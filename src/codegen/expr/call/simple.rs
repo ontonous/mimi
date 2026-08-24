@@ -21,6 +21,5764 @@ fn classify_is_empty_kind(type_name: &str) -> Option<&'static str> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// 0.39.136 architecture: SINGLE source of truth for typed to_json
+    /// serialization dispatch (lists, sets, maps, records, product tuples,
+    /// Option/Result wrappers, and every nested-product combination).
+    /// Consumed by BOTH the legacy emitter (`compile_call`) and the resolved
+    /// native emitter — previously three drifting inline copies of this
+    /// routing existed, so a shape fixed in one silently stayed broken in the
+    /// others. Keyed by an explicit type display name + LLVM argument value;
+    /// no AST or hint-table access. Returns Ok(None) when the shape is not
+    /// handled here and the caller should fall through.
+    pub(in crate::codegen) fn emit_typed_to_json_dispatch(
+        &mut self,
+        obj_type: &str,
+        arg0: BasicMetadataValueEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        // Product tuples: JSON array via recursive field serialization.
+        // Only when the *source* type is a product tuple — never Option
+        // `{i1,T}`, Result, enum `{i32,i64}`, string, or list layouts.
+        if let BasicMetadataValueEnum::StructValue(sv) = arg0 {
+            let fields = sv.get_type().get_field_types();
+            let looks_like_option = !fields.is_empty()
+                && matches!(
+                    fields[0],
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                );
+            let is_string = fields.len() == 2
+                && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                && matches!(
+                    fields[1],
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                );
+            let is_list = fields.len() == 2
+                && matches!(
+                    fields[0],
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                )
+                && matches!(fields[1], BasicTypeEnum::PointerType(_));
+            let is_enum_tag = fields.len() == 2
+                && matches!(
+                    fields[0],
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 32
+                )
+                && matches!(
+                    fields[1],
+                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                );
+            let src_ty = obj_type.to_string();
+            // Type aliases like `type Pair = (i32, i32)` keep the alias
+            // name in var_type_names; resolve so product dispatch fires.
+            let src_resolved = self.resolve_alias_type_name(&src_ty);
+            let named_as_tuple = src_resolved.starts_with('(')
+                || src_ty.starts_with('(')
+                || src_ty.contains("Tuple")
+                || self.is_product_tuple_alias(&src_ty);
+            // Prefer AST-ish type name when available; else multi-field
+            // product that is not option/string/list/enum.
+            // Named records stay on the record path (type_defs Record);
+            // product-tuple aliases are not "blocking" names.
+            let blocks_product = self
+                .type_defs
+                .get(&src_ty)
+                .is_some_and(|td| !matches!(td.kind, crate::ast::TypeDefKind::Alias(_)));
+            if named_as_tuple
+                || (fields.len() >= 2
+                    && !looks_like_option
+                    && !is_string
+                    && !is_list
+                    && !is_enum_tag
+                    && !src_resolved.starts_with("Option")
+                    && !src_resolved.starts_with("Result")
+                    && !src_resolved.starts_with("List")
+                    && !src_resolved.starts_with("Map")
+                    && !src_resolved.starts_with("Set")
+                    && !blocks_product)
+            {
+                let raw = self.emit_product_tuple_to_json(sv)?;
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+        }
+        let obj_type = obj_type.to_string();
+        if obj_type == "List" || obj_type.starts_with("List<") {
+            let inner_opt = obj_type
+                .strip_prefix("List<")
+                .and_then(|s| s.strip_suffix('>'));
+            let inner = inner_opt.unwrap_or("i64");
+            let list_struct_ty = self.list_struct_type();
+            let alloca = self.build_alloca(list_struct_ty, "to_json_list_alloca")?;
+            match &arg0 {
+                BasicMetadataValueEnum::StructValue(sv) => {
+                    self.build_store(alloca, *sv)?;
+                }
+                BasicMetadataValueEnum::PointerValue(pv) => {
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(list_struct_ty),
+                            *pv,
+                            "to_json_list_load",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    self.build_store(alloca, loaded)?;
+                }
+                _ => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unexpected List argument kind for {}",
+                        obj_type
+                    )))
+                }
+            }
+            // Check for record element type — needs callback-based serialization
+            let is_record = self
+                .type_defs
+                .get(inner)
+                .map(|td| matches!(td.kind, TypeDefKind::Record(_)))
+                .unwrap_or(false);
+            if is_record {
+                if let Some(td) = self.type_defs.get(inner) {
+                    if let TypeDefKind::Record(fields) = &td.kind {
+                        let fields_clone = fields.clone();
+                        return Ok(Some(self.compile_record_list_to_json(
+                            inner,
+                            &fields_clone,
+                            &alloca,
+                        )?));
+                    }
+                }
+            }
+            if inner.starts_with("List") {
+                // Nested List: product-tuple inner uses codegen loop;
+                // scalar/nested inners use element-type-aware
+                // formatting. AUDIT FIX (H-18): the leaf formatter was
+                // hardcoded to mimi_list_i64_to_json — f64 bit patterns
+                // and string pointers were serialized as integers
+                // (silently wrong JSON; VM emits correct values).
+                let mid_elem = Self::strip_list_element_type(inner)
+                    .or_else(|| {
+                        inner
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
+                if mid_elem.starts_with('(') {
+                    let raw = self.emit_list_list_product_tuple_to_json(alloca, &mid_elem)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                let raw = self.emit_list_to_json_cstr(alloca, inner)?;
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // List of Map of product / nested product Map values.
+            if inner.starts_with("Map<") {
+                let mode = self.map_nested_product_mode(inner);
+                if mode >= 10 {
+                    let raw = self.emit_list_map_nested_product_to_json(alloca, inner)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+            }
+            // List of Set of product / Set of Result of product.
+            if let Some(set_elem) = inner.strip_prefix("Set<").and_then(|s| s.strip_suffix('>')) {
+                if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                    let resolved = if self.is_product_tuple_alias(set_elem) {
+                        self.resolve_alias_type_name(set_elem)
+                    } else {
+                        set_elem.to_string()
+                    };
+                    let mut arity: i64 = 0;
+                    let mut depth = 0i32;
+                    let mut any = false;
+                    let body = resolved
+                        .strip_prefix('(')
+                        .and_then(|s| s.strip_suffix(')'))
+                        .unwrap_or(resolved.as_str());
+                    for ch in body.chars() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                arity += 1;
+                                any = true;
+                            }
+                            c if !c.is_whitespace() => any = true,
+                            _ => {}
+                        }
+                    }
+                    if any {
+                        arity += 1;
+                    }
+                    let func = self.get_runtime_fn("mimi_list_set_product_to_json")?;
+                    let raw = self
+                        .build_call(
+                            func,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(alloca),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context
+                                        .i64_type()
+                                        .const_int(arity.max(1) as u64, false),
+                                ),
+                            ],
+                            "list_set_product_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list set product to_json void")?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if let Some(opt_inner) = set_elem
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                        let resolved = if self.is_product_tuple_alias(opt_inner) {
+                            self.resolve_alias_type_name(opt_inner)
+                        } else {
+                            opt_inner.to_string()
+                        };
+                        let raw =
+                            self.emit_list_set_option_product_to_json(alloca, &resolved, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+                if set_elem.starts_with("Map<string, ") {
+                    if let Some(val_ty) = set_elem
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let resolved = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            let raw =
+                                self.emit_list_set_map_product_to_json(alloca, &resolved, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                }
+                if set_elem.starts_with("Result<") {
+                    if let Some(ok_ty) = set_elem.strip_prefix("Result<").and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    }) {
+                        if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                            let resolved = if self.is_product_tuple_alias(ok_ty) {
+                                self.resolve_alias_type_name(ok_ty)
+                            } else {
+                                ok_ty.to_string()
+                            };
+                            let raw =
+                                self.emit_list_set_result_product_to_json(alloca, &resolved, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                }
+            }
+            let rt_fn_name = if inner.starts_with("Map") {
+                if inner.contains("Map<string, string>") {
+                    "mimi_list_map_to_json_string"
+                } else {
+                    // i32/i64/bool/f64 maps share int-style JSON objects.
+                    "mimi_list_map_to_string"
+                }
+            } else if inner.starts_with("Set") {
+                "mimi_list_set_to_json"
+            } else if inner.starts_with("Option") && inner.contains("Map<") {
+                // List of Option of Map — nested product modes via helper.
+                let mode = if inner.contains("Map<string, string>") {
+                    1i64
+                } else if inner.contains("Map<string, bool>") {
+                    2
+                } else if inner.contains("Map<string, f64>") || inner.contains("Map<string, f32>") {
+                    3
+                } else {
+                    self.map_nested_product_mode(inner)
+                };
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let fn_ty = i8_ptr_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                );
+                let callee = self
+                    .module
+                    .get_function("mimi_list_option_map_to_json")
+                    .unwrap_or_else(|| {
+                        self.module.add_function(
+                            "mimi_list_option_map_to_json",
+                            fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                let raw = self
+                    .build_call(
+                        callee,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(alloca),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_list_opt_map",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list option map to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            } else if inner.starts_with("Option") {
+                // Option of Result / product / record needs full Option
+                // layout — never the scalar {i1,i64} runtime helper.
+                // Exclude bare Option of scalar i32 (no Result/tuple/record).
+                let opt_inner = inner
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or("");
+                // List of Option of Set of product.
+                if opt_inner.starts_with("Set<") {
+                    if let Some(elem) = opt_inner
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            let raw =
+                                self.emit_list_option_set_product_to_json(alloca, arity.max(1))?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                }
+                let needs_full = opt_inner.starts_with("Result")
+                    || opt_inner.starts_with("List")
+                    || opt_inner.starts_with("Set")
+                    || opt_inner.starts_with('(')
+                    || opt_inner.contains("Tuple")
+                    || self
+                        .type_defs
+                        .get(opt_inner)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+                    || self.is_product_tuple_alias(opt_inner);
+                if needs_full {
+                    let raw = self.emit_list_option_product_tuple_to_json(alloca, inner)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                "mimi_list_option_i64_to_json"
+            } else if inner.starts_with("Result") && inner.contains("Set<") {
+                // List of Result of Set of product — dedicated runtime path.
+                if let Some(set_elem) = inner
+                    .strip_prefix("Result<")
+                    .and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    })
+                    .and_then(|s| s.strip_prefix("Set<"))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                        let elem = if self.is_product_tuple_alias(set_elem) {
+                            self.resolve_alias_type_name(set_elem)
+                        } else {
+                            set_elem.to_string()
+                        };
+                        let raw = self.emit_list_result_set_product_runtime(alloca, &elem, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+                "mimi_list_result_i64_to_json"
+            } else if inner.starts_with("Result") && inner.contains("Map<") {
+                // List of Result of Map of product — dedicated runtime path.
+                if let Some(val_ty) = inner
+                    .strip_prefix("Result<")
+                    .and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    })
+                    .and_then(|s| s.strip_prefix("Map<string, "))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                        let elem = if self.is_product_tuple_alias(val_ty) {
+                            self.resolve_alias_type_name(val_ty)
+                        } else {
+                            val_ty.to_string()
+                        };
+                        let raw = self.emit_list_result_map_product_runtime(alloca, &elem, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+                // List of Result of Map — typed map Ok payload (scalars).
+                // mode 0-3 scalars; mode 20+arity for product Map
+                // (runtime list_result adds +10 for scalar map path).
+                let mode = if inner.contains("Map<string, string>") {
+                    1i64
+                } else if inner.contains("Map<string, bool>") {
+                    2
+                } else if inner.contains("Map<string, f64>") || inner.contains("Map<string, f32>") {
+                    3
+                } else if let Some(val_ty) = inner
+                    .strip_prefix("Result<")
+                    .and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' => depth += 1,
+                                '>' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    })
+                    .and_then(|s| s.strip_prefix("Map<string, "))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                        let elem = if self.is_product_tuple_alias(val_ty) {
+                            self.resolve_alias_type_name(val_ty)
+                        } else {
+                            val_ty.to_string()
+                        };
+                        let mut arity: i64 = 0;
+                        let mut depth = 0i32;
+                        let mut any = false;
+                        let body = elem
+                            .strip_prefix('(')
+                            .and_then(|s| s.strip_suffix(')'))
+                            .unwrap_or(elem.as_str());
+                        for ch in body.chars() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    arity += 1;
+                                    any = true;
+                                }
+                                c if !c.is_whitespace() => any = true,
+                                _ => {}
+                            }
+                        }
+                        if any {
+                            arity += 1;
+                        }
+                        // Pass through as 10+arity so after +10 becomes 20+arity.
+                        10 + arity.max(1)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let fn_ty = i8_ptr_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                    ],
+                    false,
+                );
+                let callee = self
+                    .module
+                    .get_function("mimi_list_result_map_to_json")
+                    .unwrap_or_else(|| {
+                        self.module.add_function(
+                            "mimi_list_result_map_to_json",
+                            fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                let raw = self
+                    .build_call(
+                        callee,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(alloca),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_list_res_map",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list result map to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            } else if inner.starts_with("Result") {
+                let ok_inner = inner
+                    .strip_prefix("Result<")
+                    .and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or("");
+                // Product-tuple / named-record / nested Result Ok — not bare scalar.
+                // Product-tuple only (not named records — those use struct to_json).
+                let ok_is_product = ok_inner.starts_with('(')
+                    || ok_inner.contains("Tuple")
+                    || self.is_product_tuple_alias(ok_inner);
+                let ok_is_named_record = self
+                    .type_defs
+                    .get(ok_inner)
+                    .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
+                let ok_is_option_product = ok_inner.starts_with("Option")
+                    && (ok_inner.contains('(')
+                        || ok_inner.contains("Tuple")
+                        || ok_inner.contains("Result"));
+                if ok_is_product {
+                    // Prefer runtime uniform pack path (from_json list result product).
+                    let elem = if self.is_product_tuple_alias(ok_inner) {
+                        self.resolve_alias_type_name(ok_inner)
+                    } else {
+                        ok_inner.to_string()
+                    };
+                    let raw = self.emit_list_result_product_runtime(alloca, &elem, 0)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if ok_is_named_record {
+                    let raw = self.emit_list_result_product_to_json(alloca, inner)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if ok_inner.starts_with("Map<string, ") {
+                    if let Some(inner_val) = ok_inner
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val) {
+                            let elem = if self.is_product_tuple_alias(inner_val) {
+                                self.resolve_alias_type_name(inner_val)
+                            } else {
+                                inner_val.to_string()
+                            };
+                            let raw =
+                                self.emit_list_result_map_product_runtime(alloca, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                }
+                if ok_is_option_product {
+                    let raw = self.emit_list_result_option_product_to_json(alloca, inner)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                // Nested Result Ok: Result<Result<…>, E> — full LLVM load + recurse.
+                if ok_inner.starts_with("Result") {
+                    let raw = self.emit_list_result_product_to_json(alloca, inner)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                // Scalar Result Ok — runtime i64 helper.
+                "mimi_list_result_i64_to_json"
+            } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
+                // List of product tuples (or type-alias of them).
+                let elem = if self.is_product_tuple_alias(inner) {
+                    self.resolve_alias_type_name(inner)
+                } else {
+                    inner.to_string()
+                };
+                let raw = self.emit_list_product_tuple_to_json(alloca, &elem)?;
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            } else {
+                match inner {
+                    "string" => "mimi_list_str_to_json",
+                    "f64" | "f32" => "mimi_list_f64_to_json",
+                    "bool" => "mimi_list_bool_to_json",
+                    _ => "mimi_list_i64_to_json",
+                }
+            };
+            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let fn_ty = i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+            let callee = self.module.get_function(rt_fn_name).unwrap_or_else(|| {
+                self.module.add_function(
+                    rt_fn_name,
+                    fn_ty,
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            let raw = self
+                .build_call(
+                    callee,
+                    &[BasicMetadataValueEnum::PointerValue(alloca)],
+                    "to_json_list",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("to_json list helper returned void")?
+                .into_pointer_value();
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+        // Map / Map<string, …> → typed map JSON helpers.
+        // 0.39.136 (L1): the checker's canonical name for a dynamic
+        // `map_new()` map is `Record` — accept it here too, or the
+        // untyped-map handle falls through to compile_to_json's
+        // integer arm and to_json prints the raw handle natively
+        // while the VM serializes real JSON.
+        if obj_type == "Map" || obj_type.starts_with("Map<") || obj_type == "Record" {
+            let handle = match &arg0 {
+                BasicMetadataValueEnum::IntValue(iv) => *iv,
+                BasicMetadataValueEnum::PointerValue(_) => {
+                    return Err(CompileError::Generic(
+                        "to_json: Map handle must be i64".into(),
+                    ));
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unexpected Map argument kind {:?}",
+                        other
+                    )))
+                }
+            };
+            if let Some(val_ty) = obj_type
+                .strip_prefix("Map<string, ")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                    let elem = if self.is_product_tuple_alias(val_ty) {
+                        self.resolve_alias_type_name(val_ty)
+                    } else {
+                        val_ty.to_string()
+                    };
+                    let raw = self.emit_map_product_to_json(handle, &elem, 0)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if let Some(list_elem) = val_ty
+                    .strip_prefix("List<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem) {
+                        let elem = if self.is_product_tuple_alias(list_elem) {
+                            self.resolve_alias_type_name(list_elem)
+                        } else {
+                            list_elem.to_string()
+                        };
+                        let raw = self.emit_map_list_product_to_json(handle, &elem, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                    if list_elem.starts_with("Map<string, ") {
+                        if let Some(map_val) = list_elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if map_val.starts_with('(') || self.is_product_tuple_alias(map_val) {
+                                let elem = if self.is_product_tuple_alias(map_val) {
+                                    self.resolve_alias_type_name(map_val)
+                                } else {
+                                    map_val.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_list_map_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if let Some(list_elem2) = map_val
+                                .strip_prefix("List<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if list_elem2.starts_with('(')
+                                    || self.is_product_tuple_alias(list_elem2)
+                                {
+                                    let elem = if self.is_product_tuple_alias(list_elem2) {
+                                        self.resolve_alias_type_name(list_elem2)
+                                    } else {
+                                        list_elem2.to_string()
+                                    };
+                                    let raw = self
+                                        .emit_map_list_map_list_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(set_elem) = list_elem
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                            let elem = if self.is_product_tuple_alias(set_elem) {
+                                self.resolve_alias_type_name(set_elem)
+                            } else {
+                                set_elem.to_string()
+                            };
+                            let raw = self.emit_map_list_set_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if set_elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = set_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let raw = self
+                                        .emit_map_list_set_map_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                        if let Some(opt_inner) = set_elem
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let raw = self
+                                    .emit_map_list_set_option_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if set_elem.starts_with("Result<") {
+                            if let Some(ok_ty) = set_elem.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }) {
+                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                                    let elem = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let raw = self.emit_map_list_set_result_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(opt_inner) = list_elem
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                            let elem = if self.is_product_tuple_alias(opt_inner) {
+                                self.resolve_alias_type_name(opt_inner)
+                            } else {
+                                opt_inner.to_string()
+                            };
+                            let raw =
+                                self.emit_map_list_option_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if let Some(set_elem) = opt_inner
+                            .strip_prefix("Set<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                                let elem = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
+                                } else {
+                                    set_elem.to_string()
+                                };
+                                let raw = self
+                                    .emit_map_list_option_set_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                    if let Some(res_ok) = list_elem
+                        .strip_prefix("Result<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        let product = if res_ok.starts_with('(') {
+                            let mut depth = 0i32;
+                            let mut end = 0usize;
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '(' => depth += 1,
+                                    ')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            end = i + 1;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].to_string()
+                        } else if let Some(c) = res_ok.find(',') {
+                            res_ok[..c].to_string()
+                        } else {
+                            res_ok.to_string()
+                        };
+                        if product.starts_with('(') || self.is_product_tuple_alias(&product) {
+                            let elem = if self.is_product_tuple_alias(&product) {
+                                self.resolve_alias_type_name(&product)
+                            } else {
+                                product
+                            };
+                            let raw =
+                                self.emit_map_list_result_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        let res_first = {
+                            let mut depth = 0i32;
+                            let mut end = res_ok.len();
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        end = i;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].trim().to_string()
+                        };
+                        if let Some(opt_inner) = res_first
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let raw = self.emit_map_list_result_option_product_to_json(
+                                    handle, &elem, 0,
+                                )?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(set_elem) = val_ty
+                    .strip_prefix("Set<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                        let elem = if self.is_product_tuple_alias(set_elem) {
+                            self.resolve_alias_type_name(set_elem)
+                        } else {
+                            set_elem.to_string()
+                        };
+                        let raw = self.emit_map_set_product_to_json(handle, &elem, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                    if let Some(list_elem) = set_elem
+                        .strip_prefix("List<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem) {
+                            let elem = if self.is_product_tuple_alias(list_elem) {
+                                self.resolve_alias_type_name(list_elem)
+                            } else {
+                                list_elem.to_string()
+                            };
+                            let raw = self.emit_map_set_list_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if list_elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = list_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let raw = self
+                                        .emit_map_set_list_map_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if set_elem.starts_with("Map<string, ") {
+                        if let Some(val_ty) = set_elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_set_map_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if let Some(list_elem) = val_ty
+                                .strip_prefix("List<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if list_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(list_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(list_elem) {
+                                        self.resolve_alias_type_name(list_elem)
+                                    } else {
+                                        list_elem.to_string()
+                                    };
+                                    let raw = self
+                                        .emit_map_set_map_list_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(opt_inner) = set_elem
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                            let elem = if self.is_product_tuple_alias(opt_inner) {
+                                self.resolve_alias_type_name(opt_inner)
+                            } else {
+                                opt_inner.to_string()
+                            };
+                            let raw = self.emit_map_set_option_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                    if let Some(res_ok) = set_elem
+                        .strip_prefix("Result<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        let product = if res_ok.starts_with('(') {
+                            let mut depth = 0i32;
+                            let mut end = 0usize;
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '(' => depth += 1,
+                                    ')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            end = i + 1;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].to_string()
+                        } else if let Some(c) = res_ok.find(',') {
+                            res_ok[..c].to_string()
+                        } else {
+                            res_ok.to_string()
+                        };
+                        if product.starts_with('(') || self.is_product_tuple_alias(&product) {
+                            let elem = if self.is_product_tuple_alias(&product) {
+                                self.resolve_alias_type_name(&product)
+                            } else {
+                                product
+                            };
+                            let raw = self.emit_map_set_result_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        let res_first = {
+                            let mut depth = 0i32;
+                            let mut end = res_ok.len();
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        end = i;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].trim().to_string()
+                        };
+                        if let Some(opt_inner) = res_first
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let raw = self
+                                    .emit_map_set_result_option_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(opt_elem) = val_ty
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                        let elem = if self.is_product_tuple_alias(opt_elem) {
+                            self.resolve_alias_type_name(opt_elem)
+                        } else {
+                            opt_elem.to_string()
+                        };
+                        let raw = self.emit_map_option_product_to_json(handle, &elem, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                    if opt_elem.starts_with("Map<string, ") {
+                        if let Some(inner_val) = opt_elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val)
+                            {
+                                let elem = if self.is_product_tuple_alias(inner_val) {
+                                    self.resolve_alias_type_name(inner_val)
+                                } else {
+                                    inner_val.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_option_map_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if let Some(list_elem) = inner_val
+                                .strip_prefix("List<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if list_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(list_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(list_elem) {
+                                        self.resolve_alias_type_name(list_elem)
+                                    } else {
+                                        list_elem.to_string()
+                                    };
+                                    let raw = self.emit_map_option_map_list_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(set_elem) = opt_elem
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                            let elem = if self.is_product_tuple_alias(set_elem) {
+                                self.resolve_alias_type_name(set_elem)
+                            } else {
+                                set_elem.to_string()
+                            };
+                            let raw = self.emit_map_option_set_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if let Some(list_elem) = set_elem
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let raw = self
+                                    .emit_map_option_set_list_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if set_elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = set_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let raw = self.emit_map_option_set_map_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(list_elem) = opt_elem
+                        .strip_prefix("List<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem) {
+                            let elem = if self.is_product_tuple_alias(list_elem) {
+                                self.resolve_alias_type_name(list_elem)
+                            } else {
+                                list_elem.to_string()
+                            };
+                            let raw =
+                                self.emit_map_option_list_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if list_elem.starts_with("Map<string, ") {
+                            if let Some(val_ty) = list_elem
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let elem = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let raw = self.emit_map_option_list_map_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(res_ok) = opt_elem
+                        .strip_prefix("Result<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        let product = if res_ok.starts_with('(') {
+                            let mut depth = 0i32;
+                            let mut end = 0usize;
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '(' => depth += 1,
+                                    ')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            end = i + 1;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].to_string()
+                        } else if let Some(c) = res_ok.find(',') {
+                            res_ok[..c].to_string()
+                        } else {
+                            res_ok.to_string()
+                        };
+                        if product.starts_with('(') || self.is_product_tuple_alias(&product) {
+                            let elem = if self.is_product_tuple_alias(&product) {
+                                self.resolve_alias_type_name(&product)
+                            } else {
+                                product
+                            };
+                            let raw =
+                                self.emit_map_option_result_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        // res_ok may be "List<(…), string" if strip_suffix only removed one >.
+                        let res_first = {
+                            let mut depth = 0i32;
+                            let mut end = res_ok.len();
+                            for (i, ch) in res_ok.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        end = i;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            res_ok[..end].trim()
+                        };
+                        if let Some(list_elem) = res_first
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let raw = self.emit_map_option_result_list_product_to_json(
+                                    handle, &elem, 0,
+                                )?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if val_ty.starts_with("Result<") {
+                    if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    }) {
+                        if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                            let elem = if self.is_product_tuple_alias(ok_ty) {
+                                self.resolve_alias_type_name(ok_ty)
+                            } else {
+                                ok_ty.to_string()
+                            };
+                            let raw = self.emit_map_result_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if ok_ty.starts_with("Map<string, ") {
+                            if let Some(inner_val) = ok_ty
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if inner_val.starts_with('(')
+                                    || self.is_product_tuple_alias(inner_val)
+                                {
+                                    let elem = if self.is_product_tuple_alias(inner_val) {
+                                        self.resolve_alias_type_name(inner_val)
+                                    } else {
+                                        inner_val.to_string()
+                                    };
+                                    let raw =
+                                        self.emit_map_result_map_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                        if let Some(set_elem) =
+                            ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
+                        {
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                                let elem = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
+                                } else {
+                                    set_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_result_set_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if let Some(list_elem) = set_elem
+                                .strip_prefix("List<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if list_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(list_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(list_elem) {
+                                        self.resolve_alias_type_name(list_elem)
+                                    } else {
+                                        list_elem.to_string()
+                                    };
+                                    let raw = self.emit_map_result_set_list_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                            if set_elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = set_elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(val_ty) {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let raw = self.emit_map_result_set_map_product_to_json(
+                                            handle, &elem, 0,
+                                        )?;
+                                        self.register_heap_alloc(raw);
+                                        return Ok(Some(self.wrap_c_string(raw)?));
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(list_elem) = ok_ty
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_result_list_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if list_elem.starts_with("Map<string, ") {
+                                if let Some(val_ty) = list_elem
+                                    .strip_prefix("Map<string, ")
+                                    .and_then(|s| s.strip_suffix('>'))
+                                {
+                                    if val_ty.starts_with('(')
+                                        || self.is_product_tuple_alias(val_ty)
+                                    {
+                                        let elem = if self.is_product_tuple_alias(val_ty) {
+                                            self.resolve_alias_type_name(val_ty)
+                                        } else {
+                                            val_ty.to_string()
+                                        };
+                                        let raw = self.emit_map_result_list_map_product_to_json(
+                                            handle, &elem, 0,
+                                        )?;
+                                        self.register_heap_alloc(raw);
+                                        return Ok(Some(self.wrap_c_string(raw)?));
+                                    }
+                                }
+                            }
+                            if let Some(set_elem) = list_elem
+                                .strip_prefix("Set<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if set_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(set_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(set_elem) {
+                                        self.resolve_alias_type_name(set_elem)
+                                    } else {
+                                        set_elem.to_string()
+                                    };
+                                    let raw = self.emit_map_result_list_set_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                            if let Some(opt_inner) = list_elem
+                                .strip_prefix("Option<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if opt_inner.starts_with('(')
+                                    || self.is_product_tuple_alias(opt_inner)
+                                {
+                                    let elem = if self.is_product_tuple_alias(opt_inner) {
+                                        self.resolve_alias_type_name(opt_inner)
+                                    } else {
+                                        opt_inner.to_string()
+                                    };
+                                    let raw = self.emit_map_result_list_option_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                        if let Some(opt_elem) = ok_ty
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                                let elem = if self.is_product_tuple_alias(opt_elem) {
+                                    self.resolve_alias_type_name(opt_elem)
+                                } else {
+                                    opt_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_result_option_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                            if let Some(list_elem) = opt_elem
+                                .strip_prefix("List<")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if list_elem.starts_with('(')
+                                    || self.is_product_tuple_alias(list_elem)
+                                {
+                                    let elem = if self.is_product_tuple_alias(list_elem) {
+                                        self.resolve_alias_type_name(list_elem)
+                                    } else {
+                                        list_elem.to_string()
+                                    };
+                                    let raw = self.emit_map_result_option_list_product_to_json(
+                                        handle, &elem, 0,
+                                    )?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                }
+                if val_ty.starts_with("Map<string, ") {
+                    if let Some(inner_val) = val_ty
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if inner_val.starts_with('(') || self.is_product_tuple_alias(inner_val) {
+                            let elem = if self.is_product_tuple_alias(inner_val) {
+                                self.resolve_alias_type_name(inner_val)
+                            } else {
+                                inner_val.to_string()
+                            };
+                            let raw = self.emit_map_map_product_to_json(handle, &elem, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if let Some(set_elem) = inner_val
+                            .strip_prefix("Set<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                                let elem = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
+                                } else {
+                                    set_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_map_set_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if let Some(list_elem) = inner_val
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let elem = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_map_list_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if let Some(opt_inner) = inner_val
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let elem = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let raw =
+                                    self.emit_map_map_option_product_to_json(handle, &elem, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if inner_val.starts_with("Result<") {
+                            if let Some(ok_ty) = inner_val.strip_prefix("Result<").and_then(|s| {
+                                let mut depth = 0i32;
+                                for (i, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            return Some(s[..i].trim());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }) {
+                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                                    let elem = if self.is_product_tuple_alias(ok_ty) {
+                                        self.resolve_alias_type_name(ok_ty)
+                                    } else {
+                                        ok_ty.to_string()
+                                    };
+                                    let raw =
+                                        self.emit_map_map_result_product_to_json(handle, &elem, 0)?;
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let fn_name = if obj_type.contains("Map<string, string>") {
+                "mimi_map_to_json_string"
+            } else if obj_type.contains("Map<string, bool>") {
+                "mimi_map_to_json_bool"
+            } else if obj_type.contains("Map<string, f64>") || obj_type.contains("Map<string, f32>")
+            {
+                "mimi_map_to_json_f64_serde"
+            } else if obj_type == "Record" || obj_type == "Map" {
+                // Untyped `map_new()` map: values are Any handles —
+                // render strings as JSON strings, ints bare (VM
+                // parity). Typed Map<…> modes keep their exact paths.
+                "mimi_map_to_json_any"
+            } else {
+                "mimi_map_to_json_i64"
+            };
+            let func = self.get_runtime_fn(fn_name)?;
+            let raw = self
+                .build_call(
+                    func,
+                    &[BasicMetadataValueEnum::IntValue(handle)],
+                    "to_json_map",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("map to_json returned void")?
+                .into_pointer_value();
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+        // Set / Set<…> → typed set JSON helpers
+        if obj_type == "Set" || obj_type.starts_with("Set<") || obj_type == "set" {
+            let handle = match &arg0 {
+                BasicMetadataValueEnum::IntValue(iv) => *iv,
+                BasicMetadataValueEnum::PointerValue(_) => {
+                    return Err(CompileError::Generic(
+                        "to_json: Set handle must be i64".into(),
+                    ));
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unexpected Set argument kind {:?}",
+                        other
+                    )))
+                }
+            };
+            if let Some(elem) = obj_type
+                .strip_prefix("Set<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                    let resolved = if self.is_product_tuple_alias(elem) {
+                        self.resolve_alias_type_name(elem)
+                    } else {
+                        elem.to_string()
+                    };
+                    let raw = self.emit_set_product_to_json(handle, &resolved, 0)?;
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if elem.starts_with("Map<string, ") {
+                    if let Some(val_ty) = elem
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let resolved = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            let arity = {
+                                let body = resolved
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(&resolved);
+                                let mut arity = 0i64;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                arity.max(1)
+                            };
+                            let func = self.get_runtime_fn("mimi_set_to_json_map_product_i64")?;
+                            let i64_ty = self.context.i64_type();
+                            let raw = self
+                                .build_call(
+                                    func,
+                                    &[
+                                        BasicMetadataValueEnum::IntValue(handle),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(arity as u64, false),
+                                        ),
+                                        BasicMetadataValueEnum::IntValue(
+                                            i64_ty.const_int(0, false),
+                                        ),
+                                    ],
+                                    "set_map_product_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("set map product to_json void")?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if let Some(list_elem) = val_ty
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let resolved = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_map_list_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_map_list_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set map list product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if let Some(set_elem) = val_ty
+                            .strip_prefix("Set<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
+                                let resolved = if self.is_product_tuple_alias(set_elem) {
+                                    self.resolve_alias_type_name(set_elem)
+                                } else {
+                                    set_elem.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_map_set_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_map_set_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set map set product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(opt_inner) = elem
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if opt_inner.starts_with("Map<string, ") {
+                        if let Some(val_ty) = opt_inner
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_option_map_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_option_map_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set option map product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(res_ok) = elem.strip_prefix("Result<").and_then(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return Some(s[..i].trim());
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }) {
+                    if res_ok.starts_with("Map<string, ") {
+                        if let Some(val_ty) = res_ok
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_result_map_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_result_map_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set result map product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if let Some(list_elem) = res_ok
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let resolved = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func = self
+                                    .get_runtime_fn("mimi_set_to_json_result_list_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_result_list_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set result list product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(list_elem) =
+                    elem.strip_prefix("List<").and_then(|s| s.strip_suffix('>'))
+                {
+                    if list_elem.starts_with("Map<string, ") {
+                        if let Some(val_ty) = list_elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func =
+                                    self.get_runtime_fn("mimi_set_to_json_list_map_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_list_map_product_json",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set list map product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                    }
+                }
+                if let Some(opt_elem) = elem
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
+                        let resolved = if self.is_product_tuple_alias(opt_elem) {
+                            self.resolve_alias_type_name(opt_elem)
+                        } else {
+                            opt_elem.to_string()
+                        };
+                        let raw = self.emit_set_option_product_to_json(handle, &resolved, 0)?;
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                    if let Some(res_ok) = opt_elem.strip_prefix("Result<").and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    }) {
+                        if res_ok.starts_with('(') || self.is_product_tuple_alias(res_ok) {
+                            let resolved = if self.is_product_tuple_alias(res_ok) {
+                                self.resolve_alias_type_name(res_ok)
+                            } else {
+                                res_ok.to_string()
+                            };
+                            let raw =
+                                self.emit_set_option_result_product_to_json(handle, &resolved, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                    }
+                }
+                if elem.starts_with("Result<") {
+                    if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    }) {
+                        if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
+                            let resolved = if self.is_product_tuple_alias(ok_ty) {
+                                self.resolve_alias_type_name(ok_ty)
+                            } else {
+                                ok_ty.to_string()
+                            };
+                            let raw = self.emit_set_result_product_to_json(handle, &resolved, 0)?;
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
+                        if let Some(opt_inner) = ok_ty
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
+                            {
+                                let resolved = if self.is_product_tuple_alias(opt_inner) {
+                                    self.resolve_alias_type_name(opt_inner)
+                                } else {
+                                    opt_inner.to_string()
+                                };
+                                let raw = self
+                                    .emit_set_result_option_product_to_json(handle, &resolved, 0)?;
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if let Some(list_elem) = ok_ty
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
+                            {
+                                let resolved = if self.is_product_tuple_alias(list_elem) {
+                                    self.resolve_alias_type_name(list_elem)
+                                } else {
+                                    list_elem.to_string()
+                                };
+                                let arity = {
+                                    let body = resolved
+                                        .strip_prefix('(')
+                                        .and_then(|s| s.strip_suffix(')'))
+                                        .unwrap_or(&resolved);
+                                    let mut arity = 0i64;
+                                    let mut depth = 0i32;
+                                    let mut any = false;
+                                    for ch in body.chars() {
+                                        match ch {
+                                            '<' | '(' => depth += 1,
+                                            '>' | ')' => depth -= 1,
+                                            ',' if depth == 0 => {
+                                                arity += 1;
+                                                any = true;
+                                            }
+                                            c if !c.is_whitespace() => any = true,
+                                            _ => {}
+                                        }
+                                    }
+                                    if any {
+                                        arity += 1;
+                                    }
+                                    arity.max(1)
+                                };
+                                let func = self
+                                    .get_runtime_fn("mimi_set_to_json_result_list_product_i64")?;
+                                let i64_ty = self.context.i64_type();
+                                let raw = self
+                                    .build_call(
+                                        func,
+                                        &[
+                                            BasicMetadataValueEnum::IntValue(handle),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(arity as u64, false),
+                                            ),
+                                            BasicMetadataValueEnum::IntValue(
+                                                i64_ty.const_int(0, false),
+                                            ),
+                                        ],
+                                        "set_result_list_product_json2",
+                                    )?
+                                    .try_as_basic_value_opt()
+                                    .ok_or("set result list product to_json void")?
+                                    .into_pointer_value();
+                                self.register_heap_alloc(raw);
+                                return Ok(Some(self.wrap_c_string(raw)?));
+                            }
+                        }
+                        if ok_ty.starts_with("Map<string, ") {
+                            if let Some(val_ty) = ok_ty
+                                .strip_prefix("Map<string, ")
+                                .and_then(|s| s.strip_suffix('>'))
+                            {
+                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                    let resolved = if self.is_product_tuple_alias(val_ty) {
+                                        self.resolve_alias_type_name(val_ty)
+                                    } else {
+                                        val_ty.to_string()
+                                    };
+                                    let arity = {
+                                        let body = resolved
+                                            .strip_prefix('(')
+                                            .and_then(|s| s.strip_suffix(')'))
+                                            .unwrap_or(&resolved);
+                                        let mut arity = 0i64;
+                                        let mut depth = 0i32;
+                                        let mut any = false;
+                                        for ch in body.chars() {
+                                            match ch {
+                                                '<' | '(' => depth += 1,
+                                                '>' | ')' => depth -= 1,
+                                                ',' if depth == 0 => {
+                                                    arity += 1;
+                                                    any = true;
+                                                }
+                                                c if !c.is_whitespace() => any = true,
+                                                _ => {}
+                                            }
+                                        }
+                                        if any {
+                                            arity += 1;
+                                        }
+                                        arity.max(1)
+                                    };
+                                    let func = self.get_runtime_fn(
+                                        "mimi_set_to_json_result_map_product_i64",
+                                    )?;
+                                    let i64_ty = self.context.i64_type();
+                                    let raw = self
+                                        .build_call(
+                                            func,
+                                            &[
+                                                BasicMetadataValueEnum::IntValue(handle),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(arity as u64, false),
+                                                ),
+                                                BasicMetadataValueEnum::IntValue(
+                                                    i64_ty.const_int(0, false),
+                                                ),
+                                            ],
+                                            "set_result_map_product_json2",
+                                        )?
+                                        .try_as_basic_value_opt()
+                                        .ok_or("set result map product to_json void")?
+                                        .into_pointer_value();
+                                    self.register_heap_alloc(raw);
+                                    return Ok(Some(self.wrap_c_string(raw)?));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let fn_name = if obj_type.contains("Set<string>") {
+                "mimi_set_to_json_string"
+            } else if obj_type.contains("Set<bool>") {
+                "mimi_set_to_json_bool"
+            } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                "mimi_set_to_json_f64"
+            } else {
+                "mimi_set_to_json_i64"
+            };
+            let func = self.get_runtime_fn(fn_name)?;
+            let raw = self
+                .build_call(
+                    func,
+                    &[BasicMetadataValueEnum::IntValue(handle)],
+                    "to_json_set",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("set to_json returned void")?
+                .into_pointer_value();
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+        // Option / Option<T> with integer/handle payload: {i1,i64}
+        // or by-value struct payload ({i1, tuple|record}).
+        if obj_type == "Option" || obj_type.starts_with("Option<") {
+            let opt_load_sty = {
+                let parsed = crate::codegen::extract_list_elem_type(&format!("List<{}>", obj_type));
+                // extract_list_elem_type("List<Option<P>>") → Option<P>
+                let opt_ty = parsed.unwrap_or_else(|| {
+                    crate::ast::Type::Name(
+                        "Option".into(),
+                        vec![crate::ast::Type::Name("i64".into(), vec![])],
+                    )
+                });
+                match self.llvm_type_for(&opt_ty) {
+                    Some(BasicTypeEnum::StructType(s)) => s,
+                    _ => self.context.struct_type(
+                        &[
+                            self.context.bool_type().into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    ),
+                }
+            };
+            let sv = match &arg0 {
+                BasicMetadataValueEnum::StructValue(s) => *s,
+                BasicMetadataValueEnum::PointerValue(pv) => {
+                    let loaded = self
+                        .builder
+                        .build_load(BasicTypeEnum::StructType(opt_load_sty), *pv, "opt_load")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    loaded
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unexpected Option argument kind {:?}",
+                        other
+                    )))
+                }
+            };
+            let disc = self
+                .build_extract_value(sv.into(), 0, "opt_disc")?
+                .into_int_value();
+            let disc_i64 = self
+                .builder
+                .build_int_z_extend(disc, self.context.i64_type(), "opt_disc_i64")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let payload_bv = self.build_extract_value(sv.into(), 1, "opt_payload")?;
+            // D-3: heap-string payload is StructValue {ptr,i64} — must
+            // NOT reach the generic mimi_option_i64_to_json scalar path
+            // (which would print the pointer as a number) nor the
+            // product-tuple path ([ptr,len]).
+            let payload_is_string = matches!(
+                &payload_bv,
+                BasicValueEnum::StructValue(sv) if {
+                    let f = sv.get_type().get_field_types();
+                    f.len() == 2
+                        && matches!(f[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            f[1],
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                        )
+                }
+            );
+            // Option of Result by-value: payload is Result struct {i1,ok,err}.
+            if obj_type.contains("Result") && matches!(payload_bv, BasicValueEnum::StructValue(_)) {
+                let res_sv = payload_bv.into_struct_value();
+                let r_disc = self
+                    .build_extract_value(res_sv.into(), 0, "opt_res_disc")?
+                    .into_int_value();
+                let r_disc_i64 = self
+                    .builder
+                    .build_int_z_extend(r_disc, self.context.i64_type(), "opt_res_disc_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let r_ok_bv = self.build_extract_value(res_sv.into(), 1, "opt_res_ok")?;
+                // Result Ok is product-tuple/record struct — rebuild nested JSON.
+                if let BasicValueEnum::StructValue(ok_sv) = r_ok_bv {
+                    let ok_fields = ok_sv.get_type().get_field_types();
+                    let ok_is_string = ok_fields.len() == 2
+                        && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            ok_fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    if !ok_is_string && ok_fields.len() >= 2 {
+                        let mut ok_inner = obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .and_then(|s| s.strip_prefix("Result<"))
+                            .and_then(|s| s.split(',').next())
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if ok_inner.is_empty() {
+                            let pay_sty = ok_sv.get_type();
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(
+                                    ty,
+                                    BasicTypeEnum::StructType(s) if *s == pay_sty
+                                ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                }) {
+                                    ok_inner = n.clone();
+                                    break;
+                                }
+                            }
+                        }
+                        let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
+                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                        });
+                        let ok_json = if is_named_record {
+                            let rec_ty = ok_sv.get_type();
+                            let rec_alloca = self.build_alloca(
+                                BasicTypeEnum::StructType(rec_ty),
+                                "opt_res_rec_tmp",
+                            )?;
+                            self.build_store(rec_alloca, ok_sv)?;
+                            self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+                        } else {
+                            self.emit_product_tuple_to_json(ok_sv)?
+                        };
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_res_tup_is_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let r_is_ok = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                r_disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_res_tup_is_ok",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_some");
+                        let none_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_none");
+                        let merge_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_merge");
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_res_tup_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let ok_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_ok");
+                        let err_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_err");
+                        let some_merge = self
+                            .context
+                            .append_basic_block(function, "toj_opt_res_tup_sm");
+                        self.builder
+                            .build_conditional_branch(r_is_ok, ok_bb, err_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(ok_bb);
+                        let inner_buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_res_tup_inner",
+                        )?;
+                        let ifmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Ok\":[%s]}", "opt_res_tup_ifmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(inner_buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(ok_json),
+                            ],
+                            "opt_res_tup_isn",
+                        )?;
+                        let outer_buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_res_tup_outer",
+                        )?;
+                        let ofmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_ofmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(outer_buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(inner_buf),
+                            ],
+                            "opt_res_tup_osn",
+                        )?;
+                        self.build_store(out_alloca, outer_buf)?;
+                        self.builder
+                            .build_unconditional_branch(some_merge)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(err_bb);
+                        // Err payload: string Err is heap {ptr,len}; scalar is i64.
+                        let r_err_bv =
+                            self.build_extract_value(res_sv.into(), 2, "opt_res_tup_errv")?;
+                        let r_err_i64 = match r_err_bv {
+                            BasicValueEnum::IntValue(iv) => {
+                                if iv.get_type().get_bit_width() < 64 {
+                                    self.builder
+                                        .build_int_s_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            "opt_res_tup_err_i64",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                } else {
+                                    iv
+                                }
+                            }
+                            _ => self.context.i64_type().const_int(0, false),
+                        };
+                        let inner_err = self.emit_result_err_json(r_err_i64, true)?;
+                        let ewrap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_res_tup_err_outer",
+                        )?;
+                        let eofmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_eofmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(ewrap),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(eofmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(inner_err),
+                            ],
+                            "opt_res_tup_eosn",
+                        )?;
+                        self.build_store(out_alloca, ewrap)?;
+                        self.builder
+                            .build_unconditional_branch(some_merge)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_merge);
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_res_tup_none",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_res_tup_none_lit")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_res_tup_ncpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_res_tup_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+                let r_ok = match r_ok_bv {
+                    BasicValueEnum::IntValue(iv) => iv,
+                    BasicValueEnum::PointerValue(pv) => self
+                        .builder
+                        .build_ptr_to_int(pv, self.context.i64_type(), "opt_res_ok_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                    _ => self.context.i64_type().const_int(0, false),
+                };
+                let r_ok_i64 = if r_ok.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(r_ok, self.context.i64_type(), "opt_res_ok_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    r_ok
+                };
+                let r_err = self
+                    .build_extract_value(res_sv.into(), 2, "opt_res_err")?
+                    .into_int_value();
+                let r_err_i64 = if r_err.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(r_err, self.context.i64_type(), "opt_res_err_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    r_err
+                };
+                // Option of Result of Map/Set: Ok is a handle, not a plain i64.
+                let res_json = if obj_type.contains("Map<") {
+                    let mode = if obj_type.contains("Map<string, string>") {
+                        1i64
+                    } else if obj_type.contains("Map<string, bool>") {
+                        2
+                    } else if obj_type.contains("Map<string, f64>")
+                        || obj_type.contains("Map<string, f32>")
+                    {
+                        3
+                    } else {
+                        self.map_nested_product_mode(&obj_type)
+                    };
+                    let res_fn = self.get_runtime_fn("mimi_result_map_to_json")?;
+                    self.build_call(
+                        res_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(r_disc_i64),
+                            BasicMetadataValueEnum::IntValue(r_ok_i64),
+                            BasicMetadataValueEnum::IntValue(r_err_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "opt_res_map_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("result map to_json void")?
+                    .into_pointer_value()
+                } else if obj_type.contains("Set<") {
+                    let mode = if obj_type.contains("Set<string>") {
+                        1i64
+                    } else if obj_type.contains("Set<bool>") {
+                        2
+                    } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                        3
+                    } else if let Some(elem) = obj_type
+                        .find("Set<")
+                        .map(|i| &obj_type[i + 4..])
+                        .and_then(|s| {
+                            let mut depth = 0i32;
+                            for (j, ch) in s.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' if depth == 0 => return Some(&s[..j]),
+                                    '>' | ')' => depth -= 1,
+                                    _ => {}
+                                }
+                            }
+                            None
+                        })
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            10 + arity.max(1)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let res_fn = self.get_runtime_fn("mimi_result_set_to_json")?;
+                    self.build_call(
+                        res_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(r_disc_i64),
+                            BasicMetadataValueEnum::IntValue(r_ok_i64),
+                            BasicMetadataValueEnum::IntValue(r_err_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "opt_res_set_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("result set to_json void")?
+                    .into_pointer_value()
+                } else {
+                    // Prefer structured Result JSON so string Err
+                    // (heap {ptr,len}) is not printed as a raw i64.
+                    self.emit_result_struct_to_json_cstr(res_sv, {
+                        obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or("Result")
+                    })?
+                };
+                let disc_is_some = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_i64,
+                        self.context.i64_type().const_int(0, false),
+                        "opt_res_is_some",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let function = self.current_function().ok_or("no function")?;
+                let some_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_res_some");
+                let none_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_res_none");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_res_merge");
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let out_alloca =
+                    self.build_alloca(BasicTypeEnum::PointerType(i8_ptr_ty), "toj_opt_res_out")?;
+                self.builder
+                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(some_bb);
+                let buf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(512, false),
+                    "opt_res_buf",
+                )?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(512, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(res_json),
+                    ],
+                    "opt_res_sn",
+                )?;
+                self.build_store(out_alloca, buf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(none_bb);
+                let none_heap = self.malloc_or_abort(
+                    self.context.i64_type().const_int(8, false),
+                    "opt_res_none_heap",
+                )?;
+                let none_lit = self
+                    .builder
+                    .build_global_string_ptr("\"None\"", "opt_res_none")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                self.build_call(
+                    strcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(none_heap),
+                        BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                    ],
+                    "opt_res_none_cpy",
+                )?;
+                self.build_store(out_alloca, none_heap)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let raw = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "opt_res_result",
+                    )?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // Option of product tuple / named record: multi-field struct payload.
+            if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
+                let pay_fields = pay_sv.get_type().get_field_types();
+                let pay_is_string = pay_fields.len() == 2
+                    && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        pay_fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    );
+                // Nested Option/Result start with i1 disc — never product-tuple.
+                let pay_is_nested_wrapper = !pay_fields.is_empty()
+                    && matches!(
+                        pay_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                    );
+                // List layout {i64,ptr} is not a product tuple.
+                let pay_is_list = pay_fields.len() == 2
+                    && matches!(
+                        pay_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    )
+                    && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
+                if !pay_is_string && !pay_is_nested_wrapper && !pay_is_list {
+                    let mut inner_name = obj_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or("")
+                        .to_string();
+                    // Bare `Option` (missing generic in var_type_names): recover
+                    // named record from payload LLVM layout.
+                    if inner_name.is_empty() || inner_name == "Option" {
+                        let pay_sty = pay_sv.get_type();
+                        for (n, ty) in &self.type_llvm {
+                            if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
+                                && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                })
+                            {
+                                inner_name = n.clone();
+                                break;
+                            }
+                        }
+                    }
+                    let is_named_record = self
+                        .type_defs
+                        .get(&inner_name)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
+                    if is_named_record || pay_fields.len() >= 2 {
+                        let pay_json = if is_named_record {
+                            let rec_ty = pay_sv.get_type();
+                            let rec_alloca = self
+                                .build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_tmp")?;
+                            self.build_store(rec_alloca, pay_sv)?;
+                            self.compile_record_to_json_cstr(&inner_name, rec_alloca)?
+                        } else {
+                            self.emit_product_tuple_to_json(pay_sv)?
+                        };
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_tup_is_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_tup_some");
+                        let none_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_tup_none");
+                        let merge_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_tup_merge");
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_tup_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_tup_buf",
+                        )?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_tup_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(pay_json),
+                            ],
+                            "opt_tup_sn",
+                        )?;
+                        self.build_store(out_alloca, buf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_tup_none_heap",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_tup_none")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_tup_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_tup_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+            }
+            // Option of named record: pointer payload (Some stores stack
+            // alloca of record as ptr) or i64 ptrtoint.
+            if let Some(inner_name) = obj_type
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                if self
+                    .type_defs
+                    .get(inner_name)
+                    .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+                {
+                    if let BasicValueEnum::PointerValue(rec_ptr) = payload_bv {
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_rec_ptr_is_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_ptr_some");
+                        let none_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_ptr_none");
+                        let merge_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_ptr_merge");
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_rec_ptr_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let rec_json = self.compile_record_to_json_cstr(inner_name, rec_ptr)?;
+                        let buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_rec_ptr_buf",
+                        )?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_rec_ptr_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(rec_json),
+                            ],
+                            "opt_rec_ptr_sn",
+                        )?;
+                        self.build_store(out_alloca, buf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_rec_ptr_none",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_rec_ptr_none_lit")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_rec_ptr_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_rec_ptr_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                    if let BasicValueEnum::IntValue(pay_iv) = payload_bv {
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let pay_i64 = if pay_iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(
+                                    pay_iv,
+                                    self.context.i64_type(),
+                                    "opt_rec_pay_i64",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            pay_iv
+                        };
+                        let disc_is_some = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "opt_rec_is_some",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let some_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_some");
+                        let none_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_none");
+                        let merge_bb = self
+                            .context
+                            .append_basic_block(function, "toj_opt_rec_merge");
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_opt_rec_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(some_bb);
+                        let rec_ptr = self
+                            .builder
+                            .build_int_to_ptr(pay_i64, i8_ptr_ty, "opt_rec_ptr")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let rec_json = self.compile_record_to_json_cstr(inner_name, rec_ptr)?;
+                        let buf = self.malloc_or_abort(
+                            self.context.i64_type().const_int(1024, false),
+                            "opt_rec_buf",
+                        )?;
+                        let fmt = self
+                            .builder
+                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_rec_fmt")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                        self.build_call(
+                            snprintf_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(buf),
+                                BasicMetadataValueEnum::IntValue(
+                                    self.context.i64_type().const_int(1024, false),
+                                ),
+                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                                BasicMetadataValueEnum::PointerValue(rec_json),
+                            ],
+                            "opt_rec_sn",
+                        )?;
+                        self.build_store(out_alloca, buf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(none_bb);
+                        let none_heap = self.malloc_or_abort(
+                            self.context.i64_type().const_int(8, false),
+                            "opt_rec_none_heap",
+                        )?;
+                        let none_lit = self
+                            .builder
+                            .build_global_string_ptr("\"None\"", "opt_rec_none")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                        self.build_call(
+                            strcpy_fn,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(none_heap),
+                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                            ],
+                            "opt_rec_none_cpy",
+                        )?;
+                        self.build_store(out_alloca, none_heap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "opt_rec_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    }
+                }
+            }
+            // Nested Option / List by-value as StructValue payload.
+            if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
+                let pay_fields = pay_sv.get_type().get_field_types();
+                // Option of List by-value: {i64,ptr} list struct.
+                let pay_is_list = pay_fields.len() == 2
+                    && matches!(
+                        pay_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    )
+                    && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
+                if pay_is_list && (obj_type.contains("List") || obj_type.contains("list")) {
+                    let list_ty = self.list_struct_type();
+                    let list_alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(list_ty), "opt_list_bv")?;
+                    self.build_store(list_alloca, pay_sv)?;
+                    // Reuse Option of List path: build {"Some":[list_json]} / None.
+                    let disc_is_some = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            disc_i64,
+                            self.context.i64_type().const_int(0, false),
+                            "opt_list_bv_some",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let function = self.current_function().ok_or("no function")?;
+                    let some_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_list_bv_some");
+                    let none_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_list_bv_none");
+                    let merge_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_list_bv_merge");
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let out_alloca = self.build_alloca(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        "toj_opt_list_bv_out",
+                    )?;
+                    self.builder
+                        .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(some_bb);
+                    // Dispatch list to_json helper by element type.
+                    let list_json = if obj_type.contains("Map<") {
+                        // Option of List of Map of product.
+                        // Accept both `Map<string, (…)>` and `Map<string,(…)>`.
+                        let map_val = obj_type
+                            .find("Map<string,")
+                            .map(|i| &obj_type[i + "Map<string,".len()..])
+                            .map(|s| s.trim_start())
+                            .and_then(|s| {
+                                // Take until matching '>' for Map value type.
+                                let mut depth = 0i32;
+                                for (j, ch) in s.char_indices() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' if depth == 0 => {
+                                            return Some(s[..j].trim());
+                                        }
+                                        '>' | ')' => depth -= 1,
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            });
+                        if let Some(val_ty) = map_val {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let elem = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                self.emit_list_map_product_to_json(list_alloca, &elem)?
+                            } else {
+                                let mode = if obj_type.contains("Map<string, string>") {
+                                    1i64
+                                } else if obj_type.contains("Map<string, bool>") {
+                                    2
+                                } else if obj_type.contains("Map<string, f64>")
+                                    || obj_type.contains("Map<string, f32>")
+                                {
+                                    3
+                                } else {
+                                    0
+                                };
+                                let fn_ty = i8_ptr_ty.fn_type(
+                                    &[
+                                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                                        BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                                    ],
+                                    false,
+                                );
+                                let callee = self
+                                    .module
+                                    .get_function("mimi_list_map_to_json")
+                                    .unwrap_or_else(|| {
+                                        self.module.add_function(
+                                            "mimi_list_map_to_json",
+                                            fn_ty,
+                                            Some(inkwell::module::Linkage::External),
+                                        )
+                                    });
+                                self.build_call(
+                                    callee,
+                                    &[
+                                        BasicMetadataValueEnum::PointerValue(list_alloca),
+                                        BasicMetadataValueEnum::IntValue(
+                                            self.context.i64_type().const_int(mode as u64, false),
+                                        ),
+                                    ],
+                                    "opt_list_map_json",
+                                )?
+                                .try_as_basic_value_opt()
+                                .ok_or("list map to_json void")?
+                                .into_pointer_value()
+                            }
+                        } else {
+                            let map_fn = if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            };
+                            let map_callee =
+                                self.module.get_function(map_fn).unwrap_or_else(|| {
+                                    let fn_ty = i8_ptr_ty.fn_type(
+                                        &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
+                                        false,
+                                    );
+                                    self.module.add_function(
+                                        map_fn,
+                                        fn_ty,
+                                        Some(inkwell::module::Linkage::External),
+                                    )
+                                });
+                            self.build_call(
+                                map_callee,
+                                &[BasicMetadataValueEnum::PointerValue(list_alloca)],
+                                "opt_list_map_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else {
+                        let rt_fn = if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("f64") || obj_type.contains("f32") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("bool") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
+                        let fn_ty = i8_ptr_ty
+                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                        let callee = self.module.get_function(rt_fn).unwrap_or_else(|| {
+                            self.module.add_function(
+                                rt_fn,
+                                fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                        self.build_call(
+                            callee,
+                            &[BasicMetadataValueEnum::PointerValue(list_alloca)],
+                            "opt_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list to_json void")?
+                        .into_pointer_value()
+                    };
+                    let buf = self.malloc_or_abort(
+                        self.context.i64_type().const_int(1024, false),
+                        "opt_list_bv_buf",
+                    )?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("{\"Some\":[%s]}", "opt_list_bv_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(1024, false),
+                            ),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(list_json),
+                        ],
+                        "opt_list_bv_sn",
+                    )?;
+                    self.build_store(out_alloca, buf)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(none_bb);
+                    let none_heap = self.malloc_or_abort(
+                        self.context.i64_type().const_int(8, false),
+                        "opt_list_bv_none",
+                    )?;
+                    let none_lit = self
+                        .builder
+                        .build_global_string_ptr("\"None\"", "opt_list_bv_none_lit")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(none_heap),
+                            BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                        ],
+                        "opt_list_bv_ncpy",
+                    )?;
+                    self.build_store(out_alloca, none_heap)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(merge_bb);
+                    let raw = self
+                        .build_load(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            out_alloca,
+                            "opt_list_bv_result",
+                        )?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+                if !pay_fields.is_empty()
+                    && matches!(
+                        pay_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                    )
+                    && obj_type
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .is_some_and(|inner| inner.starts_with("Option"))
+                {
+                    // Heap-pack nested Option and reuse nested path via i64.
+                    let sty = pay_sv.get_type();
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
+                    let heap = self.malloc_or_abort(
+                        self.context.i64_type().const_int(size, false),
+                        "opt_nest_bv_heap",
+                    )?;
+                    let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed = self
+                        .build_bit_cast(
+                            heap.into(),
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            "opt_nest_bv_ptr",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed, pay_sv)?;
+                    let payload_i64 = self
+                        .builder
+                        .build_ptr_to_int(typed, self.context.i64_type(), "opt_nest_bv_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    // Fall through into nested Option rebuild using payload_i64.
+                    let disc_is_some = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            disc_i64,
+                            self.context.i64_type().const_int(0, false),
+                            "opt_nest_bv_some",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let function = self.current_function().ok_or("no function")?;
+                    let some_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_nest_bv_some");
+                    let none_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_nest_bv_none");
+                    let merge_bb = self
+                        .context
+                        .append_basic_block(function, "toj_opt_nest_bv_merge");
+                    let out_alloca = self
+                        .build_alloca(BasicTypeEnum::PointerType(i8_ptr), "toj_opt_nest_bv_out")?;
+                    self.builder
+                        .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(some_bb);
+                    let nested_ptr = self
+                        .builder
+                        .build_int_to_ptr(payload_i64, i8_ptr, "opt_nest_bv_ld_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let opt_sty = self.context.struct_type(
+                        &[
+                            self.context.bool_type().into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    );
+                    let nested_sv = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(opt_sty),
+                            nested_ptr,
+                            "opt_nest_bv_ld",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    let n_disc = self
+                        .build_extract_value(nested_sv.into(), 0, "n_disc_bv")?
+                        .into_int_value();
+                    let n_disc_i64 = self
+                        .builder
+                        .build_int_z_extend(n_disc, self.context.i64_type(), "n_disc_bv_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let n_pay = self
+                        .build_extract_value(nested_sv.into(), 1, "n_pay_bv")?
+                        .into_int_value();
+                    let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(n_pay, self.context.i64_type(), "n_pay_bv_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        n_pay
+                    };
+                    let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                    let nested_json = self
+                        .build_call(
+                            opt_fn,
+                            &[
+                                BasicMetadataValueEnum::IntValue(n_disc_i64),
+                                BasicMetadataValueEnum::IntValue(n_pay_i64),
+                            ],
+                            "opt_nest_bv_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("option to_json void")?
+                        .into_pointer_value();
+                    let buf = self.malloc_or_abort(
+                        self.context.i64_type().const_int(512, false),
+                        "opt_nest_bv_buf",
+                    )?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("{\"Some\":[%s]}", "opt_nest_bv_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(512, false),
+                            ),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(nested_json),
+                        ],
+                        "opt_nest_bv_sn",
+                    )?;
+                    self.build_store(out_alloca, buf)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(none_bb);
+                    let none_heap = self.malloc_or_abort(
+                        self.context.i64_type().const_int(8, false),
+                        "opt_nest_bv_none",
+                    )?;
+                    let none_lit = self
+                        .builder
+                        .build_global_string_ptr("\"None\"", "opt_nest_bv_none_lit")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(none_heap),
+                            BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                        ],
+                        "opt_nest_bv_ncpy",
+                    )?;
+                    self.build_store(out_alloca, none_heap)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(merge_bb);
+                    let raw = self
+                        .build_load(
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            out_alloca,
+                            "opt_nest_bv_result",
+                        )?
+                        .into_pointer_value();
+                    self.register_heap_alloc(raw);
+                    return Ok(Some(self.wrap_c_string(raw)?));
+                }
+            }
+            let payload_i64 = match payload_bv {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, self.context.i64_type(), "opt_pay_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => self
+                    .builder
+                    .build_ptr_to_int(pv, self.context.i64_type(), "opt_pay_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                BasicValueEnum::StructValue(sv) => {
+                    // D-3: heap-string payload {ptr,i64} — serialize
+                    // to a JSON string literal instead of the generic
+                    // E0700 rejection.
+                    let j = self.emit_heap_string_payload_json(sv)?;
+                    self.register_heap_alloc(j);
+                    self.builder
+                        .build_ptr_to_int(j, self.context.i64_type(), "opt_pay_str_json")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json Option: unexpected payload {:?}",
+                        other.get_type()
+                    )));
+                }
+            };
+            if obj_type
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .is_some_and(|inner| inner.starts_with("Option"))
+            {
+                // Nested Option: payload is ptrtoint of heap Option {i1,i64}.
+                // mimi_option_i64_to_json only handles int payloads — rebuild.
+                let disc_is_some = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_i64,
+                        self.context.i64_type().const_int(0, false),
+                        "opt_nest_some",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let function = self.current_function().ok_or("no function")?;
+                let some_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_nest_some");
+                let none_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_nest_none");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_nest_merge");
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let out_alloca =
+                    self.build_alloca(BasicTypeEnum::PointerType(i8_ptr_ty), "toj_opt_nest_out")?;
+                self.builder
+                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(some_bb);
+                let nested_ptr = self
+                    .builder
+                    .build_int_to_ptr(payload_i64, i8_ptr_ty, "opt_nest_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let opt_sty = self.context.struct_type(
+                    &[
+                        self.context.bool_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let nested_sv = self
+                    .builder
+                    .build_load(
+                        BasicTypeEnum::StructType(opt_sty),
+                        nested_ptr,
+                        "opt_nest_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                let n_disc = self
+                    .build_extract_value(nested_sv.into(), 0, "n_disc")?
+                    .into_int_value();
+                let n_disc_i64 = self
+                    .builder
+                    .build_int_z_extend(n_disc, self.context.i64_type(), "n_disc_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let n_pay = self
+                    .build_extract_value(nested_sv.into(), 1, "n_pay")?
+                    .into_int_value();
+                let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(n_pay, self.context.i64_type(), "n_pay_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    n_pay
+                };
+                let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                let inner_json = self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(n_disc_i64),
+                            BasicMetadataValueEnum::IntValue(n_pay_i64),
+                        ],
+                        "opt_nest_inner_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("option to_json void")?
+                    .into_pointer_value();
+                let buf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(512, false),
+                    "opt_nest_buf",
+                )?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_nest_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(512, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(inner_json),
+                    ],
+                    "opt_nest_sn",
+                )?;
+                self.build_store(out_alloca, buf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(none_bb);
+                // Heap-copy "None" so wrap_c_string free is always valid.
+                let none_heap = self.malloc_or_abort(
+                    self.context.i64_type().const_int(8, false),
+                    "opt_nest_none_heap",
+                )?;
+                let none_lit = self
+                    .builder
+                    .build_global_string_ptr("\"None\"", "opt_nest_none")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                self.build_call(
+                    strcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(none_heap),
+                        BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                    ],
+                    "opt_nest_none_cpy",
+                )?;
+                self.build_store(out_alloca, none_heap)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let raw = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "opt_nest_result",
+                    )?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            if obj_type.contains("List<") {
+                // Option of List: payload is pointer to list struct
+                // (or ptrtoint of it). Element type may be Map/Set/scalar.
+                let disc_is_some = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_i64,
+                        self.context.i64_type().const_int(0, false),
+                        "opt_list_some",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let function = self.current_function().ok_or("no function")?;
+                let some_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_list_some");
+                let none_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_list_none");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(function, "toj_opt_list_merge");
+                let out_alloca = self.build_alloca(
+                    BasicTypeEnum::PointerType(
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                    ),
+                    "toj_opt_list_out",
+                )?;
+                self.builder
+                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(some_bb);
+                let list_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        payload_i64,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "opt_list_as_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                // Product-tuple list elements need codegen JSON helpers.
+                let list_inner = obj_type
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .and_then(|s| s.strip_prefix("List<"))
+                    .and_then(|s| s.strip_suffix('>'))
+                    .unwrap_or("");
+                let list_json = if list_inner.starts_with("List<") {
+                    let mid_elem =
+                        Self::strip_first_type_arg(&format!("List<{}>", list_inner), "List")
+                            .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
+                            .unwrap_or_else(|| list_inner.to_string());
+                    if mid_elem.starts_with('(') || self.is_product_tuple_alias(&mid_elem) {
+                        let elem = if self.is_product_tuple_alias(&mid_elem) {
+                            self.resolve_alias_type_name(&mid_elem)
+                        } else {
+                            mid_elem
+                        };
+                        self.emit_list_list_product_tuple_to_json(list_ptr, &elem)?
+                    } else {
+                        // fall through to scalar helpers below
+                        let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "opt_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list to_json void")?
+                        .into_pointer_value()
+                    }
+                } else if list_inner.starts_with('(') || self.is_product_tuple_alias(list_inner) {
+                    let elem = if self.is_product_tuple_alias(list_inner) {
+                        self.resolve_alias_type_name(list_inner)
+                    } else {
+                        list_inner.to_string()
+                    };
+                    self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                } else if list_inner.starts_with("Map") {
+                    if let Some(val_ty) = list_inner
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .or_else(|| {
+                            list_inner
+                                .strip_prefix("Map<string,")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .map(|s| s.trim())
+                        })
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let elem = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            self.emit_list_map_product_to_json(list_ptr, &elem)?
+                        } else {
+                            // Value type is string only when Map<string, string>.
+                            let list_fn_name = if list_inner.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            };
+                            let list_fn = self.get_runtime_fn(list_fn_name)?;
+                            self.build_call(
+                                list_fn,
+                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                "opt_list_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else {
+                        let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "opt_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list map to_json void")?
+                        .into_pointer_value()
+                    }
+                } else if list_inner.starts_with("Set") {
+                    if let Some(elem) = list_inner
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            let func = self.get_runtime_fn("mimi_list_set_product_to_json")?;
+                            self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(list_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context
+                                            .i64_type()
+                                            .const_int(arity.max(1) as u64, false),
+                                    ),
+                                ],
+                                "opt_list_set_product_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list set product to_json void")?
+                            .into_pointer_value()
+                        } else {
+                            let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                            self.build_call(
+                                list_fn,
+                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                "opt_list_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list set to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else {
+                        let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "opt_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list set to_json void")?
+                        .into_pointer_value()
+                    }
+                } else {
+                    let list_fn_name =
+                        if obj_type.contains("List<Map") || obj_type.contains("List<Map<") {
+                            if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            }
+                        } else if obj_type.contains("List<Set") {
+                            "mimi_list_set_to_json"
+                        } else if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("List<bool>") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
+                    let list_fn_ty =
+                        i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                    let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                        self.module.add_function(
+                            list_fn_name,
+                            list_fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                    self.build_call(
+                        list_fn,
+                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                        "opt_list_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list to_json void")?
+                    .into_pointer_value()
+                };
+                let buf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(4096, false),
+                    "opt_list_buf",
+                )?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_list_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(4096, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(list_json),
+                    ],
+                    "opt_list_sn",
+                )?;
+                self.build_store(out_alloca, buf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(none_bb);
+                let none_heap = self.malloc_or_abort(
+                    self.context.i64_type().const_int(8, false),
+                    "opt_list_none_heap",
+                )?;
+                let none_lit = self
+                    .builder
+                    .build_global_string_ptr("\"None\"", "opt_list_none")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                self.build_call(
+                    strcpy_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(none_heap),
+                        BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                    ],
+                    "opt_list_none_cpy",
+                )?;
+                self.build_store(out_alloca, none_heap)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let raw = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "opt_list_result",
+                    )?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            let opt_inner = obj_type
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(obj_type.as_str());
+            if opt_inner.starts_with("Map<") {
+                let mode = if obj_type.contains("Map<string, string>") {
+                    1i64
+                } else if obj_type.contains("Map<string, bool>") {
+                    2
+                } else if obj_type.contains("Map<string, f64>")
+                    || obj_type.contains("Map<string, f32>")
+                {
+                    3
+                } else {
+                    self.map_nested_product_mode(&obj_type)
+                };
+                let func = self.get_runtime_fn("mimi_option_map_to_json")?;
+                let raw = self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(disc_i64),
+                            BasicMetadataValueEnum::IntValue(payload_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_opt_map",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_option_map_to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            if opt_inner.starts_with("Set<") {
+                let mode = if obj_type.contains("Set<string>") {
+                    1i64
+                } else if obj_type.contains("Set<bool>") {
+                    2
+                } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                    3
+                } else if let Some(elem) = obj_type
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .and_then(|s| s.strip_prefix("Set<"))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                        let resolved = if self.is_product_tuple_alias(elem) {
+                            self.resolve_alias_type_name(elem)
+                        } else {
+                            elem.to_string()
+                        };
+                        let mut arity: i64 = 0;
+                        let mut depth = 0i32;
+                        let mut any = false;
+                        let body = resolved
+                            .strip_prefix('(')
+                            .and_then(|s| s.strip_suffix(')'))
+                            .unwrap_or(resolved.as_str());
+                        for ch in body.chars() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    arity += 1;
+                                    any = true;
+                                }
+                                c if !c.is_whitespace() => any = true,
+                                _ => {}
+                            }
+                        }
+                        if any {
+                            arity += 1;
+                        }
+                        10 + arity.max(1)
+                    } else if elem.starts_with("Map<string, ") {
+                        if let Some(val_ty) = elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = resolved
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(resolved.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                70 + arity.max(1)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let func = self.get_runtime_fn("mimi_option_set_to_json")?;
+                let raw = self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(disc_i64),
+                            BasicMetadataValueEnum::IntValue(payload_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_opt_set",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_option_set_to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // D-3: Option<string> — Some payload is a heap string
+            // {ptr,i64}; payload_i64 is the ptrtoint of the escaped
+            // JSON string literal. Emit structured JSON instead of
+            // printing the pointer as a number.
+            if payload_is_string {
+                let raw = self.emit_option_string_to_json_cstr(disc_i64, payload_i64)?;
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
+            let raw = self
+                .build_call(
+                    func,
+                    &[
+                        BasicMetadataValueEnum::IntValue(disc_i64),
+                        BasicMetadataValueEnum::IntValue(payload_i64),
+                    ],
+                    "to_json_opt",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("mimi_option_i64_to_json void")?
+                .into_pointer_value();
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+        // Result / Result<T,E> integer payloads: {i1, ok, err}
+        if obj_type == "Result" || obj_type.starts_with("Result<") {
+            let sv = match &arg0 {
+                BasicMetadataValueEnum::StructValue(s) => *s,
+                BasicMetadataValueEnum::PointerValue(pv) => {
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            BasicTypeEnum::StructType(self.context.struct_type(
+                                &[
+                                    self.context.bool_type().into(),
+                                    self.context.i64_type().into(),
+                                    self.context.i64_type().into(),
+                                ],
+                                false,
+                            )),
+                            *pv,
+                            "res_load",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_struct_value();
+                    loaded
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unexpected Result argument kind {:?}",
+                        other
+                    )))
+                }
+            };
+            let disc = self
+                .build_extract_value(sv.into(), 0, "res_disc")?
+                .into_int_value();
+            let disc_i64 = self
+                .builder
+                .build_int_z_extend(disc, self.context.i64_type(), "res_disc_i64")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let ok_bv = self.build_extract_value(sv.into(), 1, "res_ok")?;
+            // Result of Option: Ok is nested Option struct {i1, payload}.
+            // Require Option to be the Ok type root (not List<Option<…>> etc.).
+            let result_ok_is_option = obj_type
+                .strip_prefix("Result<")
+                .map(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' | '(' => depth += 1,
+                            '>' | ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return s[..i].trim().starts_with("Option");
+                            }
+                            _ => {}
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if result_ok_is_option && matches!(ok_bv, BasicValueEnum::StructValue(_)) {
+                let opt_sv = ok_bv.into_struct_value();
+                let o_disc = self
+                    .build_extract_value(opt_sv.into(), 0, "res_opt_disc")?
+                    .into_int_value();
+                let o_disc_i64 = self
+                    .builder
+                    .build_int_z_extend(o_disc, self.context.i64_type(), "res_opt_disc_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let o_pay_bv = self.build_extract_value(opt_sv.into(), 1, "res_opt_pay")?;
+                // Option of product-tuple/record inside Result: rebuild
+                // {"Some":[…]} from struct payload rather than i64 helper.
+                if let BasicValueEnum::StructValue(pay_sv) = o_pay_bv {
+                    let pay_fields = pay_sv.get_type().get_field_types();
+                    let pay_is_string = pay_fields.len() == 2
+                        && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            pay_fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    if !pay_is_string && pay_fields.len() >= 1 {
+                        let mut pay_inner = obj_type
+                            .strip_prefix("Result<")
+                            .and_then(|s| s.split(',').next())
+                            .and_then(|s| s.strip_prefix("Option<"))
+                            .and_then(|s| s.strip_suffix('>'))
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if pay_inner.is_empty() {
+                            let pay_sty = pay_sv.get_type();
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(
+                                    ty,
+                                    BasicTypeEnum::StructType(s) if *s == pay_sty
+                                ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                }) {
+                                    pay_inner = n.clone();
+                                    break;
+                                }
+                            }
+                        }
+                        let is_named_record = self.type_defs.get(&pay_inner).is_some_and(|td| {
+                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                        });
+                        if !is_named_record && pay_fields.len() < 2 {
+                            // fall through to i64 path
+                        } else {
+                            let pay_json = if is_named_record {
+                                let rec_ty = pay_sv.get_type();
+                                let rec_alloca = self.build_alloca(
+                                    BasicTypeEnum::StructType(rec_ty),
+                                    "res_opt_rec_tmp",
+                                )?;
+                                self.build_store(rec_alloca, pay_sv)?;
+                                self.compile_record_to_json_cstr(&pay_inner, rec_alloca)?
+                            } else {
+                                self.emit_product_tuple_to_json(pay_sv)?
+                            };
+                            let disc_is_ok = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "res_opt_tup_is_ok",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let o_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    o_disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "res_opt_tup_is_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let ok_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_ok");
+                            let err_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_err");
+                            let merge_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_merge");
+                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let out_alloca = self.build_alloca(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "toj_res_opt_tup_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(ok_bb);
+                            let some_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_some");
+                            let none_bb = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_none");
+                            let ok_merge = self
+                                .context
+                                .append_basic_block(function, "toj_res_opt_tup_ok_m");
+                            self.builder
+                                .build_conditional_branch(o_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            let inner_buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "res_opt_tup_inner",
+                            )?;
+                            let ifmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Some\":[%s]}", "res_opt_tup_ifmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(inner_buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(pay_json),
+                                ],
+                                "res_opt_tup_isn",
+                            )?;
+                            let outer_buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "res_opt_tup_outer",
+                            )?;
+                            let ofmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Ok\":[%s]}", "res_opt_tup_ofmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(outer_buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(inner_buf),
+                                ],
+                                "res_opt_tup_osn",
+                            )?;
+                            self.build_store(out_alloca, outer_buf)?;
+                            self.builder
+                                .build_unconditional_branch(ok_merge)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let none_wrap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(32, false),
+                                "res_opt_tup_none",
+                            )?;
+                            let nfmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Ok\":[\"None\"]}", "res_opt_tup_nfmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_wrap),
+                                    BasicMetadataValueEnum::PointerValue(nfmt.as_pointer_value()),
+                                ],
+                                "res_opt_tup_ncpy",
+                            )?;
+                            self.build_store(out_alloca, none_wrap)?;
+                            self.builder
+                                .build_unconditional_branch(ok_merge)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(ok_merge);
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(err_bb);
+                            let ebuf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(32, false),
+                                "res_opt_tup_err",
+                            )?;
+                            let efmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Err\":[0]}", "res_opt_tup_efmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(ebuf),
+                                    BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
+                                ],
+                                "res_opt_tup_ecpy",
+                            )?;
+                            self.build_store(out_alloca, ebuf)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            let raw = self
+                                .build_load(
+                                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    out_alloca,
+                                    "res_opt_tup_result",
+                                )?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        } // else !is_named_record && pay_fields.len() < 2
+                    }
+                }
+                let o_pay = match o_pay_bv {
+                    BasicValueEnum::IntValue(iv) => iv,
+                    BasicValueEnum::PointerValue(pv) => self
+                        .builder
+                        .build_ptr_to_int(pv, self.context.i64_type(), "res_opt_pay_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                    BasicValueEnum::StructValue(_) => {
+                        // Nested Option/List heap-packed as struct — already
+                        // handled above for multi-field product; treat as 0.
+                        self.context.i64_type().const_int(0, false)
+                    }
+                    other => {
+                        return Err(CompileError::Generic(format!(
+                            "to_json Result Option: unexpected pay {:?}",
+                            other.get_type()
+                        )));
+                    }
+                };
+                let o_pay_i64 = if o_pay.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_s_extend(o_pay, self.context.i64_type(), "res_opt_pay_i64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                } else {
+                    o_pay
+                };
+                // Nested Option of Map/Set/List needs typed helpers.
+                let opt_json = if obj_type.contains("Map<") {
+                    let mode = if obj_type.contains("Map<string, string>") {
+                        1i64
+                    } else if obj_type.contains("Map<string, bool>") {
+                        2
+                    } else if obj_type.contains("Map<string, f64>")
+                        || obj_type.contains("Map<string, f32>")
+                    {
+                        3
+                    } else {
+                        self.map_nested_product_mode(&obj_type)
+                    };
+                    let opt_fn = self.get_runtime_fn("mimi_option_map_to_json")?;
+                    self.build_call(
+                        opt_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(o_disc_i64),
+                            BasicMetadataValueEnum::IntValue(o_pay_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "res_opt_map_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("option map to_json void")?
+                    .into_pointer_value()
+                } else if obj_type.contains("Set<") {
+                    let mode = if obj_type.contains("Set<string>") {
+                        1i64
+                    } else if obj_type.contains("Set<bool>") {
+                        2
+                    } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                        3
+                    } else if let Some(elem) = obj_type
+                        .find("Set<")
+                        .map(|i| &obj_type[i + 4..])
+                        .and_then(|s| {
+                            let mut depth = 0i32;
+                            for (j, ch) in s.char_indices() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' if depth == 0 => {
+                                        return Some(s[..j].trim());
+                                    }
+                                    '>' | ')' => depth -= 1,
+                                    _ => {}
+                                }
+                            }
+                            None
+                        })
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            10 + arity.max(1)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let opt_fn = self.get_runtime_fn("mimi_option_set_to_json")?;
+                    self.build_call(
+                        opt_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(o_disc_i64),
+                            BasicMetadataValueEnum::IntValue(o_pay_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "res_opt_set_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("option set to_json void")?
+                    .into_pointer_value()
+                } else if obj_type.contains("List<") {
+                    // Option of List: rebuild {"Some":[list_json]} / "None".
+                    let disc_is_some = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            o_disc_i64,
+                            self.context.i64_type().const_int(0, false),
+                            "res_opt_list_some",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let function = self.current_function().ok_or("no function")?;
+                    let some_bb = self
+                        .context
+                        .append_basic_block(function, "toj_res_opt_list_some");
+                    let none_bb = self
+                        .context
+                        .append_basic_block(function, "toj_res_opt_list_none");
+                    let merge_bb = self
+                        .context
+                        .append_basic_block(function, "toj_res_opt_list_merge");
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let out_alloca = self.build_alloca(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        "toj_res_opt_list_out",
+                    )?;
+                    self.builder
+                        .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(some_bb);
+                    let list_ptr = self
+                        .builder
+                        .build_int_to_ptr(o_pay_i64, i8_ptr_ty, "res_opt_list_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    // Result<Option<List<(…)>>> product path.
+                    let list_elem = Self::strip_first_type_arg(&obj_type, "Result")
+                        .and_then(|s| Self::strip_first_type_arg(&s, "Option"))
+                        .and_then(|s| {
+                            s.strip_prefix("List<")
+                                .and_then(|x| x.strip_suffix('>'))
+                                .map(|x| x.to_string())
+                        })
+                        .unwrap_or_default();
+                    let list_json = if list_elem.starts_with('(')
+                        || self.is_product_tuple_alias(&list_elem)
+                    {
+                        let elem = if self.is_product_tuple_alias(&list_elem) {
+                            self.resolve_alias_type_name(&list_elem)
+                        } else {
+                            list_elem
+                        };
+                        self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                    } else {
+                        let list_fn_name = if obj_type.contains("List<Map") {
+                            if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            }
+                        } else if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("List<bool>") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
+                        let list_fn_ty = i8_ptr_ty
+                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                        let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                            self.module.add_function(
+                                list_fn_name,
+                                list_fn_ty,
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "res_opt_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list to_json void")?
+                        .into_pointer_value()
+                    };
+                    let buf = self.malloc_or_abort(
+                        self.context.i64_type().const_int(4096, false),
+                        "res_opt_list_buf",
+                    )?;
+                    let fmt = self
+                        .builder
+                        .build_global_string_ptr("{\"Some\":[%s]}", "res_opt_list_fmt")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                    self.build_call(
+                        snprintf_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(buf),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(4096, false),
+                            ),
+                            BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                            BasicMetadataValueEnum::PointerValue(list_json),
+                        ],
+                        "res_opt_list_sn",
+                    )?;
+                    self.build_store(out_alloca, buf)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(none_bb);
+                    let none_heap = self.malloc_or_abort(
+                        self.context.i64_type().const_int(8, false),
+                        "res_opt_list_none",
+                    )?;
+                    let none_lit = self
+                        .builder
+                        .build_global_string_ptr("\"None\"", "res_opt_list_none_lit")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                    self.build_call(
+                        strcpy_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(none_heap),
+                            BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
+                        ],
+                        "res_opt_list_none_cpy",
+                    )?;
+                    self.build_store(out_alloca, none_heap)?;
+                    self.builder
+                        .build_unconditional_branch(merge_bb)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(merge_bb);
+                    self.build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "res_opt_list_result",
+                    )?
+                    .into_pointer_value()
+                } else {
+                    let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
+                    self.build_call(
+                        opt_fn,
+                        &[
+                            BasicMetadataValueEnum::IntValue(o_disc_i64),
+                            BasicMetadataValueEnum::IntValue(o_pay_i64),
+                        ],
+                        "res_opt_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("option to_json void")?
+                    .into_pointer_value()
+                };
+                let disc_is_ok = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_i64,
+                        self.context.i64_type().const_int(0, false),
+                        "res_opt_is_ok",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let function = self.current_function().ok_or("no function")?;
+                let ok_bb = self.context.append_basic_block(function, "toj_res_opt_ok");
+                let err_bb = self.context.append_basic_block(function, "toj_res_opt_err");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(function, "toj_res_opt_merge");
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let out_alloca =
+                    self.build_alloca(BasicTypeEnum::PointerType(i8_ptr_ty), "toj_res_opt_out")?;
+                self.builder
+                    .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(ok_bb);
+                let buf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(512, false),
+                    "res_opt_buf",
+                )?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Ok\":[%s]}", "res_opt_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(512, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(opt_json),
+                    ],
+                    "res_opt_sn",
+                )?;
+                self.build_store(out_alloca, buf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(err_bb);
+                let err_bv = self.build_extract_value(sv.into(), 2, "res_opt_err")?;
+                let err_i64 = match err_bv {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, self.context.i64_type(), "res_opt_err_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        }
+                    }
+                    _ => self.context.i64_type().const_int(0, false),
+                };
+                let ebuf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(128, false),
+                    "res_opt_ebuf",
+                )?;
+                let efmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Err\":[%ld]}", "res_opt_efmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(ebuf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(128, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(err_i64),
+                    ],
+                    "res_opt_esn",
+                )?;
+                self.build_store(out_alloca, ebuf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let raw = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "res_opt_result",
+                    )?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // Result of List: Ok may be by-value list struct {i64,ptr}
+            // or a pointer/int handle — handle before scalar ok_i64 coercion.
+            // Result of List: Ok type must start with List (not Map/Set of List).
+            let result_ok_is_list = obj_type
+                .strip_prefix("Result<")
+                .map(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' => depth += 1,
+                            '>' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return s[..i].trim().starts_with("List");
+                            }
+                            _ => {}
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false);
+            if result_ok_is_list {
+                let err_bv = self.build_extract_value(sv.into(), 2, "res_list_err")?;
+                let err_i64 = match err_bv {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, self.context.i64_type(), "res_list_err_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        }
+                    }
+                    BasicValueEnum::PointerValue(pv) => self
+                        .builder
+                        .build_ptr_to_int(pv, self.context.i64_type(), "res_list_err_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                    _ => self.context.i64_type().const_int(0, false),
+                };
+                let disc_is_ok = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_i64,
+                        self.context.i64_type().const_int(0, false),
+                        "res_list_ok",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let function = self.current_function().ok_or("no function")?;
+                let ok_bb = self.context.append_basic_block(function, "toj_res_list_ok");
+                let err_bb = self
+                    .context
+                    .append_basic_block(function, "toj_res_list_err");
+                let merge_bb = self
+                    .context
+                    .append_basic_block(function, "toj_res_list_merge");
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let out_alloca =
+                    self.build_alloca(BasicTypeEnum::PointerType(i8_ptr_ty), "toj_res_list_out")?;
+                self.builder
+                    .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(ok_bb);
+                // Materialize list as a pointer for runtime helpers.
+                let list_ptr = match ok_bv {
+                    BasicValueEnum::StructValue(lsv) => {
+                        let list_alloca = self.build_alloca(
+                            BasicTypeEnum::StructType(lsv.get_type()),
+                            "res_list_tmp",
+                        )?;
+                        self.build_store(list_alloca, lsv)?;
+                        list_alloca
+                    }
+                    BasicValueEnum::PointerValue(pv) => pv,
+                    BasicValueEnum::IntValue(iv) => {
+                        let as_i64 = if iv.get_type().get_bit_width() < 64 {
+                            self.builder
+                                .build_int_s_extend(iv, self.context.i64_type(), "res_list_ok_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        } else {
+                            iv
+                        };
+                        self.builder
+                            .build_int_to_ptr(as_i64, i8_ptr_ty, "res_list_as_ptr")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    }
+                    other => {
+                        return Err(CompileError::Generic(format!(
+                            "to_json Result List: unexpected Ok payload {:?}",
+                            other.get_type()
+                        )));
+                    }
+                };
+                // Product-tuple list elements need codegen helpers.
+                // Use paren-aware strip: Result<List<(i32,i32)>,string> must
+                // not split on the tuple comma.
+                let list_elem =
+                    crate::codegen::CodeGenerator::strip_first_type_arg(&obj_type, "Result")
+                        .and_then(|s| {
+                            s.strip_prefix("List<")
+                                .and_then(|x| x.strip_suffix('>'))
+                                .map(|x| x.to_string())
+                        })
+                        .unwrap_or_default();
+                let list_json = if list_elem.starts_with('(')
+                    || self.is_product_tuple_alias(&list_elem)
+                {
+                    let elem = if self.is_product_tuple_alias(&list_elem) {
+                        self.resolve_alias_type_name(&list_elem)
+                    } else {
+                        list_elem
+                    };
+                    self.emit_list_product_tuple_to_json(list_ptr, &elem)?
+                } else if let Some(opt_inner) = list_elem
+                    .strip_prefix("Option<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                        let elem = if self.is_product_tuple_alias(opt_inner) {
+                            self.resolve_alias_type_name(opt_inner)
+                        } else {
+                            opt_inner.to_string()
+                        };
+                        let arity = {
+                            let body = elem
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(&elem);
+                            let mut arity = 0i64;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            arity.max(1)
+                        };
+                        let func = self.get_runtime_fn("mimi_list_option_product_to_json")?;
+                        let i64_ty = self.context.i64_type();
+                        self.build_call(
+                            func,
+                            &[
+                                BasicMetadataValueEnum::PointerValue(list_ptr),
+                                BasicMetadataValueEnum::IntValue(
+                                    i64_ty.const_int(arity as u64, false),
+                                ),
+                                BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
+                            ],
+                            "res_list_opt_prod_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list option product to_json void")?
+                        .into_pointer_value()
+                    } else {
+                        // fallback scalar option list
+                        let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "res_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list to_json void")?
+                        .into_pointer_value()
+                    }
+                } else if list_elem.starts_with("Map") {
+                    if let Some(val_ty) = list_elem
+                        .strip_prefix("Map<string, ")
+                        .and_then(|s| s.strip_suffix('>'))
+                        .or_else(|| {
+                            list_elem
+                                .strip_prefix("Map<string,")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .map(|s| s.trim())
+                        })
+                    {
+                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                            let elem = if self.is_product_tuple_alias(val_ty) {
+                                self.resolve_alias_type_name(val_ty)
+                            } else {
+                                val_ty.to_string()
+                            };
+                            self.emit_list_map_product_to_json(list_ptr, &elem)?
+                        } else {
+                            let list_fn_name = if list_elem.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            };
+                            let list_fn = self.get_runtime_fn(list_fn_name)?;
+                            self.build_call(
+                                list_fn,
+                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                "res_list_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list map to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else {
+                        let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "res_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list map to_json void")?
+                        .into_pointer_value()
+                    }
+                } else if list_elem.starts_with("Set") {
+                    if let Some(elem) = list_elem
+                        .strip_prefix("Set<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                            let resolved = if self.is_product_tuple_alias(elem) {
+                                self.resolve_alias_type_name(elem)
+                            } else {
+                                elem.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            let func = self.get_runtime_fn("mimi_list_set_product_to_json")?;
+                            self.build_call(
+                                func,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(list_ptr),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context
+                                            .i64_type()
+                                            .const_int(arity.max(1) as u64, false),
+                                    ),
+                                ],
+                                "res_list_set_product_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list set product to_json void")?
+                            .into_pointer_value()
+                        } else {
+                            let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                            self.build_call(
+                                list_fn,
+                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                                "res_list_json",
+                            )?
+                            .try_as_basic_value_opt()
+                            .ok_or("list set to_json void")?
+                            .into_pointer_value()
+                        }
+                    } else {
+                        let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
+                        self.build_call(
+                            list_fn,
+                            &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                            "res_list_json",
+                        )?
+                        .try_as_basic_value_opt()
+                        .ok_or("list set to_json void")?
+                        .into_pointer_value()
+                    }
+                } else {
+                    let list_fn_name =
+                        if obj_type.contains("List<Map") || obj_type.contains("List<Map<") {
+                            if obj_type.contains("Map<string, string>") {
+                                "mimi_list_map_to_json_string"
+                            } else {
+                                "mimi_list_map_to_string"
+                            }
+                        } else if obj_type.contains("List<Set") {
+                            "mimi_list_set_to_json"
+                        } else if obj_type.contains("List<string>") {
+                            "mimi_list_str_to_json"
+                        } else if obj_type.contains("List<f64>") || obj_type.contains("List<f32>") {
+                            "mimi_list_f64_to_json"
+                        } else if obj_type.contains("List<bool>") {
+                            "mimi_list_bool_to_json"
+                        } else {
+                            "mimi_list_i64_to_json"
+                        };
+                    let list_fn_ty =
+                        i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                    let list_fn = self.module.get_function(list_fn_name).unwrap_or_else(|| {
+                        self.module.add_function(
+                            list_fn_name,
+                            list_fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                    self.build_call(
+                        list_fn,
+                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
+                        "res_list_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("list to_json void")?
+                    .into_pointer_value()
+                };
+                let buf = self.malloc_or_abort(
+                    self.context.i64_type().const_int(4096, false),
+                    "res_list_buf",
+                )?;
+                let fmt = self
+                    .builder
+                    .build_global_string_ptr("{\"Ok\":[%s]}", "res_list_fmt")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                self.build_call(
+                    snprintf_fn,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(buf),
+                        BasicMetadataValueEnum::IntValue(
+                            self.context.i64_type().const_int(4096, false),
+                        ),
+                        BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
+                        BasicMetadataValueEnum::PointerValue(list_json),
+                    ],
+                    "res_list_sn",
+                )?;
+                self.build_store(out_alloca, buf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(err_bb);
+                let ebuf = self.emit_result_err_json(err_i64, true)?;
+                self.build_store(out_alloca, ebuf)?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let raw = self
+                    .build_load(
+                        BasicTypeEnum::PointerType(i8_ptr_ty),
+                        out_alloca,
+                        "res_list_result",
+                    )?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // Result of product tuple / named record Ok.
+            if let BasicValueEnum::StructValue(ok_sv) = ok_bv {
+                let ok_fields = ok_sv.get_type().get_field_types();
+                let ok_is_string = ok_fields.len() == 2
+                    && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
+                    && matches!(
+                        ok_fields[1],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    );
+                // Nested Option/Result Ok payloads start with i1 — not product tuples.
+                let ok_is_nested_wrapper = !ok_fields.is_empty()
+                    && matches!(
+                        ok_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                    );
+                let ok_is_list = ok_fields.len() == 2
+                    && matches!(
+                        ok_fields[0],
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                    )
+                    && matches!(ok_fields[1], BasicTypeEnum::PointerType(_));
+                if !ok_fields.is_empty() && !ok_is_nested_wrapper && !ok_is_list {
+                    // Note: ok_is_string deliberately NOT excluded —
+                    // heap-string Ok payloads {ptr,i64} must take the
+                    // structured JSON path (D-3), not fall through to
+                    // the scalar i64 coercion which rejects them (E0700)
+                    // or re-serializes the struct as a product tuple.
+                    let mut ok_inner = obj_type
+                        .strip_prefix("Result<")
+                        .and_then(|s| s.split(',').next())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if ok_inner.is_empty() {
+                        let pay_sty = ok_sv.get_type();
+                        for (n, ty) in &self.type_llvm {
+                            if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
+                                && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                })
+                            {
+                                ok_inner = n.clone();
+                                break;
+                            }
+                        }
+                    }
+                    let is_named_record = self
+                        .type_defs
+                        .get(&ok_inner)
+                        .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
+                    if !is_named_record && !ok_is_string && ok_fields.len() < 2 {
+                        // fall through
+                    } else {
+                        let ok_json = if is_named_record {
+                            let rec_ty = ok_sv.get_type();
+                            let rec_alloca = self
+                                .build_alloca(BasicTypeEnum::StructType(rec_ty), "res_rec_tmp")?;
+                            self.build_store(rec_alloca, ok_sv)?;
+                            self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+                        } else if ok_is_string {
+                            // D-3: heap-string Ok payload {ptr,i64} must
+                            // NOT be treated as a 2-field product tuple
+                            // (its 2 struct fields would otherwise
+                            // mis-serialize as [ptr,len]). Emit a JSON
+                            // string literal instead.
+                            let sj = self.emit_heap_string_payload_json(ok_sv)?;
+                            self.register_heap_alloc(sj);
+                            sj
+                        } else {
+                            self.emit_product_tuple_to_json(ok_sv)?
+                        };
+                        let err_bv = self.build_extract_value(sv.into(), 2, "res_err_tup")?;
+                        let err_i64 = match err_bv {
+                            BasicValueEnum::IntValue(iv) => {
+                                if iv.get_type().get_bit_width() < 64 {
+                                    self.builder
+                                        .build_int_s_extend(
+                                            iv,
+                                            self.context.i64_type(),
+                                            "res_err_tup_i64",
+                                        )
+                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                } else {
+                                    iv
+                                }
+                            }
+                            BasicValueEnum::PointerValue(pv) => self
+                                .builder
+                                .build_ptr_to_int(pv, self.context.i64_type(), "res_err_tup_ptr")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                            _ => self.context.i64_type().const_int(0, false),
+                        };
+                        // Result disc: true/1 = Ok, false/0 = Err (matches mimi_result_*_to_json).
+                        let disc_is_ok = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::NE,
+                                disc_i64,
+                                self.context.i64_type().const_int(0, false),
+                                "res_tup_is_ok",
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let function = self.current_function().ok_or("no function")?;
+                        let ok_bb = self.context.append_basic_block(function, "toj_res_tup_ok");
+                        let err_bb = self.context.append_basic_block(function, "toj_res_tup_err");
+                        let merge_bb = self
+                            .context
+                            .append_basic_block(function, "toj_res_tup_merge");
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let out_alloca = self.build_alloca(
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "toj_res_tup_out",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(ok_bb);
+                        // D-3: sized assembly instead of the old fixed
+                        // 1024-byte snprintf — long payloads truncated
+                        // at 1023 (NUL) on the native backend while the
+                        // VM kept the full rendering.
+                        let wrap = self.sized_cat_parts(
+                            &[
+                                crate::codegen::builtins::io::CatPart::Lit("{\"Ok\":["),
+                                crate::codegen::builtins::io::CatPart::Dyn(ok_json),
+                                crate::codegen::builtins::io::CatPart::Lit("]}"),
+                            ],
+                            "res_tup_ok_wrap",
+                            false,
+                        )?;
+                        self.build_store(out_alloca, wrap)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(err_bb);
+                        let ebuf = self.emit_result_err_json(err_i64, true)?;
+                        self.build_store(out_alloca, ebuf)?;
+                        self.builder
+                            .build_unconditional_branch(merge_bb)
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        self.builder.position_at_end(merge_bb);
+                        let raw = self
+                            .build_load(
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                out_alloca,
+                                "res_tup_result",
+                            )?
+                            .into_pointer_value();
+                        self.register_heap_alloc(raw);
+                        return Ok(Some(self.wrap_c_string(raw)?));
+                    } // else is_named_record || multi-field
+                }
+            }
+            let ok_i64 = match ok_bv {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, self.context.i64_type(), "res_ok_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => self
+                    .builder
+                    .build_ptr_to_int(pv, self.context.i64_type(), "res_ok_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                BasicValueEnum::StructValue(sv) => {
+                    // D-3: heap-string Ok payload {ptr,i64} — serialize
+                    // to a JSON string literal (the 5908 arm already
+                    // excluded strings from the product-tuple path;
+                    // without this the payload hits the generic E0700).
+                    let j = self.emit_heap_string_payload_json(sv)?;
+                    self.register_heap_alloc(j);
+                    self.builder
+                        .build_ptr_to_int(j, self.context.i64_type(), "res_ok_str_json")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json Result: unexpected Ok payload {:?}",
+                        other.get_type()
+                    )));
+                }
+            };
+            let err_bv = self.build_extract_value(sv.into(), 2, "res_err")?;
+            let err_i64 = match err_bv {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_s_extend(iv, self.context.i64_type(), "res_err_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => self
+                    .builder
+                    .build_ptr_to_int(pv, self.context.i64_type(), "res_err_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                BasicValueEnum::StructValue(sv) => {
+                    // D-3: heap-string Err payload → JSON string literal.
+                    let j = self.emit_heap_string_payload_json(sv)?;
+                    self.register_heap_alloc(j);
+                    self.builder
+                        .build_ptr_to_int(j, self.context.i64_type(), "res_err_str_json")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                }
+                other => {
+                    return Err(CompileError::Generic(format!(
+                        "to_json Result: unexpected Err payload {:?}",
+                        other.get_type()
+                    )));
+                }
+            };
+            let ok_root = obj_type
+                .strip_prefix("Result<")
+                .and_then(|s| {
+                    let mut depth = 0i32;
+                    for (i, ch) in s.char_indices() {
+                        match ch {
+                            '<' => depth += 1,
+                            '>' => depth -= 1,
+                            ',' if depth == 0 => {
+                                return Some(s[..i].trim());
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                })
+                .unwrap_or(obj_type.as_str());
+            if ok_root.starts_with("Set<") {
+                let mode = if obj_type.contains("Set<string>") {
+                    1i64
+                } else if obj_type.contains("Set<bool>") {
+                    2
+                } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
+                    3
+                } else if let Some(elem) = obj_type
+                    .strip_prefix("Result<")
+                    .and_then(|s| {
+                        let mut depth = 0i32;
+                        for (i, ch) in s.char_indices() {
+                            match ch {
+                                '<' => depth += 1,
+                                '>' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    return Some(s[..i].trim());
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    })
+                    .and_then(|s| s.strip_prefix("Set<"))
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
+                        let resolved = if self.is_product_tuple_alias(elem) {
+                            self.resolve_alias_type_name(elem)
+                        } else {
+                            elem.to_string()
+                        };
+                        let mut arity: i64 = 0;
+                        let mut depth = 0i32;
+                        let mut any = false;
+                        let body = resolved
+                            .strip_prefix('(')
+                            .and_then(|s| s.strip_suffix(')'))
+                            .unwrap_or(resolved.as_str());
+                        for ch in body.chars() {
+                            match ch {
+                                '<' | '(' => depth += 1,
+                                '>' | ')' => depth -= 1,
+                                ',' if depth == 0 => {
+                                    arity += 1;
+                                    any = true;
+                                }
+                                c if !c.is_whitespace() => any = true,
+                                _ => {}
+                            }
+                        }
+                        if any {
+                            arity += 1;
+                        }
+                        10 + arity.max(1)
+                    } else if let Some(opt_inner) = elem
+                        .strip_prefix("Option<")
+                        .and_then(|s| s.strip_suffix('>'))
+                    {
+                        if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner) {
+                            let resolved = if self.is_product_tuple_alias(opt_inner) {
+                                self.resolve_alias_type_name(opt_inner)
+                            } else {
+                                opt_inner.to_string()
+                            };
+                            let mut arity: i64 = 0;
+                            let mut depth = 0i32;
+                            let mut any = false;
+                            let body = resolved
+                                .strip_prefix('(')
+                                .and_then(|s| s.strip_suffix(')'))
+                                .unwrap_or(resolved.as_str());
+                            for ch in body.chars() {
+                                match ch {
+                                    '<' | '(' => depth += 1,
+                                    '>' | ')' => depth -= 1,
+                                    ',' if depth == 0 => {
+                                        arity += 1;
+                                        any = true;
+                                    }
+                                    c if !c.is_whitespace() => any = true,
+                                    _ => {}
+                                }
+                            }
+                            if any {
+                                arity += 1;
+                            }
+                            50 + arity.max(1)
+                        } else {
+                            0
+                        }
+                    } else if elem.starts_with("Map<string, ") {
+                        if let Some(val_ty) = elem
+                            .strip_prefix("Map<string, ")
+                            .and_then(|s| s.strip_suffix('>'))
+                        {
+                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
+                                let resolved = if self.is_product_tuple_alias(val_ty) {
+                                    self.resolve_alias_type_name(val_ty)
+                                } else {
+                                    val_ty.to_string()
+                                };
+                                let mut arity: i64 = 0;
+                                let mut depth = 0i32;
+                                let mut any = false;
+                                let body = resolved
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(resolved.as_str());
+                                for ch in body.chars() {
+                                    match ch {
+                                        '<' | '(' => depth += 1,
+                                        '>' | ')' => depth -= 1,
+                                        ',' if depth == 0 => {
+                                            arity += 1;
+                                            any = true;
+                                        }
+                                        c if !c.is_whitespace() => any = true,
+                                        _ => {}
+                                    }
+                                }
+                                if any {
+                                    arity += 1;
+                                }
+                                70 + arity.max(1)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let func = self.get_runtime_fn("mimi_result_set_to_json")?;
+                let raw = self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(disc_i64),
+                            BasicMetadataValueEnum::IntValue(ok_i64),
+                            BasicMetadataValueEnum::IntValue(err_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_res_set",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_result_set_to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            if ok_root.starts_with("Map<") {
+                let mode = if obj_type.contains("Map<string, string>") {
+                    1i64
+                } else if obj_type.contains("Map<string, bool>") {
+                    2
+                } else if obj_type.contains("Map<string, f64>")
+                    || obj_type.contains("Map<string, f32>")
+                {
+                    3
+                } else {
+                    self.map_nested_product_mode(&obj_type)
+                };
+                let func = self.get_runtime_fn("mimi_result_map_to_json")?;
+                let raw = self
+                    .build_call(
+                        func,
+                        &[
+                            BasicMetadataValueEnum::IntValue(disc_i64),
+                            BasicMetadataValueEnum::IntValue(ok_i64),
+                            BasicMetadataValueEnum::IntValue(err_i64),
+                            BasicMetadataValueEnum::IntValue(
+                                self.context.i64_type().const_int(mode as u64, false),
+                            ),
+                        ],
+                        "to_json_res_map",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_result_map_to_json void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            // Prefer structured Result JSON so string Err (heap {ptr,len}) is
+            // not printed as a raw i64 address.
+            if let BasicMetadataValueEnum::StructValue(res_sv) = arg0 {
+                let raw = self.emit_result_struct_to_json_cstr(res_sv, &obj_type)?;
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
+            let func = self.get_runtime_fn("mimi_result_i64_to_json")?;
+            let raw = self
+                .build_call(
+                    func,
+                    &[
+                        BasicMetadataValueEnum::IntValue(disc_i64),
+                        BasicMetadataValueEnum::IntValue(ok_i64),
+                        BasicMetadataValueEnum::IntValue(err_i64),
+                    ],
+                    "to_json_res",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or("mimi_result_i64_to_json void")?
+                .into_pointer_value();
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+        // Check for Record type — serialize to JSON object via sprintf
+        if self
+            .type_defs
+            .get(&obj_type)
+            .is_some_and(|td| matches!(td.kind, TypeDefKind::Record(_)))
+        {
+            // Shape normalization (0.39.136 architecture): the legacy emitter
+            // surfaces named records as pointers (alloca-backed), the resolved
+            // emitter as bare struct values. Normalize here so both callers
+            // share one path.
+            let struct_ptr = match &arg0 {
+                BasicMetadataValueEnum::PointerValue(pv) => *pv,
+                BasicMetadataValueEnum::StructValue(sv) => {
+                    let sv_ty = sv.get_type();
+                    let alloca = self
+                        .build_alloca(BasicTypeEnum::StructType(sv_ty), "to_json_rec_val_alloca")?;
+                    self.build_store(alloca, *sv)?;
+                    alloca
+                }
+                _ => {
+                    return Err(CompileError::Generic(
+                        "to_json: record value must be a pointer".into(),
+                    ))
+                }
+            };
+            let raw = self.compile_record_to_json_cstr(&obj_type, struct_ptr)?;
+            self.register_heap_alloc(raw);
+            return Ok(Some(self.wrap_c_string(raw)?));
+        }
+
+        Ok(None)
+    }
+
     pub(in crate::codegen) fn compile_call_expr(
         &mut self,
         callee: &Expr,
@@ -621,6025 +6379,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )));
                 }
             }
-            // Special case: `to_json(obj)` where obj is a List<T> — dispatch
-            // to the appropriate mimi_list_*_to_json runtime helper.
-            if name == "to_json" && !args.is_empty() && !metadata_args.is_empty() {
-                // Product tuples: JSON array via recursive field serialization.
-                // Only when the *source* type is a product tuple — never Option
-                // `{i1,T}`, Result, enum `{i32,i64}`, string, or list layouts.
-                if let BasicMetadataValueEnum::StructValue(sv) = metadata_args[0] {
-                    let fields = sv.get_type().get_field_types();
-                    let looks_like_option = !fields.is_empty()
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                        );
-                    let is_string = fields.len() == 2
-                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
-                        && matches!(
-                            fields[1],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        );
-                    let is_list = fields.len() == 2
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        )
-                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
-                    let is_enum_tag = fields.len() == 2
-                        && matches!(
-                            fields[0],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 32
-                        )
-                        && matches!(
-                            fields[1],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        );
-                    let src_ty = self.infer_object_type(&args[0], vars);
-                    // Type aliases like `type Pair = (i32, i32)` keep the alias
-                    // name in var_type_names; resolve so product dispatch fires.
-                    let src_resolved = self.resolve_alias_type_name(&src_ty);
-                    let named_as_tuple = src_resolved.starts_with('(')
-                        || src_ty.starts_with('(')
-                        || src_ty.contains("Tuple")
-                        || self.is_product_tuple_alias(&src_ty);
-                    // Prefer AST-ish type name when available; else multi-field
-                    // product that is not option/string/list/enum.
-                    // Named records stay on the record path (type_defs Record);
-                    // product-tuple aliases are not "blocking" names.
-                    let blocks_product = self
-                        .type_defs
-                        .get(&src_ty)
-                        .is_some_and(|td| !matches!(td.kind, crate::ast::TypeDefKind::Alias(_)));
-                    if named_as_tuple
-                        || (fields.len() >= 2
-                            && !looks_like_option
-                            && !is_string
-                            && !is_list
-                            && !is_enum_tag
-                            && !src_resolved.starts_with("Option")
-                            && !src_resolved.starts_with("Result")
-                            && !src_resolved.starts_with("List")
-                            && !src_resolved.starts_with("Map")
-                            && !src_resolved.starts_with("Set")
-                            && !blocks_product)
-                    {
-                        let raw = self.emit_product_tuple_to_json(sv)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                }
+            // 0.39.136 architecture: typed to_json routing moved into the
+            // shared emit_typed_to_json_dispatch (also used by the resolved
+            // emitter). obj_type comes from infer_object_type here and from
+            // resolved_type_display_name there.
+            if name == "to_json" && !metadata_args.is_empty() {
                 let obj_type = self.infer_object_type(&args[0], vars);
-                if obj_type == "List" || obj_type.starts_with("List<") {
-                    let inner_opt = obj_type
-                        .strip_prefix("List<")
-                        .and_then(|s| s.strip_suffix('>'));
-                    let inner = inner_opt.unwrap_or("i64");
-                    let list_struct_ty = self.list_struct_type();
-                    let alloca = self.build_alloca(list_struct_ty, "to_json_list_alloca")?;
-                    match &metadata_args[0] {
-                        BasicMetadataValueEnum::StructValue(sv) => {
-                            self.build_store(alloca, *sv)?;
-                        }
-                        BasicMetadataValueEnum::PointerValue(pv) => {
-                            let loaded = self
-                                .builder
-                                .build_load(
-                                    BasicTypeEnum::StructType(list_struct_ty),
-                                    *pv,
-                                    "to_json_list_load",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                .into_struct_value();
-                            self.build_store(alloca, loaded)?;
-                        }
-                        _ => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json: unexpected List argument kind for {}",
-                                obj_type
-                            )))
-                        }
-                    }
-                    // Check for record element type — needs callback-based serialization
-                    let is_record = self
-                        .type_defs
-                        .get(inner)
-                        .map(|td| matches!(td.kind, TypeDefKind::Record(_)))
-                        .unwrap_or(false);
-                    if is_record {
-                        if let Some(td) = self.type_defs.get(inner) {
-                            if let TypeDefKind::Record(fields) = &td.kind {
-                                let fields_clone = fields.clone();
-                                return self.compile_record_list_to_json(
-                                    inner,
-                                    &fields_clone,
-                                    &alloca,
-                                );
-                            }
-                        }
-                    }
-                    if inner.starts_with("List") {
-                        // Nested List: product-tuple inner uses codegen loop;
-                        // scalar/nested inners use element-type-aware
-                        // formatting. AUDIT FIX (H-18): the leaf formatter was
-                        // hardcoded to mimi_list_i64_to_json — f64 bit patterns
-                        // and string pointers were serialized as integers
-                        // (silently wrong JSON; VM emits correct values).
-                        let mid_elem = Self::strip_list_element_type(inner)
-                            .or_else(|| {
-                                inner
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                    .map(|s| s.to_string())
-                            })
-                            .unwrap_or_default();
-                        if mid_elem.starts_with('(') {
-                            let raw =
-                                self.emit_list_list_product_tuple_to_json(alloca, &mid_elem)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        let raw = self.emit_list_to_json_cstr(alloca, inner)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // List of Map of product / nested product Map values.
-                    if inner.starts_with("Map<") {
-                        let mode = self.map_nested_product_mode(inner);
-                        if mode >= 10 {
-                            let raw = self.emit_list_map_nested_product_to_json(alloca, inner)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                    }
-                    // List of Set of product / Set of Result of product.
-                    if let Some(set_elem) =
-                        inner.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
-                    {
-                        if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
-                            let resolved = if self.is_product_tuple_alias(set_elem) {
-                                self.resolve_alias_type_name(set_elem)
-                            } else {
-                                set_elem.to_string()
-                            };
-                            let mut arity: i64 = 0;
-                            let mut depth = 0i32;
-                            let mut any = false;
-                            let body = resolved
-                                .strip_prefix('(')
-                                .and_then(|s| s.strip_suffix(')'))
-                                .unwrap_or(resolved.as_str());
-                            for ch in body.chars() {
-                                match ch {
-                                    '<' | '(' => depth += 1,
-                                    '>' | ')' => depth -= 1,
-                                    ',' if depth == 0 => {
-                                        arity += 1;
-                                        any = true;
-                                    }
-                                    c if !c.is_whitespace() => any = true,
-                                    _ => {}
-                                }
-                            }
-                            if any {
-                                arity += 1;
-                            }
-                            let func = self.get_runtime_fn("mimi_list_set_product_to_json")?;
-                            let raw = self
-                                .build_call(
-                                    func,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(alloca),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context
-                                                .i64_type()
-                                                .const_int(arity.max(1) as u64, false),
-                                        ),
-                                    ],
-                                    "list_set_product_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list set product to_json void")?
-                                .into_pointer_value();
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if let Some(opt_inner) = set_elem
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
-                            {
-                                let resolved = if self.is_product_tuple_alias(opt_inner) {
-                                    self.resolve_alias_type_name(opt_inner)
-                                } else {
-                                    opt_inner.to_string()
-                                };
-                                let raw = self
-                                    .emit_list_set_option_product_to_json(alloca, &resolved, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                        if set_elem.starts_with("Map<string, ") {
-                            if let Some(val_ty) = set_elem
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                    let resolved = if self.is_product_tuple_alias(val_ty) {
-                                        self.resolve_alias_type_name(val_ty)
-                                    } else {
-                                        val_ty.to_string()
-                                    };
-                                    let raw = self
-                                        .emit_list_set_map_product_to_json(alloca, &resolved, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                        }
-                        if set_elem.starts_with("Result<") {
-                            if let Some(ok_ty) = set_elem.strip_prefix("Result<").and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            }) {
-                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                                    let resolved = if self.is_product_tuple_alias(ok_ty) {
-                                        self.resolve_alias_type_name(ok_ty)
-                                    } else {
-                                        ok_ty.to_string()
-                                    };
-                                    let raw = self.emit_list_set_result_product_to_json(
-                                        alloca, &resolved, 0,
-                                    )?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                        }
-                    }
-                    let rt_fn_name = if inner.starts_with("Map") {
-                        if inner.contains("Map<string, string>") {
-                            "mimi_list_map_to_json_string"
-                        } else {
-                            // i32/i64/bool/f64 maps share int-style JSON objects.
-                            "mimi_list_map_to_string"
-                        }
-                    } else if inner.starts_with("Set") {
-                        "mimi_list_set_to_json"
-                    } else if inner.starts_with("Option") && inner.contains("Map<") {
-                        // List of Option of Map — nested product modes via helper.
-                        let mode = if inner.contains("Map<string, string>") {
-                            1i64
-                        } else if inner.contains("Map<string, bool>") {
-                            2
-                        } else if inner.contains("Map<string, f64>")
-                            || inner.contains("Map<string, f32>")
-                        {
-                            3
-                        } else {
-                            self.map_nested_product_mode(inner)
-                        };
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let fn_ty = i8_ptr_ty.fn_type(
-                            &[
-                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                            ],
-                            false,
-                        );
-                        let callee = self
-                            .module
-                            .get_function("mimi_list_option_map_to_json")
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    "mimi_list_option_map_to_json",
-                                    fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
-                        let raw = self
-                            .build_call(
-                                callee,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(alloca),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_list_opt_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("list option map to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    } else if inner.starts_with("Option") {
-                        // Option of Result / product / record needs full Option
-                        // layout — never the scalar {i1,i64} runtime helper.
-                        // Exclude bare Option of scalar i32 (no Result/tuple/record).
-                        let opt_inner = inner
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .unwrap_or("");
-                        // List of Option of Set of product.
-                        if opt_inner.starts_with("Set<") {
-                            if let Some(elem) = opt_inner
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    let raw = self.emit_list_option_set_product_to_json(
-                                        alloca,
-                                        arity.max(1),
-                                    )?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                        }
-                        let needs_full = opt_inner.starts_with("Result")
-                            || opt_inner.starts_with("List")
-                            || opt_inner.starts_with("Set")
-                            || opt_inner.starts_with('(')
-                            || opt_inner.contains("Tuple")
-                            || self.type_defs.get(opt_inner).is_some_and(|td| {
-                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                            })
-                            || self.is_product_tuple_alias(opt_inner);
-                        if needs_full {
-                            let raw = self.emit_list_option_product_tuple_to_json(alloca, inner)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        "mimi_list_option_i64_to_json"
-                    } else if inner.starts_with("Result") && inner.contains("Set<") {
-                        // List of Result of Set of product — dedicated runtime path.
-                        if let Some(set_elem) = inner
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .and_then(|s| s.strip_prefix("Set<"))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
-                                let elem = if self.is_product_tuple_alias(set_elem) {
-                                    self.resolve_alias_type_name(set_elem)
-                                } else {
-                                    set_elem.to_string()
-                                };
-                                let raw =
-                                    self.emit_list_result_set_product_runtime(alloca, &elem, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                        "mimi_list_result_i64_to_json"
-                    } else if inner.starts_with("Result") && inner.contains("Map<") {
-                        // List of Result of Map of product — dedicated runtime path.
-                        if let Some(val_ty) = inner
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .and_then(|s| s.strip_prefix("Map<string, "))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                    self.resolve_alias_type_name(val_ty)
-                                } else {
-                                    val_ty.to_string()
-                                };
-                                let raw =
-                                    self.emit_list_result_map_product_runtime(alloca, &elem, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                        // List of Result of Map — typed map Ok payload (scalars).
-                        // mode 0-3 scalars; mode 20+arity for product Map
-                        // (runtime list_result adds +10 for scalar map path).
-                        let mode = if inner.contains("Map<string, string>") {
-                            1i64
-                        } else if inner.contains("Map<string, bool>") {
-                            2
-                        } else if inner.contains("Map<string, f64>")
-                            || inner.contains("Map<string, f32>")
-                        {
-                            3
-                        } else if let Some(val_ty) = inner
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' => depth += 1,
-                                        '>' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .and_then(|s| s.strip_prefix("Map<string, "))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                    self.resolve_alias_type_name(val_ty)
-                                } else {
-                                    val_ty.to_string()
-                                };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let body = elem
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(elem.as_str());
-                                for ch in body.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                // Pass through as 10+arity so after +10 becomes 20+arity.
-                                10 + arity.max(1)
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let fn_ty = i8_ptr_ty.fn_type(
-                            &[
-                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                                BasicMetadataTypeEnum::IntType(self.context.i64_type()),
-                            ],
-                            false,
-                        );
-                        let callee = self
-                            .module
-                            .get_function("mimi_list_result_map_to_json")
-                            .unwrap_or_else(|| {
-                                self.module.add_function(
-                                    "mimi_list_result_map_to_json",
-                                    fn_ty,
-                                    Some(inkwell::module::Linkage::External),
-                                )
-                            });
-                        let raw = self
-                            .build_call(
-                                callee,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(alloca),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_list_res_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("list result map to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    } else if inner.starts_with("Result") {
-                        let ok_inner = inner
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .unwrap_or("");
-                        // Product-tuple / named-record / nested Result Ok — not bare scalar.
-                        // Product-tuple only (not named records — those use struct to_json).
-                        let ok_is_product = ok_inner.starts_with('(')
-                            || ok_inner.contains("Tuple")
-                            || self.is_product_tuple_alias(ok_inner);
-                        let ok_is_named_record = self.type_defs.get(ok_inner).is_some_and(|td| {
-                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                        });
-                        let ok_is_option_product = ok_inner.starts_with("Option")
-                            && (ok_inner.contains('(')
-                                || ok_inner.contains("Tuple")
-                                || ok_inner.contains("Result"));
-                        if ok_is_product {
-                            // Prefer runtime uniform pack path (from_json list result product).
-                            let elem = if self.is_product_tuple_alias(ok_inner) {
-                                self.resolve_alias_type_name(ok_inner)
-                            } else {
-                                ok_inner.to_string()
-                            };
-                            let raw = self.emit_list_result_product_runtime(alloca, &elem, 0)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if ok_is_named_record {
-                            let raw = self.emit_list_result_product_to_json(alloca, inner)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if ok_inner.starts_with("Map<string, ") {
-                            if let Some(inner_val) = ok_inner
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if inner_val.starts_with('(')
-                                    || self.is_product_tuple_alias(inner_val)
-                                {
-                                    let elem = if self.is_product_tuple_alias(inner_val) {
-                                        self.resolve_alias_type_name(inner_val)
-                                    } else {
-                                        inner_val.to_string()
-                                    };
-                                    let raw = self
-                                        .emit_list_result_map_product_runtime(alloca, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                        }
-                        if ok_is_option_product {
-                            let raw =
-                                self.emit_list_result_option_product_to_json(alloca, inner)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        // Nested Result Ok: Result<Result<…>, E> — full LLVM load + recurse.
-                        if ok_inner.starts_with("Result") {
-                            let raw = self.emit_list_result_product_to_json(alloca, inner)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        // Scalar Result Ok — runtime i64 helper.
-                        "mimi_list_result_i64_to_json"
-                    } else if inner.starts_with('(') || self.is_product_tuple_alias(inner) {
-                        // List of product tuples (or type-alias of them).
-                        let elem = if self.is_product_tuple_alias(inner) {
-                            self.resolve_alias_type_name(inner)
-                        } else {
-                            inner.to_string()
-                        };
-                        let raw = self.emit_list_product_tuple_to_json(alloca, &elem)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    } else {
-                        match inner {
-                            "string" => "mimi_list_str_to_json",
-                            "f64" | "f32" => "mimi_list_f64_to_json",
-                            "bool" => "mimi_list_bool_to_json",
-                            _ => "mimi_list_i64_to_json",
-                        }
-                    };
-                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                    let fn_ty =
-                        i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                    let callee = self.module.get_function(rt_fn_name).unwrap_or_else(|| {
-                        self.module.add_function(
-                            rt_fn_name,
-                            fn_ty,
-                            Some(inkwell::module::Linkage::External),
-                        )
-                    });
-                    let raw = self
-                        .build_call(
-                            callee,
-                            &[BasicMetadataValueEnum::PointerValue(alloca)],
-                            "to_json_list",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("to_json list helper returned void")?
-                        .into_pointer_value();
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
-                }
-                // Map / Map<string, …> → typed map JSON helpers.
-                // 0.39.136 (L1): the checker's canonical name for a dynamic
-                // `map_new()` map is `Record` — accept it here too, or the
-                // untyped-map handle falls through to compile_to_json's
-                // integer arm and to_json prints the raw handle natively
-                // while the VM serializes real JSON.
-                if obj_type == "Map" || obj_type.starts_with("Map<") || obj_type == "Record" {
-                    let handle = match &metadata_args[0] {
-                        BasicMetadataValueEnum::IntValue(iv) => *iv,
-                        BasicMetadataValueEnum::PointerValue(_) => {
-                            return Err(CompileError::Generic(
-                                "to_json: Map handle must be i64".into(),
-                            ));
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json: unexpected Map argument kind {:?}",
-                                other
-                            )))
-                        }
-                    };
-                    if let Some(val_ty) = obj_type
-                        .strip_prefix("Map<string, ")
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                self.resolve_alias_type_name(val_ty)
-                            } else {
-                                val_ty.to_string()
-                            };
-                            let raw = self.emit_map_product_to_json(handle, &elem, 0)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if let Some(list_elem) = val_ty
-                            .strip_prefix("List<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if list_elem.starts_with('(') || self.is_product_tuple_alias(list_elem)
-                            {
-                                let elem = if self.is_product_tuple_alias(list_elem) {
-                                    self.resolve_alias_type_name(list_elem)
-                                } else {
-                                    list_elem.to_string()
-                                };
-                                let raw = self.emit_map_list_product_to_json(handle, &elem, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                            if list_elem.starts_with("Map<string, ") {
-                                if let Some(map_val) = list_elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if map_val.starts_with('(')
-                                        || self.is_product_tuple_alias(map_val)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(map_val) {
-                                            self.resolve_alias_type_name(map_val)
-                                        } else {
-                                            map_val.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_list_map_product_to_json(handle, &elem, 0)?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if let Some(list_elem2) = map_val
-                                        .strip_prefix("List<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if list_elem2.starts_with('(')
-                                            || self.is_product_tuple_alias(list_elem2)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(list_elem2) {
-                                                self.resolve_alias_type_name(list_elem2)
-                                            } else {
-                                                list_elem2.to_string()
-                                            };
-                                            let raw = self.emit_map_list_map_list_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(set_elem) = list_elem
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if set_elem.starts_with('(')
-                                    || self.is_product_tuple_alias(set_elem)
-                                {
-                                    let elem = if self.is_product_tuple_alias(set_elem) {
-                                        self.resolve_alias_type_name(set_elem)
-                                    } else {
-                                        set_elem.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_list_set_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if set_elem.starts_with("Map<string, ") {
-                                    if let Some(val_ty) = set_elem
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if val_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(val_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                                self.resolve_alias_type_name(val_ty)
-                                            } else {
-                                                val_ty.to_string()
-                                            };
-                                            let raw = self.emit_map_list_set_map_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                                if let Some(opt_inner) = set_elem
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(opt_inner) {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        let raw = self.emit_map_list_set_option_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if set_elem.starts_with("Result<") {
-                                    if let Some(ok_ty) =
-                                        set_elem.strip_prefix("Result<").and_then(|s| {
-                                            let mut depth = 0i32;
-                                            for (i, ch) in s.char_indices() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        return Some(s[..i].trim());
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            None
-                                        })
-                                    {
-                                        if ok_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(ok_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(ok_ty) {
-                                                self.resolve_alias_type_name(ok_ty)
-                                            } else {
-                                                ok_ty.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_list_set_result_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(opt_inner) = list_elem
-                                .strip_prefix("Option<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if opt_inner.starts_with('(')
-                                    || self.is_product_tuple_alias(opt_inner)
-                                {
-                                    let elem = if self.is_product_tuple_alias(opt_inner) {
-                                        self.resolve_alias_type_name(opt_inner)
-                                    } else {
-                                        opt_inner.to_string()
-                                    };
-                                    let raw = self
-                                        .emit_map_list_option_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if let Some(set_elem) = opt_inner
-                                    .strip_prefix("Set<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if set_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(set_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(set_elem) {
-                                            self.resolve_alias_type_name(set_elem)
-                                        } else {
-                                            set_elem.to_string()
-                                        };
-                                        let raw = self.emit_map_list_option_set_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                            if let Some(res_ok) = list_elem
-                                .strip_prefix("Result<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                let product = if res_ok.starts_with('(') {
-                                    let mut depth = 0i32;
-                                    let mut end = 0usize;
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '(' => depth += 1,
-                                            ')' => {
-                                                depth -= 1;
-                                                if depth == 0 {
-                                                    end = i + 1;
-                                                    break;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].to_string()
-                                } else if let Some(c) = res_ok.find(',') {
-                                    res_ok[..c].to_string()
-                                } else {
-                                    res_ok.to_string()
-                                };
-                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
-                                {
-                                    let elem = if self.is_product_tuple_alias(&product) {
-                                        self.resolve_alias_type_name(&product)
-                                    } else {
-                                        product
-                                    };
-                                    let raw = self
-                                        .emit_map_list_result_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                let res_first = {
-                                    let mut depth = 0i32;
-                                    let mut end = res_ok.len();
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                end = i;
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].trim().to_string()
-                                };
-                                if let Some(opt_inner) = res_first
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(opt_inner) {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_list_result_option_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(set_elem) = val_ty
-                            .strip_prefix("Set<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if set_elem.starts_with('(') || self.is_product_tuple_alias(set_elem) {
-                                let elem = if self.is_product_tuple_alias(set_elem) {
-                                    self.resolve_alias_type_name(set_elem)
-                                } else {
-                                    set_elem.to_string()
-                                };
-                                let raw = self.emit_map_set_product_to_json(handle, &elem, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                            if let Some(list_elem) = set_elem
-                                .strip_prefix("List<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if list_elem.starts_with('(')
-                                    || self.is_product_tuple_alias(list_elem)
-                                {
-                                    let elem = if self.is_product_tuple_alias(list_elem) {
-                                        self.resolve_alias_type_name(list_elem)
-                                    } else {
-                                        list_elem.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_set_list_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if list_elem.starts_with("Map<string, ") {
-                                    if let Some(val_ty) = list_elem
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if val_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(val_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                                self.resolve_alias_type_name(val_ty)
-                                            } else {
-                                                val_ty.to_string()
-                                            };
-                                            let raw = self.emit_map_set_list_map_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if set_elem.starts_with("Map<string, ") {
-                                if let Some(val_ty) = set_elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_set_map_product_to_json(handle, &elem, 0)?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if let Some(list_elem) = val_ty
-                                        .strip_prefix("List<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if list_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(list_elem)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(list_elem) {
-                                                self.resolve_alias_type_name(list_elem)
-                                            } else {
-                                                list_elem.to_string()
-                                            };
-                                            let raw = self.emit_map_set_map_list_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(opt_inner) = set_elem
-                                .strip_prefix("Option<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if opt_inner.starts_with('(')
-                                    || self.is_product_tuple_alias(opt_inner)
-                                {
-                                    let elem = if self.is_product_tuple_alias(opt_inner) {
-                                        self.resolve_alias_type_name(opt_inner)
-                                    } else {
-                                        opt_inner.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_set_option_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                            if let Some(res_ok) = set_elem
-                                .strip_prefix("Result<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                let product = if res_ok.starts_with('(') {
-                                    let mut depth = 0i32;
-                                    let mut end = 0usize;
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '(' => depth += 1,
-                                            ')' => {
-                                                depth -= 1;
-                                                if depth == 0 {
-                                                    end = i + 1;
-                                                    break;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].to_string()
-                                } else if let Some(c) = res_ok.find(',') {
-                                    res_ok[..c].to_string()
-                                } else {
-                                    res_ok.to_string()
-                                };
-                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
-                                {
-                                    let elem = if self.is_product_tuple_alias(&product) {
-                                        self.resolve_alias_type_name(&product)
-                                    } else {
-                                        product
-                                    };
-                                    let raw =
-                                        self.emit_map_set_result_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                let res_first = {
-                                    let mut depth = 0i32;
-                                    let mut end = res_ok.len();
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                end = i;
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].trim().to_string()
-                                };
-                                if let Some(opt_inner) = res_first
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(opt_inner) {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        let raw = self.emit_map_set_result_option_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(opt_elem) = val_ty
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
-                                let elem = if self.is_product_tuple_alias(opt_elem) {
-                                    self.resolve_alias_type_name(opt_elem)
-                                } else {
-                                    opt_elem.to_string()
-                                };
-                                let raw = self.emit_map_option_product_to_json(handle, &elem, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                            if opt_elem.starts_with("Map<string, ") {
-                                if let Some(inner_val) = opt_elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if inner_val.starts_with('(')
-                                        || self.is_product_tuple_alias(inner_val)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(inner_val) {
-                                            self.resolve_alias_type_name(inner_val)
-                                        } else {
-                                            inner_val.to_string()
-                                        };
-                                        let raw = self.emit_map_option_map_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if let Some(list_elem) = inner_val
-                                        .strip_prefix("List<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if list_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(list_elem)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(list_elem) {
-                                                self.resolve_alias_type_name(list_elem)
-                                            } else {
-                                                list_elem.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_option_map_list_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(set_elem) = opt_elem
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if set_elem.starts_with('(')
-                                    || self.is_product_tuple_alias(set_elem)
-                                {
-                                    let elem = if self.is_product_tuple_alias(set_elem) {
-                                        self.resolve_alias_type_name(set_elem)
-                                    } else {
-                                        set_elem.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_option_set_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if let Some(list_elem) = set_elem
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let raw = self.emit_map_option_set_list_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if set_elem.starts_with("Map<string, ") {
-                                    if let Some(val_ty) = set_elem
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if val_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(val_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                                self.resolve_alias_type_name(val_ty)
-                                            } else {
-                                                val_ty.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_option_set_map_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(list_elem) = opt_elem
-                                .strip_prefix("List<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if list_elem.starts_with('(')
-                                    || self.is_product_tuple_alias(list_elem)
-                                {
-                                    let elem = if self.is_product_tuple_alias(list_elem) {
-                                        self.resolve_alias_type_name(list_elem)
-                                    } else {
-                                        list_elem.to_string()
-                                    };
-                                    let raw = self
-                                        .emit_map_option_list_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if list_elem.starts_with("Map<string, ") {
-                                    if let Some(val_ty) = list_elem
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if val_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(val_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(val_ty) {
-                                                self.resolve_alias_type_name(val_ty)
-                                            } else {
-                                                val_ty.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_option_list_map_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(res_ok) = opt_elem
-                                .strip_prefix("Result<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                let product = if res_ok.starts_with('(') {
-                                    let mut depth = 0i32;
-                                    let mut end = 0usize;
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '(' => depth += 1,
-                                            ')' => {
-                                                depth -= 1;
-                                                if depth == 0 {
-                                                    end = i + 1;
-                                                    break;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].to_string()
-                                } else if let Some(c) = res_ok.find(',') {
-                                    res_ok[..c].to_string()
-                                } else {
-                                    res_ok.to_string()
-                                };
-                                if product.starts_with('(') || self.is_product_tuple_alias(&product)
-                                {
-                                    let elem = if self.is_product_tuple_alias(&product) {
-                                        self.resolve_alias_type_name(&product)
-                                    } else {
-                                        product
-                                    };
-                                    let raw = self
-                                        .emit_map_option_result_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                // res_ok may be "List<(…), string" if strip_suffix only removed one >.
-                                let res_first = {
-                                    let mut depth = 0i32;
-                                    let mut end = res_ok.len();
-                                    for (i, ch) in res_ok.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                end = i;
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    res_ok[..end].trim()
-                                };
-                                if let Some(list_elem) = res_first
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_option_result_list_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if val_ty.starts_with("Result<") {
-                            if let Some(ok_ty) = val_ty.strip_prefix("Result<").and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            }) {
-                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                                    let elem = if self.is_product_tuple_alias(ok_ty) {
-                                        self.resolve_alias_type_name(ok_ty)
-                                    } else {
-                                        ok_ty.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_result_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if ok_ty.starts_with("Map<string, ") {
-                                    if let Some(inner_val) = ok_ty
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if inner_val.starts_with('(')
-                                            || self.is_product_tuple_alias(inner_val)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(inner_val) {
-                                                self.resolve_alias_type_name(inner_val)
-                                            } else {
-                                                inner_val.to_string()
-                                            };
-                                            let raw = self.emit_map_result_map_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                                if let Some(set_elem) =
-                                    ok_ty.strip_prefix("Set<").and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if set_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(set_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(set_elem) {
-                                            self.resolve_alias_type_name(set_elem)
-                                        } else {
-                                            set_elem.to_string()
-                                        };
-                                        let raw = self.emit_map_result_set_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if let Some(list_elem) = set_elem
-                                        .strip_prefix("List<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if list_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(list_elem)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(list_elem) {
-                                                self.resolve_alias_type_name(list_elem)
-                                            } else {
-                                                list_elem.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_result_set_list_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                    if set_elem.starts_with("Map<string, ") {
-                                        if let Some(val_ty) = set_elem
-                                            .strip_prefix("Map<string, ")
-                                            .and_then(|s| s.strip_suffix('>'))
-                                        {
-                                            if val_ty.starts_with('(')
-                                                || self.is_product_tuple_alias(val_ty)
-                                            {
-                                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                                    self.resolve_alias_type_name(val_ty)
-                                                } else {
-                                                    val_ty.to_string()
-                                                };
-                                                let raw = self
-                                                    .emit_map_result_set_map_product_to_json(
-                                                        handle, &elem, 0,
-                                                    )?;
-                                                self.register_heap_alloc(raw);
-                                                return self.wrap_c_string(raw);
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(list_elem) = ok_ty
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let raw = self.emit_map_result_list_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if list_elem.starts_with("Map<string, ") {
-                                        if let Some(val_ty) = list_elem
-                                            .strip_prefix("Map<string, ")
-                                            .and_then(|s| s.strip_suffix('>'))
-                                        {
-                                            if val_ty.starts_with('(')
-                                                || self.is_product_tuple_alias(val_ty)
-                                            {
-                                                let elem = if self.is_product_tuple_alias(val_ty) {
-                                                    self.resolve_alias_type_name(val_ty)
-                                                } else {
-                                                    val_ty.to_string()
-                                                };
-                                                let raw = self
-                                                    .emit_map_result_list_map_product_to_json(
-                                                        handle, &elem, 0,
-                                                    )?;
-                                                self.register_heap_alloc(raw);
-                                                return self.wrap_c_string(raw);
-                                            }
-                                        }
-                                    }
-                                    if let Some(set_elem) = list_elem
-                                        .strip_prefix("Set<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if set_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(set_elem)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(set_elem) {
-                                                self.resolve_alias_type_name(set_elem)
-                                            } else {
-                                                set_elem.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_result_list_set_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                    if let Some(opt_inner) = list_elem
-                                        .strip_prefix("Option<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if opt_inner.starts_with('(')
-                                            || self.is_product_tuple_alias(opt_inner)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(opt_inner) {
-                                                self.resolve_alias_type_name(opt_inner)
-                                            } else {
-                                                opt_inner.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_result_list_option_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                                if let Some(opt_elem) = ok_ty
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(opt_elem) {
-                                            self.resolve_alias_type_name(opt_elem)
-                                        } else {
-                                            opt_elem.to_string()
-                                        };
-                                        let raw = self.emit_map_result_option_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                    if let Some(list_elem) = opt_elem
-                                        .strip_prefix("List<")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if list_elem.starts_with('(')
-                                            || self.is_product_tuple_alias(list_elem)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(list_elem) {
-                                                self.resolve_alias_type_name(list_elem)
-                                            } else {
-                                                list_elem.to_string()
-                                            };
-                                            let raw = self
-                                                .emit_map_result_option_list_product_to_json(
-                                                    handle, &elem, 0,
-                                                )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if val_ty.starts_with("Map<string, ") {
-                            if let Some(inner_val) = val_ty
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if inner_val.starts_with('(')
-                                    || self.is_product_tuple_alias(inner_val)
-                                {
-                                    let elem = if self.is_product_tuple_alias(inner_val) {
-                                        self.resolve_alias_type_name(inner_val)
-                                    } else {
-                                        inner_val.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_map_map_product_to_json(handle, &elem, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if let Some(set_elem) = inner_val
-                                    .strip_prefix("Set<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if set_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(set_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(set_elem) {
-                                            self.resolve_alias_type_name(set_elem)
-                                        } else {
-                                            set_elem.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_map_set_product_to_json(handle, &elem, 0)?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if let Some(list_elem) = inner_val
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let raw = self
-                                            .emit_map_map_list_product_to_json(handle, &elem, 0)?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if let Some(opt_inner) = inner_val
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(opt_inner) {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        let raw = self.emit_map_map_option_product_to_json(
-                                            handle, &elem, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if inner_val.starts_with("Result<") {
-                                    if let Some(ok_ty) =
-                                        inner_val.strip_prefix("Result<").and_then(|s| {
-                                            let mut depth = 0i32;
-                                            for (i, ch) in s.char_indices() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        return Some(s[..i].trim());
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            None
-                                        })
-                                    {
-                                        if ok_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(ok_ty)
-                                        {
-                                            let elem = if self.is_product_tuple_alias(ok_ty) {
-                                                self.resolve_alias_type_name(ok_ty)
-                                            } else {
-                                                ok_ty.to_string()
-                                            };
-                                            let raw = self.emit_map_map_result_product_to_json(
-                                                handle, &elem, 0,
-                                            )?;
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let fn_name = if obj_type.contains("Map<string, string>") {
-                        "mimi_map_to_json_string"
-                    } else if obj_type.contains("Map<string, bool>") {
-                        "mimi_map_to_json_bool"
-                    } else if obj_type.contains("Map<string, f64>")
-                        || obj_type.contains("Map<string, f32>")
-                    {
-                        "mimi_map_to_json_f64_serde"
-                    } else if obj_type == "Record" || obj_type == "Map" {
-                        // Untyped `map_new()` map: values are Any handles —
-                        // render strings as JSON strings, ints bare (VM
-                        // parity). Typed Map<…> modes keep their exact paths.
-                        "mimi_map_to_json_any"
-                    } else {
-                        "mimi_map_to_json_i64"
-                    };
-                    let func = self.get_runtime_fn(fn_name)?;
-                    let raw = self
-                        .build_call(
-                            func,
-                            &[BasicMetadataValueEnum::IntValue(handle)],
-                            "to_json_map",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("map to_json returned void")?
-                        .into_pointer_value();
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
-                }
-                // Set / Set<…> → typed set JSON helpers
-                if obj_type == "Set" || obj_type.starts_with("Set<") || obj_type == "set" {
-                    let handle = match &metadata_args[0] {
-                        BasicMetadataValueEnum::IntValue(iv) => *iv,
-                        BasicMetadataValueEnum::PointerValue(_) => {
-                            return Err(CompileError::Generic(
-                                "to_json: Set handle must be i64".into(),
-                            ));
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json: unexpected Set argument kind {:?}",
-                                other
-                            )))
-                        }
-                    };
-                    if let Some(elem) = obj_type
-                        .strip_prefix("Set<")
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                            let resolved = if self.is_product_tuple_alias(elem) {
-                                self.resolve_alias_type_name(elem)
-                            } else {
-                                elem.to_string()
-                            };
-                            let raw = self.emit_set_product_to_json(handle, &resolved, 0)?;
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if elem.starts_with("Map<string, ") {
-                            if let Some(val_ty) = elem
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                    let resolved = if self.is_product_tuple_alias(val_ty) {
-                                        self.resolve_alias_type_name(val_ty)
-                                    } else {
-                                        val_ty.to_string()
-                                    };
-                                    let arity = {
-                                        let body = resolved
-                                            .strip_prefix('(')
-                                            .and_then(|s| s.strip_suffix(')'))
-                                            .unwrap_or(&resolved);
-                                        let mut arity = 0i64;
-                                        let mut depth = 0i32;
-                                        let mut any = false;
-                                        for ch in body.chars() {
-                                            match ch {
-                                                '<' | '(' => depth += 1,
-                                                '>' | ')' => depth -= 1,
-                                                ',' if depth == 0 => {
-                                                    arity += 1;
-                                                    any = true;
-                                                }
-                                                c if !c.is_whitespace() => any = true,
-                                                _ => {}
-                                            }
-                                        }
-                                        if any {
-                                            arity += 1;
-                                        }
-                                        arity.max(1)
-                                    };
-                                    let func =
-                                        self.get_runtime_fn("mimi_set_to_json_map_product_i64")?;
-                                    let i64_ty = self.context.i64_type();
-                                    let raw = self
-                                        .build_call(
-                                            func,
-                                            &[
-                                                BasicMetadataValueEnum::IntValue(handle),
-                                                BasicMetadataValueEnum::IntValue(
-                                                    i64_ty.const_int(arity as u64, false),
-                                                ),
-                                                BasicMetadataValueEnum::IntValue(
-                                                    i64_ty.const_int(0, false),
-                                                ),
-                                            ],
-                                            "set_map_product_json",
-                                        )?
-                                        .try_as_basic_value_opt()
-                                        .ok_or("set map product to_json void")?
-                                        .into_pointer_value();
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if let Some(list_elem) = val_ty
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_map_list_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_map_list_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set map list product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if let Some(set_elem) = val_ty
-                                    .strip_prefix("Set<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if set_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(set_elem)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(set_elem) {
-                                            self.resolve_alias_type_name(set_elem)
-                                        } else {
-                                            set_elem.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_map_set_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_map_set_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set map set product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(opt_inner) = elem
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if opt_inner.starts_with("Map<string, ") {
-                                if let Some(val_ty) = opt_inner
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_option_map_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_option_map_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set option map product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(res_ok) = elem.strip_prefix("Result<").and_then(|s| {
-                            let mut depth = 0i32;
-                            for (i, ch) in s.char_indices() {
-                                match ch {
-                                    '<' | '(' => depth += 1,
-                                    '>' | ')' => depth -= 1,
-                                    ',' if depth == 0 => {
-                                        return Some(s[..i].trim());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            None
-                        }) {
-                            if res_ok.starts_with("Map<string, ") {
-                                if let Some(val_ty) = res_ok
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_result_map_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_result_map_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set result map product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if let Some(list_elem) = res_ok
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_result_list_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_result_list_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set result list product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(list_elem) =
-                            elem.strip_prefix("List<").and_then(|s| s.strip_suffix('>'))
-                        {
-                            if list_elem.starts_with("Map<string, ") {
-                                if let Some(val_ty) = list_elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_list_map_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_list_map_product_json",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set list map product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(opt_elem) = elem
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if opt_elem.starts_with('(') || self.is_product_tuple_alias(opt_elem) {
-                                let resolved = if self.is_product_tuple_alias(opt_elem) {
-                                    self.resolve_alias_type_name(opt_elem)
-                                } else {
-                                    opt_elem.to_string()
-                                };
-                                let raw =
-                                    self.emit_set_option_product_to_json(handle, &resolved, 0)?;
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                            if let Some(res_ok) = opt_elem.strip_prefix("Result<").and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            }) {
-                                if res_ok.starts_with('(') || self.is_product_tuple_alias(res_ok) {
-                                    let resolved = if self.is_product_tuple_alias(res_ok) {
-                                        self.resolve_alias_type_name(res_ok)
-                                    } else {
-                                        res_ok.to_string()
-                                    };
-                                    let raw = self.emit_set_option_result_product_to_json(
-                                        handle, &resolved, 0,
-                                    )?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                            }
-                        }
-                        if elem.starts_with("Result<") {
-                            if let Some(ok_ty) = elem.strip_prefix("Result<").and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            }) {
-                                if ok_ty.starts_with('(') || self.is_product_tuple_alias(ok_ty) {
-                                    let resolved = if self.is_product_tuple_alias(ok_ty) {
-                                        self.resolve_alias_type_name(ok_ty)
-                                    } else {
-                                        ok_ty.to_string()
-                                    };
-                                    let raw =
-                                        self.emit_set_result_product_to_json(handle, &resolved, 0)?;
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                }
-                                if let Some(opt_inner) = ok_ty
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if opt_inner.starts_with('(')
-                                        || self.is_product_tuple_alias(opt_inner)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(opt_inner) {
-                                            self.resolve_alias_type_name(opt_inner)
-                                        } else {
-                                            opt_inner.to_string()
-                                        };
-                                        let raw = self.emit_set_result_option_product_to_json(
-                                            handle, &resolved, 0,
-                                        )?;
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if let Some(list_elem) = ok_ty
-                                    .strip_prefix("List<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if list_elem.starts_with('(')
-                                        || self.is_product_tuple_alias(list_elem)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(list_elem) {
-                                            self.resolve_alias_type_name(list_elem)
-                                        } else {
-                                            list_elem.to_string()
-                                        };
-                                        let arity = {
-                                            let body = resolved
-                                                .strip_prefix('(')
-                                                .and_then(|s| s.strip_suffix(')'))
-                                                .unwrap_or(&resolved);
-                                            let mut arity = 0i64;
-                                            let mut depth = 0i32;
-                                            let mut any = false;
-                                            for ch in body.chars() {
-                                                match ch {
-                                                    '<' | '(' => depth += 1,
-                                                    '>' | ')' => depth -= 1,
-                                                    ',' if depth == 0 => {
-                                                        arity += 1;
-                                                        any = true;
-                                                    }
-                                                    c if !c.is_whitespace() => any = true,
-                                                    _ => {}
-                                                }
-                                            }
-                                            if any {
-                                                arity += 1;
-                                            }
-                                            arity.max(1)
-                                        };
-                                        let func = self.get_runtime_fn(
-                                            "mimi_set_to_json_result_list_product_i64",
-                                        )?;
-                                        let i64_ty = self.context.i64_type();
-                                        let raw = self
-                                            .build_call(
-                                                func,
-                                                &[
-                                                    BasicMetadataValueEnum::IntValue(handle),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(arity as u64, false),
-                                                    ),
-                                                    BasicMetadataValueEnum::IntValue(
-                                                        i64_ty.const_int(0, false),
-                                                    ),
-                                                ],
-                                                "set_result_list_product_json2",
-                                            )?
-                                            .try_as_basic_value_opt()
-                                            .ok_or("set result list product to_json void")?
-                                            .into_pointer_value();
-                                        self.register_heap_alloc(raw);
-                                        return self.wrap_c_string(raw);
-                                    }
-                                }
-                                if ok_ty.starts_with("Map<string, ") {
-                                    if let Some(val_ty) = ok_ty
-                                        .strip_prefix("Map<string, ")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                    {
-                                        if val_ty.starts_with('(')
-                                            || self.is_product_tuple_alias(val_ty)
-                                        {
-                                            let resolved = if self.is_product_tuple_alias(val_ty) {
-                                                self.resolve_alias_type_name(val_ty)
-                                            } else {
-                                                val_ty.to_string()
-                                            };
-                                            let arity = {
-                                                let body = resolved
-                                                    .strip_prefix('(')
-                                                    .and_then(|s| s.strip_suffix(')'))
-                                                    .unwrap_or(&resolved);
-                                                let mut arity = 0i64;
-                                                let mut depth = 0i32;
-                                                let mut any = false;
-                                                for ch in body.chars() {
-                                                    match ch {
-                                                        '<' | '(' => depth += 1,
-                                                        '>' | ')' => depth -= 1,
-                                                        ',' if depth == 0 => {
-                                                            arity += 1;
-                                                            any = true;
-                                                        }
-                                                        c if !c.is_whitespace() => any = true,
-                                                        _ => {}
-                                                    }
-                                                }
-                                                if any {
-                                                    arity += 1;
-                                                }
-                                                arity.max(1)
-                                            };
-                                            let func = self.get_runtime_fn(
-                                                "mimi_set_to_json_result_map_product_i64",
-                                            )?;
-                                            let i64_ty = self.context.i64_type();
-                                            let raw = self
-                                                .build_call(
-                                                    func,
-                                                    &[
-                                                        BasicMetadataValueEnum::IntValue(handle),
-                                                        BasicMetadataValueEnum::IntValue(
-                                                            i64_ty.const_int(arity as u64, false),
-                                                        ),
-                                                        BasicMetadataValueEnum::IntValue(
-                                                            i64_ty.const_int(0, false),
-                                                        ),
-                                                    ],
-                                                    "set_result_map_product_json2",
-                                                )?
-                                                .try_as_basic_value_opt()
-                                                .ok_or("set result map product to_json void")?
-                                                .into_pointer_value();
-                                            self.register_heap_alloc(raw);
-                                            return self.wrap_c_string(raw);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let fn_name = if obj_type.contains("Set<string>") {
-                        "mimi_set_to_json_string"
-                    } else if obj_type.contains("Set<bool>") {
-                        "mimi_set_to_json_bool"
-                    } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
-                        "mimi_set_to_json_f64"
-                    } else {
-                        "mimi_set_to_json_i64"
-                    };
-                    let func = self.get_runtime_fn(fn_name)?;
-                    let raw = self
-                        .build_call(
-                            func,
-                            &[BasicMetadataValueEnum::IntValue(handle)],
-                            "to_json_set",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("set to_json returned void")?
-                        .into_pointer_value();
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
-                }
-                // Option / Option<T> with integer/handle payload: {i1,i64}
-                // or by-value struct payload ({i1, tuple|record}).
-                if obj_type == "Option" || obj_type.starts_with("Option<") {
-                    let opt_load_sty = {
-                        let parsed =
-                            crate::codegen::extract_list_elem_type(&format!("List<{}>", obj_type));
-                        // extract_list_elem_type("List<Option<P>>") → Option<P>
-                        let opt_ty = parsed.unwrap_or_else(|| {
-                            crate::ast::Type::Name(
-                                "Option".into(),
-                                vec![crate::ast::Type::Name("i64".into(), vec![])],
-                            )
-                        });
-                        match self.llvm_type_for(&opt_ty) {
-                            Some(BasicTypeEnum::StructType(s)) => s,
-                            _ => self.context.struct_type(
-                                &[
-                                    self.context.bool_type().into(),
-                                    self.context.i64_type().into(),
-                                ],
-                                false,
-                            ),
-                        }
-                    };
-                    let sv = match &metadata_args[0] {
-                        BasicMetadataValueEnum::StructValue(s) => *s,
-                        BasicMetadataValueEnum::PointerValue(pv) => {
-                            let loaded = self
-                                .builder
-                                .build_load(
-                                    BasicTypeEnum::StructType(opt_load_sty),
-                                    *pv,
-                                    "opt_load",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                .into_struct_value();
-                            loaded
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json: unexpected Option argument kind {:?}",
-                                other
-                            )))
-                        }
-                    };
-                    let disc = self
-                        .build_extract_value(sv.into(), 0, "opt_disc")?
-                        .into_int_value();
-                    let disc_i64 = self
-                        .builder
-                        .build_int_z_extend(disc, self.context.i64_type(), "opt_disc_i64")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    let payload_bv = self.build_extract_value(sv.into(), 1, "opt_payload")?;
-                    // D-3: heap-string payload is StructValue {ptr,i64} — must
-                    // NOT reach the generic mimi_option_i64_to_json scalar path
-                    // (which would print the pointer as a number) nor the
-                    // product-tuple path ([ptr,len]).
-                    let payload_is_string = matches!(
-                        &payload_bv,
-                        BasicValueEnum::StructValue(sv) if {
-                            let f = sv.get_type().get_field_types();
-                            f.len() == 2
-                                && matches!(f[0], BasicTypeEnum::PointerType(_))
-                                && matches!(
-                                    f[1],
-                                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
-                                )
-                        }
-                    );
-                    // Option of Result by-value: payload is Result struct {i1,ok,err}.
-                    if obj_type.contains("Result")
-                        && matches!(payload_bv, BasicValueEnum::StructValue(_))
-                    {
-                        let res_sv = payload_bv.into_struct_value();
-                        let r_disc = self
-                            .build_extract_value(res_sv.into(), 0, "opt_res_disc")?
-                            .into_int_value();
-                        let r_disc_i64 = self
-                            .builder
-                            .build_int_z_extend(r_disc, self.context.i64_type(), "opt_res_disc_i64")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let r_ok_bv = self.build_extract_value(res_sv.into(), 1, "opt_res_ok")?;
-                        // Result Ok is product-tuple/record struct — rebuild nested JSON.
-                        if let BasicValueEnum::StructValue(ok_sv) = r_ok_bv {
-                            let ok_fields = ok_sv.get_type().get_field_types();
-                            let ok_is_string = ok_fields.len() == 2
-                                && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
-                                && matches!(
-                                    ok_fields[1],
-                                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                                );
-                            if !ok_is_string && ok_fields.len() >= 2 {
-                                let mut ok_inner = obj_type
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                    .and_then(|s| s.strip_prefix("Result<"))
-                                    .and_then(|s| s.split(',').next())
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default();
-                                if ok_inner.is_empty() {
-                                    let pay_sty = ok_sv.get_type();
-                                    for (n, ty) in &self.type_llvm {
-                                        if matches!(
-                                            ty,
-                                            BasicTypeEnum::StructType(s) if *s == pay_sty
-                                        ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                        }) {
-                                            ok_inner = n.clone();
-                                            break;
-                                        }
-                                    }
-                                }
-                                let is_named_record =
-                                    self.type_defs.get(&ok_inner).is_some_and(|td| {
-                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                    });
-                                let ok_json = if is_named_record {
-                                    let rec_ty = ok_sv.get_type();
-                                    let rec_alloca = self.build_alloca(
-                                        BasicTypeEnum::StructType(rec_ty),
-                                        "opt_res_rec_tmp",
-                                    )?;
-                                    self.build_store(rec_alloca, ok_sv)?;
-                                    self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
-                                } else {
-                                    self.emit_product_tuple_to_json(ok_sv)?
-                                };
-                                let disc_is_some = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "opt_res_tup_is_some",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let r_is_ok = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        r_disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "opt_res_tup_is_ok",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let function = self.current_function().ok_or("no function")?;
-                                let some_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_some");
-                                let none_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_none");
-                                let merge_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_merge");
-                                let i8_ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let out_alloca = self.build_alloca(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    "toj_opt_res_tup_out",
-                                )?;
-                                self.builder
-                                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(some_bb);
-                                let ok_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_ok");
-                                let err_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_err");
-                                let some_merge = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_res_tup_sm");
-                                self.builder
-                                    .build_conditional_branch(r_is_ok, ok_bb, err_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(ok_bb);
-                                let inner_buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_res_tup_inner",
-                                )?;
-                                let ifmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Ok\":[%s]}", "opt_res_tup_ifmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(inner_buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            ifmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(ok_json),
-                                    ],
-                                    "opt_res_tup_isn",
-                                )?;
-                                let outer_buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_res_tup_outer",
-                                )?;
-                                let ofmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_ofmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(outer_buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            ofmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(inner_buf),
-                                    ],
-                                    "opt_res_tup_osn",
-                                )?;
-                                self.build_store(out_alloca, outer_buf)?;
-                                self.builder
-                                    .build_unconditional_branch(some_merge)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(err_bb);
-                                // Err payload: string Err is heap {ptr,len}; scalar is i64.
-                                let r_err_bv =
-                                    self.build_extract_value(res_sv.into(), 2, "opt_res_tup_errv")?;
-                                let r_err_i64 = match r_err_bv {
-                                    BasicValueEnum::IntValue(iv) => {
-                                        if iv.get_type().get_bit_width() < 64 {
-                                            self.builder
-                                                .build_int_s_extend(
-                                                    iv,
-                                                    self.context.i64_type(),
-                                                    "opt_res_tup_err_i64",
-                                                )
-                                                .map_err(|e| {
-                                                    CompileError::LlvmError(e.to_string())
-                                                })?
-                                        } else {
-                                            iv
-                                        }
-                                    }
-                                    _ => self.context.i64_type().const_int(0, false),
-                                };
-                                let inner_err = self.emit_result_err_json(r_err_i64, true)?;
-                                let ewrap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_res_tup_err_outer",
-                                )?;
-                                let eofmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_eofmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(ewrap),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            eofmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(inner_err),
-                                    ],
-                                    "opt_res_tup_eosn",
-                                )?;
-                                self.build_store(out_alloca, ewrap)?;
-                                self.builder
-                                    .build_unconditional_branch(some_merge)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(some_merge);
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(none_bb);
-                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                                let none_heap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(8, false),
-                                    "opt_res_tup_none",
-                                )?;
-                                let none_lit = self
-                                    .builder
-                                    .build_global_string_ptr("\"None\"", "opt_res_tup_none_lit")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.build_call(
-                                    strcpy_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(none_heap),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            none_lit.as_pointer_value(),
-                                        ),
-                                    ],
-                                    "opt_res_tup_ncpy",
-                                )?;
-                                self.build_store(out_alloca, none_heap)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(merge_bb);
-                                let raw = self
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        out_alloca,
-                                        "opt_res_tup_result",
-                                    )?
-                                    .into_pointer_value();
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                        let r_ok = match r_ok_bv {
-                            BasicValueEnum::IntValue(iv) => iv,
-                            BasicValueEnum::PointerValue(pv) => self
-                                .builder
-                                .build_ptr_to_int(pv, self.context.i64_type(), "opt_res_ok_ptr")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                            _ => self.context.i64_type().const_int(0, false),
-                        };
-                        let r_ok_i64 = if r_ok.get_type().get_bit_width() < 64 {
-                            self.builder
-                                .build_int_s_extend(r_ok, self.context.i64_type(), "opt_res_ok_i64")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        } else {
-                            r_ok
-                        };
-                        let r_err = self
-                            .build_extract_value(res_sv.into(), 2, "opt_res_err")?
-                            .into_int_value();
-                        let r_err_i64 = if r_err.get_type().get_bit_width() < 64 {
-                            self.builder
-                                .build_int_s_extend(
-                                    r_err,
-                                    self.context.i64_type(),
-                                    "opt_res_err_i64",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        } else {
-                            r_err
-                        };
-                        // Option of Result of Map/Set: Ok is a handle, not a plain i64.
-                        let res_json = if obj_type.contains("Map<") {
-                            let mode = if obj_type.contains("Map<string, string>") {
-                                1i64
-                            } else if obj_type.contains("Map<string, bool>") {
-                                2
-                            } else if obj_type.contains("Map<string, f64>")
-                                || obj_type.contains("Map<string, f32>")
-                            {
-                                3
-                            } else {
-                                self.map_nested_product_mode(&obj_type)
-                            };
-                            let res_fn = self.get_runtime_fn("mimi_result_map_to_json")?;
-                            self.build_call(
-                                res_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
-                                    BasicMetadataValueEnum::IntValue(r_err_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "opt_res_map_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("result map to_json void")?
-                            .into_pointer_value()
-                        } else if obj_type.contains("Set<") {
-                            let mode = if obj_type.contains("Set<string>") {
-                                1i64
-                            } else if obj_type.contains("Set<bool>") {
-                                2
-                            } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
-                            {
-                                3
-                            } else if let Some(elem) = obj_type
-                                .find("Set<")
-                                .map(|i| &obj_type[i + 4..])
-                                .and_then(|s| {
-                                    let mut depth = 0i32;
-                                    for (j, ch) in s.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' if depth == 0 => return Some(&s[..j]),
-                                            '>' | ')' => depth -= 1,
-                                            _ => {}
-                                        }
-                                    }
-                                    None
-                                })
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    10 + arity.max(1)
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            };
-                            let res_fn = self.get_runtime_fn("mimi_result_set_to_json")?;
-                            self.build_call(
-                                res_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(r_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(r_ok_i64),
-                                    BasicMetadataValueEnum::IntValue(r_err_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "opt_res_set_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("result set to_json void")?
-                            .into_pointer_value()
-                        } else {
-                            // Prefer structured Result JSON so string Err
-                            // (heap {ptr,len}) is not printed as a raw i64.
-                            self.emit_result_struct_to_json_cstr(res_sv, {
-                                obj_type
-                                    .strip_prefix("Option<")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                    .unwrap_or("Result")
-                            })?
-                        };
-                        let disc_is_some = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "opt_res_is_some",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let some_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_some");
-                        let none_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_none");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_merge");
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "toj_opt_res_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(some_bb);
-                        let buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(512, false),
-                            "opt_res_buf",
-                        )?;
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_fmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(512, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(res_json),
-                            ],
-                            "opt_res_sn",
-                        )?;
-                        self.build_store(out_alloca, buf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(none_bb);
-                        let none_heap = self.malloc_or_abort(
-                            self.context.i64_type().const_int(8, false),
-                            "opt_res_none_heap",
-                        )?;
-                        let none_lit = self
-                            .builder
-                            .build_global_string_ptr("\"None\"", "opt_res_none")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(none_heap),
-                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
-                            ],
-                            "opt_res_none_cpy",
-                        )?;
-                        self.build_store(out_alloca, none_heap)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "opt_res_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // Option of product tuple / named record: multi-field struct payload.
-                    if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
-                        let pay_fields = pay_sv.get_type().get_field_types();
-                        let pay_is_string = pay_fields.len() == 2
-                            && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
-                            && matches!(
-                                pay_fields[1],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                            );
-                        // Nested Option/Result start with i1 disc — never product-tuple.
-                        let pay_is_nested_wrapper = !pay_fields.is_empty()
-                            && matches!(
-                                pay_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                            );
-                        // List layout {i64,ptr} is not a product tuple.
-                        let pay_is_list = pay_fields.len() == 2
-                            && matches!(
-                                pay_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                            )
-                            && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
-                        if !pay_is_string && !pay_is_nested_wrapper && !pay_is_list {
-                            let mut inner_name = obj_type
-                                .strip_prefix("Option<")
-                                .and_then(|s| s.strip_suffix('>'))
-                                .unwrap_or("")
-                                .to_string();
-                            // Bare `Option` (missing generic in var_type_names): recover
-                            // named record from payload LLVM layout.
-                            if inner_name.is_empty() || inner_name == "Option" {
-                                let pay_sty = pay_sv.get_type();
-                                for (n, ty) in &self.type_llvm {
-                                    if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
-                                        && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                        })
-                                    {
-                                        inner_name = n.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                            let is_named_record =
-                                self.type_defs.get(&inner_name).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                });
-                            if is_named_record || pay_fields.len() >= 2 {
-                                let pay_json = if is_named_record {
-                                    let rec_ty = pay_sv.get_type();
-                                    let rec_alloca = self.build_alloca(
-                                        BasicTypeEnum::StructType(rec_ty),
-                                        "opt_rec_tmp",
-                                    )?;
-                                    self.build_store(rec_alloca, pay_sv)?;
-                                    self.compile_record_to_json_cstr(&inner_name, rec_alloca)?
-                                } else {
-                                    self.emit_product_tuple_to_json(pay_sv)?
-                                };
-                                let disc_is_some = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "opt_tup_is_some",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let function = self.current_function().ok_or("no function")?;
-                                let some_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_tup_some");
-                                let none_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_tup_none");
-                                let merge_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_tup_merge");
-                                let i8_ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let out_alloca = self.build_alloca(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    "toj_opt_tup_out",
-                                )?;
-                                self.builder
-                                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(some_bb);
-                                let buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_tup_buf",
-                                )?;
-                                let fmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_tup_fmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            fmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(pay_json),
-                                    ],
-                                    "opt_tup_sn",
-                                )?;
-                                self.build_store(out_alloca, buf)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(none_bb);
-                                let none_heap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(8, false),
-                                    "opt_tup_none_heap",
-                                )?;
-                                let none_lit = self
-                                    .builder
-                                    .build_global_string_ptr("\"None\"", "opt_tup_none")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                                self.build_call(
-                                    strcpy_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(none_heap),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            none_lit.as_pointer_value(),
-                                        ),
-                                    ],
-                                    "opt_tup_none_cpy",
-                                )?;
-                                self.build_store(out_alloca, none_heap)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(merge_bb);
-                                let raw = self
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        out_alloca,
-                                        "opt_tup_result",
-                                    )?
-                                    .into_pointer_value();
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                    }
-                    // Option of named record: pointer payload (Some stores stack
-                    // alloca of record as ptr) or i64 ptrtoint.
-                    if let Some(inner_name) = obj_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                    {
-                        if self
-                            .type_defs
-                            .get(inner_name)
-                            .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
-                        {
-                            if let BasicValueEnum::PointerValue(rec_ptr) = payload_bv {
-                                let disc_is_some = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "opt_rec_ptr_is_some",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let function = self.current_function().ok_or("no function")?;
-                                let some_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_ptr_some");
-                                let none_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_ptr_none");
-                                let merge_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_ptr_merge");
-                                let i8_ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let out_alloca = self.build_alloca(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    "toj_opt_rec_ptr_out",
-                                )?;
-                                self.builder
-                                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(some_bb);
-                                let rec_json =
-                                    self.compile_record_to_json_cstr(inner_name, rec_ptr)?;
-                                let buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_rec_ptr_buf",
-                                )?;
-                                let fmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_rec_ptr_fmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            fmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(rec_json),
-                                    ],
-                                    "opt_rec_ptr_sn",
-                                )?;
-                                self.build_store(out_alloca, buf)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(none_bb);
-                                let none_heap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(8, false),
-                                    "opt_rec_ptr_none",
-                                )?;
-                                let none_lit = self
-                                    .builder
-                                    .build_global_string_ptr("\"None\"", "opt_rec_ptr_none_lit")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                                self.build_call(
-                                    strcpy_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(none_heap),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            none_lit.as_pointer_value(),
-                                        ),
-                                    ],
-                                    "opt_rec_ptr_none_cpy",
-                                )?;
-                                self.build_store(out_alloca, none_heap)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(merge_bb);
-                                let raw = self
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        out_alloca,
-                                        "opt_rec_ptr_result",
-                                    )?
-                                    .into_pointer_value();
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                            if let BasicValueEnum::IntValue(pay_iv) = payload_bv {
-                                let i8_ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let pay_i64 = if pay_iv.get_type().get_bit_width() < 64 {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            pay_iv,
-                                            self.context.i64_type(),
-                                            "opt_rec_pay_i64",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                } else {
-                                    pay_iv
-                                };
-                                let disc_is_some = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "opt_rec_is_some",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let function = self.current_function().ok_or("no function")?;
-                                let some_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_some");
-                                let none_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_none");
-                                let merge_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_opt_rec_merge");
-                                let out_alloca = self.build_alloca(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    "toj_opt_rec_out",
-                                )?;
-                                self.builder
-                                    .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(some_bb);
-                                let rec_ptr = self
-                                    .builder
-                                    .build_int_to_ptr(pay_i64, i8_ptr_ty, "opt_rec_ptr")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let rec_json =
-                                    self.compile_record_to_json_cstr(inner_name, rec_ptr)?;
-                                let buf = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(1024, false),
-                                    "opt_rec_buf",
-                                )?;
-                                let fmt = self
-                                    .builder
-                                    .build_global_string_ptr("{\"Some\":[%s]}", "opt_rec_fmt")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                self.build_call(
-                                    snprintf_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(buf),
-                                        BasicMetadataValueEnum::IntValue(
-                                            self.context.i64_type().const_int(1024, false),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            fmt.as_pointer_value(),
-                                        ),
-                                        BasicMetadataValueEnum::PointerValue(rec_json),
-                                    ],
-                                    "opt_rec_sn",
-                                )?;
-                                self.build_store(out_alloca, buf)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(none_bb);
-                                let none_heap = self.malloc_or_abort(
-                                    self.context.i64_type().const_int(8, false),
-                                    "opt_rec_none_heap",
-                                )?;
-                                let none_lit = self
-                                    .builder
-                                    .build_global_string_ptr("\"None\"", "opt_rec_none")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                                self.build_call(
-                                    strcpy_fn,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(none_heap),
-                                        BasicMetadataValueEnum::PointerValue(
-                                            none_lit.as_pointer_value(),
-                                        ),
-                                    ],
-                                    "opt_rec_none_cpy",
-                                )?;
-                                self.build_store(out_alloca, none_heap)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(merge_bb);
-                                let raw = self
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        out_alloca,
-                                        "opt_rec_result",
-                                    )?
-                                    .into_pointer_value();
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            }
-                        }
-                    }
-                    // Nested Option / List by-value as StructValue payload.
-                    if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
-                        let pay_fields = pay_sv.get_type().get_field_types();
-                        // Option of List by-value: {i64,ptr} list struct.
-                        let pay_is_list = pay_fields.len() == 2
-                            && matches!(
-                                pay_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                            )
-                            && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
-                        if pay_is_list && (obj_type.contains("List") || obj_type.contains("list")) {
-                            let list_ty = self.list_struct_type();
-                            let list_alloca = self
-                                .build_alloca(BasicTypeEnum::StructType(list_ty), "opt_list_bv")?;
-                            self.build_store(list_alloca, pay_sv)?;
-                            // Reuse Option of List path: build {"Some":[list_json]} / None.
-                            let disc_is_some = self
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::NE,
-                                    disc_i64,
-                                    self.context.i64_type().const_int(0, false),
-                                    "opt_list_bv_some",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let function = self.current_function().ok_or("no function")?;
-                            let some_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_list_bv_some");
-                            let none_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_list_bv_none");
-                            let merge_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_list_bv_merge");
-                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let out_alloca = self.build_alloca(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                "toj_opt_list_bv_out",
-                            )?;
-                            self.builder
-                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(some_bb);
-                            // Dispatch list to_json helper by element type.
-                            let list_json = if obj_type.contains("Map<") {
-                                // Option of List of Map of product.
-                                // Accept both `Map<string, (…)>` and `Map<string,(…)>`.
-                                let map_val = obj_type
-                                    .find("Map<string,")
-                                    .map(|i| &obj_type[i + "Map<string,".len()..])
-                                    .map(|s| s.trim_start())
-                                    .and_then(|s| {
-                                        // Take until matching '>' for Map value type.
-                                        let mut depth = 0i32;
-                                        for (j, ch) in s.char_indices() {
-                                            match ch {
-                                                '<' | '(' => depth += 1,
-                                                '>' if depth == 0 => {
-                                                    return Some(s[..j].trim());
-                                                }
-                                                '>' | ')' => depth -= 1,
-                                                _ => {}
-                                            }
-                                        }
-                                        None
-                                    });
-                                if let Some(val_ty) = map_val {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let elem = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        self.emit_list_map_product_to_json(list_alloca, &elem)?
-                                    } else {
-                                        let mode = if obj_type.contains("Map<string, string>") {
-                                            1i64
-                                        } else if obj_type.contains("Map<string, bool>") {
-                                            2
-                                        } else if obj_type.contains("Map<string, f64>")
-                                            || obj_type.contains("Map<string, f32>")
-                                        {
-                                            3
-                                        } else {
-                                            0
-                                        };
-                                        let fn_ty = i8_ptr_ty.fn_type(
-                                            &[
-                                                BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
-                                                BasicMetadataTypeEnum::IntType(
-                                                    self.context.i64_type(),
-                                                ),
-                                            ],
-                                            false,
-                                        );
-                                        let callee = self
-                                            .module
-                                            .get_function("mimi_list_map_to_json")
-                                            .unwrap_or_else(|| {
-                                                self.module.add_function(
-                                                    "mimi_list_map_to_json",
-                                                    fn_ty,
-                                                    Some(inkwell::module::Linkage::External),
-                                                )
-                                            });
-                                        self.build_call(
-                                            callee,
-                                            &[
-                                                BasicMetadataValueEnum::PointerValue(list_alloca),
-                                                BasicMetadataValueEnum::IntValue(
-                                                    self.context
-                                                        .i64_type()
-                                                        .const_int(mode as u64, false),
-                                                ),
-                                            ],
-                                            "opt_list_map_json",
-                                        )?
-                                        .try_as_basic_value_opt()
-                                        .ok_or("list map to_json void")?
-                                        .into_pointer_value()
-                                    }
-                                } else {
-                                    let map_fn = if obj_type.contains("Map<string, string>") {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    };
-                                    let map_callee =
-                                        self.module.get_function(map_fn).unwrap_or_else(|| {
-                                            let fn_ty = i8_ptr_ty.fn_type(
-                                                &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
-                                                false,
-                                            );
-                                            self.module.add_function(
-                                                map_fn,
-                                                fn_ty,
-                                                Some(inkwell::module::Linkage::External),
-                                            )
-                                        });
-                                    self.build_call(
-                                        map_callee,
-                                        &[BasicMetadataValueEnum::PointerValue(list_alloca)],
-                                        "opt_list_map_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list map to_json void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let rt_fn = if obj_type.contains("List<string>") {
-                                    "mimi_list_str_to_json"
-                                } else if obj_type.contains("f64") || obj_type.contains("f32") {
-                                    "mimi_list_f64_to_json"
-                                } else if obj_type.contains("bool") {
-                                    "mimi_list_bool_to_json"
-                                } else {
-                                    "mimi_list_i64_to_json"
-                                };
-                                let fn_ty = i8_ptr_ty.fn_type(
-                                    &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
-                                    false,
-                                );
-                                let callee = self.module.get_function(rt_fn).unwrap_or_else(|| {
-                                    self.module.add_function(
-                                        rt_fn,
-                                        fn_ty,
-                                        Some(inkwell::module::Linkage::External),
-                                    )
-                                });
-                                self.build_call(
-                                    callee,
-                                    &[BasicMetadataValueEnum::PointerValue(list_alloca)],
-                                    "opt_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list to_json void")?
-                                .into_pointer_value()
-                            };
-                            let buf = self.malloc_or_abort(
-                                self.context.i64_type().const_int(1024, false),
-                                "opt_list_bv_buf",
-                            )?;
-                            let fmt = self
-                                .builder
-                                .build_global_string_ptr("{\"Some\":[%s]}", "opt_list_bv_fmt")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                            self.build_call(
-                                snprintf_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(buf),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(1024, false),
-                                    ),
-                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                    BasicMetadataValueEnum::PointerValue(list_json),
-                                ],
-                                "opt_list_bv_sn",
-                            )?;
-                            self.build_store(out_alloca, buf)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(none_bb);
-                            let none_heap = self.malloc_or_abort(
-                                self.context.i64_type().const_int(8, false),
-                                "opt_list_bv_none",
-                            )?;
-                            let none_lit = self
-                                .builder
-                                .build_global_string_ptr("\"None\"", "opt_list_bv_none_lit")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                            self.build_call(
-                                strcpy_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(none_heap),
-                                    BasicMetadataValueEnum::PointerValue(
-                                        none_lit.as_pointer_value(),
-                                    ),
-                                ],
-                                "opt_list_bv_ncpy",
-                            )?;
-                            self.build_store(out_alloca, none_heap)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(merge_bb);
-                            let raw = self
-                                .build_load(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    out_alloca,
-                                    "opt_list_bv_result",
-                                )?
-                                .into_pointer_value();
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                        if !pay_fields.is_empty()
-                            && matches!(
-                                pay_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                            )
-                            && obj_type
-                                .strip_prefix("Option<")
-                                .and_then(|s| s.strip_suffix('>'))
-                                .is_some_and(|inner| inner.starts_with("Option"))
-                        {
-                            // Heap-pack nested Option and reuse nested path via i64.
-                            let sty = pay_sv.get_type();
-                            let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(sty));
-                            let heap = self.malloc_or_abort(
-                                self.context.i64_type().const_int(size, false),
-                                "opt_nest_bv_heap",
-                            )?;
-                            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let typed = self
-                                .build_bit_cast(
-                                    heap.into(),
-                                    BasicTypeEnum::PointerType(i8_ptr),
-                                    "opt_nest_bv_ptr",
-                                )?
-                                .into_pointer_value();
-                            self.build_store(typed, pay_sv)?;
-                            let payload_i64 = self
-                                .builder
-                                .build_ptr_to_int(typed, self.context.i64_type(), "opt_nest_bv_i64")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            // Fall through into nested Option rebuild using payload_i64.
-                            let disc_is_some = self
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::NE,
-                                    disc_i64,
-                                    self.context.i64_type().const_int(0, false),
-                                    "opt_nest_bv_some",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let function = self.current_function().ok_or("no function")?;
-                            let some_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_nest_bv_some");
-                            let none_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_nest_bv_none");
-                            let merge_bb = self
-                                .context
-                                .append_basic_block(function, "toj_opt_nest_bv_merge");
-                            let out_alloca = self.build_alloca(
-                                BasicTypeEnum::PointerType(i8_ptr),
-                                "toj_opt_nest_bv_out",
-                            )?;
-                            self.builder
-                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(some_bb);
-                            let nested_ptr = self
-                                .builder
-                                .build_int_to_ptr(payload_i64, i8_ptr, "opt_nest_bv_ld_ptr")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let opt_sty = self.context.struct_type(
-                                &[
-                                    self.context.bool_type().into(),
-                                    self.context.i64_type().into(),
-                                ],
-                                false,
-                            );
-                            let nested_sv = self
-                                .builder
-                                .build_load(
-                                    BasicTypeEnum::StructType(opt_sty),
-                                    nested_ptr,
-                                    "opt_nest_bv_ld",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                .into_struct_value();
-                            let n_disc = self
-                                .build_extract_value(nested_sv.into(), 0, "n_disc_bv")?
-                                .into_int_value();
-                            let n_disc_i64 = self
-                                .builder
-                                .build_int_z_extend(
-                                    n_disc,
-                                    self.context.i64_type(),
-                                    "n_disc_bv_i64",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let n_pay = self
-                                .build_extract_value(nested_sv.into(), 1, "n_pay_bv")?
-                                .into_int_value();
-                            let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(
-                                        n_pay,
-                                        self.context.i64_type(),
-                                        "n_pay_bv_i64",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                n_pay
-                            };
-                            let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
-                            let nested_json = self
-                                .build_call(
-                                    opt_fn,
-                                    &[
-                                        BasicMetadataValueEnum::IntValue(n_disc_i64),
-                                        BasicMetadataValueEnum::IntValue(n_pay_i64),
-                                    ],
-                                    "opt_nest_bv_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("option to_json void")?
-                                .into_pointer_value();
-                            let buf = self.malloc_or_abort(
-                                self.context.i64_type().const_int(512, false),
-                                "opt_nest_bv_buf",
-                            )?;
-                            let fmt = self
-                                .builder
-                                .build_global_string_ptr("{\"Some\":[%s]}", "opt_nest_bv_fmt")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                            self.build_call(
-                                snprintf_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(buf),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(512, false),
-                                    ),
-                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                    BasicMetadataValueEnum::PointerValue(nested_json),
-                                ],
-                                "opt_nest_bv_sn",
-                            )?;
-                            self.build_store(out_alloca, buf)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(none_bb);
-                            let none_heap = self.malloc_or_abort(
-                                self.context.i64_type().const_int(8, false),
-                                "opt_nest_bv_none",
-                            )?;
-                            let none_lit = self
-                                .builder
-                                .build_global_string_ptr("\"None\"", "opt_nest_bv_none_lit")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                            self.build_call(
-                                strcpy_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(none_heap),
-                                    BasicMetadataValueEnum::PointerValue(
-                                        none_lit.as_pointer_value(),
-                                    ),
-                                ],
-                                "opt_nest_bv_ncpy",
-                            )?;
-                            self.build_store(out_alloca, none_heap)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(merge_bb);
-                            let raw = self
-                                .build_load(
-                                    BasicTypeEnum::PointerType(i8_ptr),
-                                    out_alloca,
-                                    "opt_nest_bv_result",
-                                )?
-                                .into_pointer_value();
-                            self.register_heap_alloc(raw);
-                            return self.wrap_c_string(raw);
-                        }
-                    }
-                    let payload_i64 = match payload_bv {
-                        BasicValueEnum::IntValue(iv) => {
-                            if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(iv, self.context.i64_type(), "opt_pay_i64")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                iv
-                            }
-                        }
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_ptr_to_int(pv, self.context.i64_type(), "opt_pay_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                        BasicValueEnum::StructValue(sv) => {
-                            // D-3: heap-string payload {ptr,i64} — serialize
-                            // to a JSON string literal instead of the generic
-                            // E0700 rejection.
-                            let j = self.emit_heap_string_payload_json(sv)?;
-                            self.register_heap_alloc(j);
-                            self.builder
-                                .build_ptr_to_int(j, self.context.i64_type(), "opt_pay_str_json")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json Option: unexpected payload {:?}",
-                                other.get_type()
-                            )));
-                        }
-                    };
-                    if obj_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                        .is_some_and(|inner| inner.starts_with("Option"))
-                    {
-                        // Nested Option: payload is ptrtoint of heap Option {i1,i64}.
-                        // mimi_option_i64_to_json only handles int payloads — rebuild.
-                        let disc_is_some = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "opt_nest_some",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let some_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_nest_some");
-                        let none_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_nest_none");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_nest_merge");
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "toj_opt_nest_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(some_bb);
-                        let nested_ptr = self
-                            .builder
-                            .build_int_to_ptr(payload_i64, i8_ptr_ty, "opt_nest_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let opt_sty = self.context.struct_type(
-                            &[
-                                self.context.bool_type().into(),
-                                self.context.i64_type().into(),
-                            ],
-                            false,
-                        );
-                        let nested_sv = self
-                            .builder
-                            .build_load(
-                                BasicTypeEnum::StructType(opt_sty),
-                                nested_ptr,
-                                "opt_nest_ld",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            .into_struct_value();
-                        let n_disc = self
-                            .build_extract_value(nested_sv.into(), 0, "n_disc")?
-                            .into_int_value();
-                        let n_disc_i64 = self
-                            .builder
-                            .build_int_z_extend(n_disc, self.context.i64_type(), "n_disc_i64")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let n_pay = self
-                            .build_extract_value(nested_sv.into(), 1, "n_pay")?
-                            .into_int_value();
-                        let n_pay_i64 = if n_pay.get_type().get_bit_width() < 64 {
-                            self.builder
-                                .build_int_s_extend(n_pay, self.context.i64_type(), "n_pay_i64")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        } else {
-                            n_pay
-                        };
-                        let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
-                        let inner_json = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(n_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(n_pay_i64),
-                                ],
-                                "opt_nest_inner_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("option to_json void")?
-                            .into_pointer_value();
-                        let buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(512, false),
-                            "opt_nest_buf",
-                        )?;
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_nest_fmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(512, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(inner_json),
-                            ],
-                            "opt_nest_sn",
-                        )?;
-                        self.build_store(out_alloca, buf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(none_bb);
-                        // Heap-copy "None" so wrap_c_string free is always valid.
-                        let none_heap = self.malloc_or_abort(
-                            self.context.i64_type().const_int(8, false),
-                            "opt_nest_none_heap",
-                        )?;
-                        let none_lit = self
-                            .builder
-                            .build_global_string_ptr("\"None\"", "opt_nest_none")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(none_heap),
-                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
-                            ],
-                            "opt_nest_none_cpy",
-                        )?;
-                        self.build_store(out_alloca, none_heap)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "opt_nest_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    if obj_type.contains("List<") {
-                        // Option of List: payload is pointer to list struct
-                        // (or ptrtoint of it). Element type may be Map/Set/scalar.
-                        let disc_is_some = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "opt_list_some",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let some_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_list_some");
-                        let none_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_list_none");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_list_merge");
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(
-                                self.context.ptr_type(inkwell::AddressSpace::default()),
-                            ),
-                            "toj_opt_list_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(some_bb);
-                        let list_ptr = self
-                            .builder
-                            .build_int_to_ptr(
-                                payload_i64,
-                                self.context.ptr_type(inkwell::AddressSpace::default()),
-                                "opt_list_as_ptr",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        // Product-tuple list elements need codegen JSON helpers.
-                        let list_inner = obj_type
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("List<"))
-                            .and_then(|s| s.strip_suffix('>'))
-                            .unwrap_or("");
-                        let list_json = if list_inner.starts_with("List<") {
-                            let mid_elem = Self::strip_first_type_arg(
-                                &format!("List<{}>", list_inner),
-                                "List",
-                            )
-                            .and_then(|mid| Self::strip_first_type_arg(&mid, "List"))
-                            .unwrap_or_else(|| list_inner.to_string());
-                            if mid_elem.starts_with('(') || self.is_product_tuple_alias(&mid_elem) {
-                                let elem = if self.is_product_tuple_alias(&mid_elem) {
-                                    self.resolve_alias_type_name(&mid_elem)
-                                } else {
-                                    mid_elem
-                                };
-                                self.emit_list_list_product_tuple_to_json(list_ptr, &elem)?
-                            } else {
-                                // fall through to scalar helpers below
-                                let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "opt_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else if list_inner.starts_with('(')
-                            || self.is_product_tuple_alias(list_inner)
-                        {
-                            let elem = if self.is_product_tuple_alias(list_inner) {
-                                self.resolve_alias_type_name(list_inner)
-                            } else {
-                                list_inner.to_string()
-                            };
-                            self.emit_list_product_tuple_to_json(list_ptr, &elem)?
-                        } else if list_inner.starts_with("Map") {
-                            if let Some(val_ty) = list_inner
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                                .or_else(|| {
-                                    list_inner
-                                        .strip_prefix("Map<string,")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                        .map(|s| s.trim())
-                                })
-                            {
-                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                    let elem = if self.is_product_tuple_alias(val_ty) {
-                                        self.resolve_alias_type_name(val_ty)
-                                    } else {
-                                        val_ty.to_string()
-                                    };
-                                    self.emit_list_map_product_to_json(list_ptr, &elem)?
-                                } else {
-                                    // Value type is string only when Map<string, string>.
-                                    let list_fn_name = if list_inner.contains("Map<string, string>")
-                                    {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    };
-                                    let list_fn = self.get_runtime_fn(list_fn_name)?;
-                                    self.build_call(
-                                        list_fn,
-                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                        "opt_list_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list map to_json void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "opt_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list map to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else if list_inner.starts_with("Set") {
-                            if let Some(elem) = list_inner
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    let func =
-                                        self.get_runtime_fn("mimi_list_set_product_to_json")?;
-                                    self.build_call(
-                                        func,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(list_ptr),
-                                            BasicMetadataValueEnum::IntValue(
-                                                self.context
-                                                    .i64_type()
-                                                    .const_int(arity.max(1) as u64, false),
-                                            ),
-                                        ],
-                                        "opt_list_set_product_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list set product to_json void")?
-                                    .into_pointer_value()
-                                } else {
-                                    let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
-                                    self.build_call(
-                                        list_fn,
-                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                        "opt_list_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list set to_json void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "opt_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list set to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else {
-                            let list_fn_name = if obj_type.contains("List<Map")
-                                || obj_type.contains("List<Map<")
-                            {
-                                if obj_type.contains("Map<string, string>") {
-                                    "mimi_list_map_to_json_string"
-                                } else {
-                                    "mimi_list_map_to_string"
-                                }
-                            } else if obj_type.contains("List<Set") {
-                                "mimi_list_set_to_json"
-                            } else if obj_type.contains("List<string>") {
-                                "mimi_list_str_to_json"
-                            } else if obj_type.contains("List<f64>")
-                                || obj_type.contains("List<f32>")
-                            {
-                                "mimi_list_f64_to_json"
-                            } else if obj_type.contains("List<bool>") {
-                                "mimi_list_bool_to_json"
-                            } else {
-                                "mimi_list_i64_to_json"
-                            };
-                            let list_fn_ty = i8_ptr_ty
-                                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                            let list_fn =
-                                self.module.get_function(list_fn_name).unwrap_or_else(|| {
-                                    self.module.add_function(
-                                        list_fn_name,
-                                        list_fn_ty,
-                                        Some(inkwell::module::Linkage::External),
-                                    )
-                                });
-                            self.build_call(
-                                list_fn,
-                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                "opt_list_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("list to_json void")?
-                            .into_pointer_value()
-                        };
-                        let buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(4096, false),
-                            "opt_list_buf",
-                        )?;
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_list_fmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(4096, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(list_json),
-                            ],
-                            "opt_list_sn",
-                        )?;
-                        self.build_store(out_alloca, buf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(none_bb);
-                        let none_heap = self.malloc_or_abort(
-                            self.context.i64_type().const_int(8, false),
-                            "opt_list_none_heap",
-                        )?;
-                        let none_lit = self
-                            .builder
-                            .build_global_string_ptr("\"None\"", "opt_list_none")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(none_heap),
-                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
-                            ],
-                            "opt_list_none_cpy",
-                        )?;
-                        self.build_store(out_alloca, none_heap)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "opt_list_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    let opt_inner = obj_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                        .unwrap_or(obj_type.as_str());
-                    if opt_inner.starts_with("Map<") {
-                        let mode = if obj_type.contains("Map<string, string>") {
-                            1i64
-                        } else if obj_type.contains("Map<string, bool>") {
-                            2
-                        } else if obj_type.contains("Map<string, f64>")
-                            || obj_type.contains("Map<string, f32>")
-                        {
-                            3
-                        } else {
-                            self.map_nested_product_mode(&obj_type)
-                        };
-                        let func = self.get_runtime_fn("mimi_option_map_to_json")?;
-                        let raw = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(disc_i64),
-                                    BasicMetadataValueEnum::IntValue(payload_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_opt_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_option_map_to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    if opt_inner.starts_with("Set<") {
-                        let mode = if obj_type.contains("Set<string>") {
-                            1i64
-                        } else if obj_type.contains("Set<bool>") {
-                            2
-                        } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
-                            3
-                        } else if let Some(elem) = obj_type
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("Set<"))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                let resolved = if self.is_product_tuple_alias(elem) {
-                                    self.resolve_alias_type_name(elem)
-                                } else {
-                                    elem.to_string()
-                                };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let body = resolved
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(resolved.as_str());
-                                for ch in body.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                10 + arity.max(1)
-                            } else if elem.starts_with("Map<string, ") {
-                                if let Some(val_ty) = elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let mut arity: i64 = 0;
-                                        let mut depth = 0i32;
-                                        let mut any = false;
-                                        let body = resolved
-                                            .strip_prefix('(')
-                                            .and_then(|s| s.strip_suffix(')'))
-                                            .unwrap_or(resolved.as_str());
-                                        for ch in body.chars() {
-                                            match ch {
-                                                '<' | '(' => depth += 1,
-                                                '>' | ')' => depth -= 1,
-                                                ',' if depth == 0 => {
-                                                    arity += 1;
-                                                    any = true;
-                                                }
-                                                c if !c.is_whitespace() => any = true,
-                                                _ => {}
-                                            }
-                                        }
-                                        if any {
-                                            arity += 1;
-                                        }
-                                        70 + arity.max(1)
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        let func = self.get_runtime_fn("mimi_option_set_to_json")?;
-                        let raw = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(disc_i64),
-                                    BasicMetadataValueEnum::IntValue(payload_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_opt_set",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_option_set_to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // D-3: Option<string> — Some payload is a heap string
-                    // {ptr,i64}; payload_i64 is the ptrtoint of the escaped
-                    // JSON string literal. Emit structured JSON instead of
-                    // printing the pointer as a number.
-                    if payload_is_string {
-                        let raw = self.emit_option_string_to_json_cstr(disc_i64, payload_i64)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    let func = self.get_runtime_fn("mimi_option_i64_to_json")?;
-                    let raw = self
-                        .build_call(
-                            func,
-                            &[
-                                BasicMetadataValueEnum::IntValue(disc_i64),
-                                BasicMetadataValueEnum::IntValue(payload_i64),
-                            ],
-                            "to_json_opt",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("mimi_option_i64_to_json void")?
-                        .into_pointer_value();
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
-                }
-                // Result / Result<T,E> integer payloads: {i1, ok, err}
-                if obj_type == "Result" || obj_type.starts_with("Result<") {
-                    let sv = match &metadata_args[0] {
-                        BasicMetadataValueEnum::StructValue(s) => *s,
-                        BasicMetadataValueEnum::PointerValue(pv) => {
-                            let loaded = self
-                                .builder
-                                .build_load(
-                                    BasicTypeEnum::StructType(self.context.struct_type(
-                                        &[
-                                            self.context.bool_type().into(),
-                                            self.context.i64_type().into(),
-                                            self.context.i64_type().into(),
-                                        ],
-                                        false,
-                                    )),
-                                    *pv,
-                                    "res_load",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                .into_struct_value();
-                            loaded
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json: unexpected Result argument kind {:?}",
-                                other
-                            )))
-                        }
-                    };
-                    let disc = self
-                        .build_extract_value(sv.into(), 0, "res_disc")?
-                        .into_int_value();
-                    let disc_i64 = self
-                        .builder
-                        .build_int_z_extend(disc, self.context.i64_type(), "res_disc_i64")
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                    let ok_bv = self.build_extract_value(sv.into(), 1, "res_ok")?;
-                    // Result of Option: Ok is nested Option struct {i1, payload}.
-                    // Require Option to be the Ok type root (not List<Option<…>> etc.).
-                    let result_ok_is_option = obj_type
-                        .strip_prefix("Result<")
-                        .map(|s| {
-                            let mut depth = 0i32;
-                            for (i, ch) in s.char_indices() {
-                                match ch {
-                                    '<' | '(' => depth += 1,
-                                    '>' | ')' => depth -= 1,
-                                    ',' if depth == 0 => {
-                                        return s[..i].trim().starts_with("Option");
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            false
-                        })
-                        .unwrap_or(false);
-                    if result_ok_is_option && matches!(ok_bv, BasicValueEnum::StructValue(_)) {
-                        let opt_sv = ok_bv.into_struct_value();
-                        let o_disc = self
-                            .build_extract_value(opt_sv.into(), 0, "res_opt_disc")?
-                            .into_int_value();
-                        let o_disc_i64 = self
-                            .builder
-                            .build_int_z_extend(o_disc, self.context.i64_type(), "res_opt_disc_i64")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let o_pay_bv = self.build_extract_value(opt_sv.into(), 1, "res_opt_pay")?;
-                        // Option of product-tuple/record inside Result: rebuild
-                        // {"Some":[…]} from struct payload rather than i64 helper.
-                        if let BasicValueEnum::StructValue(pay_sv) = o_pay_bv {
-                            let pay_fields = pay_sv.get_type().get_field_types();
-                            let pay_is_string = pay_fields.len() == 2
-                                && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
-                                && matches!(
-                                    pay_fields[1],
-                                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                                );
-                            if !pay_is_string && pay_fields.len() >= 1 {
-                                let mut pay_inner = obj_type
-                                    .strip_prefix("Result<")
-                                    .and_then(|s| s.split(',').next())
-                                    .and_then(|s| s.strip_prefix("Option<"))
-                                    .and_then(|s| s.strip_suffix('>'))
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default();
-                                if pay_inner.is_empty() {
-                                    let pay_sty = pay_sv.get_type();
-                                    for (n, ty) in &self.type_llvm {
-                                        if matches!(
-                                            ty,
-                                            BasicTypeEnum::StructType(s) if *s == pay_sty
-                                        ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                        }) {
-                                            pay_inner = n.clone();
-                                            break;
-                                        }
-                                    }
-                                }
-                                let is_named_record =
-                                    self.type_defs.get(&pay_inner).is_some_and(|td| {
-                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                    });
-                                if !is_named_record && pay_fields.len() < 2 {
-                                    // fall through to i64 path
-                                } else {
-                                    let pay_json = if is_named_record {
-                                        let rec_ty = pay_sv.get_type();
-                                        let rec_alloca = self.build_alloca(
-                                            BasicTypeEnum::StructType(rec_ty),
-                                            "res_opt_rec_tmp",
-                                        )?;
-                                        self.build_store(rec_alloca, pay_sv)?;
-                                        self.compile_record_to_json_cstr(&pay_inner, rec_alloca)?
-                                    } else {
-                                        self.emit_product_tuple_to_json(pay_sv)?
-                                    };
-                                    let disc_is_ok = self
-                                        .builder
-                                        .build_int_compare(
-                                            inkwell::IntPredicate::NE,
-                                            disc_i64,
-                                            self.context.i64_type().const_int(0, false),
-                                            "res_opt_tup_is_ok",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    let o_is_some = self
-                                        .builder
-                                        .build_int_compare(
-                                            inkwell::IntPredicate::NE,
-                                            o_disc_i64,
-                                            self.context.i64_type().const_int(0, false),
-                                            "res_opt_tup_is_some",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    let function = self.current_function().ok_or("no function")?;
-                                    let ok_bb = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_ok");
-                                    let err_bb = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_err");
-                                    let merge_bb = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_merge");
-                                    let i8_ptr_ty =
-                                        self.context.ptr_type(inkwell::AddressSpace::default());
-                                    let out_alloca = self.build_alloca(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        "toj_res_opt_tup_out",
-                                    )?;
-                                    self.builder
-                                        .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(ok_bb);
-                                    let some_bb = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_some");
-                                    let none_bb = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_none");
-                                    let ok_merge = self
-                                        .context
-                                        .append_basic_block(function, "toj_res_opt_tup_ok_m");
-                                    self.builder
-                                        .build_conditional_branch(o_is_some, some_bb, none_bb)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(some_bb);
-                                    let inner_buf = self.malloc_or_abort(
-                                        self.context.i64_type().const_int(1024, false),
-                                        "res_opt_tup_inner",
-                                    )?;
-                                    let ifmt = self
-                                        .builder
-                                        .build_global_string_ptr(
-                                            "{\"Some\":[%s]}",
-                                            "res_opt_tup_ifmt",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                                    self.build_call(
-                                        snprintf_fn,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(inner_buf),
-                                            BasicMetadataValueEnum::IntValue(
-                                                self.context.i64_type().const_int(1024, false),
-                                            ),
-                                            BasicMetadataValueEnum::PointerValue(
-                                                ifmt.as_pointer_value(),
-                                            ),
-                                            BasicMetadataValueEnum::PointerValue(pay_json),
-                                        ],
-                                        "res_opt_tup_isn",
-                                    )?;
-                                    let outer_buf = self.malloc_or_abort(
-                                        self.context.i64_type().const_int(1024, false),
-                                        "res_opt_tup_outer",
-                                    )?;
-                                    let ofmt = self
-                                        .builder
-                                        .build_global_string_ptr(
-                                            "{\"Ok\":[%s]}",
-                                            "res_opt_tup_ofmt",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.build_call(
-                                        snprintf_fn,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(outer_buf),
-                                            BasicMetadataValueEnum::IntValue(
-                                                self.context.i64_type().const_int(1024, false),
-                                            ),
-                                            BasicMetadataValueEnum::PointerValue(
-                                                ofmt.as_pointer_value(),
-                                            ),
-                                            BasicMetadataValueEnum::PointerValue(inner_buf),
-                                        ],
-                                        "res_opt_tup_osn",
-                                    )?;
-                                    self.build_store(out_alloca, outer_buf)?;
-                                    self.builder
-                                        .build_unconditional_branch(ok_merge)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(none_bb);
-                                    let none_wrap = self.malloc_or_abort(
-                                        self.context.i64_type().const_int(32, false),
-                                        "res_opt_tup_none",
-                                    )?;
-                                    let nfmt = self
-                                        .builder
-                                        .build_global_string_ptr(
-                                            "{\"Ok\":[\"None\"]}",
-                                            "res_opt_tup_nfmt",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                                    self.build_call(
-                                        strcpy_fn,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(none_wrap),
-                                            BasicMetadataValueEnum::PointerValue(
-                                                nfmt.as_pointer_value(),
-                                            ),
-                                        ],
-                                        "res_opt_tup_ncpy",
-                                    )?;
-                                    self.build_store(out_alloca, none_wrap)?;
-                                    self.builder
-                                        .build_unconditional_branch(ok_merge)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(ok_merge);
-                                    self.builder
-                                        .build_unconditional_branch(merge_bb)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(err_bb);
-                                    let ebuf = self.malloc_or_abort(
-                                        self.context.i64_type().const_int(32, false),
-                                        "res_opt_tup_err",
-                                    )?;
-                                    let efmt = self
-                                        .builder
-                                        .build_global_string_ptr(
-                                            "{\"Err\":[0]}",
-                                            "res_opt_tup_efmt",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.build_call(
-                                        strcpy_fn,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(ebuf),
-                                            BasicMetadataValueEnum::PointerValue(
-                                                efmt.as_pointer_value(),
-                                            ),
-                                        ],
-                                        "res_opt_tup_ecpy",
-                                    )?;
-                                    self.build_store(out_alloca, ebuf)?;
-                                    self.builder
-                                        .build_unconditional_branch(merge_bb)
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                    self.builder.position_at_end(merge_bb);
-                                    let raw = self
-                                        .build_load(
-                                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                                            out_alloca,
-                                            "res_opt_tup_result",
-                                        )?
-                                        .into_pointer_value();
-                                    self.register_heap_alloc(raw);
-                                    return self.wrap_c_string(raw);
-                                } // else !is_named_record && pay_fields.len() < 2
-                            }
-                        }
-                        let o_pay = match o_pay_bv {
-                            BasicValueEnum::IntValue(iv) => iv,
-                            BasicValueEnum::PointerValue(pv) => self
-                                .builder
-                                .build_ptr_to_int(pv, self.context.i64_type(), "res_opt_pay_ptr")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                            BasicValueEnum::StructValue(_) => {
-                                // Nested Option/List heap-packed as struct — already
-                                // handled above for multi-field product; treat as 0.
-                                self.context.i64_type().const_int(0, false)
-                            }
-                            other => {
-                                return Err(CompileError::Generic(format!(
-                                    "to_json Result Option: unexpected pay {:?}",
-                                    other.get_type()
-                                )));
-                            }
-                        };
-                        let o_pay_i64 = if o_pay.get_type().get_bit_width() < 64 {
-                            self.builder
-                                .build_int_s_extend(
-                                    o_pay,
-                                    self.context.i64_type(),
-                                    "res_opt_pay_i64",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        } else {
-                            o_pay
-                        };
-                        // Nested Option of Map/Set/List needs typed helpers.
-                        let opt_json = if obj_type.contains("Map<") {
-                            let mode = if obj_type.contains("Map<string, string>") {
-                                1i64
-                            } else if obj_type.contains("Map<string, bool>") {
-                                2
-                            } else if obj_type.contains("Map<string, f64>")
-                                || obj_type.contains("Map<string, f32>")
-                            {
-                                3
-                            } else {
-                                self.map_nested_product_mode(&obj_type)
-                            };
-                            let opt_fn = self.get_runtime_fn("mimi_option_map_to_json")?;
-                            self.build_call(
-                                opt_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(o_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(o_pay_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "res_opt_map_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("option map to_json void")?
-                            .into_pointer_value()
-                        } else if obj_type.contains("Set<") {
-                            let mode = if obj_type.contains("Set<string>") {
-                                1i64
-                            } else if obj_type.contains("Set<bool>") {
-                                2
-                            } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>")
-                            {
-                                3
-                            } else if let Some(elem) = obj_type
-                                .find("Set<")
-                                .map(|i| &obj_type[i + 4..])
-                                .and_then(|s| {
-                                    let mut depth = 0i32;
-                                    for (j, ch) in s.char_indices() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' if depth == 0 => {
-                                                return Some(s[..j].trim());
-                                            }
-                                            '>' | ')' => depth -= 1,
-                                            _ => {}
-                                        }
-                                    }
-                                    None
-                                })
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    10 + arity.max(1)
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            };
-                            let opt_fn = self.get_runtime_fn("mimi_option_set_to_json")?;
-                            self.build_call(
-                                opt_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(o_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(o_pay_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "res_opt_set_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("option set to_json void")?
-                            .into_pointer_value()
-                        } else if obj_type.contains("List<") {
-                            // Option of List: rebuild {"Some":[list_json]} / "None".
-                            let disc_is_some = self
-                                .builder
-                                .build_int_compare(
-                                    inkwell::IntPredicate::NE,
-                                    o_disc_i64,
-                                    self.context.i64_type().const_int(0, false),
-                                    "res_opt_list_some",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let function = self.current_function().ok_or("no function")?;
-                            let some_bb = self
-                                .context
-                                .append_basic_block(function, "toj_res_opt_list_some");
-                            let none_bb = self
-                                .context
-                                .append_basic_block(function, "toj_res_opt_list_none");
-                            let merge_bb = self
-                                .context
-                                .append_basic_block(function, "toj_res_opt_list_merge");
-                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let out_alloca = self.build_alloca(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                "toj_res_opt_list_out",
-                            )?;
-                            self.builder
-                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(some_bb);
-                            let list_ptr = self
-                                .builder
-                                .build_int_to_ptr(o_pay_i64, i8_ptr_ty, "res_opt_list_ptr")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            // Result<Option<List<(…)>>> product path.
-                            let list_elem = Self::strip_first_type_arg(&obj_type, "Result")
-                                .and_then(|s| Self::strip_first_type_arg(&s, "Option"))
-                                .and_then(|s| {
-                                    s.strip_prefix("List<")
-                                        .and_then(|x| x.strip_suffix('>'))
-                                        .map(|x| x.to_string())
-                                })
-                                .unwrap_or_default();
-                            let list_json = if list_elem.starts_with('(')
-                                || self.is_product_tuple_alias(&list_elem)
-                            {
-                                let elem = if self.is_product_tuple_alias(&list_elem) {
-                                    self.resolve_alias_type_name(&list_elem)
-                                } else {
-                                    list_elem
-                                };
-                                self.emit_list_product_tuple_to_json(list_ptr, &elem)?
-                            } else {
-                                let list_fn_name = if obj_type.contains("List<Map") {
-                                    if obj_type.contains("Map<string, string>") {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    }
-                                } else if obj_type.contains("List<string>") {
-                                    "mimi_list_str_to_json"
-                                } else if obj_type.contains("List<f64>")
-                                    || obj_type.contains("List<f32>")
-                                {
-                                    "mimi_list_f64_to_json"
-                                } else if obj_type.contains("List<bool>") {
-                                    "mimi_list_bool_to_json"
-                                } else {
-                                    "mimi_list_i64_to_json"
-                                };
-                                let list_fn_ty = i8_ptr_ty.fn_type(
-                                    &[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)],
-                                    false,
-                                );
-                                let list_fn =
-                                    self.module.get_function(list_fn_name).unwrap_or_else(|| {
-                                        self.module.add_function(
-                                            list_fn_name,
-                                            list_fn_ty,
-                                            Some(inkwell::module::Linkage::External),
-                                        )
-                                    });
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "res_opt_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list to_json void")?
-                                .into_pointer_value()
-                            };
-                            let buf = self.malloc_or_abort(
-                                self.context.i64_type().const_int(4096, false),
-                                "res_opt_list_buf",
-                            )?;
-                            let fmt = self
-                                .builder
-                                .build_global_string_ptr("{\"Some\":[%s]}", "res_opt_list_fmt")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                            self.build_call(
-                                snprintf_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(buf),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(4096, false),
-                                    ),
-                                    BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                    BasicMetadataValueEnum::PointerValue(list_json),
-                                ],
-                                "res_opt_list_sn",
-                            )?;
-                            self.build_store(out_alloca, buf)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(none_bb);
-                            let none_heap = self.malloc_or_abort(
-                                self.context.i64_type().const_int(8, false),
-                                "res_opt_list_none",
-                            )?;
-                            let none_lit = self
-                                .builder
-                                .build_global_string_ptr("\"None\"", "res_opt_list_none_lit")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                            self.build_call(
-                                strcpy_fn,
-                                &[
-                                    BasicMetadataValueEnum::PointerValue(none_heap),
-                                    BasicMetadataValueEnum::PointerValue(
-                                        none_lit.as_pointer_value(),
-                                    ),
-                                ],
-                                "res_opt_list_none_cpy",
-                            )?;
-                            self.build_store(out_alloca, none_heap)?;
-                            self.builder
-                                .build_unconditional_branch(merge_bb)
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            self.builder.position_at_end(merge_bb);
-                            self.build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "res_opt_list_result",
-                            )?
-                            .into_pointer_value()
-                        } else {
-                            let opt_fn = self.get_runtime_fn("mimi_option_i64_to_json")?;
-                            self.build_call(
-                                opt_fn,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(o_disc_i64),
-                                    BasicMetadataValueEnum::IntValue(o_pay_i64),
-                                ],
-                                "res_opt_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("option to_json void")?
-                            .into_pointer_value()
-                        };
-                        let disc_is_ok = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "res_opt_is_ok",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let ok_bb = self.context.append_basic_block(function, "toj_res_opt_ok");
-                        let err_bb = self.context.append_basic_block(function, "toj_res_opt_err");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_res_opt_merge");
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "toj_res_opt_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(ok_bb);
-                        let buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(512, false),
-                            "res_opt_buf",
-                        )?;
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Ok\":[%s]}", "res_opt_fmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(512, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(opt_json),
-                            ],
-                            "res_opt_sn",
-                        )?;
-                        self.build_store(out_alloca, buf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(err_bb);
-                        let err_bv = self.build_extract_value(sv.into(), 2, "res_opt_err")?;
-                        let err_i64 = match err_bv {
-                            BasicValueEnum::IntValue(iv) => {
-                                if iv.get_type().get_bit_width() < 64 {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            "res_opt_err_i64",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                } else {
-                                    iv
-                                }
-                            }
-                            _ => self.context.i64_type().const_int(0, false),
-                        };
-                        let ebuf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(128, false),
-                            "res_opt_ebuf",
-                        )?;
-                        let efmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Err\":[%ld]}", "res_opt_efmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(ebuf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(128, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(efmt.as_pointer_value()),
-                                BasicMetadataValueEnum::IntValue(err_i64),
-                            ],
-                            "res_opt_esn",
-                        )?;
-                        self.build_store(out_alloca, ebuf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "res_opt_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // Result of List: Ok may be by-value list struct {i64,ptr}
-                    // or a pointer/int handle — handle before scalar ok_i64 coercion.
-                    // Result of List: Ok type must start with List (not Map/Set of List).
-                    let result_ok_is_list = obj_type
-                        .strip_prefix("Result<")
-                        .map(|s| {
-                            let mut depth = 0i32;
-                            for (i, ch) in s.char_indices() {
-                                match ch {
-                                    '<' => depth += 1,
-                                    '>' => depth -= 1,
-                                    ',' if depth == 0 => {
-                                        return s[..i].trim().starts_with("List");
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            false
-                        })
-                        .unwrap_or(false);
-                    if result_ok_is_list {
-                        let err_bv = self.build_extract_value(sv.into(), 2, "res_list_err")?;
-                        let err_i64 = match err_bv {
-                            BasicValueEnum::IntValue(iv) => {
-                                if iv.get_type().get_bit_width() < 64 {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            "res_list_err_i64",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                } else {
-                                    iv
-                                }
-                            }
-                            BasicValueEnum::PointerValue(pv) => self
-                                .builder
-                                .build_ptr_to_int(pv, self.context.i64_type(), "res_list_err_ptr")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                            _ => self.context.i64_type().const_int(0, false),
-                        };
-                        let disc_is_ok = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "res_list_ok",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let ok_bb = self.context.append_basic_block(function, "toj_res_list_ok");
-                        let err_bb = self
-                            .context
-                            .append_basic_block(function, "toj_res_list_err");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_res_list_merge");
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "toj_res_list_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(ok_bb);
-                        // Materialize list as a pointer for runtime helpers.
-                        let list_ptr = match ok_bv {
-                            BasicValueEnum::StructValue(lsv) => {
-                                let list_alloca = self.build_alloca(
-                                    BasicTypeEnum::StructType(lsv.get_type()),
-                                    "res_list_tmp",
-                                )?;
-                                self.build_store(list_alloca, lsv)?;
-                                list_alloca
-                            }
-                            BasicValueEnum::PointerValue(pv) => pv,
-                            BasicValueEnum::IntValue(iv) => {
-                                let as_i64 = if iv.get_type().get_bit_width() < 64 {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            "res_list_ok_i64",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                                } else {
-                                    iv
-                                };
-                                self.builder
-                                    .build_int_to_ptr(as_i64, i8_ptr_ty, "res_list_as_ptr")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            }
-                            other => {
-                                return Err(CompileError::Generic(format!(
-                                    "to_json Result List: unexpected Ok payload {:?}",
-                                    other.get_type()
-                                )));
-                            }
-                        };
-                        // Product-tuple list elements need codegen helpers.
-                        // Use paren-aware strip: Result<List<(i32,i32)>,string> must
-                        // not split on the tuple comma.
-                        let list_elem = crate::codegen::CodeGenerator::strip_first_type_arg(
-                            &obj_type, "Result",
-                        )
-                        .and_then(|s| {
-                            s.strip_prefix("List<")
-                                .and_then(|x| x.strip_suffix('>'))
-                                .map(|x| x.to_string())
-                        })
-                        .unwrap_or_default();
-                        let list_json = if list_elem.starts_with('(')
-                            || self.is_product_tuple_alias(&list_elem)
-                        {
-                            let elem = if self.is_product_tuple_alias(&list_elem) {
-                                self.resolve_alias_type_name(&list_elem)
-                            } else {
-                                list_elem
-                            };
-                            self.emit_list_product_tuple_to_json(list_ptr, &elem)?
-                        } else if let Some(opt_inner) = list_elem
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if opt_inner.starts_with('(') || self.is_product_tuple_alias(opt_inner)
-                            {
-                                let elem = if self.is_product_tuple_alias(opt_inner) {
-                                    self.resolve_alias_type_name(opt_inner)
-                                } else {
-                                    opt_inner.to_string()
-                                };
-                                let arity = {
-                                    let body = elem
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(&elem);
-                                    let mut arity = 0i64;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    arity.max(1)
-                                };
-                                let func =
-                                    self.get_runtime_fn("mimi_list_option_product_to_json")?;
-                                let i64_ty = self.context.i64_type();
-                                self.build_call(
-                                    func,
-                                    &[
-                                        BasicMetadataValueEnum::PointerValue(list_ptr),
-                                        BasicMetadataValueEnum::IntValue(
-                                            i64_ty.const_int(arity as u64, false),
-                                        ),
-                                        BasicMetadataValueEnum::IntValue(
-                                            i64_ty.const_int(0, false),
-                                        ),
-                                    ],
-                                    "res_list_opt_prod_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list option product to_json void")?
-                                .into_pointer_value()
-                            } else {
-                                // fallback scalar option list
-                                let list_fn = self.get_runtime_fn("mimi_list_i64_to_json")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "res_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else if list_elem.starts_with("Map") {
-                            if let Some(val_ty) = list_elem
-                                .strip_prefix("Map<string, ")
-                                .and_then(|s| s.strip_suffix('>'))
-                                .or_else(|| {
-                                    list_elem
-                                        .strip_prefix("Map<string,")
-                                        .and_then(|s| s.strip_suffix('>'))
-                                        .map(|s| s.trim())
-                                })
-                            {
-                                if val_ty.starts_with('(') || self.is_product_tuple_alias(val_ty) {
-                                    let elem = if self.is_product_tuple_alias(val_ty) {
-                                        self.resolve_alias_type_name(val_ty)
-                                    } else {
-                                        val_ty.to_string()
-                                    };
-                                    self.emit_list_map_product_to_json(list_ptr, &elem)?
-                                } else {
-                                    let list_fn_name = if list_elem.contains("Map<string, string>")
-                                    {
-                                        "mimi_list_map_to_json_string"
-                                    } else {
-                                        "mimi_list_map_to_string"
-                                    };
-                                    let list_fn = self.get_runtime_fn(list_fn_name)?;
-                                    self.build_call(
-                                        list_fn,
-                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                        "res_list_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list map to_json void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let list_fn = self.get_runtime_fn("mimi_list_map_to_string")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "res_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list map to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else if list_elem.starts_with("Set") {
-                            if let Some(elem) = list_elem
-                                .strip_prefix("Set<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                    let resolved = if self.is_product_tuple_alias(elem) {
-                                        self.resolve_alias_type_name(elem)
-                                    } else {
-                                        elem.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    let func =
-                                        self.get_runtime_fn("mimi_list_set_product_to_json")?;
-                                    self.build_call(
-                                        func,
-                                        &[
-                                            BasicMetadataValueEnum::PointerValue(list_ptr),
-                                            BasicMetadataValueEnum::IntValue(
-                                                self.context
-                                                    .i64_type()
-                                                    .const_int(arity.max(1) as u64, false),
-                                            ),
-                                        ],
-                                        "res_list_set_product_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list set product to_json void")?
-                                    .into_pointer_value()
-                                } else {
-                                    let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
-                                    self.build_call(
-                                        list_fn,
-                                        &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                        "res_list_json",
-                                    )?
-                                    .try_as_basic_value_opt()
-                                    .ok_or("list set to_json void")?
-                                    .into_pointer_value()
-                                }
-                            } else {
-                                let list_fn = self.get_runtime_fn("mimi_list_set_to_json")?;
-                                self.build_call(
-                                    list_fn,
-                                    &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                    "res_list_json",
-                                )?
-                                .try_as_basic_value_opt()
-                                .ok_or("list set to_json void")?
-                                .into_pointer_value()
-                            }
-                        } else {
-                            let list_fn_name = if obj_type.contains("List<Map")
-                                || obj_type.contains("List<Map<")
-                            {
-                                if obj_type.contains("Map<string, string>") {
-                                    "mimi_list_map_to_json_string"
-                                } else {
-                                    "mimi_list_map_to_string"
-                                }
-                            } else if obj_type.contains("List<Set") {
-                                "mimi_list_set_to_json"
-                            } else if obj_type.contains("List<string>") {
-                                "mimi_list_str_to_json"
-                            } else if obj_type.contains("List<f64>")
-                                || obj_type.contains("List<f32>")
-                            {
-                                "mimi_list_f64_to_json"
-                            } else if obj_type.contains("List<bool>") {
-                                "mimi_list_bool_to_json"
-                            } else {
-                                "mimi_list_i64_to_json"
-                            };
-                            let list_fn_ty = i8_ptr_ty
-                                .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                            let list_fn =
-                                self.module.get_function(list_fn_name).unwrap_or_else(|| {
-                                    self.module.add_function(
-                                        list_fn_name,
-                                        list_fn_ty,
-                                        Some(inkwell::module::Linkage::External),
-                                    )
-                                });
-                            self.build_call(
-                                list_fn,
-                                &[BasicMetadataValueEnum::PointerValue(list_ptr)],
-                                "res_list_json",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("list to_json void")?
-                            .into_pointer_value()
-                        };
-                        let buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(4096, false),
-                            "res_list_buf",
-                        )?;
-                        let fmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Ok\":[%s]}", "res_list_fmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(4096, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(fmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(list_json),
-                            ],
-                            "res_list_sn",
-                        )?;
-                        self.build_store(out_alloca, buf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(err_bb);
-                        let ebuf = self.emit_result_err_json(err_i64, true)?;
-                        self.build_store(out_alloca, ebuf)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
-                                BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "res_list_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // Result of product tuple / named record Ok.
-                    if let BasicValueEnum::StructValue(ok_sv) = ok_bv {
-                        let ok_fields = ok_sv.get_type().get_field_types();
-                        let ok_is_string = ok_fields.len() == 2
-                            && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
-                            && matches!(
-                                ok_fields[1],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                            );
-                        // Nested Option/Result Ok payloads start with i1 — not product tuples.
-                        let ok_is_nested_wrapper = !ok_fields.is_empty()
-                            && matches!(
-                                ok_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                            );
-                        let ok_is_list = ok_fields.len() == 2
-                            && matches!(
-                                ok_fields[0],
-                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                            )
-                            && matches!(ok_fields[1], BasicTypeEnum::PointerType(_));
-                        if !ok_fields.is_empty() && !ok_is_nested_wrapper && !ok_is_list {
-                            // Note: ok_is_string deliberately NOT excluded —
-                            // heap-string Ok payloads {ptr,i64} must take the
-                            // structured JSON path (D-3), not fall through to
-                            // the scalar i64 coercion which rejects them (E0700)
-                            // or re-serializes the struct as a product tuple.
-                            let mut ok_inner = obj_type
-                                .strip_prefix("Result<")
-                                .and_then(|s| s.split(',').next())
-                                .map(|s| s.trim().to_string())
-                                .unwrap_or_default();
-                            if ok_inner.is_empty() {
-                                let pay_sty = ok_sv.get_type();
-                                for (n, ty) in &self.type_llvm {
-                                    if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
-                                        && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                        })
-                                    {
-                                        ok_inner = n.clone();
-                                        break;
-                                    }
-                                }
-                            }
-                            let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
-                                matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                            });
-                            if !is_named_record && !ok_is_string && ok_fields.len() < 2 {
-                                // fall through
-                            } else {
-                                let ok_json = if is_named_record {
-                                    let rec_ty = ok_sv.get_type();
-                                    let rec_alloca = self.build_alloca(
-                                        BasicTypeEnum::StructType(rec_ty),
-                                        "res_rec_tmp",
-                                    )?;
-                                    self.build_store(rec_alloca, ok_sv)?;
-                                    self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
-                                } else if ok_is_string {
-                                    // D-3: heap-string Ok payload {ptr,i64} must
-                                    // NOT be treated as a 2-field product tuple
-                                    // (its 2 struct fields would otherwise
-                                    // mis-serialize as [ptr,len]). Emit a JSON
-                                    // string literal instead.
-                                    let sj = self.emit_heap_string_payload_json(ok_sv)?;
-                                    self.register_heap_alloc(sj);
-                                    sj
-                                } else {
-                                    self.emit_product_tuple_to_json(ok_sv)?
-                                };
-                                let err_bv =
-                                    self.build_extract_value(sv.into(), 2, "res_err_tup")?;
-                                let err_i64 = match err_bv {
-                                    BasicValueEnum::IntValue(iv) => {
-                                        if iv.get_type().get_bit_width() < 64 {
-                                            self.builder
-                                                .build_int_s_extend(
-                                                    iv,
-                                                    self.context.i64_type(),
-                                                    "res_err_tup_i64",
-                                                )
-                                                .map_err(|e| {
-                                                    CompileError::LlvmError(e.to_string())
-                                                })?
-                                        } else {
-                                            iv
-                                        }
-                                    }
-                                    BasicValueEnum::PointerValue(pv) => self
-                                        .builder
-                                        .build_ptr_to_int(
-                                            pv,
-                                            self.context.i64_type(),
-                                            "res_err_tup_ptr",
-                                        )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                                    _ => self.context.i64_type().const_int(0, false),
-                                };
-                                // Result disc: true/1 = Ok, false/0 = Err (matches mimi_result_*_to_json).
-                                let disc_is_ok = self
-                                    .builder
-                                    .build_int_compare(
-                                        inkwell::IntPredicate::NE,
-                                        disc_i64,
-                                        self.context.i64_type().const_int(0, false),
-                                        "res_tup_is_ok",
-                                    )
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                let function = self.current_function().ok_or("no function")?;
-                                let ok_bb =
-                                    self.context.append_basic_block(function, "toj_res_tup_ok");
-                                let err_bb =
-                                    self.context.append_basic_block(function, "toj_res_tup_err");
-                                let merge_bb = self
-                                    .context
-                                    .append_basic_block(function, "toj_res_tup_merge");
-                                let i8_ptr_ty =
-                                    self.context.ptr_type(inkwell::AddressSpace::default());
-                                let out_alloca = self.build_alloca(
-                                    BasicTypeEnum::PointerType(i8_ptr_ty),
-                                    "toj_res_tup_out",
-                                )?;
-                                self.builder
-                                    .build_conditional_branch(disc_is_ok, ok_bb, err_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(ok_bb);
-                                // D-3: sized assembly instead of the old fixed
-                                // 1024-byte snprintf — long payloads truncated
-                                // at 1023 (NUL) on the native backend while the
-                                // VM kept the full rendering.
-                                let wrap = self.sized_cat_parts(
-                                    &[
-                                        crate::codegen::builtins::io::CatPart::Lit("{\"Ok\":["),
-                                        crate::codegen::builtins::io::CatPart::Dyn(ok_json),
-                                        crate::codegen::builtins::io::CatPart::Lit("]}"),
-                                    ],
-                                    "res_tup_ok_wrap",
-                                    false,
-                                )?;
-                                self.build_store(out_alloca, wrap)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(err_bb);
-                                let ebuf = self.emit_result_err_json(err_i64, true)?;
-                                self.build_store(out_alloca, ebuf)?;
-                                self.builder
-                                    .build_unconditional_branch(merge_bb)
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                                self.builder.position_at_end(merge_bb);
-                                let raw = self
-                                    .build_load(
-                                        BasicTypeEnum::PointerType(i8_ptr_ty),
-                                        out_alloca,
-                                        "res_tup_result",
-                                    )?
-                                    .into_pointer_value();
-                                self.register_heap_alloc(raw);
-                                return self.wrap_c_string(raw);
-                            } // else is_named_record || multi-field
-                        }
-                    }
-                    let ok_i64 = match ok_bv {
-                        BasicValueEnum::IntValue(iv) => {
-                            if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(iv, self.context.i64_type(), "res_ok_i64")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                iv
-                            }
-                        }
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_ptr_to_int(pv, self.context.i64_type(), "res_ok_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                        BasicValueEnum::StructValue(sv) => {
-                            // D-3: heap-string Ok payload {ptr,i64} — serialize
-                            // to a JSON string literal (the 5908 arm already
-                            // excluded strings from the product-tuple path;
-                            // without this the payload hits the generic E0700).
-                            let j = self.emit_heap_string_payload_json(sv)?;
-                            self.register_heap_alloc(j);
-                            self.builder
-                                .build_ptr_to_int(j, self.context.i64_type(), "res_ok_str_json")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json Result: unexpected Ok payload {:?}",
-                                other.get_type()
-                            )));
-                        }
-                    };
-                    let err_bv = self.build_extract_value(sv.into(), 2, "res_err")?;
-                    let err_i64 = match err_bv {
-                        BasicValueEnum::IntValue(iv) => {
-                            if iv.get_type().get_bit_width() < 64 {
-                                self.builder
-                                    .build_int_s_extend(iv, self.context.i64_type(), "res_err_i64")
-                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                            } else {
-                                iv
-                            }
-                        }
-                        BasicValueEnum::PointerValue(pv) => self
-                            .builder
-                            .build_ptr_to_int(pv, self.context.i64_type(), "res_err_ptr")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
-                        BasicValueEnum::StructValue(sv) => {
-                            // D-3: heap-string Err payload → JSON string literal.
-                            let j = self.emit_heap_string_payload_json(sv)?;
-                            self.register_heap_alloc(j);
-                            self.builder
-                                .build_ptr_to_int(j, self.context.i64_type(), "res_err_str_json")
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        }
-                        other => {
-                            return Err(CompileError::Generic(format!(
-                                "to_json Result: unexpected Err payload {:?}",
-                                other.get_type()
-                            )));
-                        }
-                    };
-                    let ok_root = obj_type
-                        .strip_prefix("Result<")
-                        .and_then(|s| {
-                            let mut depth = 0i32;
-                            for (i, ch) in s.char_indices() {
-                                match ch {
-                                    '<' => depth += 1,
-                                    '>' => depth -= 1,
-                                    ',' if depth == 0 => {
-                                        return Some(s[..i].trim());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            None
-                        })
-                        .unwrap_or(obj_type.as_str());
-                    if ok_root.starts_with("Set<") {
-                        let mode = if obj_type.contains("Set<string>") {
-                            1i64
-                        } else if obj_type.contains("Set<bool>") {
-                            2
-                        } else if obj_type.contains("Set<f64>") || obj_type.contains("Set<f32>") {
-                            3
-                        } else if let Some(elem) = obj_type
-                            .strip_prefix("Result<")
-                            .and_then(|s| {
-                                let mut depth = 0i32;
-                                for (i, ch) in s.char_indices() {
-                                    match ch {
-                                        '<' => depth += 1,
-                                        '>' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            return Some(s[..i].trim());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                None
-                            })
-                            .and_then(|s| s.strip_prefix("Set<"))
-                            .and_then(|s| s.strip_suffix('>'))
-                        {
-                            if elem.starts_with('(') || self.is_product_tuple_alias(elem) {
-                                let resolved = if self.is_product_tuple_alias(elem) {
-                                    self.resolve_alias_type_name(elem)
-                                } else {
-                                    elem.to_string()
-                                };
-                                let mut arity: i64 = 0;
-                                let mut depth = 0i32;
-                                let mut any = false;
-                                let body = resolved
-                                    .strip_prefix('(')
-                                    .and_then(|s| s.strip_suffix(')'))
-                                    .unwrap_or(resolved.as_str());
-                                for ch in body.chars() {
-                                    match ch {
-                                        '<' | '(' => depth += 1,
-                                        '>' | ')' => depth -= 1,
-                                        ',' if depth == 0 => {
-                                            arity += 1;
-                                            any = true;
-                                        }
-                                        c if !c.is_whitespace() => any = true,
-                                        _ => {}
-                                    }
-                                }
-                                if any {
-                                    arity += 1;
-                                }
-                                10 + arity.max(1)
-                            } else if let Some(opt_inner) = elem
-                                .strip_prefix("Option<")
-                                .and_then(|s| s.strip_suffix('>'))
-                            {
-                                if opt_inner.starts_with('(')
-                                    || self.is_product_tuple_alias(opt_inner)
-                                {
-                                    let resolved = if self.is_product_tuple_alias(opt_inner) {
-                                        self.resolve_alias_type_name(opt_inner)
-                                    } else {
-                                        opt_inner.to_string()
-                                    };
-                                    let mut arity: i64 = 0;
-                                    let mut depth = 0i32;
-                                    let mut any = false;
-                                    let body = resolved
-                                        .strip_prefix('(')
-                                        .and_then(|s| s.strip_suffix(')'))
-                                        .unwrap_or(resolved.as_str());
-                                    for ch in body.chars() {
-                                        match ch {
-                                            '<' | '(' => depth += 1,
-                                            '>' | ')' => depth -= 1,
-                                            ',' if depth == 0 => {
-                                                arity += 1;
-                                                any = true;
-                                            }
-                                            c if !c.is_whitespace() => any = true,
-                                            _ => {}
-                                        }
-                                    }
-                                    if any {
-                                        arity += 1;
-                                    }
-                                    50 + arity.max(1)
-                                } else {
-                                    0
-                                }
-                            } else if elem.starts_with("Map<string, ") {
-                                if let Some(val_ty) = elem
-                                    .strip_prefix("Map<string, ")
-                                    .and_then(|s| s.strip_suffix('>'))
-                                {
-                                    if val_ty.starts_with('(')
-                                        || self.is_product_tuple_alias(val_ty)
-                                    {
-                                        let resolved = if self.is_product_tuple_alias(val_ty) {
-                                            self.resolve_alias_type_name(val_ty)
-                                        } else {
-                                            val_ty.to_string()
-                                        };
-                                        let mut arity: i64 = 0;
-                                        let mut depth = 0i32;
-                                        let mut any = false;
-                                        let body = resolved
-                                            .strip_prefix('(')
-                                            .and_then(|s| s.strip_suffix(')'))
-                                            .unwrap_or(resolved.as_str());
-                                        for ch in body.chars() {
-                                            match ch {
-                                                '<' | '(' => depth += 1,
-                                                '>' | ')' => depth -= 1,
-                                                ',' if depth == 0 => {
-                                                    arity += 1;
-                                                    any = true;
-                                                }
-                                                c if !c.is_whitespace() => any = true,
-                                                _ => {}
-                                            }
-                                        }
-                                        if any {
-                                            arity += 1;
-                                        }
-                                        70 + arity.max(1)
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        let func = self.get_runtime_fn("mimi_result_set_to_json")?;
-                        let raw = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(disc_i64),
-                                    BasicMetadataValueEnum::IntValue(ok_i64),
-                                    BasicMetadataValueEnum::IntValue(err_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_res_set",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_result_set_to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    if ok_root.starts_with("Map<") {
-                        let mode = if obj_type.contains("Map<string, string>") {
-                            1i64
-                        } else if obj_type.contains("Map<string, bool>") {
-                            2
-                        } else if obj_type.contains("Map<string, f64>")
-                            || obj_type.contains("Map<string, f32>")
-                        {
-                            3
-                        } else {
-                            self.map_nested_product_mode(&obj_type)
-                        };
-                        let func = self.get_runtime_fn("mimi_result_map_to_json")?;
-                        let raw = self
-                            .build_call(
-                                func,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(disc_i64),
-                                    BasicMetadataValueEnum::IntValue(ok_i64),
-                                    BasicMetadataValueEnum::IntValue(err_i64),
-                                    BasicMetadataValueEnum::IntValue(
-                                        self.context.i64_type().const_int(mode as u64, false),
-                                    ),
-                                ],
-                                "to_json_res_map",
-                            )?
-                            .try_as_basic_value_opt()
-                            .ok_or("mimi_result_map_to_json void")?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    // Prefer structured Result JSON so string Err (heap {ptr,len}) is
-                    // not printed as a raw i64 address.
-                    if let BasicMetadataValueEnum::StructValue(res_sv) = metadata_args[0] {
-                        let raw = self.emit_result_struct_to_json_cstr(res_sv, &obj_type)?;
-                        self.register_heap_alloc(raw);
-                        return self.wrap_c_string(raw);
-                    }
-                    let func = self.get_runtime_fn("mimi_result_i64_to_json")?;
-                    let raw = self
-                        .build_call(
-                            func,
-                            &[
-                                BasicMetadataValueEnum::IntValue(disc_i64),
-                                BasicMetadataValueEnum::IntValue(ok_i64),
-                                BasicMetadataValueEnum::IntValue(err_i64),
-                            ],
-                            "to_json_res",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("mimi_result_i64_to_json void")?
-                        .into_pointer_value();
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
-                }
-                // Check for Record type — serialize to JSON object via sprintf
-                if self
-                    .type_defs
-                    .get(&obj_type)
-                    .is_some_and(|td| matches!(td.kind, TypeDefKind::Record(_)))
+                if let Some(value) =
+                    self.emit_typed_to_json_dispatch(&obj_type, metadata_args[0])?
                 {
-                    let struct_ptr = match &metadata_args[0] {
-                        BasicMetadataValueEnum::PointerValue(pv) => *pv,
-                        _ => {
-                            return Err(CompileError::Generic(
-                                "to_json: record value must be a pointer".into(),
-                            ))
-                        }
-                    };
-                    let raw = self.compile_record_to_json_cstr(&obj_type, struct_ptr)?;
-                    self.register_heap_alloc(raw);
-                    return self.wrap_c_string(raw);
+                    return Ok(value);
                 }
             }
             // P0-3: for the print/println/eprintln family only, convert
