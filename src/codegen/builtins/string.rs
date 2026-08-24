@@ -1070,6 +1070,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             .builder
             .build_and(consumed, end_null, "strtol_ok")
             .map_err(|e| CompileError::LlvmError(format!("and ok: {}", e)))?;
+        // 0.39.136 (L1): on failure the value field must be 0, matching the VM
+        // (`s.parse::<i64>()` → (false, 0)). Without the select, the raw
+        // strtol partial result leaked through: str_parse_int("7x").1 was 7
+        // natively vs 0 in the VM.
+        let value = self
+            .builder
+            .build_select(
+                ok,
+                value,
+                i64_ty.const_int(0, false),
+                "strtol_value_or_zero",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select value: {e}")))?
+            .into_int_value();
         Ok((ok, value))
     }
 

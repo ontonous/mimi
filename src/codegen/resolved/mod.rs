@@ -2217,13 +2217,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "tuple projection on non-struct value".into(),
                             ));
                         };
-                        let field =
-                            struct_val
-                                .get_field_at_index(*index as u32)
-                                .ok_or_else(|| {
-                                    CompileError::LlvmError(format!("tuple field {index} absent"))
-                                })?;
-                        Ok(field)
+                        // 0.39.136: extractvalue via the builder — the const-only
+                        // StructValue::get_field_at_index returns garbage for
+                        // runtime SSA aggregates (e.g. str_parse_int(s).0 produced
+                        // a bogus pointer where field 0 was an i1).
+                        self.generator
+                            .builder
+                            .build_extract_value(struct_val, *index as u32, "tuple_proj")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("tuple field {index}: {e}"))
+                            })
                     }
                     // 0.32.2: Index value projection for List rvalue access.
                     crate::core::ir::ResolvedValueProjection::Index(index_expr) => {
@@ -7687,8 +7690,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
         // Evaluate the iterable expression to get the list struct {i64, ptr}.
         let list_val = self.emit_expr(iterable, frame)?;
+        // 0.39.136: call-result iterables (e.g. `for w in str_split(s, " ")`
+        // inside std::strings::words) can surface as pointers to the list
+        // struct rather than bare struct values; load through them instead of
+        // refusing and silently falling the whole function back to legacy.
         let list_struct = match list_val {
             BasicValueEnum::StructValue(sv) => sv,
+            BasicValueEnum::PointerValue(pv) => self
+                .generator
+                .builder
+                .build_load(
+                    BasicTypeEnum::StructType(self.generator.list_struct_type()),
+                    pv,
+                    "for_in_list_ptr_load",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("for-in-list ptr load: {e}")))?
+                .into_struct_value(),
             _ => {
                 return Err(CompileError::Unsupported(
                     "for-in-list iterable is not a list struct".into(),

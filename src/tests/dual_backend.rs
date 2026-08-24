@@ -19416,6 +19416,44 @@ fn dual_prod_map_keys_values_order_deterministic() {
 }
 
 #[test]
+fn dual_prod_tuple_projection_and_for_in_call_result() {
+    // 0.39.136 dispatch-purity pair:
+    // (a) Tuple projection used the const-only StructValue::get_field_at_index,
+    //     which yields garbage for runtime SSA aggregates — `str_parse_int(s).0`
+    //     surfaced a bogus pointer where field 0 was an i1, failing the bool
+    //     coercion and silently falling the whole function back to legacy.
+    //     Fixed with builder extractvalue.
+    // (b) `for w in str_split(s, " ")` (call-result iterable) surfaced as a
+    //     pointer rather than a bare struct; emit_for_list refused it, so every
+    //     std::strings::words caller fell back. Pointers now load through.
+    // Both shapes are the backbone of std::text/std::strings trait fns.
+    assert_checked_backends_stdout(
+        r#"
+        func try_it(s: string) -> bool {
+            str_parse_int(s).0
+        }
+        func count_words(s: string) -> i32 {
+            let mut n = 0
+            for w in str_split(s, " ") {
+                if len(w) > 0 { n = n + 1 }
+            }
+            n
+        }
+        func main() -> i32 {
+            println(try_it("42"))
+            println(try_it("xx"))
+            let parts = str_parse_int("7x")
+            println(parts.1)
+            println(count_words("a  b c"))
+            0
+        }
+        "#,
+        "true\nfalse\n0\n3",
+        "tuple projection + call-result for-in stay resolved",
+    );
+}
+
+#[test]
 fn dual_prod_container_to_json_dispatch_purity() {
     // M1 closure: typed containers (List<T>, nominal records, record-element
     // lists) previously fell out of the resolved pipeline at compile_to_json's
