@@ -272,9 +272,13 @@ fn fmt_non_string_operators_still_normalized() {
         "formatter should still normalize assignments: got {}",
         result
     );
+    // 0.39.136 contract change: single `<`/`>` are copied VERBATIM because a
+    // line-level rewriter cannot tell comparison `x>0` from generic brackets
+    // (`List<string>` → `List < string >` corrupted the token stream). Tight
+    // comparisons stay tight — still parseable, byte-identical re-lex.
     assert!(
-        result.contains("if x > 0"),
-        "formatter should still normalize comparisons: got {}",
+        result.contains("if x>0"),
+        "comparison adjacency is preserved verbatim (generic-safety): got {}",
         result
     );
     assert!(
@@ -389,10 +393,26 @@ fn fmt_single_char_operators_behavior_preserved() {
         "single-char `+` spacing must be preserved: {}",
         result
     );
+    // 0.39.136 contract change: `>` is verbatim — inserting spaces broke
+    // generic brackets (`List<T>` → `List < T >`). See fmt.rs verbatim arm.
     let result = check_format("func f(a: i32, b: i32) -> bool { a>b }");
     assert!(
-        result.contains("a > b"),
-        "single-char `>` spacing must be preserved: {}",
+        result.contains("a>b"),
+        "single-char `>` adjacency must be preserved verbatim: {}",
+        result
+    );
+    // Generic brackets must survive formatting EXACTLY (regression lock for
+    // the List<string> → List < string > corruption).
+    let result = check_format("func f(x: List<string>) -> i32 { 0 }");
+    assert!(
+        result.contains("List<string>"),
+        "generic brackets must stay glued: {}",
+        result
+    );
+    let result = check_format("type P = Map<string, List<List<i32>>>");
+    assert!(
+        result.contains("Map<string, List<List<i32>>>"),
+        "nested generic closing brackets must stay glued: {}",
         result
     );
 }

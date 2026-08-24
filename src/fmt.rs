@@ -67,9 +67,12 @@ impl Formatter {
     /// output unparseable. The lexer is greedy, so preserving the original
     /// adjacency guarantees identical re-tokenization. All entries are 2 chars.
     ///
-    /// Note: `>>` is also glued; the parser splits a `Shr` token into two
-    /// closing `>` brackets in generic position (`parser/helpers.rs`
-    /// `expect_gt`), so nested generics like `List<List<i32>>` still parse.
+    /// Note: `<<`/`>>` are deliberately NOT listed — a line-level rewriter
+    /// cannot tell shift operators from generic boundaries (`List<List<T>>`,
+    /// `Map<K, V>>`), and inserting spaces there corrupts types. They fall
+    /// through to the verbatim `<`/`>` arms below, which preserve source
+    /// adjacency byte-for-byte (the input parsed once, so it re-lexes
+    /// identically).
     fn multi_char_operator(chars: &[char], i: usize) -> Option<&'static str> {
         let next = *chars.get(i + 1)?;
         Some(match (chars[i], next) {
@@ -77,9 +80,7 @@ impl Formatter {
             ('=', '>') => "=>", // FatArrow
             ('!', '=') => "!=", // Ne
             ('<', '=') => "<=", // Le
-            ('<', '<') => "<<", // Shl
             ('>', '=') => ">=", // Ge
-            ('>', '>') => ">>", // Shr
             ('+', '=') => "+=", // PlusEq
             ('-', '>') => "->", // Arrow
             ('-', '=') => "-=", // MinusEq
@@ -114,7 +115,11 @@ impl Formatter {
     /// disk — silent corruption of user source.
     fn normalize_spacing(line: &str) -> String {
         // Quick check: if no known punctuation needing normalization, skip
-        if !line.contains(&['{', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&'][..]) {
+        if !line.contains(
+            &[
+                '{', '}', '(', ')', '[', ']', ',', ':', '-', '=', '+', '*', '<', '>', '|', '&',
+            ][..],
+        ) {
             return line.to_string();
         }
         // A7: Use scanner to get per-char regions, so we only normalize code chars.
@@ -190,6 +195,11 @@ impl Formatter {
                     out.push(('}', true));
                 }
                 ',' => {
+                    // Canonical form: no space BEFORE a comma (`a, b`, not
+                    // `a , b`). Pop a preceding collapsible space if present.
+                    while matches!(out.last(), Some((' ', true))) {
+                        out.pop();
+                    }
                     out.push((',', true));
                     // Ensure space after `,` (unless at end or already space)
                     if i + 1 < chars.len() && chars[i + 1] != ' ' {
@@ -223,6 +233,22 @@ impl Formatter {
                     if i + 1 < chars.len() && chars[i + 1] != ' ' {
                         out.push((' ', true));
                     }
+                }
+                '(' | '[' => {
+                    // 0.39.136 fmt quality: canonical form is tight after an
+                    // opening bracket — `f(x)`, `(1, 2)`, `[1, 2]`. Previously
+                    // user spacing like `f( x )` survived formatting.
+                    out.push((c, true));
+                    if i + 1 < chars.len() && chars[i + 1] == ' ' {
+                        i += 1; // swallow the space right after ( or [
+                    }
+                }
+                ')' | ']' => {
+                    // Canonical form is tight before a closing bracket.
+                    while matches!(out.last(), Some((' ', true))) {
+                        out.pop();
+                    }
+                    out.push((c, true));
                 }
                 '-' => {
                     // FMT-OP1: `->` and `-=` are consumed by the multi-char
@@ -267,7 +293,7 @@ impl Formatter {
                         }
                     }
                 }
-                '+' | '*' | '<' | '>' | '|' | '&' => {
+                '+' => {
                     // Space before operator (unless at start or preceded by space/punct)
                     if i > 0
                         && chars[i - 1] != ' '
@@ -284,6 +310,16 @@ impl Formatter {
                         out.push((' ', true));
                     }
                 }
+                // 0.39.136 fmt correctness: adjacency-sensitive symbols are
+                // copied VERBATIM — a line-level character rewriter cannot
+                // disambiguate their dual roles, and inserting spaces corrupts
+                // the token stream (`List<string>` → `List < string >`,
+                // `|ptr|` closure pipes → `| ptr |`, `&mut` borrow → `& mut`,
+                // deref `*p` → `* p`). Preserving source adjacency is always
+                // safe: the input parsed once, so its exact byte sequence
+                // re-lexes identically. (Tight comparisons stay tight —
+                // cosmetic only, still parseable.)
+                '<' | '>' | '*' | '&' | '|' => out.push((c, true)),
                 _ => out.push((c, true)),
             }
             i += 1;
