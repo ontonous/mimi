@@ -19387,6 +19387,37 @@ fn dual_prod_map_keys_values_order_deterministic() {
 }
 
 #[test]
+fn dual_prod_container_to_json_dispatch_purity() {
+    // M1 closure: typed containers (List<T>, nominal records, record-element
+    // lists) previously fell out of the resolved pipeline at compile_to_json's
+    // generic arm ("untyped pointer values are not supported") — output stayed
+    // correct only because the WHOLE function silently fell back to legacy.
+    // The resolved to_json routing now reuses the legacy serializers directly
+    // (emit_list_to_json_cstr / compile_record_list_to_json /
+    // compile_record_to_json_cstr), so these shapes stay resolved end-to-end.
+    // Also locks the bool-list formatter fix: json_list_formatter_for lacked a
+    // "bool" arm, so native emitted "[1,0]" where the VM printed "[true,false]".
+    assert_checked_backends_stdout(
+        r#"
+        type Point { x: i32, y: i32 }
+        func main() -> i32 {
+            let ps = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+            println(to_json(ps))
+            println(to_json(Point { x: 9, y: 8 }))
+            println(to_json([1, 2, 3]))
+            println(to_json([1.5, 2.5]))
+            println(to_json(["a", "b"]))
+            println(to_json([true, false]))
+            println(to_json([[1, 2], [3]]))
+            0
+        }
+        "#,
+        "[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]\n{\"x\":9,\"y\":8}\n[1,2,3]\n[1.5,2.5]\n[\"a\",\"b\"]\n[true,false]\n[[1,2],[3]]",
+        "container to_json dispatch purity + bool list formatter",
+    );
+}
+
+#[test]
 fn dual_prod_generic_record_fallback_channel_parity() {
     // H1 closure: the execution-channel harness (checked_codegen_compile_and_run
     // et al.) now merges the stdlib prelude exactly like every CLI subcommand

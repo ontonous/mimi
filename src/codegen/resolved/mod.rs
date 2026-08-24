@@ -3459,6 +3459,103 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 return self.generator.compile_from_json_raw(&ty, raw_ptr);
                             }
                         }
+                        // 0.39.136 (L1, M1): typed containers — List<T>/Set<T>
+                        // and nominal records — route to the legacy
+                        // serializers directly. compile_to_json's generic arm
+                        // only accepts scalars/strings and refuses opaque
+                        // {i64,ptr} / record structs, which silently fell the
+                        // whole function back to legacy (correct output, but a
+                        // dispatch-purity debt against the zero-fallback
+                        // direction). Record-element lists use the callback
+                        // serializer; everything else goes through the
+                        // element-type-aware formatter.
+                        if name == "to_json" && call.arguments.len() == 1 {
+                            let container_arg_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if (container_arg_ty.starts_with("List<")
+                                || container_arg_ty.starts_with("Set<"))
+                                && container_arg_ty.ends_with('>')
+                            {
+                                if let BasicMetadataValueEnum::StructValue(sv) = arguments[0] {
+                                    let inner = container_arg_ty
+                                        ["List<".len()..container_arg_ty.len() - 1]
+                                        .to_string();
+                                    let list_struct_ty = self.generator.list_struct_type();
+                                    let alloca = self.generator.build_alloca(
+                                        list_struct_ty,
+                                        "resolved_to_json_list_alloca",
+                                    )?;
+                                    self.generator.build_store(alloca, sv)?;
+                                    let is_record_elem =
+                                        self.generator.type_defs.get(&inner).is_some_and(|td| {
+                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                        });
+                                    if is_record_elem {
+                                        if let Some(td) = self.generator.type_defs.get(&inner) {
+                                            if let crate::ast::TypeDefKind::Record(fields) =
+                                                &td.kind
+                                            {
+                                                let fields_clone = fields.clone();
+                                                // Returns the value already shaped for
+                                                // the builtin ABI bridge (raw cstr
+                                                // pointer or string struct).
+                                                let raw =
+                                                    self.generator.compile_record_list_to_json(
+                                                        &inner,
+                                                        &fields_clone,
+                                                        &alloca,
+                                                    )?;
+                                                if let BasicMetadataValueEnum::PointerValue(pv) =
+                                                    BasicMetadataValueEnum::from(raw)
+                                                {
+                                                    self.generator.register_heap_alloc(pv);
+                                                }
+                                                return self
+                                                    .wrap_builtin_string_result(raw, &call.result);
+                                            }
+                                        }
+                                    }
+                                    let raw =
+                                        self.generator.emit_list_to_json_cstr(alloca, &inner)?;
+                                    self.generator.register_heap_alloc(raw);
+                                    return self.wrap_builtin_string_result(
+                                        BasicValueEnum::PointerValue(raw),
+                                        &call.result,
+                                    );
+                                }
+                            }
+                            let record_arg_ty = resolved_type_display_name(
+                                self.program,
+                                &call.arguments[0].value.ty,
+                            );
+                            if self
+                                .generator
+                                .type_defs
+                                .get(&record_arg_ty)
+                                .is_some_and(|td| {
+                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                })
+                            {
+                                if let BasicMetadataValueEnum::StructValue(sv) = arguments[0] {
+                                    let sv_ty = sv.get_type();
+                                    let alloca = self.generator.build_alloca(
+                                        BasicTypeEnum::StructType(sv_ty),
+                                        "resolved_to_json_rec_alloca",
+                                    )?;
+                                    self.generator.build_store(alloca, sv)?;
+                                    let raw = self
+                                        .generator
+                                        .compile_record_to_json_cstr(&record_arg_ty, alloca)?;
+                                    self.generator.register_heap_alloc(raw);
+                                    return self.wrap_builtin_string_result(
+                                        BasicValueEnum::PointerValue(raw),
+                                        &call.result,
+                                    );
+                                }
+                            }
+                        }
                         // 0.39.136 (L1): to_json on an opaque map handle must
                         // route through the typed map serializers, NOT
                         // compile_to_json's generic integer arm — a Record

@@ -1574,6 +1574,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         match elem_ty_name {
             "string" => "mimi_list_str_to_json",
             "f64" | "f32" => "mimi_list_f64_to_json",
+            // 0.39.136 (L1): bool lists previously fell through to the i64
+            // formatter — to_json([true,false]) emitted "[1,0]" natively while
+            // the VM printed "[true,false]". mimi_list_bool_to_json exists in
+            // the runtime and is what the legacy simple.rs tail dispatch uses.
+            "bool" => "mimi_list_bool_to_json",
             _ => "mimi_list_i64_to_json",
         }
     }
