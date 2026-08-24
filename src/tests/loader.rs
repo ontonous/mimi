@@ -4,6 +4,11 @@ use std::path::PathBuf;
 fn temp_dir(name: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("mimi_test_loader_{}_{}", name, std::process::id()));
+    // 0.39.136 flake fix: the OS reuses pids across runs, so a stale directory
+    // from an earlier crashed run could survive with extra module files that
+    // changed resolution results (observed once as a parallel-run failure of
+    // loader_std_strings_plus_fs_merge_no_dup_impl_key). Clear before use.
+    let _ = fs::remove_dir_all(&dir);
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -333,6 +338,7 @@ func main() -> i32 {
 fn loader_std_json_import_typechecks() {
     // Regression for v0.28.17: `use std::json` must resolve the stdlib module,
     // merge its public items, and pass type checking.
+    let _stdlib_read = super::StdlibEnvGuard::read();
     let dir = temp_dir("std_json");
     let main_path = dir.join("main.mimi");
     fs::write(
@@ -379,7 +385,8 @@ func make() -> (Any, i32) {
 "#,
     )
     .expect("write tuple_any_check.mimi");
-    std::env::set_var("MIMI_STDLIB", &dir);
+    // EXPERIMENT: is this set_var load-bearing?
+    let _stdlib_guard = super::StdlibEnvGuard::set(&dir);
     let src = fs::read_to_string(&path).expect("read tuple_any_check.mimi");
     let tokens = crate::lexer::Lexer::new(&src)
         .tokenize()
@@ -398,7 +405,6 @@ func make() -> (Any, i32) {
         "tuple Any return should typecheck: {:?}",
         result.err()
     );
-    std::env::remove_var("MIMI_STDLIB");
     cleanup(&dir);
 }
 
@@ -411,6 +417,7 @@ fn loader_std_set_import_typechecks() {
     // loader path stamps stdlib sources with the "stdlib:" SourceKey
     // (loader/flow.rs:126) and the checker exempts exactly that scope —
     // this test pins the end-to-end `use std::set` typecheck.
+    let _stdlib_read = super::StdlibEnvGuard::read();
     let dir = temp_dir("std_set");
     let main_path = dir.join("main.mimi");
     fs::write(
@@ -447,6 +454,7 @@ func main() -> i32 {
 fn loader_std_maps_import_typechecks() {
     // C3 (audit 2026-08-03): same stdlib-Any story as std::set, for
     // std/maps.mimi (`Any` in get/set/remove/get_or_default/...).
+    let _stdlib_read = super::StdlibEnvGuard::read();
     let dir = temp_dir("std_maps");
     let main_path = dir.join("main.mimi");
     fs::write(
@@ -584,6 +592,7 @@ fn loader_std_strings_plus_fs_merge_no_dup_impl_key() {
     // "duplicate item 'string'" because item_name keyed Item::Impl on
     // type_name alone — both modules impl traits on `string` (Str, FsOps).
     // The dedup key is now (trait, type), so coexisting impls merge cleanly.
+    let _stdlib_read = super::StdlibEnvGuard::read();
     let dir = temp_dir("std_strings_fs");
     let main_path = dir.join("main.mimi");
     fs::write(

@@ -378,6 +378,78 @@ impl Drop for FfiEnvLock {
     }
 }
 
+/// 0.39.136 flake fix: unsynchronized `set_var("MIMI_STDLIB", …)` in a
+/// parallel loader test transiently poisoned every other test's stdlib
+/// resolution (process-global env state). This guard serializes holders via
+/// a dedicated flock file and RESTORES the previous value on drop — including
+/// during unwinding, so a failing assertion can no longer leak the override.
+pub(crate) struct StdlibEnvGuard {
+    _lock_file: std::fs::File,
+    prev: Option<std::ffi::OsString>,
+    restore: bool,
+}
+
+impl StdlibEnvGuard {
+    /// Reader side: hold a SHARED flock while the test runs, so a concurrent
+    /// `set` (LOCK_EX) cannot flip MIMI_STDLIB underneath stdlib resolution.
+    pub fn read() -> Self {
+        let lock_path = std::env::temp_dir().join("mimi_stdlib_test.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("failed to create stdlib test lock file");
+        #[cfg(unix)]
+        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            libc::flock(file.as_raw_fd(), libc::LOCK_SH);
+        }
+        Self {
+            _lock_file: file,
+            prev: None,
+            restore: false,
+        }
+    }
+
+    /// Writer side: exclusive flock + set + restore-on-drop.
+    pub fn set(value: &std::path::Path) -> Self {
+        let lock_path = std::env::temp_dir().join("mimi_stdlib_test.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("failed to create stdlib test lock file");
+        #[cfg(unix)]
+        // SAFETY: fd 来自已打开的真实锁文件，flock 上锁参数有效。
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            libc::flock(file.as_raw_fd(), libc::LOCK_EX);
+        }
+        let prev = std::env::var_os("MIMI_STDLIB");
+        std::env::set_var("MIMI_STDLIB", value);
+        Self {
+            _lock_file: file,
+            prev,
+            restore: true,
+        }
+    }
+}
+
+impl Drop for StdlibEnvGuard {
+    fn drop(&mut self) {
+        if !self.restore {
+            return;
+        }
+        match self.prev.take() {
+            Some(v) => std::env::set_var("MIMI_STDLIB", v),
+            None => std::env::remove_var("MIMI_STDLIB"),
+        }
+    }
+}
+
 /// Compile the Rust runtime into a shared library for interpreter FFI tests.
 /// Returns the path to the compiled `.so`.
 /// The caller MUST hold `FfiEnvLock` before calling this and setting `MIMI_FFI_LIB`.
