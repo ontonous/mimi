@@ -1080,12 +1080,6 @@ impl CheckedProgram {
         let mut extern_blocks = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
-        eprintln!(
-            "DBG-SEC fcfb_entry sources={} items={} imports={}",
-            file.sources.len(),
-            file.items.len(),
-            file.imports.len()
-        );
         let ids = NodeIdBuilder::new(&file.sources);
         let compilation_root = NodeId(COMPILATION_ROOT_NODE_ID.to_string());
         for import in &file.imports {

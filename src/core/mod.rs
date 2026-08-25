@@ -60,17 +60,11 @@ pub fn check_strict(file: &File) -> Result<(), Vec<Diagnostic>> {
 }
 
 pub fn check_program(file: &File) -> Result<CheckedProgram, Vec<Diagnostic>> {
-    let t0 = std::time::Instant::now();
     let acc = checker::flow::flow_check_with_artifacts(file).map_err(|mut errors| {
         sort_diagnostics(&mut errors);
         errors
     })?;
-    let t1 = std::time::Instant::now();
-    eprintln!("DBG-PHASE flow_check={:?}", t1 - t0);
-    let built = CheckedProgram::from_flow_acc(file, acc);
-    let t2 = std::time::Instant::now();
-    eprintln!("DBG-PHASE from_flow_acc={:?}", t2 - t1);
-    built.map_err(|mut errors| {
+    CheckedProgram::from_flow_acc(file, acc).map_err(|mut errors| {
         sort_diagnostics(&mut errors);
         errors
     })

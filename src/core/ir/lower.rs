@@ -19,9 +19,9 @@ use crate::ast::{
 use crate::core::resolved::{
     expr_kind, expr_sibling_role, expr_sibling_roles, impl_method_owner, impl_qualified_name,
     interpolation_role, map_entry_role, map_entry_roles, match_arm_role, match_arm_roles,
-    nested_function_owner, pattern_kind,
-    pattern_sibling_role, pattern_sibling_roles, stable_id_fragment, stmt_anchor, stmt_kind,
-    stmt_sibling_role, stmt_sibling_roles, type_kind, NodeIdBuilder,
+    nested_function_owner, pattern_kind, pattern_sibling_role, pattern_sibling_roles,
+    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, stmt_sibling_roles, type_kind,
+    NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
