@@ -348,7 +348,7 @@ use std::json
 
 func main() -> i64 {
     let data = "{\"count\":42}"
-    get_int(data, "count")
+    json_get_int(data, "count")
 }
 "#,
     )
@@ -427,8 +427,8 @@ use std::set
 
 func main() -> i32 {
     let s = {7, 9}
-    let s2 = insert(s, 11)
-    if contains(s2, 7) { size(s2) } else { 0 }
+    let s2 = set_insert(s, 11)
+    if set_contains(s2, 7) { set_size(s2) } else { 0 }
 }
 "#,
     )

@@ -139,11 +139,6 @@ pub func sleep_secs(secs: i32) {
     sleep(secs * 1000)
 }
 
-// sleep_ms: Sleeps for ms milliseconds.
-// Duplicate of time::sleep_ms — kept for compatibility.
-pub func sleep_ms(ms: i32) {
-    sleep(ms)
-}
 
 // sleep_until: Sleeps until Unix timestamp_secs.
 pub func sleep_until(timestamp_secs: i64) {

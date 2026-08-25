@@ -11,15 +11,15 @@ use std::set;
 
 func main() -> i32 {
     let s: Set<i32> = {1, 2, 1}
-    let s2 = insert(s, 3)
-    if size(s2) != 3 { return 1 }
-    if !contains(s2, 2) { return 2 }
-    if is_empty(s2) { return 3 }
-    let l = to_list(s2)
+    let s2 = set_insert(s, 3)
+    if set_size(s2) != 3 { return 1 }
+    if !set_contains(s2, 2) { return 2 }
+    if set_is_empty(s2) { return 3 }
+    let l = set_to_list(s2)
     if len(l) != 3 { return 4 }
 
     let t: Set<i32> = {1, 2, 3}
-    let t2 = remove(t, 1)
-    if size(t2) != 2 { return 5 }
+    let t2 = set_remove(t, 1)
+    if set_size(t2) != 2 { return 5 }
     0
 }

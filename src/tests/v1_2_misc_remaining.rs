@@ -503,9 +503,15 @@ fn module_duplicate_export_fails_loud() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create tmp project");
     let entry = dir.join("main.mimi");
+    // 0.39.136 stdlib consolidation removed cross-stdlib collisions; the
+    // fail-loud contract is now pinned with two user modules.
+    std::fs::write(dir.join("helper.mimi"), "pub func size() -> i32 { 1 }")
+        .expect("write helper.mimi");
+    std::fs::write(dir.join("other.mimi"), "pub func size() -> i32 { 2 }")
+        .expect("write other.mimi");
     std::fs::write(
         &entry,
-        "use std::maps\nuse std::set\nfunc main() -> i32 { println(size(map_new())) }\n",
+        "use helper\nuse other\nfunc main() -> i32 { println(size()) }\n",
     )
     .expect("write main.mimi");
     let mut loader = crate::loader::ModuleLoader::new(dir.clone());

@@ -64,9 +64,9 @@ impl TextExt for string {
 
 // Compatibility functions — keep original signatures.
 
-// is_blank: Returns true if s is empty or whitespace-only.
+// text_is_blank: Returns true if s is empty or whitespace-only.
 // Duplicate of strings::is_blank — kept for compatibility.
-pub func is_blank(s: string) -> bool {
+pub func text_is_blank(s: string) -> bool {
     len(str_trim(s)) == 0
 }
 
@@ -75,9 +75,9 @@ pub func is_numeric(s: string) -> bool {
     str_parse_int(s).0
 }
 
-// count_lines: Returns the number of lines in s.
+// text_count_lines: Returns the number of lines in s.
 // Duplicate of strings::count_lines — kept for compatibility.
-pub func count_lines(s: string) -> i32 {
+pub func text_count_lines(s: string) -> i32 {
     len(str_split(s, "\n"))
 }
 

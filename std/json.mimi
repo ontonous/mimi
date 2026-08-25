@@ -85,10 +85,6 @@ pub func get_string(json: string, key: string) -> string {
     json_get_string(json, key)
 }
 
-// get_int: Gets an integer field from a JSON object by key.
-pub func get_int(json: string, key: string) -> i64 {
-    json_get_int(json, key)
-}
 
 // get_element: Gets the element at index from a JSON array.
 pub func get_element(json: string, index: i32) -> string {
@@ -105,19 +101,7 @@ pub func get_bool(json: string, key: string) -> Result<bool, string> {
     else { Err("not a boolean") }
 }
 
-// get_float: Gets a float field from a JSON object by key.
-// SD-12 (0.31.51b): returns Result — RFC 8259 rejects NaN/Inf.
-pub func get_float(json: string, key: string) -> Result<f64, string> {
-    if !json_has_key(json, key) { return Err("key not found") }
-    let v = json_get_string(json, key)
-    let parsed = str_parse_float(v)
-    if parsed.0 { Ok(parsed.1) } else { Err("not a valid float") }
-}
 
-// has_key: Returns true if the JSON object contains the given key.
-pub func has_key(json: string, key: string) -> bool {
-    json_has_key(json, key)
-}
 
 // is_valid_json: Returns true if s is syntactically valid JSON.
 pub func is_valid_json(s: string) -> bool {

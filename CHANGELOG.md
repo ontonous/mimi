@@ -2,6 +2,22 @@
 
 ## [Unreleased] — 0.1.9-dev
 
+### stdlib 合并唯一名（0.39.136 破坏性，迁移注记）
+
+跨模块同名自由函数曾使任何同时 `use` 双方（如 `std::maps` +
+`std::strings`）的程序在合并层硬失败。按全局唯一裸名纪律收敛：
+
+- 移除冗余垫片（方法/内建等价物保留可用性）：
+  maps::is_empty → `m.is_empty()`；set 的 size/is_empty/contains/
+  remove/to_list 自由函数 → set_* 前缀族；json 的 get_int/get_float/
+  has_key → 内建 json_get_int / json_get_float / json_has_key；
+  mymath::random_int → `use std::random` 的 random_int；
+  datetime::sleep_ms → time::sleep_ms。
+- 改名：text::is_blank/count_lines → text_is_blank/text_count_lines；
+  env::set → env::set_var（对齐 get_var 风格）。
+- maps 的 omit/filter 实现改为内联成员判断，不再依赖裸 contains 名字
+  解析（内置与 stdlib 同名的历史陷阱，§5.2 先例的正式化）。
+
 > 0.1.8 已发布（2026-08-22，tag `0.1.8`；0.38.122 收官：lib 5559/0/7、
 > real_world 31/0、stress 62/0、dispatch 核语料 0 fallback）。
 > 0.1.9-dev 进行中：线性种类 + 权限闭环 + 可写验收。

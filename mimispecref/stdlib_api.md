@@ -3,7 +3,7 @@
 > Auto-generated from `mimi/std/*.mimi`. Do not edit manually.
 
 
-> **384 public functions + constants across 23 modules.**
+> **379 public functions + constants across 23 modules.**
 
 
 ## `array` (16)
@@ -86,7 +86,7 @@
 - `pub func serialize(rows: List<List<string>>) -> string` — serialize: Serializes rows into CSV string.
 - `pub func cell(rows: List<List<string>>, row: i32, col: i32) -> string` — cell: Gets cell at (row, col). Returns "" if out of bounds. 0.39.137: renamed from `get` — the bare name collided with maps::get (fail-loud duplicate item when both modules are imported) and the semantics differ entirely (positional cell lookup vs keyed map access).
 
-## `datetime` (26)
+## `datetime` (25)
 
 - `pub func now_secs() -> i64` — now_secs: Current Unix timestamp in seconds. Duplicate of time::timestamp — kept for compatibility.
 - `pub func now_millis() -> i64` — now_millis: Current Unix timestamp in milliseconds. Duplicate of time::timestamp_ms — kept for compatibility.
@@ -105,7 +105,6 @@
 - `pub func time_until(timestamp_secs: i64) -> i64` — time_until: Returns seconds until timestamp_secs.
 - `pub func elapsed_since(start_ms: i64) -> i64` — elapsed_since: Returns milliseconds elapsed since start_ms. Duplicate of time::elapsed — kept for compatibility.
 - `pub func sleep_secs(secs: i32)` — sleep_secs: Sleeps for secs seconds.
-- `pub func sleep_ms(ms: i32)` — sleep_ms: Sleeps for ms milliseconds. Duplicate of time::sleep_ms — kept for compatibility.
 - `pub func sleep_until(timestamp_secs: i64)` — sleep_until: Sleeps until Unix timestamp_secs.
 - `pub const SECONDS_PER_MINUTE = 60` — Time constants
 - `pub const SECONDS_PER_HOUR = 3600`
@@ -125,7 +124,7 @@
 - `pub func get_float(name: string) -> Result<f64, string>` — get_float: Reads and parses env var as f64. Returns Err if missing or invalid.
 - `pub func arg_count() -> i32` — arg_count: Returns the number of CLI arguments.
 - `pub func first_arg() -> string` — first_arg: Returns the first CLI argument, or "" if none.
-- `pub func set(key: string, value: string) -> bool` — set: Sets an environment variable. Returns true on success.
+- `pub func set_var(key: string, value: string) -> bool` — set_var: Sets an environment variable. Returns true on success.
 
 ## `errors` (6)
 
@@ -181,21 +180,18 @@
 - `pub func iter_count(arr: List<string>, value: string) -> i32` — iter_count: Returns the number of elements equal to value.
 - `pub func iter_unique(arr: List<string>) -> List<string>` — iter_unique: Returns a new list with duplicates removed (first occurrence wins).
 
-## `json` (11)
+## `json` (8)
 
 - `pub func get_string(json: string, key: string) -> string` — get_string: Gets a string field from a JSON object by key.
-- `pub func get_int(json: string, key: string) -> i64` — get_int: Gets an integer field from a JSON object by key.
 - `pub func get_element(json: string, index: i32) -> string` — get_element: Gets the element at index from a JSON array.
 - `pub func get_bool(json: string, key: string) -> Result<bool, string>` — get_bool: Gets a boolean field from a JSON object by key. Returns Ok(true/false) if key exists, Err if key missing or not boolean.
-- `pub func get_float(json: string, key: string) -> Result<f64, string>` — get_float: Gets a float field from a JSON object by key. SD-12 (0.31.51b): returns Result — RFC 8259 rejects NaN/Inf.
-- `pub func has_key(json: string, key: string) -> bool` — has_key: Returns true if the JSON object contains the given key.
 - `pub func is_valid_json(s: string) -> bool` — is_valid_json: Returns true if s is syntactically valid JSON.
 - `pub func to_string_pretty(json: string) -> string` — to_string_pretty: Pretty-prints a JSON string with indentation. NOTE (batch5-04 P3): this is still a compatibility placeholder and does NOT actually reformat the JSON yet — it returns the input unchanged. Do not rely on it for pretty output; prefer `to_string` until a real pretty-printer is implemented.
 - `pub func get_object(json: string, key: string) -> string` — get_object: Gets a nested JSON object by key as a string.
 - `pub func get_array(json: string, key: string) -> string` — get_array: Gets a nested JSON array by key as a string.
 - `pub func array_length(json: string) -> i32` — array_length: Returns the number of elements in a JSON array.
 
-## `maps` (16)
+## `maps` (15)
 
 - `pub func new() -> Record` — new: Creates an empty Record (map).
 - `pub func get(m: Record, key: string) -> (bool, Any)` — get: Looks up key in map m. Returns (found, value).
@@ -204,7 +200,6 @@
 - `pub func remove(m: Record, key: string) -> Record` — remove: Removes key from map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
 - `pub func size(m: Record) -> i32` — size: Returns the number of entries in map m.
 - `pub func from_list(pairs: List<(string, Any)>) -> Record` — from_list: Creates a map from a list of (key, value) pairs.
-- `pub func is_empty(m: Record) -> bool` — is_empty: Returns true if map m has 0 entries.
 - `pub func get_or_default(m: Record, key: string, default: Any) -> Any` — get_or_default: Looks up key, returns default if not found.
 - `pub func merge(a: Record, b: Record) -> Record` — merge: Returns a new map with all entries from a and b (b overwrites a).
 - `pub func to_list(m: Record) -> List<(string, Any)>` — to_list: Converts a map to a list of (key, value) pairs.
@@ -214,7 +209,7 @@
 - `pub func pick(m: Record, ks: List<string>) -> Record` — pick: Returns a new map with only the specified keys.
 - `pub func omit(m: Record, ks: List<string>) -> Record` — omit: Returns a new map without the specified keys.
 
-## `mymath` (62)
+## `mymath` (61)
 
 - `pub func abs(x: i32) -> i32` — abs: Absolute value for integers.
 - `pub func abs_float(x: f64) -> f64` — abs_float: Absolute value for floats.
@@ -223,7 +218,6 @@
 - `pub func factorial(n: i32) -> i32` — factorial: Iterative factorial of n; returns -1 for n < 0 or n > 12 (13! exceeds i32::MAX).
 - `pub func fibonacci(n: i32) -> i32` — fibonacci: Returns the nth Fibonacci number (F_0 = 0, F_1 = 1).
 - `pub func is_prime(n: i32) -> bool` — is_prime: Returns true if n is a prime number.
-- `pub func random_int(lo: i32, hi: i32) -> i32` — random_int: Returns random integer in [lo, hi).
 - `pub func mod_pow(base: i32, exp: i32, modulus: i32) -> i32` — mod_pow: Modular exponentiation: (base^exp) % modulus.
 - `pub func deg_to_rad(degrees: f64) -> f64` — deg_to_rad: Converts degrees to radians.
 - `pub func rad_to_deg(radians: f64) -> f64` — rad_to_deg: Converts radians to degrees.
@@ -361,14 +355,15 @@
 - `pub func map_result<T, E, U>(result: Result<T, E>, f: func(T) -> U) -> Result<U, E>` — map_result: Applies f to the Ok value, preserving Err.
 - `pub func map_err_result<T, E, F>(result: Result<T, E>, f: func(E) -> F) -> Result<T, F>` — map_err_result: Applies f to the Err value, preserving Ok.
 
-## `set` (6)
+## `set` (7)
 
-- `pub func size(s: Set) -> i32` — Free-function wrappers (S-H8) matching documented set API. size: Number of elements in the set.
-- `pub func is_empty(s: Set) -> bool` — is_empty: True when the set has no elements.
-- `pub func contains(s: Set, value: Any) -> bool` — contains: True when value is a member of the set.
 - `pub func insert(s: Set, value: Any) -> Set` — insert: Returns a set with value added.
-- `pub func remove(s: Set, value: Any) -> Set` — remove: Returns a set with value removed.
-- `pub func to_list(s: Set) -> List` — to_list: Converts the set to a list of elements.
+- `pub func set_size(s: Set) -> i32` — set_size: Number of elements in the set.
+- `pub func set_is_empty(s: Set) -> bool` — set_is_empty: True when the set has no elements.
+- `pub func set_contains(s: Set, value: Any) -> bool` — set_contains: True when value is a member of the set.
+- `pub func set_insert(s: Set, value: Any) -> Set` — set_insert: Returns a set with value added.
+- `pub func set_remove(s: Set, value: Any) -> Set` — set_remove: Returns a set with value removed.
+- `pub func set_to_list(s: Set) -> List` — set_to_list: Converts the set to a list of elements.
 
 ## `strings` (48)
 
@@ -441,9 +436,9 @@
 
 ## `text` (7)
 
-- `pub func is_blank(s: string) -> bool` — is_blank: Returns true if s is empty or whitespace-only. Duplicate of strings::is_blank — kept for compatibility.
+- `pub func text_is_blank(s: string) -> bool` — text_is_blank: Returns true if s is empty or whitespace-only. Duplicate of strings::is_blank — kept for compatibility.
 - `pub func is_numeric(s: string) -> bool` — is_numeric: Returns true if s parses as an integer.
-- `pub func count_lines(s: string) -> i32` — count_lines: Returns the number of lines in s. Duplicate of strings::count_lines — kept for compatibility.
+- `pub func text_count_lines(s: string) -> i32` — text_count_lines: Returns the number of lines in s. Duplicate of strings::count_lines — kept for compatibility.
 - `pub func slugify(s: string) -> string` — slugify: Converts s to lowercase with hyphens.
 - `pub func indent_text(s: string, n: i32) -> string` — indent_text: Prepends n spaces to each line of s. Duplicate of strings::indent — kept for compatibility.
 - `pub func wrap_text(s: string, width: i32) -> List<string>` — wrap_text: Wraps s to width columns, returns list of lines.

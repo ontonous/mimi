@@ -310,12 +310,6 @@ pub func is_prime(n: i32) -> bool {
     true
 }
 
-// random_int: Returns random integer in [lo, hi).
-pub func random_int(lo: i32, hi: i32) -> i32 {
-    let ri_span = hi - lo
-    if ri_span <= 0 { return lo }
-    to_int(floor(random() * to_float(ri_span))) + lo
-}
 
 // mod_pow: Modular exponentiation: (base^exp) % modulus.
 pub func mod_pow(base: i32, exp: i32, modulus: i32) -> i32 {
@@ -625,7 +619,7 @@ pub func random_bernoulli(p: f64) -> bool {
 pub func random_int_range(lo: i32, hi: i32) -> i32 {
     let span = hi - lo
     if span <= 0 { return lo }
-    random_int(lo, hi)
+    to_int(floor(random() * to_float(span))) + lo
 }
 
 // ---------------------------------------------------------------------------

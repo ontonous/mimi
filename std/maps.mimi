@@ -101,10 +101,17 @@ impl MapExt for Record {
         result
     }
     func omit(ks: List<string>) -> Record {
+        // 0.39.136: membership is spelled inline (not via a bare `contains`)
+        // so this body never depends on which module's `contains` wins name
+        // resolution after a merge — builtins and stdlib share that name.
         let all_keys = keys(self)
         let mut result = map_from_list(to_list(self))
         for ok in all_keys {
-            if contains(ks, ok) { result = map_remove(result, ok) }
+            let mut found = false
+            for k2 in ks {
+                if !found && k2 == ok { found = true }
+            }
+            if found { result = map_remove(result, ok) }
         }
         result
     }
@@ -151,10 +158,6 @@ pub func from_list(pairs: List<(string, Any)>) -> Record {
     map_from_list(pairs)
 }
 
-// is_empty: Returns true if map m has 0 entries.
-pub func is_empty(m: Record) -> bool {
-    map_size(m) == 0
-}
 
 // get_or_default: Looks up key, returns default if not found.
 pub func get_or_default(m: Record, key: string, default: Any) -> Any {
@@ -232,10 +235,15 @@ pub func pick(m: Record, ks: List<string>) -> Record {
 
 // omit: Returns a new map without the specified keys.
 pub func omit(m: Record, ks: List<string>) -> Record {
+    // Same inline-membership rationale as the method form above.
     let all_keys = keys(m)
     let mut result = map_from_list(to_list(m))
     for ok in all_keys {
-        if contains(ks, ok) { result = map_remove(result, ok) }
+        let mut found = false
+        for k2 in ks {
+            if !found && k2 == ok { found = true }
+        }
+        if found { result = map_remove(result, ok) }
     }
     result
 }

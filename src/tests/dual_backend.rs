@@ -14415,15 +14415,18 @@ fn dual_set_stdlib_wrapper_no_trait_recursion() {
     .expect("read std/set.mimi");
     let src = format!(
         r#"{stdlib}
+// 0.39.136 stdlib consolidation: the free-function shims are gone; the
+// builtin-precedence-before-trait-dispatch guarantee this test pins is now
+// exercised through the method surface itself.
 func main() -> i32 {{
     let s = {{7, 9}}
-    println(contains(s, 7))
-    println(contains(s, 8))
-    println(size(s))
-    let s2 = insert(s, 11)
-    println(size(s2))
-    let s3 = remove(s2, 7)
-    println(contains(s3, 7))
+    println(set_contains(s, 7))
+    println(set_contains(s, 8))
+    println(set_size(s))
+    let s2 = set_insert(s, 11)
+    println(set_size(s2))
+    let s3 = set_remove(s2, 7)
+    println(set_contains(s3, 7))
     0
 }}
 "#
