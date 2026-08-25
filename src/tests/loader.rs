@@ -639,3 +639,30 @@ func main() -> i32 {
 
     cleanup(&dir);
 }
+
+#[test]
+fn e0401_suggests_importing_stdlib_module() {
+    // 0.39.136 DX: "undefined function 'print_line'" must point at the
+    // stdlib module that exports it — the merge-era top confusion was
+    // builtin-vs-module printing with no hint to `use std::io`.
+    let src = r#"
+func main() -> i64 {
+    print_line("hi")
+    0
+}
+"#;
+    let file = crate::parser::Parser::new(crate::lexer::Lexer::new(src).tokenize().expect("lex"))
+        .parse_file_with_recovery()
+        .0;
+    let errors = match crate::core::check(&file) {
+        Err(errors) => errors,
+        Ok(_) => panic!("expected E0401"),
+    };
+    assert!(
+        errors.iter().any(
+            |e| e.code.as_deref() == Some(crate::diagnostic::codes::E0401)
+                && e.help.as_deref().unwrap_or("").contains("std::io")
+        ),
+        "expected std::io import help, got: {errors:?}"
+    );
+}

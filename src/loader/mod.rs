@@ -97,6 +97,44 @@ pub fn sketch_parser_for_path(
 // ── stdlib_dir (pure) ──────────────────────────────────────────────────
 
 /// Get the path to the built-in standard library directory.
+/// 0.39.136 DX: which stdlib module exports `pub func name`? Used by the
+/// checker's E0401 help ("available from std::X — add `use std::X`").
+/// Linear scan over a small directory; only called on the error path.
+pub fn stdlib_module_exporting(name: &str) -> Option<String> {
+    let dir = stdlib_dir()?;
+    let mut modules: Vec<String> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension()?.to_str()? == "mimi" {
+                p.file_stem()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    modules.sort();
+    for module in modules {
+        let path = dir.join(format!("{module}.mimi"));
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            for line in src.lines() {
+                if line.starts_with("pub func ") {
+                    let rest = &line["pub func ".len()..];
+                    let fname: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if fname == name {
+                        return Some(module);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn stdlib_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("MIMI_STDLIB") {
         // B1: validate MIMI_STDLIB to prevent code injection via path traversal.

@@ -3003,6 +3003,37 @@ impl<'a> Checker<'a> {
                 // Collect all known function names for "did you mean?" suggestions
                 let candidates: Vec<String> = self.funcs.keys().cloned().collect();
                 let suggestion = suggest_name(name, &candidates, 3);
+                // 0.39.136 DX: when the name exists in an unimported stdlib
+                // module, say so — "undefined function 'print_line'" without
+                // "add `use std::io`" was the top merge-era confusion.
+                if self.use_imports.is_empty()
+                    || !self.use_imports.iter().any(|m| {
+                        let qualified = format!("{m}::{name}");
+                        self.funcs.contains_key(&qualified)
+                    })
+                {
+                    if let Some(module) = crate::loader::stdlib_module_exporting(name) {
+                        let already = self.use_imports.contains(&module);
+                        let help = if already {
+                            format!(
+                                "'{name}' is exported by std::{module}, which is already                                  imported — check the spelling or argument count"
+                            )
+                        } else {
+                            format!(
+                                "'{name}' is available from std::{module} — add `use std::{module}`"
+                            )
+                        };
+                        self.errors.push(
+                            Diagnostic::error_code(
+                                crate::diagnostic::codes::E0401,
+                                format!("undefined function '{}'", name),
+                                self.diagnostic_span(),
+                            )
+                            .with_help(help),
+                        );
+                        return Type::TyErr;
+                    }
+                }
                 if let Some(suggested) = suggestion {
                     self.errors.push(
                         Diagnostic::error_code(
