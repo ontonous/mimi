@@ -674,7 +674,7 @@ fn audit2_pm_sketch_recovery_orphan_brace_makes_progress() {
             .tokenize()
             .expect("lex sketch source");
         let parser = crate::parser::Parser::splice(
-            &tokens,
+            &std::rc::Rc::new(tokens),
             0,
             crate::parser::ParseMode::Sketch,
             true,

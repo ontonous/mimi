@@ -157,7 +157,7 @@ impl Parser {
     /// operand, keep the operator reading; otherwise (`not + 1`, `println(not)`,
     /// `not;`) treat it as an identifier reference.
     fn not_is_unary_operator(&self) -> bool {
-        let Some(next) = self.tokens.get(self.pos + 1) else {
+        let Some(next) = self.tokens().get(self.pos + 1) else {
             return false;
         };
         // `not()` is a function call with an empty argument list, not the
@@ -165,7 +165,7 @@ impl Parser {
         // build `Expr::Ident("not")` and the normal postfix call handle it.
         if matches!(next.kind, TokenKind::LParen)
             && self
-                .tokens
+                .tokens()
                 .get(self.pos + 2)
                 .is_some_and(|t| matches!(t.kind, TokenKind::RParen))
         {
@@ -257,8 +257,8 @@ impl Parser {
             }
             TokenKind::Old => {
                 // Soft keyword: old(expr) is contract snapshot, bare 'old' is identifier
-                if self.pos + 1 < self.tokens.len()
-                    && self.tokens[self.pos + 1].kind == TokenKind::LParen
+                if self.pos + 1 < self.tokens().len()
+                    && self.tokens()[self.pos + 1].kind == TokenKind::LParen
                 {
                     self.advance(); // consume 'old'
                     self.advance(); // consume '('
@@ -339,14 +339,17 @@ impl Parser {
             else_: tail,
         };
         for (if_idx, end_idx, cond, then_) in iter {
-            let Some(first) = self.tokens.get(if_idx) else {
+            let Some(first) = self.tokens().get(if_idx) else {
                 return Err(ParseError::new(
                     "internal: recorded `if` token index out of range",
                     self.peek().line,
                     self.peek().col,
                 ));
             };
-            let last = self.tokens.get(end_idx.saturating_sub(1)).unwrap_or(first);
+            let last = self
+                .tokens()
+                .get(end_idx.saturating_sub(1))
+                .unwrap_or(first);
             // Per-link span: this link's own `if` token .. this link's own
             // tail. Using the WHOLE chain's last token for every link made
             // every elif share one span → identical NodeIds → "duplicate
@@ -609,8 +612,8 @@ impl Parser {
             // INSIDE the postfix loop so they work after any expression and
             // can be chained: `a?.b?.c`, `foo()?.bar`, `arr[0]?.name`.
             if self.at(&TokenKind::Question) {
-                let next_is_dot = self.pos + 1 < self.tokens.len()
-                    && self.tokens[self.pos + 1].kind == TokenKind::Dot;
+                let next_is_dot = self.pos + 1 < self.tokens().len()
+                    && self.tokens()[self.pos + 1].kind == TokenKind::Dot;
                 if next_is_dot {
                     self.advance(); // consume `?`
                     self.advance(); // consume `.`
@@ -725,7 +728,8 @@ impl Parser {
             _ => return None,
         };
         // Check if followed by `=`
-        if save + 1 < self.tokens.len() && matches!(&self.tokens[save + 1].kind, TokenKind::Eq) {
+        if save + 1 < self.tokens().len() && matches!(&self.tokens()[save + 1].kind, TokenKind::Eq)
+        {
             Some(name)
         } else {
             None
@@ -829,12 +833,12 @@ impl Parser {
     fn parse_ident_primary(&mut self, name: String) -> Result<Expr, ParseError> {
         let start_pos = self.pos;
         let next_is_bang = self
-            .tokens
+            .tokens()
             .get(self.pos + 1)
             .is_some_and(|t| matches!(t.kind, TokenKind::Bang));
         if name == "quote" && next_is_bang {
             let next = self
-                .tokens
+                .tokens()
                 .get(self.pos + 1)
                 .expect("quote! lookahead token");
             let (line, col) = (next.line, next.col);

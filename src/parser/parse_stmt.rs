@@ -22,10 +22,10 @@ impl Parser {
     /// the match guard falls through to the expression path.
     fn delegate_followed_by_abolished_kw(&self) -> bool {
         let next = self.pos + 1;
-        if next >= self.tokens.len() {
+        if next >= self.tokens().len() {
             return false;
         }
-        match &self.tokens[next].kind {
+        match &self.tokens()[next].kind {
             TokenKind::View | TokenKind::Mutate => true,
             // `consume` was removed from the keyword table (softened to Ident).
             TokenKind::Ident(s) => s == "consume",
@@ -38,8 +38,8 @@ impl Parser {
     /// identifier is followed (after optional newlines) by a block.
     fn parasteps_followed_by_block(&self) -> bool {
         let mut i = self.pos + 1;
-        while i < self.tokens.len() {
-            match &self.tokens[i].kind {
+        while i < self.tokens().len() {
+            match &self.tokens()[i].kind {
                 TokenKind::Newline => i += 1,
                 TokenKind::LBrace => return true,
                 _ => return false,
@@ -54,7 +54,7 @@ impl Parser {
         // the existing `TokenKind::Parasteps` arm without reserving the word in
         // the global keyword table.
         if self.at_ident_name("parasteps") && self.parasteps_followed_by_block() {
-            self.tokens[self.pos].kind = TokenKind::Parasteps;
+            self.promote_current_kind(TokenKind::Parasteps);
         }
         match self.peek_kind() {
             TokenKind::Let | TokenKind::Const => self.parse_let(),
@@ -103,8 +103,8 @@ impl Parser {
                 if !self.is_sketch() {
                     return Err(ParseError::new(
                         "`...` placeholder is not allowed in production mode (.mimi); implement or use sketch mode (.mms)",
-                        self.tokens[self.pos.saturating_sub(1)].line,
-                        self.tokens[self.pos.saturating_sub(1)].col,
+                        self.tokens()[self.pos.saturating_sub(1)].line,
+                        self.tokens()[self.pos.saturating_sub(1)].col,
                     ));
                 }
                 self.match_semi();
@@ -155,7 +155,7 @@ impl Parser {
                 // (delegate_followed_by_abolished_kw) keeps the clause-2
                 // negative tests green while freeing the identifier.
                 self.advance();
-                let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                let tok = self.tokens()[self.pos.saturating_sub(1)].clone();
                 return Err(ParseError::new(
                     "`delegate` was abolished by architecture amendment clause 2 \
                      (nested Flow delegation removed). Express delegation as an explicit \
@@ -178,8 +178,8 @@ impl Parser {
                          Async FFI timeout (spawn_foreign_task) is planned for 0.2 — FFI calls \
                          are synchronous today. \
                          See devdocs/v0.31/architecture-amendment-1.0.md §条款 10.",
-                        self.tokens[self.pos.saturating_sub(1)].line,
-                        self.tokens[self.pos.saturating_sub(1)].col,
+                        self.tokens()[self.pos.saturating_sub(1)].line,
+                        self.tokens()[self.pos.saturating_sub(1)].col,
                     ));
                 }
                 self.expect(TokenKind::RParen, "`)`")?;

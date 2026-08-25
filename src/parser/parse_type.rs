@@ -387,15 +387,16 @@ impl Parser {
                     // newlines and ident-like tokens; stop at the first other
                     // token (`{`/`(`/...), then require `:` for a record.
                     let mut pos = self.pos + 1;
-                    while pos < self.tokens.len() {
-                        match &self.tokens[pos].kind {
+                    while pos < self.tokens().len() {
+                        match &self.tokens()[pos].kind {
                             TokenKind::Colon => break,
                             TokenKind::Newline => pos += 1,
                             kind if super::helpers::is_ident_like_kind(kind) => pos += 1,
                             _ => break,
                         }
                     }
-                    pos < self.tokens.len() && matches!(&self.tokens[pos].kind, TokenKind::Colon)
+                    pos < self.tokens().len()
+                        && matches!(&self.tokens()[pos].kind, TokenKind::Colon)
                 } else {
                     false
                 };
@@ -487,8 +488,8 @@ impl Parser {
         // inside the variant payload and misclassified the enum as a record.
         if super::helpers::is_ident_like_kind(self.peek_kind()) {
             let mut pos = self.pos + 1;
-            while pos < self.tokens.len() {
-                match &self.tokens[pos].kind {
+            while pos < self.tokens().len() {
+                match &self.tokens()[pos].kind {
                     TokenKind::Colon => return true,
                     TokenKind::Newline => {}
                     kind if super::helpers::is_ident_like_kind(kind) => {}

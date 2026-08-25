@@ -85,8 +85,8 @@ impl Parser {
                 continue;
             }
             if !(self.at(&TokenKind::Hash)
-                && self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].kind == TokenKind::LBracket)
+                && self.pos + 1 < self.tokens().len()
+                && self.tokens()[self.pos + 1].kind == TokenKind::LBracket)
             {
                 break;
             }
@@ -275,13 +275,13 @@ impl Parser {
                 // Check if this is `extern "C" func` (export) or `extern "C" { ... }` (import)
                 // Peek at the token AFTER `extern` to see if it's a string literal
                 let has_abi_string = self
-                    .tokens
+                    .tokens()
                     .get(self.pos + 1)
                     .map(|t| matches!(t.kind, TokenKind::String(_)))
                     .unwrap_or(false);
                 if has_abi_string {
                     // Peek past the string to see if next is `func`
-                    let after_abi = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+                    let after_abi = self.tokens().get(self.pos + 2).map(|t| &t.kind);
                     if matches!(after_abi, Some(TokenKind::Func)) {
                         if let Some(token) = &no_panic_attribute_token {
                             return Err(self.attribute_error(
@@ -292,7 +292,8 @@ impl Parser {
                         // extern "C" func ... { body } — Mimi → C export
                         self.advance(); // consume `extern`
                         let abi = {
-                            let tok = self.advance().clone(); // consume string
+                            let tok = self.peek().clone(); // consume string
+                            self.advance();
                             if let TokenKind::String(s) = &tok.kind {
                                 s.clone()
                             } else {
@@ -321,7 +322,7 @@ impl Parser {
                         (t.line, t.col)
                     };
                     let name = self
-                        .tokens
+                        .tokens()
                         .get(self.pos + 1)
                         .and_then(|t| match &t.kind {
                             TokenKind::Ident(n) => Some(n.clone()),
@@ -334,7 +335,7 @@ impl Parser {
                     let mut depth = 0usize;
                     let mut saw_brace = false;
                     while !self.at(&TokenKind::Eof) {
-                        let kind = self.tokens[self.pos].kind.clone();
+                        let kind = self.tokens()[self.pos].kind.clone();
                         self.advance();
                         match kind {
                             TokenKind::LBrace => {
@@ -549,8 +550,8 @@ impl Parser {
             // SD-3: parse optional per-function #[errno] attribute
             let mut func_errno = block_errno;
             while self.at(&TokenKind::Hash)
-                && self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].kind == TokenKind::LBracket
+                && self.pos + 1 < self.tokens().len()
+                && self.tokens()[self.pos + 1].kind == TokenKind::LBracket
             {
                 self.advance(); // skip #
                 self.advance(); // skip [
@@ -1005,8 +1006,8 @@ impl Parser {
             let kind = match ann_name.as_str() {
                 "mailbox" => {
                     if matches!(self.peek_kind(), TokenKind::Ident(_))
-                        && self.pos + 1 < self.tokens.len()
-                        && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        && self.pos + 1 < self.tokens().len()
+                        && self.tokens()[self.pos + 1].kind == TokenKind::Eq
                     {
                         self.expect_ident()?; // skip "depth"
                         self.expect(TokenKind::Eq, "`=`")?;
@@ -1041,8 +1042,8 @@ impl Parser {
                 }
                 "max_children" => {
                     if matches!(self.peek_kind(), TokenKind::Ident(_))
-                        && self.pos + 1 < self.tokens.len()
-                        && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                        && self.pos + 1 < self.tokens().len()
+                        && self.tokens()[self.pos + 1].kind == TokenKind::Eq
                     {
                         self.expect_ident()?; // skip "children"
                         self.expect(TokenKind::Eq, "`=`")?;
@@ -1122,7 +1123,7 @@ impl Parser {
             // promoted to the internal declaration token so `fault ErrorType`
             // keeps its existing parse path.
             if self.at_ident_name("fault") {
-                self.tokens[self.pos].kind = TokenKind::Fault;
+                self.promote_current_kind(TokenKind::Fault);
             }
             // v0.34.1: `@transactional` abolished by amendment clause 3 (WAL).
             // Check for `persistent` modifier or `@` annotation.
@@ -1132,7 +1133,7 @@ impl Parser {
                 self.advance();
                 let ann_name = self.expect_ident()?;
                 if ann_name == "transactional" {
-                    let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                    let tok = self.tokens()[self.pos.saturating_sub(1)].clone();
                     return Err(ParseError::new(
                         "`@transactional` was abolished by architecture amendment clause 3 \
                          (WAL/@transactional removed). Remove the attribute; persistent fields \
@@ -1147,7 +1148,7 @@ impl Parser {
                 // opaquely at `expect(LParen)` with "expected `(`". Reject with
                 // the clause reference, mirroring @transactional.
                 if ann_name == "metadata_shadow" {
-                    let tok = self.tokens[self.pos.saturating_sub(1)].clone();
+                    let tok = self.tokens()[self.pos.saturating_sub(1)].clone();
                     return Err(ParseError::new(
                         "`@metadata_shadow` was abolished by architecture amendment clause 3 \
                          (metadata shadow fields removed). Remove the attribute.",
@@ -1164,8 +1165,8 @@ impl Parser {
                 let kind = match ann_name.as_str() {
                     "mailbox" => {
                         if matches!(self.peek_kind(), TokenKind::Ident(_))
-                            && self.pos + 1 < self.tokens.len()
-                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                            && self.pos + 1 < self.tokens().len()
+                            && self.tokens()[self.pos + 1].kind == TokenKind::Eq
                         {
                             self.expect_ident()?;
                             self.expect(TokenKind::Eq, "`=`")?;
@@ -1199,8 +1200,8 @@ impl Parser {
                     }
                     "max_children" => {
                         if matches!(self.peek_kind(), TokenKind::Ident(_))
-                            && self.pos + 1 < self.tokens.len()
-                            && self.tokens[self.pos + 1].kind == TokenKind::Eq
+                            && self.pos + 1 < self.tokens().len()
+                            && self.tokens()[self.pos + 1].kind == TokenKind::Eq
                         {
                             self.expect_ident()?;
                             self.expect(TokenKind::Eq, "`=`")?;

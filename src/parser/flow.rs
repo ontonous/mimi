@@ -102,41 +102,39 @@ macro_rules! run_flow {
         }
     }};
     // Recovery mode: collect errors and preserve partial AST.
-    // PR-C2: on a hard transition error, keep already-parsed imports/items
-    // instead of returning an empty File + single error.
+    //
+    // 0.39.136 perf: NO per-step acc snapshot. Every item/import-level
+    // failure inside `transition` is already converted into collected errors
+    // plus an `Error` output when `recovery` is set (see the arms below), so
+    // the driver's `Err` arm is structurally unreachable in this mode. The
+    // old per-step deep clone of all accumulated items was O(items²) across
+    // a file and dominated `mimi check` on large multi-item sources.
+    // Partial-AST preservation is unaffected: successful items stay
+    // accumulated in `acc` across steps.
     (recovery $state:expr, $mode:expr, $tokens:expr, $source_id:expr) => {{
         let mut __state = $state;
         loop {
             match __state {
                 FlowState::Done(file, errors) => break (file, errors),
-                __s => {
-                    // Snapshot partial results before moving state into transition.
-                    let (imports, items, mut errors) = match &__s {
-                        FlowState::Init { acc, .. }
-                        | FlowState::Imports { acc, .. }
-                        | FlowState::Items { acc, .. } => {
-                            (acc.imports.clone(), acc.items.clone(), acc.errors.clone())
-                        }
-                        FlowState::Done(file, errors) => {
-                            (file.imports.clone(), file.items.clone(), errors.clone())
-                        }
-                    };
-                    match __s.transition(&FlowEvent::Step, $mode, $tokens, $source_id) {
-                        Ok((new_state, _)) => __state = new_state,
-                        Err(e) => {
-                            errors.push(e);
-                            break (
-                                File {
-                                    sources: crate::span::SourceRegistry::default(),
-                                    imports,
-                                    items,
-                                    implicit_single: false,
-                                },
-                                errors,
-                            );
-                        }
+                __s => match __s.transition(&FlowEvent::Step, $mode, $tokens, $source_id) {
+                    Ok((new_state, _)) => __state = new_state,
+                    Err(e) => {
+                        debug_assert!(
+                            false,
+                            "unreachable in recovery mode: item-level failures are \
+                             collected as errors before returning"
+                        );
+                        break (
+                            File {
+                                sources: crate::span::SourceRegistry::default(),
+                                imports: Vec::new(),
+                                items: Vec::new(),
+                                implicit_single: false,
+                            },
+                            vec![e],
+                        );
                     }
-                }
+                },
             }
         }
     }};
@@ -234,7 +232,7 @@ fn at_slice(tokens: &[Token], pos: usize, kind: &TokenKind) -> bool {
 /// This is the bridge between Flow state and the existing recursive descent
 /// parser. The Vec<Token> is cloned (cheap: ~24 bytes per token).
 fn sub_parser(
-    tokens: &[Token],
+    tokens: &std::rc::Rc<Vec<Token>>,
     pos: usize,
     mode: ParseMode,
     recovery: bool,
@@ -249,7 +247,7 @@ fn sub_parser(
 // Returns (result, statement-level errors collected during recovery, final position).
 
 fn parse_one_import(
-    tokens: &[Token],
+    tokens: &std::rc::Rc<Vec<Token>>,
     pos: usize,
     mode: ParseMode,
     recovery: bool,
@@ -271,14 +269,14 @@ fn parse_one_import(
 }
 
 fn parse_one_item(
-    tokens: &[Token],
+    tokens: &std::rc::Rc<Vec<Token>>,
     pos: usize,
     mode: ParseMode,
     recovery: bool,
     source_id: SourceId,
 ) -> (Result<Item, ParseError>, Vec<ParseError>, usize) {
     let mut p = sub_parser(tokens, pos, mode, recovery, source_id);
-    let original_token_count = p.tokens.len();
+    let original_token_count = p.tokens().len();
     let result = p.parse_item().map_err(|error| error.with_source(source_id));
     let stmt_errors = if recovery {
         std::mem::take(&mut p.errors)
@@ -289,11 +287,12 @@ fn parse_one_item(
         Vec::new()
     };
     // Recursive descent may split a `>>` token into two `>` tokens while
-    // parsing nested generic types. The sub-parser owns a cloned token vector,
-    // so its dense position cannot be copied back to the original Flow token
-    // slice without removing those inserted slots. Otherwise the next item can
-    // start one token late and silently lose a modifier such as `pub`.
-    let inserted_tokens = p.tokens.len().saturating_sub(original_token_count);
+    // parsing nested generic types. That split materializes the sub-parser's
+    // owned token copy and inserts a slot, so its dense position cannot be
+    // copied back to the original Flow token slice without removing those
+    // inserted slots. Otherwise the next item can start one token late and
+    // silently lose a modifier such as `pub`.
+    let inserted_tokens = p.tokens().len().saturating_sub(original_token_count);
     let original_pos = p.pos.saturating_sub(inserted_tokens);
     (result, stmt_errors, original_pos)
 }
@@ -349,7 +348,7 @@ impl FlowState {
         self,
         event: &FlowEvent,
         mode: ParseMode,
-        tokens: &[Token],
+        tokens: &std::rc::Rc<Vec<Token>>,
         source_id: SourceId,
     ) -> Result<(Self, Option<FlowOutput>), ParseError> {
         match (self, event) {
@@ -507,6 +506,15 @@ pub fn flow_parse(
     source_id: SourceId,
     source_registry: crate::span::SourceRegistry,
 ) -> Result<File, ParseError> {
+    flow_parse_shared(std::rc::Rc::new(tokens), mode, source_id, source_registry)
+}
+
+fn flow_parse_shared(
+    tokens: std::rc::Rc<Vec<Token>>,
+    mode: ParseMode,
+    source_id: SourceId,
+    source_registry: crate::span::SourceRegistry,
+) -> Result<File, ParseError> {
     let mut file = run_flow!(flow_init!(false), mode, &tokens, source_id)?;
     file.sources = source_registry;
     // v0.29.22: progressive Typestate — inject implicit Main/Single for scripts.
@@ -520,6 +528,15 @@ pub fn flow_parse(
 /// After parsing, expands the flow transfer matrix (+1 Fault fallback).
 pub fn flow_parse_with_recovery(
     tokens: Vec<Token>,
+    mode: ParseMode,
+    source_id: SourceId,
+    source_registry: crate::span::SourceRegistry,
+) -> (File, Vec<ParseError>) {
+    flow_parse_with_recovery_shared(std::rc::Rc::new(tokens), mode, source_id, source_registry)
+}
+
+fn flow_parse_with_recovery_shared(
+    tokens: std::rc::Rc<Vec<Token>>,
     mode: ParseMode,
     source_id: SourceId,
     source_registry: crate::span::SourceRegistry,

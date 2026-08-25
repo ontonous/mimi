@@ -137,11 +137,11 @@ impl Parser {
     /// Token end positions come from the lexer, so this remains correct for
     /// escaped and multi-line literals instead of guessing from decoded text.
     pub(crate) fn consumed_span(&self, start_pos: usize) -> Span {
-        let Some(first) = self.tokens.get(start_pos) else {
+        let Some(first) = self.tokens().get(start_pos) else {
             return Span::UNKNOWN.with_source(self.source_id);
         };
         let last_index = self.pos.saturating_sub(1).max(start_pos);
-        let last = self.tokens.get(last_index).unwrap_or(first);
+        let last = self.tokens().get(last_index).unwrap_or(first);
         Span::new(first.line, first.col, last.end_line, last.end_col).with_source(self.source_id)
     }
 
@@ -154,7 +154,7 @@ impl Parser {
     }
 
     pub(crate) fn peek(&self) -> &Token {
-        if self.pos >= self.tokens.len() {
+        if self.pos >= self.tokens().len() {
             static EOF: Token = Token {
                 kind: TokenKind::Eof,
                 line: 0,
@@ -164,7 +164,7 @@ impl Parser {
             };
             &EOF
         } else {
-            &self.tokens[self.pos]
+            &self.tokens()[self.pos]
         }
     }
 
@@ -174,14 +174,26 @@ impl Parser {
 
     pub(crate) fn advance(&mut self) -> &Token {
         // Mirror peek()'s EOF fallback: if the parser is already past the
-        // final token, return a synthetic EOF instead of panicking on a
-        // direct index (batch1 P2-1).
-        let idx = self.pos.min(self.tokens.len().saturating_sub(1));
-        let tok = &self.tokens[idx];
-        if !matches!(tok.kind, TokenKind::Eof) {
+        // final token, return that synthetic EOF instead of panicking on a
+        // direct index (batch1 P2-1). Position is updated before borrowing
+        // the result to keep borrowck happy.
+        let at_eof = matches!(
+            self.tokens().get(self.pos).map(|t| &t.kind),
+            Some(TokenKind::Eof)
+        );
+        if !at_eof {
             self.pos = self.pos.saturating_add(1);
         }
-        tok
+        let idx = self.pos.min(self.tokens().len().saturating_sub(1));
+        &self.tokens()[idx]
+    }
+
+    /// Contextual-keyword promotion: rewrite the CURRENT token's kind
+    /// (`parasteps`→Parasteps, `fault`→Fault). Materializes the owned copy.
+    pub(crate) fn promote_current_kind(&mut self, kind: TokenKind) {
+        self.materialize();
+        let idx = self.pos.min(self.tokens().len() - 1);
+        self.owned_tokens.as_mut().unwrap()[idx].kind = kind;
     }
 
     pub(crate) fn at(&self, kind: &TokenKind) -> bool {
@@ -211,9 +223,10 @@ impl Parser {
         }
     }
 
-    pub(crate) fn expect(&mut self, kind: TokenKind, expected: &str) -> Result<&Token, ParseError> {
+    pub(crate) fn expect(&mut self, kind: TokenKind, expected: &str) -> Result<(), ParseError> {
         if self.at(&kind) {
-            Ok(self.advance())
+            self.advance();
+            Ok(())
         } else {
             let tok = self.peek();
             Err(ParseError::new(
@@ -225,25 +238,33 @@ impl Parser {
     }
 
     /// Expect `>` or `>>` when closing generic angle brackets.
-    /// `>>` is split into two `>` tokens so nested generics like `List<List<T>>` work.
-    pub(crate) fn expect_gt(&mut self, expected: &str) -> Result<&Token, ParseError> {
+    /// `>>` is split into two `>` reads so nested generics like
+    /// `List<List<T>>` work. 0.39.136: the split is served through the
+    /// one-token overlay instead of inserting into the shared token vector —
+    /// this is what lets every sub-parser share one immutable allocation.
+    pub(crate) fn expect_gt(&mut self, expected: &str) -> Result<Token, ParseError> {
         if self.at(&TokenKind::Gt) {
-            Ok(self.advance())
+            let first = self.peek().clone();
+            self.advance();
+            Ok(first)
         } else if self.at(&TokenKind::Shr) {
-            let original_end_line = self.tokens[self.pos].end_line;
-            let original_end_col = self.tokens[self.pos].end_col;
-            self.tokens[self.pos].kind = TokenKind::Gt;
-            self.tokens[self.pos].end_line = self.tokens[self.pos].line;
-            self.tokens[self.pos].end_col = self.tokens[self.pos].col + 1;
+            self.materialize();
+            let toks = self.owned_tokens.as_mut().unwrap();
+            let p = self.pos.min(toks.len() - 1);
+            let original_end_line = toks[p].end_line;
+            let original_end_col = toks[p].end_col;
+            toks[p].kind = TokenKind::Gt;
+            toks[p].end_line = toks[p].line;
+            toks[p].end_col = toks[p].col + 1;
             let extra = Token {
                 kind: TokenKind::Gt,
-                line: self.tokens[self.pos].line,
-                col: self.tokens[self.pos].col + 1,
+                line: toks[p].line,
+                col: toks[p].col + 1,
                 end_line: original_end_line,
                 end_col: original_end_col,
             };
-            self.tokens.insert(self.pos + 1, extra);
-            Ok(self.advance())
+            toks.insert(p + 1, extra);
+            Ok(self.advance().clone())
         } else {
             let tok = self.peek();
             Err(ParseError::new(

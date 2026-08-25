@@ -94,7 +94,23 @@ pub enum ParseMode {
 }
 
 pub struct Parser {
-    tokens: Vec<Token>,
+    /// 0.39.136 perf: shared, copy-on-splice token storage. The flow driver
+    /// hands EVERY top-level item a sub-parser; with an owned `Vec` that was
+    /// an O(remaining-tokens) clone per item — quadratic in file size (10k
+    /// actor declarations spent minutes in pure `Token` clones). `Rc` makes
+    /// splice O(1); the single legal mutation (`>>` splitting) is served
+    /// through the one-token overlay in `expect_gt` instead of touching this
+    /// vector.
+    /// 0.39.136 perf: shared token storage. The flow driver hands EVERY
+    /// top-level item a sub-parser; with an owned `Vec` that was an
+    /// O(remaining-tokens) clone per item — quadratic across a file (10k
+    /// actor declarations spent minutes in pure `Token` clones). Splicing is
+    /// now O(1). The two rare in-place edits (contextual-keyword promotion
+    /// and `>>` splitting) trigger ONE lazy full copy via `materialize()`,
+    /// restoring the historical owned-Vec behavior verbatim for any file
+    /// that actually needs them.
+    shared_tokens: std::rc::Rc<Vec<Token>>,
+    owned_tokens: Option<Vec<Token>>,
     pos: usize,
     mode: ParseMode,
     recovery_mode: bool,
@@ -162,7 +178,8 @@ impl Parser {
 
     fn with_mode(tokens: Vec<Token>, mode: ParseMode) -> Self {
         Self {
-            tokens,
+            shared_tokens: std::rc::Rc::new(tokens),
+            owned_tokens: None,
             pos: 0,
             mode,
             recovery_mode: false,
@@ -188,7 +205,8 @@ impl Parser {
     #[cfg(test)]
     pub fn new_with_recovery(tokens: Vec<Token>) -> Self {
         Self {
-            tokens,
+            shared_tokens: std::rc::Rc::new(tokens),
+            owned_tokens: None,
             pos: 0,
             mode: ParseMode::Production,
             recovery_mode: true,
@@ -205,14 +223,15 @@ impl Parser {
     /// within state transitions.
     #[doc(hidden)]
     pub(crate) fn splice(
-        tokens: &[Token],
+        tokens: &std::rc::Rc<Vec<Token>>,
         pos: usize,
         mode: ParseMode,
         recovery: bool,
         source_id: SourceId,
     ) -> Self {
         Self {
-            tokens: tokens.to_vec(),
+            shared_tokens: std::rc::Rc::clone(tokens),
+            owned_tokens: None,
             pos,
             mode,
             recovery_mode: recovery,
@@ -224,8 +243,29 @@ impl Parser {
         }
     }
 
+    /// Current token slice — the lazily materialized owned copy when an
+    /// in-place edit has happened, otherwise the shared allocation.
+    #[inline]
+    pub(crate) fn tokens(&self) -> &Vec<Token> {
+        self.owned_tokens.as_ref().unwrap_or(&self.shared_tokens)
+    }
+
+    /// Force the owned copy before an in-place edit (`>>` split or contextual
+    /// keyword promotion). At most one copy per parser instance.
+    #[inline]
+    fn materialize(&mut self) {
+        if self.owned_tokens.is_none() {
+            self.owned_tokens = Some((*self.shared_tokens).clone());
+        }
+    }
+
     pub fn parse_file(self) -> Result<File, ParseError> {
-        flow_parse(self.tokens, self.mode, self.source_id, self.source_registry)
+        flow_parse(
+            (*self.tokens()).clone(),
+            self.mode,
+            self.source_id,
+            self.source_registry,
+        )
     }
 
     #[cfg(test)]
@@ -259,7 +299,12 @@ impl Parser {
     /// Parse a file with error recovery, collecting multiple errors.
     /// Returns the parsed file (possibly partial) and all errors encountered.
     pub fn parse_file_with_recovery(self) -> (File, Vec<ParseError>) {
-        flow_parse_with_recovery(self.tokens, self.mode, self.source_id, self.source_registry)
+        flow_parse_with_recovery(
+            (*self.tokens()).clone(),
+            self.mode,
+            self.source_id,
+            self.source_registry,
+        )
     }
 
     #[cfg(test)]
