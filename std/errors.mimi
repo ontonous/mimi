@@ -60,15 +60,6 @@ pub type CollectionError {
     InvalidSize(i32),       // Invalid size parameter
 }
 
-// NetError: Network operation errors.
-pub type NetError {
-    ConnectionFailed(string),   // Failed to connect
-    Timeout(string),            // Operation timed out
-    DnsError(string),           // DNS resolution failed
-    SocketError(string),        // Socket operation failed
-    ProtocolError(string),      // Protocol violation
-}
-
 // MathError: Mathematical operation errors.
 pub type MathError {
     DivisionByZero,         // Division by zero
@@ -84,7 +75,6 @@ pub type AppError {
     Fs(FsError),            // File system error
     Json(JsonError),        // JSON error
     Collection(CollectionError), // Collection error
-    Net(NetError),          // Network error
     Math(MathError),        // Math error
     Custom(string),         // Custom error message
 }
@@ -108,12 +98,6 @@ impl From<JsonError, AppError> for AppError {
 impl From<CollectionError, AppError> for AppError {
     func from(e: CollectionError) -> AppError {
          Collection(e)
-    }
-}
-
-impl From<NetError, AppError> for AppError {
-    func from(e: NetError) -> AppError {
-         Net(e)
     }
 }
 
@@ -162,17 +146,6 @@ pub func collection_error_to_string(e: CollectionError) -> string {
     }
 }
 
-// net_error_to_string: Convert NetError to a human-readable string.
-pub func net_error_to_string(e: NetError) -> string {
-    match e {
-         ConnectionFailed(msg) => "connection failed: " + msg,
-         Timeout(msg) => "timeout: " + msg,
-         DnsError(msg) => "DNS error: " + msg,
-         SocketError(msg) => "socket error: " + msg,
-         ProtocolError(msg) => "protocol error: " + msg,
-    }
-}
-
 // math_error_to_string: Convert MathError to a human-readable string.
 pub func math_error_to_string(e: MathError) -> string {
     match e {
@@ -190,7 +163,6 @@ pub func app_error_to_string(e: AppError) -> string {
          Fs(fs_err) => fs_error_to_string(fs_err),
          Json(json_err) => json_error_to_string(json_err),
          Collection(coll_err) => collection_error_to_string(coll_err),
-         Net(net_err) => net_error_to_string(net_err),
          Math(math_err) => math_error_to_string(math_err),
          Custom(msg) => msg,
     }

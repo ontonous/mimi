@@ -158,7 +158,6 @@ OVERRIDES: dict[str, dict] = {
     "errors.fs_error_to_string": {"args": 'FsError.NotFound("x")'},
     "errors.json_error_to_string": {"args": 'JsonError.MissingField("k")'},
     "errors.collection_error_to_string": {"args": 'CollectionError.EmptyCollection'},
-    "errors.net_error_to_string": {"args": 'NetError.Timeout("t")'},
     "errors.math_error_to_string": {"args": 'MathError.DivisionByZero'},
     "errors.app_error_to_string": {"args": 'AppError.Custom("c")'},
     # ---- fs（scratch 文件往返；runner 负责双后端间清理）----

@@ -13,8 +13,6 @@ func main() -> i32 {
     if app_error_to_string(c) != "index out of bounds: 1 (length 4)" { return 4 }
     let m = Math(DivisionByZero)
     if app_error_to_string(m) != "division by zero" { return 5 }
-    let n = Net(ConnectionFailed("refused"))
-    if app_error_to_string(n) != "connection failed: refused" { return 6 }
     println("OK")
     0
 }
