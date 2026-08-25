@@ -294,13 +294,31 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 _ => None,
                             };
                             ok_ty.and_then(|t| {
+                                // UNIT-PAYLOAD-PRINT (0.39.x sweep): a
+                                // Result<(), E> Ok payload lowers to a bare
+                                // i64 slot; without registering the AST type
+                                // the bound variable prints as 0 while the VM
+                                // prints `()`. The unit check MUST precede
+                                // llvm_type_for — `unit` has no registered
+                                // LLVM type, and the early-`?` used to kill
+                                // the whole derivation before the check ran.
+                                let is_unit = matches!(
+                                    t.unlocated(),
+                                    crate::ast::Type::Name(n, ref args)
+                                        if args.is_empty()
+                                            && (n == "unit" || n == "()")
+                                );
+                                if is_unit {
+                                    return Some((
+                                        t.clone(),
+                                        BasicTypeEnum::IntType(self.context.i64_type()),
+                                    ));
+                                }
                                 let llvm = self.llvm_type_for(t)?;
-                                // Only record/struct payloads need the
-                                // ptrtoint recovery; ints/strings have their
-                                // own natural slot handling.
                                 if matches!(
                                     llvm,
-                                    BasicTypeEnum::StructType(_) | BasicTypeEnum::PointerType(_)
+                                    BasicTypeEnum::StructType(_)
+                                        | BasicTypeEnum::PointerType(_)
                                 ) {
                                     Some((t.clone(), llvm))
                                 } else {
@@ -308,9 +326,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             })
                         };
-                        scrutinee_type
+                        let r = scrutinee_type
                             .and_then(derive)
-                            .or_else(|| self.pending_scrutinee_result_ty.as_ref().and_then(derive))
+                            .or_else(|| self.pending_scrutinee_result_ty.as_ref().and_then(derive));
+                        r
                     } else {
                         None
                     };

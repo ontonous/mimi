@@ -1223,7 +1223,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => return Ok(val),
         };
         let i64_ty = self.context.i64_type();
-        let data_i = self.build_ptr_to_int(data_pv, i64_ty, "res_ret_data_i")?;
+        let mut data_i = self.build_ptr_to_int(data_pv, i64_ty, "res_ret_data_i")?;
+        // CVP-CRASH-001 (0.39.x sweep): when data_pv is an LLVM CONSTANT (a
+        // global string literal returned by value — `default_string()`), the
+        // ptrtoint folds into a ConstantExpr and the whole ownership-probe
+        // branch condition becomes `br i1 icmp constexpr ...` — invalid IR
+        // that LLVM 18's CalledValuePropagation SIGSEGVs on (prelude.mimi
+        // compile crash). Materialize constant probes through an alloca
+        // round-trip so every probe node stays a real instruction.
+        if data_i.is_const() {
+            let slot = self.build_alloca(BasicTypeEnum::IntType(i64_ty), "res_ret_data_i_slot")?;
+            self.build_store(slot, data_i)?;
+            data_i = self
+                .build_load(BasicTypeEnum::IntType(i64_ty), slot, "res_ret_data_i_load")?
+                .into_int_value();
+        }
         let candidates = self.heap_probe_candidates();
         let mut owned = self
             .builder
@@ -1717,7 +1731,54 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // flush below — the previous order flushed first, freeing the
                 // buffers the claims were supposed to protect (visible under
                 // O0, masked by O1).
-                let adjusted = self.claim_returned_list_literals(adjusted, expr)?;
+                let mut adjusted = self.claim_returned_list_literals(adjusted, expr)?;
+                // CVP-CRASH-001 companion: the claim/rebuild passes may hand
+                // back a value whose LLVM type drifted from the declared
+                // signature (observed: a nested tuple field returned as i32
+                // while the function type says i64). `ret <mismatch>` is
+                // invalid IR — O0 tolerated it, but O1's
+                // CalledValuePropagation SIGSEGV'd on it. Align numeric
+                // leaves here; impossible shapes fail loud instead of
+                // poisoning the pass pipeline.
+                if adjusted.get_type() != ret_type {
+                    match (adjusted, ret_type) {
+                        (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it)) => {
+                            let w_from = iv.get_type().get_bit_width();
+                            let w_to = it.get_bit_width();
+                            adjusted = if w_from < w_to {
+                                self.builder
+                                    .build_int_s_extend(iv, it, "ret_sext")
+                                    .map_err(|e| CompileError::LlvmError(format!("ret sext: {e}")))?
+                                    .into()
+                            } else if w_from > w_to {
+                                self.builder
+                                    .build_int_truncate(iv, it, "ret_trunc")
+                                    .map_err(|e| {
+                                        CompileError::LlvmError(format!("ret trunc: {e}"))
+                                    })?
+                                    .into()
+                            } else {
+                                adjusted
+                            };
+                        }
+                        (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
+                            // GENERIC-RET-ALIGN (0.39.x sweep): the signature's
+                            // tuple slots widen integer leaves to i64 while the
+                            // body's tuple literal keeps exact widths — align
+                            // leaf-by-leaf so `ret <mismatch>` never reaches
+                            // the pass pipeline (O1's CVP crashed on it).
+                            adjusted = self.align_struct_return(sv, st)?;
+                        }
+                        _ => {}
+                    }
+                    if adjusted.get_type() != ret_type {
+                        return Err(CompileError::LlvmError(format!(
+                            "return value type {:?} does not match declared signature {:?}",
+                            adjusted.get_type(),
+                            ret_type
+                        )));
+                    }
+                }
                 self.flush_heap_scopes_to_boundary()?;
                 self.build_return(Some(&adjusted))?;
             }
@@ -1733,6 +1794,76 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         Ok(())
+    }
+
+    /// GENERIC-RET-ALIGN: recursively align an aggregate return value to the
+    /// declared signature layout. Integer leaves are sign-extended/truncated;
+    /// identical types pass through; nested structs recurse; anything else is
+    /// a hard error (fail loud instead of poisoning the optimizer).
+    fn align_struct_return(
+        &mut self,
+        sv: inkwell::values::StructValue<'ctx>,
+        target: inkwell::types::StructType<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let src_ty = sv.get_type();
+        let src_fields = src_ty.get_field_types();
+        let dst_fields = target.get_field_types();
+        if src_fields.len() != dst_fields.len() {
+            return Err(CompileError::LlvmError(format!(
+                "return aggregate arity mismatch: {} vs {}",
+                src_fields.len(),
+                dst_fields.len()
+            )));
+        }
+        let mut rebuilt = target.const_zero();
+        for (i, (sf, df)) in src_fields.iter().zip(dst_fields.iter()).enumerate() {
+            let fv = self.build_extract_value(sv.into(), i as u32, "align_f")?;
+            let aligned: BasicValueEnum = match (sf, df) {
+                (BasicTypeEnum::IntType(sit), BasicTypeEnum::IntType(dit)) => {
+                    if sit == dit {
+                        fv
+                    } else {
+                        let w_from = sit.get_bit_width();
+                        let w_to = dit.get_bit_width();
+                        let iv = fv.into_int_value();
+                        if w_from < w_to {
+                            self.builder
+                                .build_int_s_extend(iv, *dit, "align_sext")
+                                .map_err(|e| CompileError::LlvmError(format!("align sext: {e}")))?
+                                .into()
+                        } else {
+                            self.builder
+                                .build_int_truncate(iv, *dit, "align_trunc")
+                                .map_err(|e| CompileError::LlvmError(format!("align trunc: {e}")))?
+                                .into()
+                        }
+                    }
+                }
+                (BasicTypeEnum::StructType(ss), BasicTypeEnum::StructType(ds)) => {
+                    if ss == ds {
+                        fv
+                    } else {
+                        let inner = fv.into_struct_value();
+                        self.align_struct_return(inner, *ds)?
+                    }
+                }
+                _ => {
+                    if sf == df {
+                        fv
+                    } else {
+                        return Err(CompileError::LlvmError(format!(
+                            "return aggregate field {i}: incompatible layouts"
+                        )));
+                    }
+                }
+            };
+            rebuilt = self
+                .builder
+                .build_insert_value(rebuilt, aligned, i as u32, "align_ins")
+                .map_err(|e| CompileError::LlvmError(format!("align insert: {e}")))?
+                .into_struct_value();
+        }
+        Ok(BasicValueEnum::StructValue(rebuilt))
     }
 
     /// Coerce a generic Result/Option constructor value to the declared return
@@ -3890,8 +4021,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // IR that O0 tolerated by luck and O1 turns into an LLVM abort
         // ("Cannot emit physreg copy instruction").
         if !self.block_has_terminator() {
-            let last_val = self.adjust_int_val(last_val, ret_type)?;
+            let mut last_val = self.adjust_int_val(last_val, ret_type)?;
             let last_val = self.load_return_value_if_needed(last_val)?;
+            // GENERIC-RET-ALIGN: aggregate returns must match the declared
+            // signature layout too (tuple slot widths) — see the explicit
+            // return path for the full rationale.
+            let mut last_val = last_val;
+            if last_val.get_type() != ret_type {
+                if let (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) =
+                    (last_val, ret_type)
+                {
+                    last_val = self.align_struct_return(sv, st)?;
+                }
+            }
             self.build_return(Some(&last_val))?;
         }
         Ok(())

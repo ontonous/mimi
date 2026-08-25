@@ -258,7 +258,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 Stmt::Return(None) => {
                     self.flush_heap_scopes_to_boundary()?;
-                    self.build_return(None)?;
+                    // GENERIC-RET-ALIGN: a bare `return` must still satisfy the
+                    // declared signature (unit lambdas lower to an i64 slot —
+                    // `ret void` is invalid IR that O1's CVP crashes on).
+                    let zero = self.zero_value_for(ret_type);
+                    self.build_return(Some(&zero))?;
                     returned = true;
                     break;
                 }
@@ -301,6 +305,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         if !returned && !self.block_has_terminator() {
+            // GENERIC-RET-ALIGN (0.39.x sweep): the tail expression may be a
+            // narrower integer than the declared signature slot (observed:
+            // compose's inner lambda returning i32 against an i64 signature).
+            // The If-arm path above already adjusts widths — do the same for
+            // the tail expression so `ret <mismatch>` never reaches O1.
+            let last_val = self.adjust_int_value_width(last_val, ret_type, "lambda_tail_ret")?;
             let last_val = self.load_return_value_if_needed(last_val)?;
             let claimed =
                 self.claim_string_return_value(last_val, ret_type, last_expr, lambda_vars)?;

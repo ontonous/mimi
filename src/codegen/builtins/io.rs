@@ -1094,6 +1094,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                 Ok((BasicMetadataValueEnum::PointerValue(pv), "%s".to_string()))
             }
             BasicMetadataValueEnum::IntValue(iv) => {
+                // GENERIC-UNIT-PRINT (0.39.x sweep): a Unit value lowers to an
+                // i64 slot; when the dispatch knows the canonical type is
+                // unit, print the canonical `()` instead of the raw slot.
+                if arg_type == "unit" || arg_type == "()" {
+                    let empty = self
+                        .builder
+                        .build_global_string_ptr("()", "print_unit_str")
+                        .map_err(|e| {
+                            CompileError::LlvmError(format!("global string error: {e}"))
+                        })?;
+                    return Ok((
+                        BasicMetadataValueEnum::PointerValue(empty.as_pointer_value()),
+                        "%s".to_string(),
+                    ));
+                }
                 // Map/Set opaque handles: serialize via runtime JSON helpers.
                 // 0.39.136 (L1): `Record` is the checker's canonical name for
                 // a dynamic `map_new()` map — route it here too, or print

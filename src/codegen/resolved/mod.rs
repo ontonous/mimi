@@ -13078,7 +13078,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.build_return(Some(&val))?;
             } else {
                 let _ = self.generator.free_heap_allocs();
-                self.generator.build_return(None)?;
+                // GENERIC-RET-ALIGN: unit lambdas lower to a non-void
+                // signature slot; `ret void` is invalid IR that O1's CVP
+                // crashes on. Return the signature's zero instead.
+                let zero = self.generator.zero_value_for(ret_ty);
+                self.generator.build_return(Some(&zero))?;
             }
         }
 

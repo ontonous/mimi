@@ -4554,6 +4554,44 @@ impl<'a> JsonParser<'a> {
         }
     }
 
+    /// 0.39.x matrix sweep (JSON-CANON-001): the VM's json accessors return a
+    /// CANONICAL compact form (`{"k":1}`, `[1,2]`), while the raw-slice path
+    /// preserved the document's original spacing. Compact the extracted text
+    /// outside string literals only — whitespace inside `"..."` is content.
+    fn json_compact(raw: &str) -> String {
+        // Byte-accurate: string-literal contents (including multi-byte UTF-8)
+        // pass through untouched; only structural whitespace is dropped.
+        let bytes = raw.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+        let mut in_str = false;
+        let mut esc = false;
+        for &c in bytes {
+            if in_str {
+                out.push(c);
+                if esc {
+                    esc = false;
+                } else if c == b'\\' {
+                    esc = true;
+                } else if c == b'"' {
+                    in_str = false;
+                }
+                continue;
+            }
+            match c {
+                b'"' => {
+                    in_str = true;
+                    out.push(c);
+                }
+                b':' | b',' => {
+                    out.push(c);
+                }
+                b' ' | b'\t' | b'\n' | b'\r' => {}
+                _ => out.push(c),
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     fn parse_object(&mut self) -> Option<String> {
         if self.peek() != b'{' {
             return None;
@@ -4596,7 +4634,7 @@ impl<'a> JsonParser<'a> {
         }
         let s = std::str::from_utf8(&self.p[start..self.pos]).ok()?;
         self.pos += 1; // skip }
-        Some(format!("{{{}}}", s))
+        Some(format!("{{{}}}", Self::json_compact(s)))
     }
 
     fn parse_array(&mut self) -> Option<String> {
@@ -4641,7 +4679,7 @@ impl<'a> JsonParser<'a> {
         }
         let s = std::str::from_utf8(&self.p[start..self.pos]).ok()?;
         self.pos += 1; // skip ]
-        Some(format!("[{}]", s))
+        Some(format!("[{}]", Self::json_compact(s)))
     }
 
     fn parse_full(&mut self) -> Option<String> {
