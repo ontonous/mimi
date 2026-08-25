@@ -933,7 +933,11 @@ impl<'a> Checker<'a> {
                     // CHK-F02 bottom-type flow (mirrors checker/func.rs tail
                     // check): `return any_value` satisfies any declared type.
                     let any_flows_down = matches!(t.unlocated(), Type::Name(n, _) if n == "Any");
-                    if !any_flows_down && self.unification.unify(ret, &t).is_err() {
+                    // Numeric widening parity with the tail-expression path
+                    // (checker/func.rs is_numeric_coercion): `return 1` in an
+                    // `-> i64` fn must behave exactly like a trailing `1`.
+                    let coerced = crate::core::helpers::is_numeric_coercion(ret, &t);
+                    if !any_flows_down && !coerced && self.unification.unify(ret, &t).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0207,

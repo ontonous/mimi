@@ -1,0 +1,17 @@
+// Regression (L2, 0.39.136): explicit `return <int-literal>` in an
+// `-> i64` function must apply the same numeric widening as the tail-
+// expression path — before this, `if bad { return 1 }` failed E0207 while a
+// trailing `1` succeeded (inconsistent coercion between the two return
+// paths).
+
+use std::json
+
+func main() -> i64 {
+    let src = "{\"name\":\"mimi\",\"count\":3}"
+    if !is_valid_json(src) { return 1 }
+    let n = json_get_int(src, "count")
+    let name = get_string(src, "name")
+    println(name)
+    println(n)
+    if n == 3 && name == "mimi" { 0 } else { 1 }
+}
