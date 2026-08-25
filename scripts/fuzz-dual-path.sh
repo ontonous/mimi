@@ -107,12 +107,16 @@ for ((i=0; i<ROUNDS; i++)); do
 
     # 解释器执行 — 0.39.136 修复分类逻辑：
     # VM 按语义把 main 返回值作为退出码（与 native 二进制一致），
-    # 因此非零退出码 ≠ 失败。成功的可靠标志是 stdout 尾行 "-> <int>"；
-    # 运行期错误走 [E\d+] 诊断通道且无 -> 行。
+    # 因此非零退出码 ≠ 失败。0.39.136 起 VM 不再向 stdout 回显 "-> N"
+    # （stdout 属 L1 可观测契约须与 native 对齐），oracle 改用退出码
+    # 直比；运行期错误仍走 [E\d+] 诊断通道。
     interp_output=""
     interp_ok=false
-    interp_output=$("$MIMI_BIN" run "$f" 2>/dev/null) || true
-    # 运行期错误必带 [E\d+] 诊断；成功则打印 "-> N"（返回 0 时静默）。
+    vm_rc=0
+    set +e
+    interp_output=$("$MIMI_BIN" run "$f" 2>/dev/null)
+    vm_rc=$?
+    set -e
     if ! printf '%s\n' "$interp_output" | grep -qE '\[E[0-9]+\]'; then
         interp_ok=true
     fi
@@ -132,17 +136,13 @@ for ((i=0; i<ROUNDS; i++)); do
     } || true
     rm -f /tmp/mimi_fuzz_bin.o /tmp/mimi_fuzz_bin 2>/dev/null || true
 
-    # 提取解释器的数值结果: "-> 42" → "42"；返回 0 静默时缺省为 0
-    interp_value=$(echo "$interp_output" | sed -n 's/^-> *//p' | xargs)
-    [ -z "$interp_value" ] && interp_value=0
+    # 退出码直比：VM 进程退出码即 main 返回值 mod 256（与 native 一致）。
+    interp_mod=$(( (vm_rc & 0xFF) ))
 
     if $interp_ok && $compiled_ok; then
-        # Unix exit code is unsigned 8-bit.  Handle negative interp values
-        # (e.g. -1 → 255) by wrapping through signed 8-bit.
-        interp_mod=$(( (interp_value & 0xFF) ))
         if [ "$interp_mod" != "$compiled_exit_code" ]; then
             log_fail "MISMATCH at round $i!"
-            log_fail "  Interpreter: '$interp_value' (wrapped = $interp_mod)"
+            log_fail "  Interpreter: exit code $vm_rc (wrapped = $interp_mod)"
             log_fail "  Compiled:    exit code $compiled_exit_code"
             crash_file="$CRASH_DIR/mismatch_${i}_$(date +%s).mimi"
             cp "$f" "$crash_file"
