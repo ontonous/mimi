@@ -156,6 +156,13 @@ struct FuncCompiler {
     /// value-capture mechanism is structurally unable to represent the
     /// self-reference. Anonymous lambdas (Expr::Lambda) keep this None.
     self_call: Option<(String, FuncIdx)>,
+    /// 0.39.x matrix sweep: set ONLY while compiling an impl-method body
+    /// (pass 3). The pass-3 proto carries the BARE method name, so a naive
+    /// `method == fc.proto.name` check would also swallow free functions of
+    /// the same name (e.g. stdlib `first<T>(xs) { xs.first() }` must keep its
+    /// static binding to `List_first`). This field makes the self-reference
+    /// guard exact.
+    impl_method_self_name: Option<String>,
     /// Audit fix #12: ensures-contract mini-functions only — maps a parameter
     /// name to its PRE-call snapshot register (appended after `result`).
     /// `old(x)` in an ensures clause compiles to the snapshot register, while
@@ -204,6 +211,7 @@ impl FuncCompiler {
             loop_body_scope_idx: Vec::new(),
             i32_ctx_active: false,
             self_call: None,
+            impl_method_self_name: None,
             old_regs: HashMap::new(),
         }
     }
@@ -1141,6 +1149,7 @@ impl BytecodeCompiler {
         // param_count = explicit params + 1 (self).
         let total_params = f.params.len() as u16 + 1;
         let mut fc = FuncCompiler::new(f.name.clone(), total_params);
+        fc.impl_method_self_name = Some(f.name.clone());
 
         // Bind `self` to register 0.
         fc.vars[0].insert("self".to_string(), 0);
@@ -3886,6 +3895,24 @@ impl BytecodeCompiler {
                     if let Some(mangled) =
                         self.method_table.get(&(type_name.clone(), method.clone()))
                     {
+                        // 0.39.x matrix sweep: self-reference guard. Inside an
+                        // `impl Trait for BuiltinType` method whose body calls
+                        // its own name (`func is_ok() { self.is_ok() }` in
+                        // std/result.mimi), the static binding would re-enter
+                        // the function being compiled — an infinite trampoline
+                        // (VM: E0800 recursion limit on Result_map_err). The
+                        // delegating-to-builtin intent must fall through to
+                        // Op::DynMethodCall, whose runtime dispatch resolves
+                        // builtin faces first (mirrors the resolved-emitter
+                        // builtin-face precedence fix).
+                        // NOTE: the guard keys on impl_method_self_name —
+                        // only an impl-method body calling ITS OWN name is
+                        // redirected to DynMethodCall.
+                        if *mangled == fc.proto.name
+                            || fc.impl_method_self_name.as_deref() == Some(method.as_str())
+                        {
+                            continue;
+                        }
                         if let Some(&fidx) = self.func_table.get(mangled) {
                             // Audit fix #3: mutate-param write-back for the
                             // method call (pre-fix: silently dropped).
@@ -3913,6 +3940,12 @@ impl BytecodeCompiler {
                 }
                 for prefix in &prefixes {
                     let mangled = format!("{}_{}", prefix, method);
+                    // Same self-reference guard as the method_table loop above.
+                    if mangled == fc.proto.name
+                        || fc.impl_method_self_name.as_deref() == Some(method.as_str())
+                    {
+                        continue;
+                    }
                     if let Some(&fidx) = self.func_table.get(&mangled) {
                         // Audit fix #3: mutate-param write-back (as above).
                         self.emit_impl_method_mutate_setup(fc, fidx, args);

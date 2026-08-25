@@ -2767,6 +2767,26 @@ impl BodyLowerer<'_> {
             });
         }
         if site.kind == ResolvedCallKind::Method {
+            // 0.39.x matrix sweep: builtin-type method faces take precedence
+            // over user/trait impls — the VM and the legacy emitter both
+            // resolve `self.method()` inside `impl Trait for BuiltinType`
+            // (e.g. `impl ResultExt for Result`) to the LANGUAGE-provided
+            // semantics. Going straight to impl candidates instead let an
+            // impl body whose self-call matches its own name re-dispatch
+            // through ProtocolMethod into the wrapper currently being
+            // emitted: `Result_is_ok -> Result_is_ok -> …` (infinite
+            // trampoline; after O1 the native binary printed `false` for
+            // `is_ok_result(Ok(1))` while the VM printed `true`). The
+            // Unknown-kind call path already tried this face first —
+            // Method-kind calls now share that order, per the same shadow
+            // ruling as d1f43c22 (local > global > builtin).
+            if type_arguments.is_empty() {
+                if let Some(call) =
+                    self.lower_builtin_method_call(node_id, callee, arguments, role, &[])?
+                {
+                    return Ok(call);
+                }
+            }
             if !type_arguments.is_empty() {
                 return self.unsupported(node_id, "generic arguments on method call");
             }

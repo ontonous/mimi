@@ -61,6 +61,41 @@ fn variant_payload_type_name(type_str: &str) -> Option<String> {
     }
 }
 
+/// Extracts the ERROR type parameter name from a `Result<T, E>` type string
+/// (second argument, bracket-depth aware). Returns None for Option/non-generic.
+fn variant_error_type_name(type_str: &str) -> Option<String> {
+    let inner = type_str.strip_prefix("Result<")?;
+    let mut depth = 0u32;
+    let mut comma_pos = None;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                if comma_pos.is_none() {
+                    comma_pos = Some(i);
+                } else {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let start = comma_pos? + 1;
+    Some(
+        inner[start..]
+            .trim()
+            .trim_end_matches('>')
+            .trim()
+            .to_string(),
+    )
+}
+
 /// Shared context for compiling a method call on an Option/Result-like value.
 #[derive(Clone)]
 struct VariantMethodCtx<'ctx> {
@@ -75,6 +110,12 @@ struct VariantMethodCtx<'ctx> {
     /// `weak.upgrade()` results whose payload is a pointer to the shared heap
     /// even when the inner type is a primitive.
     obj_name: Option<String>,
+    /// Mimi-level receiver type string (e.g. "Result<i32, string>"). The
+    /// builtin Result layout erases E into an i64 slot, but map/map_err must
+    /// materialize the error at its DECLARED type before handing it to the
+    /// closure (0.39.x matrix sweep: passing the raw slot i64 crashed the
+    /// generated program when E was a string).
+    obj_type: String,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -828,6 +869,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             },
             is_result,
             obj_name,
+            obj_type: obj_type.clone(),
         };
 
         match method {
@@ -1447,8 +1489,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "src_err_gep",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        let err_val = self.build_load(BasicTypeEnum::IntType(i64_ty), src_err_gep, "err_val")?;
-        let mapped = self.compile_closure_call(closure_val, &[err_val], None)?;
+        // 0.39.x matrix sweep (RESULT-MAPERR-ABI-001): the builtin Result
+        // layout stores a NON-scalar error as a HEAP POINTER truncated into
+        // the i64 slot (Err ctor: malloc + ptrtoint). The closure expects the
+        // error at its DECLARED type, so materialize the slot first. Passing
+        // the raw i64 crashed the generated program when E was a string
+        // (`map_err_result(Err("abc"), fn(e: string) ...)` dereferenced the
+        // length as a pointer inside the lambda).
+        let err_slot_val =
+            self.build_load(BasicTypeEnum::IntType(i64_ty), src_err_gep, "err_val")?;
+        // The receiver type string is often the bare "Result" on the
+        // monomorphized path (var_type_names registers without parameters),
+        // so prefer the closure's own declared parameter type — it IS the
+        // error type by construction (`map_err(f: func(E) -> F)`).
+        let err_ty_name = match args[0].unlocated() {
+            Expr::Lambda { params, .. } => params
+                .first()
+                .map(|p| crate::core::fmt_type(&p.ty))
+                .filter(|t| !t.is_empty() && t != "Unknown")
+                .or_else(|| variant_error_type_name(&ctx.obj_type)),
+            _ => variant_error_type_name(&ctx.obj_type),
+        };
+        let err_llvm_ty =
+            err_ty_name.and_then(|ty_name| self.llvm_type_for(&Type::Name(ty_name, vec![])));
+        let err_arg = match err_llvm_ty {
+            Some(BasicTypeEnum::IntType(t)) => {
+                if t.get_bit_width() < 64 {
+                    self.builder
+                        .build_int_truncate(err_slot_val.into_int_value(), t, "err_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("err trunc: {}", e)))?
+                        .into()
+                } else {
+                    err_slot_val.into()
+                }
+            }
+            Some(BasicTypeEnum::PointerType(pt)) => self
+                .builder
+                .build_int_to_ptr(err_slot_val.into_int_value(), pt, "err_i2p")
+                .map_err(|e| CompileError::LlvmError(format!("err i2p: {}", e)))?
+                .into(),
+            Some(BasicTypeEnum::StructType(st)) => {
+                let heap_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        err_slot_val.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "err_box_ptr",
+                    )
+                    .map_err(|e| CompileError::LlvmError(format!("err box ptr: {}", e)))?;
+                self.build_load(st, heap_ptr, "err_box_load")?
+            }
+            _ => err_slot_val.into(),
+        };
+        let mapped = self.compile_closure_call(closure_val, &[err_arg], None)?;
         let dst_err_gep = self
             .gep()
             .build_struct_gep(
@@ -1458,7 +1551,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "dst_err_gep",
             )
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(dst_err_gep, mapped)?;
+        // Store-back mirrors the load side: non-scalar results are boxed to
+        // the heap and stored as a pointer (same ABI as the Err ctor);
+        // narrower integers are widened back into the i64 slot.
+        match mapped {
+            BasicValueEnum::StructValue(_) | BasicValueEnum::PointerValue(_) => {
+                let mapped_sty = match mapped {
+                    BasicValueEnum::StructValue(sv) => sv.get_type(),
+                    BasicValueEnum::PointerValue(_) => {
+                        return Err("map_err: pointer-typed error result requires a struct".into());
+                    }
+                    _ => unreachable!(),
+                };
+                let size_bytes = mapped_sty
+                    .size_of()
+                    .map(|c| c.get_zero_extended_constant())
+                    .flatten()
+                    .unwrap_or(16);
+                let heap_ptr = self.malloc_or_abort(
+                    self.context.i64_type().const_int(size_bytes, false),
+                    "map_err_box",
+                )?;
+                self.build_store(heap_ptr, mapped)?;
+                let boxed = self.build_ptr_to_int(heap_ptr, i64_ty, "map_err_box_i64")?;
+                self.build_store(dst_err_gep, boxed)?;
+            }
+            BasicValueEnum::IntValue(iv) => {
+                let stored: IntValue<'ctx> = if iv.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "map_err_widen")
+                        .map_err(|e| CompileError::LlvmError(format!("map_err widen: {}", e)))?
+                } else if iv.get_type().get_bit_width() > 64 {
+                    self.builder
+                        .build_int_truncate(iv, i64_ty, "map_err_narrow")
+                        .map_err(|e| CompileError::LlvmError(format!("map_err narrow: {}", e)))?
+                } else {
+                    iv
+                };
+                self.build_store(dst_err_gep, stored)?;
+            }
+            other => self.build_store(dst_err_gep, other)?,
+        }
         self.build_br(merge_bb)?;
         self.builder.position_at_end(merge_bb);
         self.build_load(

@@ -2231,6 +2231,57 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// stored to (or covered by `register_heap_alloc`) **before** registration
     /// for all paths that reach this registration.  Scope-local cleanup runs
     /// inside the block (before merge), so the stored value is always valid.
+    /// 0.39.x matrix sweep (LOOP-REBIND-HEAP-001): register a raw heap
+    /// pointer in the FUNCTION ROOT heap scope (the constructor's seed scope),
+    /// not the currently-innermost one. Loop bodies push a per-iteration heap
+    /// scope (0.37.30) whose pop frees everything registered inside the body —
+    /// correct for temporaries, catastrophic for a value rebound to an
+    /// outer-declared variable (`sh_rest = random_remove_ith(sh_rest, i)` in
+    /// std/random.mimi: each iteration freed the buffer the variable still
+    /// referenced; the next iteration then read freed memory). Transferring
+    /// such rebindings to the root scope gives them the variable's lifetime.
+    pub(super) fn register_heap_ptr_root(&self, ptr: inkwell::values::PointerValue<'ctx>) {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot = self
+            .build_entry_alloca(ptr_ty, "root_heap_slot")
+            .unwrap_or(ptr);
+        if slot != ptr {
+            // Null-init at entry so untaken paths free(null) safely.
+            let saved = self.builder.get_insert_block();
+            if let Some(slot_inst) = slot.as_instruction() {
+                if let Some(next) = slot_inst.get_next_instruction() {
+                    self.builder.position_before(&next);
+                } else if let Some(parent) = slot_inst.get_parent() {
+                    self.builder.position_at_end(parent);
+                }
+                let _ = self.build_store(slot, ptr_ty.const_null());
+            }
+            if let Some(saved) = saved {
+                self.builder.position_at_end(saved);
+            }
+            let _ = self.build_store(slot, ptr);
+        }
+        let boundary = self.heap_boundaries.borrow().last().copied().unwrap_or(0);
+        let mut guard = self.heap_allocs.borrow_mut();
+        let idx = boundary.min(guard.len().saturating_sub(1));
+        if let Some(scope) = guard.get_mut(idx) {
+            scope.push(HeapEntry::Ptr(slot));
+        }
+    }
+
+    /// True iff some heap scope already owns a SLOT entry for this alloca.
+    /// LOOP-REBIND-HEAP-001: a rebound variable's owner slot is registered at
+    /// first binding; the rebinding must transfer (pop) only the temporary
+    /// registration, not add a second entry for the same storage — two entries
+    /// loading one data field freed the same buffer twice at function exit.
+    pub(super) fn has_heap_slot(&self, base: inkwell::values::PointerValue<'ctx>) -> bool {
+        let guard = self.heap_allocs.borrow();
+        guard
+            .iter()
+            .flatten()
+            .any(|e| matches!(e, HeapEntry::Slot(b, _, _) if *b == base))
+    }
+
     pub(super) fn register_heap_slot(
         &self,
         base: inkwell::values::PointerValue<'ctx>,
@@ -3971,44 +4022,72 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     pub(super) fn get_full_type_name(&self, ty: &Type) -> Option<String> {
-        match ty.unlocated() {
-            Type::Name(tn, args) => {
-                if args.is_empty() {
-                    Some(tn.clone())
-                } else {
-                    let inner: Vec<String> = args
-                        .iter()
-                        .filter_map(|a| self.get_full_type_name(a))
-                        .collect();
-                    if inner.len() == args.len() {
-                        Some(format!("{}<{}>", tn, inner.join(", ")))
-                    } else {
+        // Depth-capped wrapper: the type_map substitution below must tolerate
+        // pathological maps (a generic parameter mapping to a type that still
+        // mentions it — observed as a stack overflow while compiling
+        // stdlib random shuffle/sample instances).
+        fn go(this: &CodeGenerator<'_>, ty: &Type, depth: u32) -> Option<String> {
+            if depth > 16 {
+                return None;
+            }
+            match ty.unlocated() {
+                Type::Name(tn, args) => {
+                    if args.is_empty() {
+                        // 0.39.x matrix sweep (RESULT-MAPERR-ABI-001): inside a
+                        // monomorphized instance, a GENERIC PARAMETER annotation
+                        // (`let result: List<T> = []`) must resolve through the
+                        // active type_map — otherwise this registration overwrote
+                        // the instantiated parameter registration with the bare
+                        // "List<T>", and downstream push/string-ABI decisions saw
+                        // an unknown element type (crash class fixed alongside).
+                        if let Some(substituted) = this.type_map.get(tn.as_str()) {
+                            // Guard against self-referential maps: only follow
+                            // the substitution when it actually differs from
+                            // the name we are expanding (depth cap is the
+                            // backstop for longer cycles).
+                            let is_self = match substituted.unlocated() {
+                                Type::Name(sn, sa) => sn == tn && sa.is_empty(),
+                                _ => false,
+                            };
+                            if !is_self {
+                                return go(this, substituted, depth + 1);
+                            }
+                        }
                         Some(tn.clone())
+                    } else {
+                        let inner: Vec<String> =
+                            args.iter().filter_map(|a| go(this, a, depth + 1)).collect();
+                        if inner.len() == args.len() {
+                            Some(format!("{}<{}>", tn, inner.join(", ")))
+                        } else {
+                            Some(tn.clone())
+                        }
                     }
                 }
-            }
-            Type::Tuple(elems) => {
-                let inner: Vec<String> = elems
-                    .iter()
-                    .filter_map(|a| self.get_full_type_name(a))
-                    .collect();
-                if inner.len() == elems.len() {
-                    Some(format!("({})", inner.join(", ")))
-                } else {
-                    None
+                Type::Tuple(elems) => {
+                    let inner: Vec<String> = elems
+                        .iter()
+                        .filter_map(|a| go(this, a, depth + 1))
+                        .collect();
+                    if inner.len() == elems.len() {
+                        Some(format!("({})", inner.join(", ")))
+                    } else {
+                        None
+                    }
                 }
+                Type::Option(inner) => go(this, inner, depth + 1).map(|s| format!("Option<{}>", s)),
+                Type::Result(ok, err) => {
+                    let o = go(this, ok, depth + 1)?;
+                    let e = go(this, err, depth + 1)?;
+                    Some(format!("Result<{},{}>", o, e))
+                }
+                _ => None,
             }
-            Type::Option(inner) => self
-                .get_full_type_name(inner)
-                .map(|s| format!("Option<{}>", s)),
-            Type::Result(ok, err) => {
-                let o = self.get_full_type_name(ok)?;
-                let e = self.get_full_type_name(err)?;
-                Some(format!("Result<{},{}>", o, e))
-            }
-            _ => None,
         }
+        go(self, ty, 0)
     }
+
+    /// Register the full Result<T, (Source, E)> return type of a flow
 
     /// Register the full Result<T, (Source, E)> return type of a flow
     /// transition call in `var_types`, enabling pattern matching code

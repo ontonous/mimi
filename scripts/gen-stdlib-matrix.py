@@ -349,6 +349,7 @@ OVERRIDES: dict[str, dict] = {
     ]},
     "random.random_choice": {"ret_shape": "result", "args": "[42]"},
     "random.random_sample": {"stmts": [
+        # n=0 keeps this deterministic: the sample is always empty.
         "let rs = random_sample([1, 2, 3], 0);",
         "println(len(rs));",
     ]},
@@ -356,7 +357,10 @@ OVERRIDES: dict[str, dict] = {
         "let sh = shuffle([3, 1, 2]);",
         "println(sort_list(sh));",
     ], "uses_extra": ["collections"]},
-    "random.random_remove_ith": {"args": "[7, 8, 9], 0"},
+    "random.random_remove_ith": {"stmts": [
+        "let rri = random_remove_ith([7, 8, 9], 0);",
+        "println(len(rri) == 2);",
+    ]},
     # ---- result ----
     "result.is_ok_result": {"stmts": [
         "let rok: Result<i32, string> = Ok(7);",

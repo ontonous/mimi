@@ -4440,6 +4440,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut vars: HashMap<String, VarEntry<'ctx>> = HashMap::new();
         self.bind_func_params(func, function, &mut vars)?;
 
+        // 0.39.x matrix sweep (RESULT-MAPERR-ABI-001): register instantiated
+        // PARAMETER types so method dispatch inside the instance sees the
+        // concrete receiver shape ("Result<i32, string>", not bare "Result").
+        // Without this, `result.map_err(f)` in std/result.mimi compiled with
+        // the Err payload treated as a scalar i64 while the actual slot holds
+        // a heap-boxed pointer for non-scalar E — the generated program
+        // dereferenced the length as a pointer and crashed. (The map_err call
+        // site additionally recovers E from the lambda's own annotation; this
+        // registration covers every other combinator face.)
+        for param in &func.params {
+            let substituted = self.resolve_type(&param.ty);
+            let ty_name = crate::core::fmt_type(&substituted);
+            if ty_name.starts_with("Result<")
+                || ty_name.starts_with("Option<")
+                || ty_name.starts_with("List<")
+                || ty_name.starts_with("Set<")
+                || ty_name.starts_with("Map<")
+            {
+                self.var_type_names.insert(param.name.clone(), ty_name);
+            }
+        }
+
         // Prepare and compile function contracts.
         self.prepare_func_contracts(func, &vars)?;
         self.snapshot_old_values(&vars)?;
