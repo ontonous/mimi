@@ -8,6 +8,7 @@
 mod eligibility;
 mod types;
 
+use crate::codegen::mono_recover::infer_type_args_from_call_site;
 use std::collections::BTreeMap;
 
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
@@ -258,7 +259,7 @@ fn resolved_type_args_to_ast(
 }
 
 /// Best-effort conversion of a resolved type to an AST type for monomorphization.
-fn resolved_type_to_ast(
+pub(super) fn resolved_type_to_ast(
     rt: &crate::core::ResolvedType,
     table: &crate::core::ResolvedTypeTable,
 ) -> Option<crate::ast::Type> {
@@ -2505,7 +2506,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     if !ast_map.is_empty() {
                                         let mangled =
                                             CodeGenerator::mangle_name(&fdef.name, &ast_map);
-                                        if self.generator.module.get_function(&mangled).is_none() {
+                                        // GENERIC-SHADOW-MONO-001 mirror: compile when the mangled name is absent
+                                        // OR only forward-declared (no body) — see the shadow arm.
+                                        let needs_compile = self
+                                            .generator
+                                            .module
+                                            .get_function(&mangled)
+                                            .map(|f| f.count_basic_blocks() == 0)
+                                            .unwrap_or(true);
+                                        if needs_compile {
                                             self.generator.compile_generic_func(&fdef, &ast_map)?;
                                         }
                                         generic_symbol_override = Some(mangled);
@@ -3712,6 +3721,123 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // functions.
                             let is_user_decl = self.generator.func_defs.contains_key(name);
                             if is_user_decl {
+                                // 0.39.x matrix sweep (GENERIC-SHADOW-MONO-001):
+                                // a GENERIC stdlib free function whose name
+                                // shadows a builtin (reduce_list over the builtin
+                                // reduce family) arrives here with
+                                // ResolvedCallee::Builtin — the Function-arm
+                                // monomorphization below never runs, so the call
+                                // went to the i64-fallback SKELETON: f64
+                                // accumulators were bitwise-i64-added
+                                // (`sum_float([2.5,1.5])` printed the bit pattern
+                                // 4616189618054758000). Monomorphize on demand
+                                // and retarget to the mangled instance, exactly
+                                // like the Function arm.
+                                if let Some(fdef) = self.generator.func_defs.get(name).cloned() {
+                                    let mut ast_map: std::collections::HashMap<
+                                        String,
+                                        crate::ast::Type,
+                                    >;
+                                    if !call.type_arguments.is_empty() {
+                                        ast_map = resolved_type_args_to_ast(
+                                            &fdef.generics,
+                                            &call.type_arguments,
+                                            self.program.resolved_types(),
+                                        );
+                                    } else {
+                                        // Inferred (non-turbofish) call: recover the
+                                        // bindings structurally from argument types.
+                                        let argument_types: Vec<crate::core::ResolvedTypeId> = call
+                                            .arguments
+                                            .iter()
+                                            .map(|a| a.value.ty.clone())
+                                            .collect();
+                                        let recovered = infer_type_args_from_call_site(
+                                            &fdef,
+                                            &argument_types,
+                                            self.program.resolved_types(),
+                                            resolved_type_to_ast,
+                                        );
+                                        // Require EVERY generic to be recovered; a
+                                        // partial map would mis-instantiate.
+                                        let complete = !fdef.generics.is_empty()
+                                            && fdef
+                                                .generics
+                                                .iter()
+                                                .all(|g| recovered.contains_key(&g.name));
+                                        ast_map = if complete {
+                                            recovered
+                                        } else {
+                                            Default::default()
+                                        };
+                                    }
+                                    if !fdef.generics.is_empty() && !ast_map.is_empty() {
+                                        let mangled =
+                                            CodeGenerator::mangle_name(&fdef.name, &ast_map);
+                                        // GENERIC-SHADOW-MONO-001: a prior
+                                        // call site may have forward-DECLARED
+                                        // the mangled name without a body —
+                                        // `is_none()` would then skip
+                                        // instantiation and link against an
+                                        // empty declaration. Compile whenever
+                                        // no definition exists yet.
+                                        let needs_compile = self
+                                            .generator
+                                            .module
+                                            .get_function(&mangled)
+                                            .map(|f| f.count_basic_blocks() == 0)
+                                            .unwrap_or(true);
+                                        if needs_compile {
+                                            self.generator.compile_generic_func(&fdef, &ast_map)?;
+                                        }
+                                        if let Some(shadow_fn) =
+                                            self.generator.module.get_function(&mangled)
+                                        {
+                                            let params = shadow_fn.get_params();
+                                            for (i, arg) in arguments.iter_mut().enumerate() {
+                                                if let Some(param) = params.get(i) {
+                                                    let param_ty = param.get_type();
+                                                    let arg_basic: BasicValueEnum = match *arg {
+                                                        BasicMetadataValueEnum::IntValue(iv) => {
+                                                            iv.into()
+                                                        }
+                                                        BasicMetadataValueEnum::FloatValue(fv) => {
+                                                            fv.into()
+                                                        }
+                                                        BasicMetadataValueEnum::PointerValue(
+                                                            pv,
+                                                        ) => pv.into(),
+                                                        BasicMetadataValueEnum::StructValue(
+                                                            svs,
+                                                        ) => svs.into(),
+                                                        _ => continue,
+                                                    };
+                                                    if arg_basic.get_type() != param_ty {
+                                                        let coerced =
+                                                            self.coerce_to(arg_basic, param_ty)?;
+                                                        *arg =
+                                                            BasicMetadataValueEnum::from(coerced);
+                                                    }
+                                                }
+                                            }
+                                            let result = self
+                                                    .generator
+                                                    .build_call(
+                                                        shadow_fn,
+                                                        &arguments,
+                                                        "resolved_generic_shadow_call",
+                                                    )?
+                                                    .try_as_basic_value_opt()
+                                                    .ok_or_else(|| {
+                                                        CompileError::LlvmError(format!(
+                                                            "generic shadow call '{mangled}' returned void"
+                                                        ))
+                                                    })?;
+                                            return self
+                                                .wrap_builtin_string_result(result, &call.result);
+                                        }
+                                    }
+                                }
                                 // Coerce arguments to match the shadow
                                 // function's declared parameter types (same
                                 // as ResolvedCallee::Function path).

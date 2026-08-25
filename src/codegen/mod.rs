@@ -6,6 +6,7 @@ mod expr;
 mod float_chain;
 mod func;
 pub mod gep;
+mod mono_recover;
 mod registry;
 mod resolved;
 mod scope;
@@ -163,6 +164,15 @@ pub struct CodeGenerator<'ctx> {
     /// v0.34.10a (SD-9): `ieee_float { }` nesting depth — when > 0, float
     /// arithmetic skips the finiteness trap (NaN/Inf allowed, IEEE 754).
     ieee_depth: usize,
+    /// GENERIC-SHADOW-MONO-001: the generic definition currently being
+    /// monomorphized (set by compile_generic_func_inner). Method-generic
+    /// binding inside the instance body must resolve callback parameter
+    /// types against THIS definition — a whole-registry scan would grab any
+    /// same-named parameter from an unrelated function (observed: prelude
+    /// compose's `f: func(U) -> V` leaked its free `V` into ListExt
+    /// find_map's method-generic binding, mangling instances as
+    /// `find_map$T_i32$U_V`, nondeterministically per HashMap order).
+    pub(super) current_generic_def: Option<crate::ast::FuncDef>,
     type_defs: HashMap<String, crate::ast::TypeDef>,
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
@@ -642,6 +652,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             builder,
             loop_break: None,
             loop_continue: None,
+            current_generic_def: None,
             ieee_depth: 0,
             type_defs: HashMap::new(),
             type_llvm: HashMap::new(),

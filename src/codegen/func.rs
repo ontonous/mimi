@@ -4352,6 +4352,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let saved_var_types = std::mem::take(&mut self.var_types);
         let saved_var_type_names = std::mem::take(&mut self.var_type_names);
         let saved_list_elem_llvm_types = std::mem::take(&mut self.list_elem_llvm_types);
+        // GENERIC-SHADOW-MONO-001: publish the definition under instantiation.
+        let saved_current_generic_def = self.current_generic_def.take();
+        self.current_generic_def = Some(func.clone());
 
         // Per-function variable type tracking must start fresh.
         self.var_types.clear();
@@ -4496,6 +4499,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.var_types = saved_var_types;
                 self.var_type_names = saved_var_type_names;
                 self.list_elem_llvm_types = saved_list_elem_llvm_types;
+                self.current_generic_def = saved_current_generic_def;
                 self.type_map = prev_type_map;
                 if let Some(bb) = saved_block {
                     self.builder.position_at_end(bb);
@@ -4512,6 +4516,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.var_types = saved_var_types;
         self.var_type_names = saved_var_type_names;
         self.list_elem_llvm_types = saved_list_elem_llvm_types;
+        self.current_generic_def = saved_current_generic_def;
         self.type_map = prev_type_map;
         if let Some(bb) = saved_block {
             self.builder.position_at_end(bb);

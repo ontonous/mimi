@@ -6821,7 +6821,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !callee_map.is_empty() {
             self.type_map = callee_map.clone();
         }
-        if self.module.get_function(&mangled).is_none() {
+        // GENERIC-SHADOW-MONO-001: the mangled name may already exist as a
+        // bare forward DECLARATION planted by another emitter's signature
+        // pre-install — `is_none()` then skipped instantiation nondeterministically
+        // (HashMap-ordered emission) and linked calls against an empty
+        // declaration. Compile whenever no DEFINITION exists yet.
+        if self
+            .module
+            .get_function(&mangled)
+            .map(|f| f.count_basic_blocks() == 0)
+            .unwrap_or(true)
+        {
             if let Some(fdef) = self.func_defs.get(name).cloned() {
                 if !fdef.generics.is_empty() {
                     self.compile_generic_func(&fdef, &callee_map).map_err(|e| {

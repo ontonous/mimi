@@ -25,6 +25,155 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// TRUNCATE). First reachable in 0.36.47, which lets the checker
     /// instantiate method-level generics (previously E0211 rejected every
     /// such call before codegen).
+    /// GENERIC-SHADOW-MONO-001 (part 2) helpers: locate a generic name's
+    /// structural position inside a declared callback type, then read the
+    /// same position off the concrete callback type.
+    fn find_generic_position(
+        ty: &crate::ast::Type,
+        generic: &str,
+        path: &mut Vec<PathSeg>,
+    ) -> bool {
+        use crate::ast::Type;
+        match ty {
+            Type::Located { ty: inner, .. } => Self::find_generic_position(inner, generic, path),
+            Type::Name(n, args) => {
+                if args.is_empty() {
+                    return n == generic;
+                }
+                for (i, a) in args.iter().enumerate() {
+                    path.push(PathSeg::Arg(i));
+                    if Self::find_generic_position(a, generic, path) {
+                        return true;
+                    }
+                    path.pop();
+                }
+                false
+            }
+            Type::Ref(_, inner)
+            | Type::RefMut(_, inner)
+            | Type::Option(inner)
+            | Type::CBuffer(inner)
+            | Type::Shared(inner)
+            | Type::Weak(inner) => {
+                path.push(PathSeg::Inner);
+                if Self::find_generic_position(inner, generic, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            Type::Result(ok, err) => {
+                path.push(PathSeg::Inner);
+                if Self::find_generic_position(ok, generic, path) {
+                    return true;
+                }
+                path.pop();
+                path.push(PathSeg::Err);
+                if Self::find_generic_position(err, generic, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            Type::Tuple(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    path.push(PathSeg::Arg(i));
+                    if Self::find_generic_position(item, generic, path) {
+                        return true;
+                    }
+                    path.pop();
+                }
+                false
+            }
+            Type::Func(params, ret) => {
+                for (i, param) in params.iter().enumerate() {
+                    path.push(PathSeg::FuncParam(i));
+                    if Self::find_generic_position(param, generic, path) {
+                        return true;
+                    }
+                    path.pop();
+                }
+                path.push(PathSeg::Ret);
+                if Self::find_generic_position(ret, generic, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn extract_type_at(ty: &crate::ast::Type, path: &[PathSeg]) -> Option<crate::ast::Type> {
+        use crate::ast::Type;
+        let (head, rest) = path.split_first()?;
+        // Deref Located wrappers as we walk.
+        let ty = match ty {
+            Type::Located { ty: inner, .. } => inner.as_ref(),
+            other => other,
+        };
+        match (head, ty) {
+            (PathSeg::Ret, Type::Func(_, ret)) => {
+                if rest.is_empty() {
+                    Some((**ret).clone())
+                } else {
+                    Self::extract_type_at(ret, rest)
+                }
+            }
+            (PathSeg::FuncParam(i), Type::Func(params, _)) => {
+                let p = params.get(*i)?;
+                if rest.is_empty() {
+                    Some(p.clone())
+                } else {
+                    Self::extract_type_at(p, rest)
+                }
+            }
+            (PathSeg::Arg(i), Type::Name(_, args)) => {
+                let a = args.get(*i)?;
+                if rest.is_empty() {
+                    Some(a.clone())
+                } else {
+                    Self::extract_type_at(a, rest)
+                }
+            }
+            (PathSeg::Arg(i), Type::Tuple(items)) => {
+                let a = items.get(*i)?;
+                if rest.is_empty() {
+                    Some(a.clone())
+                } else {
+                    Self::extract_type_at(a, rest)
+                }
+            }
+            (PathSeg::Inner, Type::Option(inner))
+            | (PathSeg::Inner, Type::Ref(_, inner))
+            | (PathSeg::Inner, Type::RefMut(_, inner))
+            | (PathSeg::Inner, Type::CBuffer(inner))
+            | (PathSeg::Inner, Type::Shared(inner))
+            | (PathSeg::Inner, Type::Weak(inner)) => {
+                if rest.is_empty() {
+                    Some((**inner).clone())
+                } else {
+                    Self::extract_type_at(inner, rest)
+                }
+            }
+            (PathSeg::Inner, Type::Result(ok, _)) => {
+                if rest.is_empty() {
+                    Some((**ok).clone())
+                } else {
+                    Self::extract_type_at(ok, rest)
+                }
+            }
+            (PathSeg::Err, Type::Result(_, err)) => {
+                if rest.is_empty() {
+                    Some((**err).clone())
+                } else {
+                    Self::extract_type_at(err, rest)
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn bind_method_generic_params(
         &self,
         type_map: &mut HashMap<String, Type>,
@@ -35,53 +184,97 @@ impl<'ctx> CodeGenerator<'ctx> {
             return;
         }
         let callback = &arguments[0];
-        let func_ret: Option<Type> = match callback.unlocated() {
+        let concrete_cb_ty: Option<Type> = match callback.unlocated() {
             Expr::Ident(name) => {
                 if let Some(fd) = self.func_defs.get(name.as_str()) {
-                    fd.ret.clone()
+                    let ret = fd.ret.clone().unwrap_or_else(|| Type::Located {
+                        meta: crate::ast::AstNodeMeta::synthetic(
+                            crate::ast::AstOrigin::RuntimeSystem("codegen.method_generic_bind"),
+                        ),
+                        ty: Box::new(Type::Name("unit".to_string(), vec![])),
+                    });
+                    Some(Type::Func(
+                        fd.params.iter().map(|p| p.ty.clone()).collect(),
+                        Box::new(ret),
+                    ))
                 } else if !self.type_map.is_empty() {
                     // Generic-body function parameter (map_list's `xs.map(f)`):
-                    // resolve the enclosing definition's parameter type with the
-                    // current instantiation.
-                    let Some(raw) = self.func_defs.values().find_map(|fd| {
-                        fd.params
-                            .iter()
-                            .find(|p| p.name == *name)
-                            .map(|p| p.ty.clone())
-                    }) else {
+                    // resolve the ENCLOSING definition's parameter type with the
+                    // current instantiation. GENERIC-SHADOW-MONO-001: the enclosing
+                    // definition is `current_generic_def` — a whole-registry scan
+                    // by parameter name would grab any same-named parameter from
+                    // an unrelated function (prelude compose's `f: func(U) -> V`
+                    // leaked its free `V` into ListExt find_map's method-generic
+                    // binding, mangling `find_map$T_i32$U_V`, per HashMap order).
+                    let Some(cur) = &self.current_generic_def else {
                         return;
                     };
-                    let generics: Vec<GenericParam> = self
-                        .type_map
-                        .keys()
-                        .map(|k| GenericParam {
+                    let Some(raw) = cur
+                        .params
+                        .iter()
+                        .find(|p| p.name == *name)
+                        .map(|p| p.ty.clone())
+                    else {
+                        return;
+                    };
+                    let generics: Vec<GenericParam> = cur
+                        .generics
+                        .iter()
+                        .map(|g| GenericParam {
                             meta: crate::ast::AstNodeMeta::synthetic(
                                 crate::ast::AstOrigin::RuntimeSystem("codegen.method_generic_bind"),
                             ),
-                            name: k.clone(),
+                            name: g.name.clone(),
                             bounds: vec![],
                             kind: crate::ast::GenericKind::Free,
                         })
                         .collect();
                     let substituted =
                         crate::core::subst_type_params(&raw, &generics, &self.type_map);
-                    let Type::Func(_, ret) = substituted.unlocated() else {
-                        return;
-                    };
-                    Some(ret.unlocated().clone())
+                    Some(substituted)
                 } else {
                     None
                 }
             }
-            Expr::Lambda { ret: Some(ty), .. } => Some(ty.unlocated().clone()),
+            Expr::Lambda {
+                params,
+                ret: Some(ty),
+                ..
+            } => Some(Type::Func(
+                params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(ty.clone()),
+            )),
             _ => None,
         };
-        let Some(func_ret) = func_ret else {
+        let Some(concrete_cb_ty) = concrete_cb_ty else {
             return;
         };
         let generic = &method_def.generics[0];
+        // GENERIC-SHADOW-MONO-001 (part 2): bind the method generic at its
+        // STRUCTURAL POSITION inside the declared callback signature, not as
+        // the whole callback return. For `find_map<U>(f: func(T) -> (bool, U))`
+        // the lambda returns `(bool, i32)` — the old whole-return binding made
+        // U = (bool, i32), mangling the instance as `find_map$T_i32$U_(bool,
+        // i32)` and returning Option<(bool,i32)> where callers decode
+        // Option<i32> (`Some(v) => println(v)` printed 0 instead of 14).
+        let Some(callback_idx) = arguments
+            .iter()
+            .position(|a| matches!(a.unlocated(), Expr::Ident(_) | Expr::Lambda { .. }))
+        else {
+            return;
+        };
+        let Some(declared_cb_ty) = method_def.params.get(callback_idx).map(|p| &p.ty) else {
+            return;
+        };
+        let mut path: Vec<PathSeg> = Vec::new();
+        if !Self::find_generic_position(declared_cb_ty.unlocated(), &generic.name, &mut path) {
+            return;
+        }
+        let Some(bound) = Self::extract_type_at(concrete_cb_ty.unlocated(), &path) else {
+            return;
+        };
         if !type_map.contains_key(&generic.name) {
-            type_map.insert(generic.name.clone(), func_ret);
+            type_map.insert(generic.name.clone(), bound);
         }
     }
 
@@ -432,7 +625,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.bind_method_generic_params(&mut type_map, f, args);
                         }
                         let mangled = Self::mangle_name(&fn_name, &type_map);
-                        if self.module.get_function(&mangled).is_none() {
+                        // GENERIC-SHADOW-MONO-001: compile over bare forward
+                        // declarations too (see simple.rs).
+                        if self
+                            .module
+                            .get_function(&mangled)
+                            .map(|f| f.count_basic_blocks() == 0)
+                            .unwrap_or(true)
+                        {
                             // Prepend self parameter (was prepended during compile_impl_methods)
                             if let Some(ref mut f) = func {
                                 // Rename func to fn_name so compile_generic_func mangles
@@ -1909,8 +2109,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut merged_map = self.type_map.clone();
         merged_map.extend(turbo_map);
         let mangled = Self::mangle_name(name, &merged_map);
-        // Compile the specialized version if not yet compiled
-        if self.module.get_function(&mangled).is_none() {
+        // Compile the specialized version if not yet compiled (over bare
+        // forward declarations too — GENERIC-SHADOW-MONO-001, see simple.rs).
+        if self
+            .module
+            .get_function(&mangled)
+            .map(|f| f.count_basic_blocks() == 0)
+            .unwrap_or(true)
+        {
             self.compile_generic_func(&func, &merged_map)
                 .map_err(|e| CompileError::Generic(e.to_string()))?;
         }
@@ -7125,4 +7331,20 @@ fn string_method_to_builtin(method: &str) -> Option<&'static str> {
         "count_substring" => Some("str_count_substring"),
         _ => None,
     }
+}
+
+/// GENERIC-SHADOW-MONO-001 (part 2): path segments locating a generic name
+/// inside a declared callback signature.
+#[derive(Clone, Debug)]
+enum PathSeg {
+    /// Generic argument slot of a nominal type / tuple element.
+    Arg(usize),
+    /// Unwrapped single-child position (Option/Ref/CBuffer/Shared/Result-ok).
+    Inner,
+    /// Result error slot.
+    Err,
+    /// Function parameter slot.
+    FuncParam(usize),
+    /// Function return position.
+    Ret,
 }
