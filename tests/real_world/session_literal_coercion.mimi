@@ -1,0 +1,19 @@
+// Regression (L1, 0.39.136): session_send must accept an integer literal
+// against a `!i64` payload via the standard numeric widening — the corpus
+// workaround (`let x: i64 = 21` before sending) was the tell that this path
+// missed the coercion every function parameter already had.
+
+session Ping = !i64 . ?i64 . end
+
+func main() -> i64 {
+    let (a, b) = session_pair::<Ping>()
+    session_send(a, 21)
+    let got = session_recv(b)
+    println(got)
+    session_send(b, got * 2)
+    let back = session_recv(a)
+    println(back)
+    session_close(a)
+    session_close(b)
+    if back == 42 { 0 } else { 1 }
+}

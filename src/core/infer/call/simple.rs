@@ -3656,7 +3656,14 @@ impl<'a> Checker<'a> {
                     if let Some(et) = expected_ty {
                         let actual = self.infer_expr(&args[1], scopes);
                         let et_r = self.resolve_type(&et);
-                        if self.unification.unify(&et_r, &actual).is_err() {
+                        // 0.39.136 usability: integer literals default to
+                        // i32; a `!i64` protocol payload must accept `21`
+                        // exactly like an i64-typed function parameter does
+                        // (numeric widening). The corpus workaround — binding
+                        // `let x: i64 = 21` first — was the tell that this
+                        // path missed the standard coercion.
+                        let coerced = is_numeric_coercion(&et_r, &actual);
+                        if !coerced && self.unification.unify(&et_r, &actual).is_err() {
                             self.emit_code(
                                 crate::diagnostic::codes::E0414,
                                 format!(
