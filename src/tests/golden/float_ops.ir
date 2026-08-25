@@ -1253,4 +1253,4 @@ declare double @llvm.fabs.f64(double) #1
 attributes #0 = { noreturn }
 attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
 
-!0 = !{i32 0, i32 1}
+!0 = !{!"branch_weights", i32 0, i32 1}

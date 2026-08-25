@@ -474,15 +474,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// compiled by the resolved emitter hold value references) while making
     /// the body slot reusable by whichever emitter recompiles it. Mirrors the
     /// clear loop in func.rs compile_func_legacy_inner.
+    /// 0.34.42: delete every basic block of a partially-emitted function,
+    /// restoring it to a pure declaration. Keeps the symbol alive (callers
+    /// compiled by the resolved emitter hold value references) while making
+    /// the body slot reusable by whichever emitter recompiles it.
+    ///
+    /// 0.39.x matrix sweep: delegates to the shared three-pass teardown on
+    /// CodeGenerator (valgrind-pinned: appearance-order deletion corrupted the
+    /// heap; see the long comment there for the use-before-def analysis).
     fn clear_partial_body(&self, function: inkwell::values::FunctionValue<'ctx>) {
-        unsafe {
-            // SAFETY: inkwell delete() 要求可变函数上下文；删除后块内引用不再使用。
-            while function.count_basic_blocks() > 0 {
-                if let Some(bb) = function.get_first_basic_block() {
-                    let _ = bb.delete();
-                }
-            }
-        }
+        self.generator.clear_partial_body(function);
     }
 
     fn callable_symbol(&self, owner: &NodeId) -> Result<&str, CompileError> {
@@ -2733,16 +2734,61 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             return self.apply_conversion(value, &call.arguments[0].conversion);
                         }
                         let variant_name = self.lookup_variant_name(variant_id)?;
+                        // 0.39.x stdlib matrix sweep: multi-field enum
+                        // constructors compile inside the resolved slice by
+                        // reusing the registered `{Type}_{Variant}`
+                        // constructor functions — the same layout source of
+                        // truth the legacy emitter and the match-side decoder
+                        // already share. This removes the silent
+                        // per-function legacy degradation for any body that
+                        // touches a multi-field variant (previously ANY such
+                        // function fell back to legacy wholesale).
+                        if call.arguments.len() > 1 {
+                            let ResolvedType::Nominal { item, .. } = self
+                                .program
+                                .resolved_types()
+                                .get(&expression.ty)
+                                .ok_or_else(|| {
+                                    CompileError::Unsupported(
+                                        "custom enum ctor: missing type".into(),
+                                    )
+                                })?
+                            else {
+                                return Err(CompileError::Unsupported(
+                                    "custom enum ctor: expression type is not Nominal".into(),
+                                ));
+                            };
+                            let item_str = item.as_str();
+                            let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
+                            let ctor_name = format!("{type_name}_{variant_name}");
+                            let ctor_fn =
+                                self.generator.module.get_function(&ctor_name).ok_or_else(
+                                    || {
+                                        CompileError::Unsupported(format!(
+                                            "multi-field enum constructor '{variant_name}' \
+                                         has no registered ctor '{ctor_name}'"
+                                        ))
+                                    },
+                                )?;
+                            let mut compiled_args = Vec::with_capacity(call.arguments.len());
+                            for argument in &call.arguments {
+                                let value = self.emit_expr(&argument.value, frame)?;
+                                let value = self.apply_conversion(value, &argument.conversion)?;
+                                compiled_args.push(value);
+                            }
+                            let call_args = self
+                                .generator
+                                .maybe_pack_enum_ctor_args(&compiled_args, ctor_fn)?;
+                            return self.generator.emit_direct_call(
+                                ctor_fn,
+                                &call_args,
+                                "enum_ctor",
+                            );
+                        }
                         // 0.37.2 safety: emit_custom_enum_ctor currently
                         // supports zero/one-payload enum variants. Multi-field
-                        // variants must fall back to the legacy enum ctor path
-                        // rather than emitting a wrong single-payload struct.
-                        if call.arguments.len() > 1 {
-                            return Err(CompileError::Unsupported(format!(
-                                "multi-field enum constructor '{}' is not yet in resolved native slice",
-                                variant_name
-                            )));
-                        }
+                        // variants are handled above via the registered
+                        // per-variant constructor functions.
                         return self.emit_custom_enum_ctor(&variant_name, call, expression, frame);
                     }
                     ResolvedCallee::Builtin(builtin_id) => {

@@ -4121,27 +4121,37 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Fail closed instead: report the deletion error and abort
                 // the build, and guard against the (impossible-in-practice)
                 // count>0-but-no-first-block divergence.
-                unsafe {
-                    // SAFETY: inkwell delete() 要求可变函数上下文；count_basic_blocks()>0 保证至少一个块，删除后引用不再使用。
-                    while function.count_basic_blocks() > 0 {
-                        let Some(bb) = function.get_first_basic_block() else {
-                            return Err(CompileError::LlvmError(format!(
-                                "H11: function '{}' has {} basic blocks but get_first_basic_block \
-                                 returned None — refusing to loop forever",
-                                func.name,
-                                function.count_basic_blocks()
-                            )));
-                        };
-                        // SAFETY: bb is owned and removed from the function by
-                        // delete(); its address is not used afterwards.
-                        bb.delete().map_err(|_| {
-                            CompileError::LlvmError(format!(
-                                "H11: failed to delete basic block of '{}' during resolved \
-                                 emitter recovery — block count still {}",
-                                func.name,
-                                function.count_basic_blocks()
-                            ))
-                        })?;
+                // Use inkwell's delete() to remove all blocks from the
+                // function while keeping the declaration alive (so callers
+                // compiled by the resolved emitter still have a valid
+                // reference).
+                // H11 (0.35.37): the old loop did `let _ = bb.delete()` —
+                // inkwell's delete returns Result<(), ()>, and an Err meant
+                // the block stayed in the function while the loop kept
+                // spinning on count_basic_blocks() > 0: a compiler hang.
+                // Fail closed instead: report the deletion error and abort
+                // the build, and guard against the (impossible-in-practice)
+                // count>0-but-no-first-block divergence.
+                //
+                // 0.39.x stdlib matrix sweep (valgrind-pinned): one-at-a-time
+                // `bb.delete()` left predecessor branches pointing at freed
+                // blocks — destroying block N ran User destructors that wrote
+                // into use-lists of blocks freed at N-1. That heap corruption
+                // surfaced later as nondeterministic SIGSEGVs inside random
+                // LLVM passes. Two-phase teardown, mirroring clear_partial_body
+                // in codegen/resolved/mod.rs: erase all instructions first
+                // (drops every cross-block edge), then delete empty blocks.
+                // 0.39.x matrix sweep: delegates to the shared three-pass
+                // teardown (valgrind-pinned; see clear_partial_body above).
+                {
+                    self.clear_partial_body(function);
+                    if function.count_basic_blocks() > 0 {
+                        return Err(CompileError::LlvmError(format!(
+                            "H11: function '{}' still has {} basic blocks after the shared \
+                             body clear — refusing to continue with a partial body",
+                            func.name,
+                            function.count_basic_blocks()
+                        )));
                     }
                 }
             } else {
@@ -4257,8 +4267,77 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Compile a generic function with concrete type arguments (monomorphization)
+    /// Shared three-pass teardown of a partially-emitted function body
+    /// (0.39.x stdlib matrix sweep, valgrind-pinned). Deleting blocks or
+    /// instructions in appearance order corrupts the heap: LLVM destruction
+    /// is use-before-def, and loop back-edges put defs (latch) after their
+    /// users (header phis). Safe sequence:
+    ///   pass 1 — erase every PHI and every terminator (kills all cross-block
+    ///            edges in both directions);
+    ///   pass 2 — erase remaining instructions in REVERSE order (SSA dominance
+    ///            guarantees users die before defs);
+    ///   pass 3 — delete the now-empty, now-unreferenced blocks.
+    pub(crate) fn clear_partial_body(&self, function: inkwell::values::FunctionValue<'ctx>) {
+        let blocks = function.get_basic_blocks();
+        for bb in &blocks {
+            while let Some(instruction) = bb.get_first_instruction() {
+                if instruction.get_opcode() == inkwell::values::InstructionOpcode::Phi {
+                    instruction.erase_from_basic_block();
+                } else {
+                    break;
+                }
+            }
+            if let Some(terminator) = bb.get_terminator() {
+                terminator.erase_from_basic_block();
+            }
+        }
+        for bb in &blocks {
+            while let Some(instruction) = bb.get_last_instruction() {
+                instruction.erase_from_basic_block();
+            }
+        }
+        for bb in blocks {
+            // SAFETY: blocks are empty and unreferenced after the two erase
+            // passes; delete() removes them from the function and their
+            // addresses are not used afterwards.
+            unsafe {
+                let _ = bb.delete();
+            }
+        }
+    }
+
+    /// Compile a generic function with concrete type arguments (monomorphization).
+    ///
+    /// 0.39.x matrix sweep: wraps the real work so that EVERY error exit — not
+    /// only the tail — tears the partially-emitted instance body down before
+    /// propagating. A half-built body left in the module poisons the LLVM pass
+    /// pipeline (nondeterministic SIGSEGVs downstream).
     pub(super) fn compile_generic_func(
+        &mut self,
+        func: &FuncDef,
+        type_map: &HashMap<String, crate::ast::Type>,
+    ) -> MimiResult<()> {
+        let mangled = Self::mangle_name(&func.name, type_map);
+        match self.compile_generic_func_inner(func, type_map) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(function) = self.module.get_function(&mangled) {
+                    let missing_terminators = function
+                        .get_basic_blocks()
+                        .iter()
+                        .any(|bb| bb.get_terminator().is_none());
+                    if missing_terminators {
+                        // The declaration itself stays (callers may already hold
+                        // references); only the poisoned body is removed.
+                        self.clear_partial_body(function);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn compile_generic_func_inner(
         &mut self,
         func: &FuncDef,
         type_map: &HashMap<String, crate::ast::Type>,
@@ -4375,8 +4454,39 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
         self.end_function_heap_scope();
+        // 0.39.x stdlib matrix sweep (nondeterministic-SIGSEGV root cause #2,
+        // valgrind/IR-diff pinned): some body shapes can finish "successfully"
+        // without a terminator in the entry block (e.g. a tail expression that
+        // silently emits nothing). A terminator-less function body poisons the
+        // module — LLVM's pass pipeline dereferences garbage on it later
+        // (LowerExpectIntrinsic crashed with a null instruction pointer), and
+        // whether the poison exists at all depended on HashMap-ordered
+        // emission. Fail closed instead: restore state, tear the partial body
+        // down with the shared three-pass clear, and surface the error.
+        let mangled_check = Self::mangle_name(&func.name, type_map);
+        if let Some(function) = self.module.get_function(&mangled_check) {
+            let missing_terminators = function
+                .get_basic_blocks()
+                .iter()
+                .any(|bb| bb.get_terminator().is_none());
+            if missing_terminators || function.count_basic_blocks() == 0 {
+                self.clear_partial_body(function);
+                self.var_types = saved_var_types;
+                self.var_type_names = saved_var_type_names;
+                self.list_elem_llvm_types = saved_list_elem_llvm_types;
+                self.type_map = prev_type_map;
+                if let Some(bb) = saved_block {
+                    self.builder.position_at_end(bb);
+                }
+                return Err(CompileError::Generic(format!(
+                    "monomorphized instance '{}' was emitted without a terminating \
+                     instruction — refusing to keep a poisoned body in the module",
+                    mangled_check
+                )));
+            }
+        }
         // Restore the caller's per-function variable type tracking (see the
-        // snapshot comment at the top of this function).
+        // snapshot comment at the top of the function).
         self.var_types = saved_var_types;
         self.var_type_names = saved_var_type_names;
         self.list_elem_llvm_types = saved_list_elem_llvm_types;

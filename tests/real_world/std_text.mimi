@@ -7,7 +7,7 @@
 use std::text;
 
 func main() -> i32 {
-    let b = is_blank(" ")
+    let b = text_is_blank(" ")
     let n = is_numeric("42")
     let sl = slugify("Hello World")
     let ind = indent_text("a\nb", 2)

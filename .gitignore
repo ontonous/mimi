@@ -91,3 +91,5 @@ docs/compose/
 
 # Free-form development scratch buffer
 .freebuff/
+tests/stdlib_matrix_generated/
+tests/stdlib_matrix_scratch/

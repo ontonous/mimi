@@ -1928,6 +1928,29 @@ impl BytecodeCompiler {
                 Ok(rd)
             }
             Expr::Field(obj, field) => {
+                // Qualified nullary enum variant used as a value:
+                // `Type.Variant` (no parentheses). The checker types this
+                // spelling as the nominal enum; emit the same NewVariant
+                // shape as the bare spelling instead of a record field read
+                // on a non-existent variable.
+                if let Expr::Ident(type_spelling) = obj.unlocated() {
+                    if matches!(
+                        self.type_defs.get(type_spelling.as_str()),
+                        Some(TypeDefKind::Enum(variants))
+                            if variants.iter().any(|v| &v.name == field)
+                    ) {
+                        let rd = fc.proto.alloc_reg();
+                        let tag_idx = fc.proto.add_const(ConstValue::Str(field.clone()));
+                        fc.emit(Op::NewVariant {
+                            rd,
+                            type_name: tag_idx,
+                            variant: 0,
+                            base: 0,
+                            arity: 0,
+                        });
+                        return Ok(rd);
+                    }
+                }
                 let r_obj = self.compile_expr(fc, obj)?;
                 let rd = fc.proto.alloc_reg();
                 // Field access by name (stored as string constant).
@@ -3676,6 +3699,32 @@ impl BytecodeCompiler {
             // compile_module_funcs / build_qualified_path) was deleted with
             // it; native codegen never compiled inline modules in the first
             // place, so both backends are now consistent.
+
+            // Qualified enum variant constructor: `Type.Variant(args)`.
+            // The checker accepts this spelling (infer/call/method.rs enum
+            // arm); emit the same NewVariant shape as the bare spelling —
+            // the runtime tags the value with the VARIANT name, which is
+            // what match arms and IsVariant compare against.
+            if let (Expr::Ident(type_spelling), true) = (
+                obj.unlocated(),
+                self.variant_names.contains(method.as_str()),
+            ) {
+                if matches!(
+                    self.type_defs.get(type_spelling.as_str()),
+                    Some(TypeDefKind::Enum(variants))
+                        if variants.iter().any(|v| &v.name == method)
+                ) {
+                    let tag_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
+                    fc.emit(Op::NewVariant {
+                        rd,
+                        type_name: tag_idx,
+                        variant: 0,
+                        base: args_base,
+                        arity: args.len() as u16,
+                    });
+                    return Ok(rd);
+                }
+            }
 
             // Allocate shifted arg block BEFORE compiling receiver,
             // so receiver compilation cannot accidentally alias the block.

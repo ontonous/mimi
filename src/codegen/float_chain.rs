@@ -65,9 +65,16 @@ pub(crate) fn mark_cold_trap_branch(
         );
         let cold = context.i32_type().const_int(0, false);
         let hot = context.i32_type().const_int(1, false);
-        // branch_weights metadata is a list of integer weights, not an
-        // MDString + integers (batch3 P2-2).
-        let node = context.metadata_node(&[cold.into(), hot.into()]);
+        // 0.39.x stdlib matrix sweep (nondeterministic-SIGSEGV root cause):
+        // the node MUST be `!{!"branch_weights", i32 cold, i32 hot}` — the
+        // leading MDString is part of the format (MD_prof consumers like
+        // LowerExpectIntrinsic do an unchecked `cast<MDString>(
+        // MD->getOperand(0))`). The old comment claimed the MDString header
+        // was not required ("batch3 P2-2"); that was wrong, and O1 builds
+        // carried malformed !prof metadata that crashed random passes
+        // depending on HashMap-ordered function emission.
+        let name_node = context.metadata_string("branch_weights");
+        let node = context.metadata_node(&[name_node.into(), cold.into(), hot.into()]);
         let _ = branch.set_metadata(node, kind_id);
     }
 }

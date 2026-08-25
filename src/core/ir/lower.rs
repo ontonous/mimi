@@ -1681,12 +1681,70 @@ impl BodyLowerer<'_> {
                     projection: ResolvedValueProjection::Dereference,
                 }
             }
+            Expr::Field(base, name)
+                if matches!(base.unlocated(), Expr::Ident(_))
+                    && self
+                        .resolve_qualified_unit_variant(
+                            &ty,
+                            match base.unlocated() {
+                                Expr::Ident(spelling) => spelling.as_str(),
+                                _ => unreachable!("guard matched Ident"),
+                            },
+                            name,
+                        )
+                        .is_some() =>
+            {
+                // Qualified nullary enum variant used as a value:
+                // `Type.Variant` (no parentheses). The checker types this
+                // Field expression as the nominal enum itself, so lower it to
+                // the same unit-variant constant as the bare spelling instead
+                // of a place projection on a non-existent local base. This arm
+                // must precede the place-projection arms — a Field rooted in
+                // an Ident is otherwise assumed to be a local-variable place.
+                let Expr::Ident(type_spelling) = base.unlocated() else {
+                    unreachable!("guard matched Ident");
+                };
+                let variant_constant = self
+                    .resolve_qualified_unit_variant(&ty, type_spelling, name)
+                    .expect("guard established resolution");
+                ResolvedExprKind::Constant(variant_constant)
+            }
             Expr::Field(base, name) if !is_local_place(expr) => {
-                let value = self.lower_expr(base, &format!("{role}.inner"))?;
-                let field = self.resolve_field(&node_id, &value.ty, name)?;
-                ResolvedExprKind::Project {
-                    value: Box::new(value),
-                    projection: ResolvedValueProjection::Field(field),
+                // Qualified nullary enum variant used as a value:
+                // `Type.Variant` (no parentheses). The checker types this
+                // Field expression as the nominal enum itself, so lower it to
+                // the same unit-variant constant as the bare spelling instead
+                // of a place projection on a non-existent local base.
+                let qualified_unit_variant = (|| {
+                    let Expr::Ident(type_spelling) = base.unlocated() else {
+                        return None;
+                    };
+                    let item = match self.types.get(&ty) {
+                        Some(ResolvedType::Nominal { item, .. })
+                            if nominal_display(item.as_str()) == *type_spelling =>
+                        {
+                            item.clone()
+                        }
+                        _ => return None,
+                    };
+                    let owner = NodeId(item.as_str().to_string());
+                    let definition = self.type_defs.get(&owner)?;
+                    if definition.kind != ResolvedTypeKind::Enum {
+                        return None;
+                    }
+                    let variant = definition.variant_ids.get(name.as_str())?;
+                    let schema = self.variants.get(variant)?;
+                    (schema.shape == ResolvedVariantShape::Unit).then(|| schema.node_id.clone())
+                })();
+                if let Some(variant_constant) = qualified_unit_variant {
+                    ResolvedExprKind::Constant(variant_constant)
+                } else {
+                    let value = self.lower_expr(base, &format!("{role}.inner"))?;
+                    let field = self.resolve_field(&node_id, &value.ty, name)?;
+                    ResolvedExprKind::Project {
+                        value: Box::new(value),
+                        projection: ResolvedValueProjection::Field(field),
+                    }
                 }
             }
             Expr::TupleIndex(base, index) if !is_local_place(expr) => ResolvedExprKind::Project {
@@ -2359,6 +2417,17 @@ impl BodyLowerer<'_> {
                     role,
                     type_arguments,
                 )? {
+                    return Ok(call);
+                }
+                // Qualified enum variant constructor `Type.Variant(args)`:
+                // the checker accepts this spelling (infer/call/method.rs enum
+                // arm returns the nominal type), so lowering must route it
+                // into the same variant-constructor pipeline as the bare
+                // spelling — otherwise it dies here as a closed Unknown call
+                // target with an internal diagnostic.
+                if let Some(call) =
+                    self.lower_qualified_variant_constructor_call(node_id, callee, arguments, role)?
+                {
                     return Ok(call);
                 }
             }
@@ -3761,6 +3830,85 @@ impl BodyLowerer<'_> {
         Ok(Some(
             self.lower_place(receiver, &format!("{role}.callee.inner"))?,
         ))
+    }
+
+    /// Resolve `Type.Variant` (no parentheses) to the canonical unit-variant
+    /// node. Fires only when the checker-finalized node type is exactly the
+    /// nominal enum named by `type_spelling` and `name` is a Unit variant of
+    /// it — the same anti-hijack discipline as the qualified constructor call
+    /// path.
+    fn resolve_qualified_unit_variant(
+        &self,
+        ty: &ResolvedTypeId,
+        type_spelling: &str,
+        name: &str,
+    ) -> Option<NodeId> {
+        let item = match self.types.get(ty) {
+            Some(ResolvedType::Nominal { item, .. }) => item,
+            _ => return None,
+        };
+        let owner = NodeId(item.as_str().to_string());
+        let definition = self.type_defs.get(&owner)?;
+        // The base identifier must spell the same enum the checker typed the
+        // expression as (short or qualified spelling).
+        let short = definition
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&definition.qualified_name);
+        if short != type_spelling && definition.qualified_name != type_spelling {
+            return None;
+        }
+        if definition.kind != ResolvedTypeKind::Enum {
+            return None;
+        }
+        let variant = definition.variant_ids.get(name)?;
+        let schema = self.variants.get(variant)?;
+        (schema.shape == ResolvedVariantShape::Unit).then(|| schema.node_id.clone())
+    }
+
+    /// Qualified enum variant constructor `Type.Variant(args)`.
+    ///
+    /// The checker accepts this spelling (infer/call/method.rs resolves
+    /// `Field(Ident(T), v)` when `v` names a variant of typedef `T` and types
+    /// the call as the nominal `T`), so lowering routes it into the same
+    /// pipeline as the bare variant spelling. The base identifier must spell
+    /// the same enum as the call's nominal result type — this guard keeps
+    /// unrelated Unknown Field-shaped calls (e.g. a failed method probe whose
+    /// result is coincidentally nominal) from being hijacked as constructors.
+    fn lower_qualified_variant_constructor_call(
+        &mut self,
+        node_id: &NodeId,
+        callee: &Expr,
+        arguments: &[Expr],
+        role: &str,
+    ) -> Result<Option<ResolvedCall>, Vec<ResolvedBodyError>> {
+        let Expr::Field(base, method) = callee.unlocated() else {
+            return Ok(None);
+        };
+        let Expr::Ident(type_spelling) = base.unlocated() else {
+            return Ok(None);
+        };
+        let result = self.expression_type(node_id)?;
+        let Some(ResolvedType::Nominal { item, .. }) = self.types.get(&result) else {
+            return Ok(None);
+        };
+        let owner = NodeId(item.as_str().to_string());
+        let matches_spelling = match self.type_defs.get(&owner) {
+            Some(definition) => {
+                let short = definition
+                    .qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&definition.qualified_name);
+                short == type_spelling.as_str() || definition.qualified_name == *type_spelling
+            }
+            None => false,
+        };
+        if !matches_spelling {
+            return Ok(None);
+        }
+        self.lower_variant_constructor_call(node_id, method, arguments, role)
     }
 
     fn lower_variant_constructor_call(

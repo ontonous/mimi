@@ -616,7 +616,59 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let TypeDefKind::Enum(variants) = &tdef.kind {
-                    if variants.iter().any(|v| v.name == method_name) {
+                    let payload_decl: Option<Vec<Type>> = variants
+                        .iter()
+                        .find(|v| v.name == method_name)
+                        .map(|v| match &v.payload {
+                            Some(VariantPayload::Tuple(types)) => types.clone(),
+                            Some(VariantPayload::Record(fields)) => {
+                                fields.iter().map(|f| f.ty.clone()).collect()
+                            }
+                            None => vec![],
+                        });
+                    // Qualified variant constructor `Type.Variant(args)`:
+                    // mirror the bare spelling's semantics — validate arity and
+                    // infer every payload argument so canonical argument types
+                    // are registered for resolved-body lowering. (Previously
+                    // arguments were never inferred on this path, so a payload
+                    // literal reached lowering with no canonical type and died
+                    // as an internal TOOL-RESOLUTION-001.)
+                    if let Some(payload_types) = payload_decl {
+                        let expected_types: Vec<Type> =
+                            payload_types.iter().map(|t| self.resolve_type(t)).collect();
+                        if args.len() != expected_types.len() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0257,
+                                format!(
+                                    "variant constructor '{}.{}' expects {} argument(s), got {}",
+                                    type_name,
+                                    method_name,
+                                    expected_types.len(),
+                                    args.len()
+                                ),
+                            );
+                        } else {
+                            for (i, (arg, param)) in
+                                args.iter().zip(expected_types.iter()).enumerate()
+                            {
+                                let at = self.infer_expr(arg, scopes);
+                                let coerced = is_numeric_coercion(param, &at);
+                                if !coerced && self.unification.unify(param, &at).is_err() {
+                                    self.emit_code(
+                                        crate::diagnostic::codes::E0211,
+                                        format!(
+                                            "argument {} of variant constructor '{}.{}' \
+                                             expected {}, found {}",
+                                            i + 1,
+                                            type_name,
+                                            method_name,
+                                            fmt_type(param),
+                                            fmt_type(&at)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         return Type::Name(type_name.clone(), vec![]);
                     }
                 }
