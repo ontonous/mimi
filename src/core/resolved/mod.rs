@@ -8308,12 +8308,21 @@ impl<'a> ExpressionKeyIndex<'a> {
     where
         'e: 'a,
     {
-        // One pass over node_meta; per meta we test the (small) set of owner
-        // prefixes — O(metas × owners) total, versus the previous O(metas)
-        // rescan PER MISSING KEY that made large bodies quadratic.
-        let owner_prefixes: Vec<(&str, String)> = owners
-            .map(|owner| (owner.0.as_str(), format!("{}/", owner.0)))
-            .collect();
+        // One pass over node_meta. 0.39.136 perf: ownership was resolved by
+        // testing EVERY owner prefix per meta — O(metas × owners), which
+        // exploded on actor-dense files (12k owners × ~200k metas ≈ billions
+        // of `starts_with`). An owner's prefix `{o}/` matches a node id
+        // exactly when it equals one of the node id's `/`-delimited prefixes,
+        // so per meta only its OWN depth-many boundaries need a hash lookup:
+        // O(metas × nesting depth + owners).
+        //
+        // Semantics preserved verbatim: every matching owner is recorded in
+        // `by_owner`; `matched` keeps the LAST match in the owners'
+        // (BTreeMap-sorted) iteration order, i.e. the lexicographic maximum.
+        let mut owner_by_prefix: HashMap<String, &'a str> = HashMap::new();
+        for owner in owners {
+            owner_by_prefix.insert(format!("{}/", owner.0), owner.0.as_str());
+        }
         let mut by_owner: HashMap<&'a str, HashMap<&'a ExpressionTypeKey, Vec<&'a NodeId>>> =
             HashMap::new();
         let mut all_by_key: HashMap<&'a ExpressionTypeKey, Vec<(Option<&'a str>, &'a NodeId)>> =
@@ -8322,16 +8331,23 @@ impl<'a> ExpressionKeyIndex<'a> {
             let Some(key) = &meta.expression_key else {
                 continue;
             };
-            let mut matched: Option<&str> = None;
-            for (owner_id, prefix) in &owner_prefixes {
-                if meta.node_id.0.starts_with(prefix.as_str()) {
-                    matched = Some(owner_id);
+            let nid = meta.node_id.0.as_str();
+            let mut matched: Option<&'a str> = None;
+            for (boundary, ch) in nid.char_indices() {
+                if ch != '/' {
+                    continue;
+                }
+                let prefix = &nid[..boundary + 1];
+                if let Some(&owner_id) = owner_by_prefix.get(prefix) {
                     by_owner
                         .entry(owner_id)
                         .or_default()
                         .entry(key)
                         .or_default()
                         .push(&meta.node_id);
+                    if matched.is_none_or(|current| owner_id > current) {
+                        matched = Some(owner_id);
+                    }
                 }
             }
             all_by_key
@@ -8378,10 +8394,12 @@ impl<'a> ExpressionKeyIndex<'a> {
         owner: &str,
         errors: &mut Vec<Diagnostic>,
     ) {
-        for (owner_part, bucket) in self.by_owner.iter() {
-            if *owner_part != owner {
-                continue;
-            }
+        // 0.39.136 perf: direct bucket hit — the old full-map scan visited
+        // every owner per call (O(owners²) across stabilize).
+        let Some(bucket) = self.by_owner.get(owner) else {
+            return;
+        };
+        {
             for (key, nodes) in bucket.iter() {
                 if nodes.len() < 2 {
                     continue;
@@ -8713,11 +8731,16 @@ fn build_canonical_function_signatures(
     let mut uniquely_owned: std::collections::HashMap<&NodeId, Vec<&NodeMeta>> =
         std::collections::HashMap::new();
     {
-        let fn_prefixes: Vec<(&NodeId, String)> = program
-            .functions
-            .keys()
-            .map(|id| (id, format!("{}/", id.0)))
-            .collect();
+        // 0.39.136 perf: ownership was resolved by testing EVERY function
+        // prefix per binding-carrying meta — O(metas × functions), exploding
+        // on actor-dense files. A function prefix `{f}/` matches a node id
+        // exactly when it equals one of its `/`-delimited prefixes, so per
+        // meta only its own depth-many boundaries need a hash lookup.
+        let mut fn_by_prefix: std::collections::HashMap<String, &NodeId> =
+            std::collections::HashMap::new();
+        for id in program.functions.keys() {
+            fn_by_prefix.insert(format!("{}/", id.0), id);
+        }
         for (meta_id, meta) in program.node_meta.iter() {
             if meta.shared_binding.is_none()
                 && meta.ref_binding.is_none()
@@ -8725,10 +8748,14 @@ fn build_canonical_function_signatures(
             {
                 continue;
             }
+            let nid = meta_id.0.as_str();
             let mut owner: Option<&NodeId> = None;
             let mut count = 0usize;
-            for (fid, prefix) in &fn_prefixes {
-                if meta_id.0.starts_with(prefix.as_str()) {
+            for (boundary, ch) in nid.char_indices() {
+                if ch != '/' {
+                    continue;
+                }
+                if let Some(&fid) = fn_by_prefix.get(&nid[..boundary + 1]) {
                     count += 1;
                     if count > 1 {
                         break;
@@ -8744,12 +8771,7 @@ fn build_canonical_function_signatures(
             }
         }
     }
-    let mut __t_sig = std::time::Duration::ZERO;
-    let mut __t_gen = std::time::Duration::ZERO;
-    let mut __t_par = std::time::Duration::ZERO;
-    let mut __t_exp = std::time::Duration::ZERO;
     for function in functions {
-        let __s0 = std::time::Instant::now();
         let Some((parameter_types, result_type)) =
             program.zonked_function_types.get(&function.node_id)
         else {
@@ -8789,8 +8811,6 @@ fn build_canonical_function_signatures(
             generic_parameters.push(id.clone());
         }
 
-        __t_sig += __s0.elapsed();
-        let __s1 = std::time::Instant::now();
         let module = function
             .qualified_name
             .rsplit_once("::")
@@ -8821,8 +8841,6 @@ fn build_canonical_function_signatures(
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
 
-        __t_gen += __s1.elapsed();
-        let __s2 = std::time::Instant::now();
         let mut canonical_parameter_types = Vec::with_capacity(parameter_types.len());
         let mut signature_failed = false;
         for ty in parameter_types {
@@ -8858,8 +8876,6 @@ fn build_canonical_function_signatures(
             continue;
         }
 
-        __t_par += __s2.elapsed();
-        let __s3 = std::time::Instant::now();
         if let Some(expressions) = expression_types.get(&function.node_id) {
             for (node_id, ty) in expressions {
                 match types.intern_zonked(ty, &capabilities, &mut resolve_name) {

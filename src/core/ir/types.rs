@@ -512,11 +512,31 @@ impl std::error::Error for ResolvedTypeError {}
 pub struct ResolvedTypeTable {
     entries: BTreeMap<ResolvedTypeId, ResolvedType>,
     canonical: BTreeMap<ResolvedTypeId, String>,
+    /// Lazily cached Unit type id. 0.39.136 perf: body lowering used to scan
+    /// the whole table PER FUNCTION to find it — O(callables × types) on
+    /// actor-dense files (12k actors ≈ 180M BTreeMap steps).
+    unit_cache: std::sync::OnceLock<ResolvedTypeId>,
 }
 
 impl ResolvedTypeTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Id of the canonical `Unit` primitive, cached after first lookup.
+    /// `None` mirrors the caller's previous "table has no unit type" error.
+    pub fn unit_type_id(&self) -> Option<ResolvedTypeId> {
+        self.unit_cache.get().cloned().or_else(|| {
+            let found = self
+                .entries
+                .iter()
+                .find(|(_, ty)| matches!(ty, ResolvedType::Primitive(PrimitiveType::Unit)))
+                .map(|(id, _)| id.clone());
+            if let Some(id) = &found {
+                let _ = self.unit_cache.set(id.clone());
+            }
+            found
+        })
     }
 
     pub fn len(&self) -> usize {

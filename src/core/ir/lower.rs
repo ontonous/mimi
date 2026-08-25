@@ -123,18 +123,14 @@ fn lower_function_body_with_captures(
     input: FunctionBodyInput<'_>,
     captures: BTreeMap<String, ResolvedLocal>,
 ) -> Result<LoweredFunctionBody, Vec<ResolvedBodyError>> {
-    let unit = input
-        .types
-        .iter()
-        .find_map(|(id, ty)| {
-            matches!(ty, ResolvedType::Primitive(super::PrimitiveType::Unit)).then(|| id.clone())
-        })
-        .ok_or_else(|| {
-            vec![ResolvedBodyError::new(
-                input.signature.owner.clone(),
-                "canonical type table has no unit type",
-            )]
-        })?;
+    // 0.39.136 perf: cached O(1) lookup — this ran per function over the
+    // whole type table (O(callables × types), quadratic on actor-dense files).
+    let unit = input.types.unit_type_id().ok_or_else(|| {
+        vec![ResolvedBodyError::new(
+            input.signature.owner.clone(),
+            "canonical type table has no unit type",
+        )]
+    })?;
     let capture_ids = captures
         .values()
         .map(|local| local.id.clone())
