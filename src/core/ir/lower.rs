@@ -17,9 +17,11 @@ use crate::ast::{
     AstOrigin, BinOp, Expr, File, FuncDef, Item, Lit, Param, Pattern, PatternKind, Stmt, UnOp,
 };
 use crate::core::resolved::{
-    expr_kind, expr_sibling_role, impl_method_owner, impl_qualified_name, interpolation_role,
-    map_entry_role, match_arm_role, nested_function_owner, pattern_kind, pattern_sibling_role,
-    stable_id_fragment, stmt_anchor, stmt_kind, stmt_sibling_role, type_kind, NodeIdBuilder,
+    expr_kind, expr_sibling_role, expr_sibling_roles, impl_method_owner, impl_qualified_name,
+    interpolation_role, map_entry_role, map_entry_roles, match_arm_role, match_arm_roles,
+    nested_function_owner, pattern_kind,
+    pattern_sibling_role, pattern_sibling_roles, stable_id_fragment, stmt_anchor, stmt_kind,
+    stmt_sibling_role, stmt_sibling_roles, type_kind, NodeIdBuilder,
 };
 use crate::core::{
     CheckedProgram, NodeId, NodeMeta, Origin, ResolvedActor, ResolvedCallKind, ResolvedCallSite,
@@ -902,8 +904,9 @@ impl BodyLowerer<'_> {
             });
         let mut statements = Vec::with_capacity(block.len());
         let mut result = None;
+        let sibling_roles_1 = stmt_sibling_roles(role, block);
         for index in 0..block.len() {
-            let stmt_role = stmt_sibling_role(role, block, index);
+            let stmt_role = sibling_roles_1[index].clone();
             if Some(index) == tail_index {
                 let lowered = match block[index].unlocated() {
                     Stmt::Expr(expression) => {
@@ -1376,18 +1379,16 @@ impl BodyLowerer<'_> {
                 kind: super::ContractKind::Invariant,
                 condition: self.lower_expr(expr, &format!("{role}.expression"))?,
             },
-            Stmt::Math(expressions) => ResolvedStmtKind::Math(
-                expressions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, expression)| {
-                        self.lower_expr(
-                            expression,
-                            &expr_sibling_role(&format!("{role}.math"), expressions, index),
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Stmt::Math(expressions) => {
+                let math_roles = expr_sibling_roles(&format!("{role}.math"), expressions);
+                ResolvedStmtKind::Math(
+                    expressions
+                        .iter()
+                        .enumerate()
+                        .map(|(index, expression)| self.lower_expr(expression, &math_roles[index]))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
             Stmt::Drop(expr) => {
                 ResolvedStmtKind::Drop(self.lower_drop_places(expr, &format!("{role}.expression"))?)
             }
@@ -1937,9 +1938,10 @@ impl BodyLowerer<'_> {
                 self.lower_record(&node_id, fields, rest.as_deref(), role, &ty)?
             }
             Expr::MapLiteral { entries } => {
+                let entry_roles = map_entry_roles(&format!("{role}.entry"), entries);
                 let mut lowered = Vec::with_capacity(entries.len());
                 for index in 0..entries.len() {
-                    let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                    let entry_role = &entry_roles[index];
                     lowered.push((
                         self.lower_expr(&entries[index].0, &format!("{entry_role}.key"))?,
                         self.lower_expr(&entries[index].1, &format!("{entry_role}.value"))?,
@@ -2241,10 +2243,11 @@ impl BodyLowerer<'_> {
         pattern_ty: &ResolvedTypeId,
         result_ty: &ResolvedTypeId,
     ) -> Result<Vec<ResolvedMatchArm>, Vec<ResolvedBodyError>> {
+        let arm_roles = match_arm_roles(&format!("{role}.arm"), arms);
         let mut lowered = Vec::with_capacity(arms.len());
         for index in 0..arms.len() {
             let arm = &arms[index];
-            let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+            let arm_role = &arm_roles[index];
             let mut diagnostics = Vec::new();
             let node_id = self.ids.anonymous(
                 &self.owner,
@@ -2573,12 +2576,12 @@ impl BodyLowerer<'_> {
             let builtin =
                 super::BuiltinId::new(site.callee.clone()).map_err(|error| vec![error])?;
             let mut lowered = Vec::with_capacity(arguments.len());
+            let sibling_roles_2 = expr_sibling_roles(&format!("{role}.argument"), arguments);
             for index in 0..arguments.len() {
                 if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
                     return self.unsupported(node_id, "named arguments for builtin call");
                 }
-                let argument_role =
-                    expr_sibling_role(&format!("{role}.argument"), arguments, index);
+                let argument_role = &sibling_roles_2[index];
                 let value = self.lower_expr(&arguments[index], &argument_role)?;
                 lowered.push(ResolvedArgument {
                     parameter: super::ResolvedParameterId(NodeId(format!(
@@ -2666,12 +2669,12 @@ impl BodyLowerer<'_> {
                 )]);
             }
             let mut lowered = Vec::with_capacity(arguments.len());
+            let sibling_roles_3 = expr_sibling_roles(&format!("{role}.argument"), arguments);
             for index in 0..arguments.len() {
                 if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
                     return self.unsupported(node_id, "named arguments for extern call");
                 }
-                let argument_role =
-                    expr_sibling_role(&format!("{role}.argument"), arguments, index);
+                let argument_role = &sibling_roles_3[index];
                 let value = self.lower_expr(&arguments[index], &argument_role)?;
                 let parameter = function
                     .parameter_ids
@@ -2758,8 +2761,9 @@ impl BodyLowerer<'_> {
 
         let mut slots = vec![None; signature.parameters.len()];
         let mut next_positional = 0;
+        let sibling_roles_4 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for index in 0..arguments.len() {
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_4[index].clone();
             let (slot, value, value_role) = match arguments[index].unlocated() {
                 Expr::NamedArg(name, value) => {
                     let slot = signature
@@ -3060,8 +3064,9 @@ impl BodyLowerer<'_> {
         let mut slots = vec![None; signature.parameters.len()];
         slots[0] = Some((source, source_role));
         let mut next_positional = 1;
+        let sibling_roles_5 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for index in 1..arguments.len() {
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_5[index].clone();
             let (slot, value, value_role) = match arguments[index].unlocated() {
                 Expr::NamedArg(name, value) => {
                     let slot = signature
@@ -3232,13 +3237,14 @@ impl BodyLowerer<'_> {
         let polymorphic = result != *call_result;
 
         let mut lowered = Vec::with_capacity(arguments.len());
+        let closure_arg_roles = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for (index, (argument, parameter_type)) in
             arguments.iter().zip(parameters.into_iter()).enumerate()
         {
             if matches!(argument.unlocated(), Expr::NamedArg(_, _)) {
                 return self.unsupported(node_id, "named arguments on local closure call");
             }
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = &closure_arg_roles[index];
             let value = self.lower_expr(argument, &argument_role)?;
             let conversion = if polymorphic || value.ty != parameter_type {
                 CheckedConversion {
@@ -3377,8 +3383,9 @@ impl BodyLowerer<'_> {
             .collect::<BTreeMap<_, _>>();
         let mut slots = vec![None; signature.parameters.len()];
         let mut next_positional = 0;
+        let sibling_roles_6 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for index in 0..arguments.len() {
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_6[index].clone();
             let (slot, value, value_role) = match arguments[index].unlocated() {
                 Expr::NamedArg(name, value) => {
                     let slot = signature
@@ -3794,8 +3801,9 @@ impl BodyLowerer<'_> {
         }
         let mut slots = vec![None; declared.len()];
         let mut next_positional = 0;
+        let sibling_roles_7 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for (index, argument) in arguments.iter().enumerate() {
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_7[index].clone();
             let (slot, value, value_role) = match argument.unlocated() {
                 Expr::NamedArg(name, value) => {
                     let slot = declared
@@ -4067,8 +4075,9 @@ impl BodyLowerer<'_> {
         }];
         let mut slots = vec![None; explicit_parameters.len()];
         let mut next_positional = 0;
+        let sibling_roles_8 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for index in 0..arguments.len() {
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_8[index].clone();
             let (slot, value, value_role) = match arguments[index].unlocated() {
                 Expr::NamedArg(name, value) => {
                     let slot = explicit_parameters
@@ -4210,12 +4219,13 @@ impl BodyLowerer<'_> {
                 to: receiver_ty,
             },
         }];
+        let sibling_roles_9 = expr_sibling_roles(&format!("{role}.argument"), arguments);
         for index in 0..arguments.len() {
             if matches!(arguments[index].unlocated(), Expr::NamedArg(_, _)) {
                 return self
                     .unsupported(node_id, "named arguments on language-provided method call");
             }
-            let argument_role = expr_sibling_role(&format!("{role}.argument"), arguments, index);
+            let argument_role = sibling_roles_9[index].clone();
             let value = self.lower_expr(&arguments[index], &argument_role)?;
             let value_ty = value.ty.clone();
             lowered.push(ResolvedArgument {
@@ -4284,10 +4294,11 @@ impl BodyLowerer<'_> {
         values: &[Expr],
         role: &str,
     ) -> Result<Vec<ResolvedExpr>, Vec<ResolvedBodyError>> {
+        let element_roles = expr_sibling_roles(role, values);
         values
             .iter()
             .enumerate()
-            .map(|(index, value)| self.lower_expr(value, &expr_sibling_role(role, values, index)))
+            .map(|(index, value)| self.lower_expr(value, &element_roles[index]))
             .collect()
     }
 
@@ -4746,13 +4757,14 @@ impl BodyLowerer<'_> {
         types: &[ResolvedTypeId],
         mutable: bool,
     ) -> Result<Vec<ResolvedPattern>, Vec<ResolvedBodyError>> {
+        let pattern_roles = pattern_sibling_roles(&format!("{role}.element"), patterns);
         patterns
             .iter()
             .enumerate()
             .map(|(index, pattern)| {
                 self.lower_binding_pattern(
                     pattern,
-                    &pattern_sibling_role(&format!("{role}.element"), patterns, index),
+                    &pattern_roles[index],
                     types[index].clone(),
                     mutable,
                 )
@@ -4857,9 +4869,9 @@ impl BodyLowerer<'_> {
         match expression.unlocated() {
             Expr::Tuple(elements) | Expr::List(elements) => {
                 let mut places = Vec::new();
+                let sibling_roles_10 = expr_sibling_roles(&format!("{role}.element"), elements);
                 for index in 0..elements.len() {
-                    let element_role =
-                        expr_sibling_role(&format!("{role}.element"), elements, index);
+                    let element_role = &sibling_roles_10[index];
                     places.extend(self.lower_drop_places(&elements[index], &element_role)?);
                 }
                 if places.is_empty() {

@@ -1080,6 +1080,12 @@ impl CheckedProgram {
         let mut extern_blocks = HashMap::new();
         let mut backend_requirements = Vec::new();
         let mut errors = Vec::new();
+        eprintln!(
+            "DBG-SEC fcfb_entry sources={} items={} imports={}",
+            file.sources.len(),
+            file.items.len(),
+            file.imports.len()
+        );
         let ids = NodeIdBuilder::new(&file.sources);
         let compilation_root = NodeId(COMPILATION_ROOT_NODE_ID.to_string());
         for import in &file.imports {
@@ -1183,11 +1189,12 @@ impl CheckedProgram {
             origin_catalog.register(&extern_block.node_id, &extern_block.origin, &mut errors);
         }
         origin_catalog.validate(&mut errors);
+        let legacy_file_clone = file.clone();
         if !errors.is_empty() {
             return Err(errors);
         }
         Ok(Self {
-            legacy_file: file.clone(),
+            legacy_file: legacy_file_clone,
             items,
             node_meta,
             call_sites,
@@ -3748,6 +3755,10 @@ fn collect_block_meta(
     }
 }
 
+pub(crate) fn stmt_sibling_roles(context: &str, block: &[Stmt]) -> Vec<String> {
+    semantic_sibling_roles(&format!("{context}.statement"), block, stmt_semantic_key)
+}
+
 pub(crate) fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> String {
     semantic_sibling_role(
         &format!("{context}.statement"),
@@ -3757,12 +3768,24 @@ pub(crate) fn stmt_sibling_role(context: &str, block: &[Stmt], index: usize) -> 
     )
 }
 
+pub(crate) fn expr_sibling_roles(context: &str, exprs: &[Expr]) -> Vec<String> {
+    semantic_sibling_roles(context, exprs, expr_semantic_key)
+}
+
 pub(crate) fn expr_sibling_role(context: &str, exprs: &[Expr], index: usize) -> String {
     semantic_sibling_role(context, exprs, index, expr_semantic_key)
 }
 
+pub(crate) fn pattern_sibling_roles(context: &str, patterns: &[Pattern]) -> Vec<String> {
+    semantic_sibling_roles(context, patterns, pattern_semantic_key)
+}
+
 pub(crate) fn pattern_sibling_role(context: &str, patterns: &[Pattern], index: usize) -> String {
     semantic_sibling_role(context, patterns, index, pattern_semantic_key)
+}
+
+pub(crate) fn type_sibling_roles(context: &str, types: &[Type]) -> Vec<String> {
+    semantic_sibling_roles(context, types, type_semantic_key)
 }
 
 pub(crate) fn type_sibling_role(context: &str, types: &[Type], index: usize) -> String {
@@ -3781,6 +3804,10 @@ fn match_arm_semantic_key(arm: &crate::ast::MatchArm) -> String {
     )
 }
 
+pub(crate) fn match_arm_roles(context: &str, arms: &[crate::ast::MatchArm]) -> Vec<String> {
+    semantic_sibling_roles(context, arms, match_arm_semantic_key)
+}
+
 pub(crate) fn match_arm_role(context: &str, arms: &[crate::ast::MatchArm], index: usize) -> String {
     semantic_sibling_role(context, arms, index, match_arm_semantic_key)
 }
@@ -3791,6 +3818,10 @@ fn map_entry_semantic_key(entry: &(Expr, Expr)) -> String {
         expr_semantic_key(&entry.0),
         expr_semantic_key(&entry.1)
     )
+}
+
+pub(crate) fn map_entry_roles(context: &str, entries: &[(Expr, Expr)]) -> Vec<String> {
+    semantic_sibling_roles(context, entries, map_entry_semantic_key)
 }
 
 pub(crate) fn map_entry_role(context: &str, entries: &[(Expr, Expr)], index: usize) -> String {
@@ -3822,23 +3853,38 @@ pub(crate) fn interpolation_role(
     )
 }
 
+/// 0.39.136 perf (check-phase O(n²) → O(n)): sibling roles used to recompute
+/// every PREVIOUS sibling's semantic key for each element (n²/2 String
+/// allocations — a 20k-element list literal spent ~6 s here alone). The batch
+/// form computes each key exactly once and counts occurrences incrementally.
+fn semantic_sibling_roles<T>(
+    context: &str,
+    values: &[T],
+    key_of: impl Fn(&T) -> String,
+) -> Vec<String> {
+    let mut occurrence: HashMap<String, usize> = HashMap::with_capacity(values.len());
+    values
+        .iter()
+        .map(|value| {
+            let key = key_of(value);
+            let occ = {
+                let slot = occurrence.entry(key.clone()).or_insert(0);
+                let current = *slot;
+                *slot += 1;
+                current
+            };
+            format!("{}.{:016x}.same.{}", context, stable_text_hash(&key), occ)
+        })
+        .collect()
+}
+
 fn semantic_sibling_role<T>(
     context: &str,
     values: &[T],
     index: usize,
     key_of: impl Fn(&T) -> String,
 ) -> String {
-    let key = key_of(&values[index]);
-    let occurrence = values[..index]
-        .iter()
-        .filter(|value| key_of(value) == key)
-        .count();
-    format!(
-        "{}.{:016x}.same.{}",
-        context,
-        stable_text_hash(&key),
-        occurrence
-    )
+    semantic_sibling_roles(context, values, key_of).swap_remove(index)
 }
 
 pub(crate) fn stable_text_hash(value: &str) -> u64 {
@@ -4215,8 +4261,9 @@ fn collect_type_meta(
     }
     match ty.unlocated() {
         Type::Name(_, args) => {
+            let child_roles = type_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
-                let child_role = type_sibling_role(&format!("{role}.argument"), args, index);
+                let child_role = &child_roles[index];
                 collect_type_meta(
                     &args[index],
                     &node_id,
@@ -4269,8 +4316,9 @@ fn collect_type_meta(
             );
         }
         Type::Tuple(items) => {
+            let child_roles = type_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
-                let child_role = type_sibling_role(&format!("{role}.element"), items, index);
+                let child_role = &child_roles[index];
                 collect_type_meta(
                     &items[index],
                     &node_id,
@@ -4283,8 +4331,9 @@ fn collect_type_meta(
             }
         }
         Type::Func(params, ret) | Type::ExternFunc(params, ret) => {
+            let child_roles = type_sibling_roles(&format!("{role}.parameter"), params);
             for index in 0..params.len() {
-                let child_role = type_sibling_role(&format!("{role}.parameter"), params, index);
+                let child_role = &child_roles[index];
                 collect_type_meta(
                     &params[index],
                     &node_id,
@@ -4783,9 +4832,9 @@ fn collect_item_meta(
                         );
                         match &variant.payload {
                             Some(crate::ast::VariantPayload::Tuple(types)) => {
+                                let child_roles = type_sibling_roles("payload.element", types);
                                 for index in 0..types.len() {
-                                    let child_role =
-                                        type_sibling_role("payload.element", types, index);
+                                    let child_role = &child_roles[index];
                                     collect_type_meta(
                                         &types[index],
                                         &variant_id,
@@ -4943,8 +4992,9 @@ fn collect_item_meta(
             for generic in &impl_def.generics {
                 collect_generic_param_meta(generic, &node_id, "generic", span, ids, out, errors);
             }
+            let role_batch = type_sibling_roles("trait_argument", &impl_def.trait_args);
             for index in 0..impl_def.trait_args.len() {
-                let role = type_sibling_role("trait_argument", &impl_def.trait_args, index);
+                let role = &role_batch[index];
                 collect_type_meta(
                     &impl_def.trait_args[index],
                     &node_id,
@@ -4955,8 +5005,9 @@ fn collect_item_meta(
                     errors,
                 );
             }
+            let role_batch = type_sibling_roles("type_argument", &impl_def.type_args);
             for index in 0..impl_def.type_args.len() {
-                let role = type_sibling_role("type_argument", &impl_def.type_args, index);
+                let role = &role_batch[index];
                 collect_type_meta(
                     &impl_def.type_args[index],
                     &node_id,
@@ -5628,8 +5679,9 @@ fn collect_stmt_meta(
             );
         }
         Stmt::Math(exprs) => {
+            let child_roles = expr_sibling_roles(&format!("{role}.math"), exprs);
             for index in 0..exprs.len() {
-                let child_role = expr_sibling_role(&format!("{role}.math"), exprs, index);
+                let child_role = &child_roles[index];
                 collect_expr_meta(
                     &exprs[index],
                     owner,
@@ -5979,14 +6031,16 @@ fn collect_expr_meta(
                 out,
                 errors,
             );
+            let child_roles = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
-                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                let child_role = &child_roles[index];
                 collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
             }
         }
         Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            let child_roles = expr_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
-                let child_role = expr_sibling_role(&format!("{role}.element"), items, index);
+                let child_role = &child_roles[index];
                 collect_expr_meta(
                     &items[index],
                     owner,
@@ -6041,8 +6095,9 @@ fn collect_expr_meta(
                 out,
                 errors,
             );
+            let arm_role_batch = match_arm_roles(&format!("{role}.arm"), arms);
             for (index, arm) in arms.iter().enumerate() {
-                let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+                let arm_role = &arm_role_batch[index];
                 insert_child_meta(
                     arm.meta,
                     owner,
@@ -6228,8 +6283,9 @@ fn collect_expr_meta(
             }
         }
         Expr::Turbofish(_, types, args) => {
+            let child_roles = type_sibling_roles(&format!("{role}.type_argument"), types);
             for index in 0..types.len() {
-                let child_role = type_sibling_role(&format!("{role}.type_argument"), types, index);
+                let child_role = &child_roles[index];
                 collect_type_meta(
                     &types[index],
                     owner,
@@ -6240,14 +6296,16 @@ fn collect_expr_meta(
                     errors,
                 );
             }
+            let arg_roles_batch = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
-                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                let child_role = &arg_roles_batch[index];
                 collect_expr_meta(&args[index], owner, &child_role, fallback, ids, out, errors);
             }
         }
         Expr::MapLiteral { entries } => {
+            let entry_roles_batch = map_entry_roles(&format!("{role}.entry"), entries);
             for (index, (key, value)) in entries.iter().enumerate() {
-                let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                let entry_role = &entry_roles_batch[index];
                 collect_expr_meta(
                     key,
                     owner,
@@ -6351,8 +6409,9 @@ fn collect_pattern_meta(
             }
         }
         PatternKind::Tuple(items) | PatternKind::Array(items) => {
+            let child_roles = pattern_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
-                let child_role = pattern_sibling_role(&format!("{role}.element"), items, index);
+                let child_role = &child_roles[index];
                 collect_pattern_meta(
                     &items[index],
                     owner,
@@ -6365,8 +6424,9 @@ fn collect_pattern_meta(
             }
         }
         PatternKind::Slice(items, rest) => {
+            let child_roles = pattern_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
-                let child_role = pattern_sibling_role(&format!("{role}.element"), items, index);
+                let child_role = &child_roles[index];
                 collect_pattern_meta(
                     &items[index],
                     owner,
@@ -7108,10 +7168,19 @@ fn collect_block_call_sites(
     out: &mut HashMap<NodeId, ResolvedCallSite>,
     errors: &mut Vec<Diagnostic>,
 ) {
+    let roles = stmt_sibling_roles(context, block);
     for (index, stmt) in block.iter().enumerate() {
-        let role = stmt_sibling_role(context, block, index);
         collect_stmt_call_sites(
-            stmt, owner, &role, fallback, ids, functions, externs, methods, out, errors,
+            stmt,
+            owner,
+            &roles[index],
+            fallback,
+            ids,
+            functions,
+            externs,
+            methods,
+            out,
+            errors,
         );
     }
 }
@@ -7471,8 +7540,9 @@ fn collect_stmt_call_sites(
             );
         }
         Stmt::Math(exprs) => {
+            let child_roles = expr_sibling_roles(&format!("{role}.math"), exprs);
             for index in 0..exprs.len() {
-                let child_role = expr_sibling_role(&format!("{role}.math"), exprs, index);
+                let child_role = &child_roles[index];
                 collect_expr_call_sites(
                     &exprs[index],
                     owner,
@@ -7528,8 +7598,9 @@ fn collect_expr_call_sites(
                 out,
                 errors,
             );
+            let child_roles = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
-                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                let child_role = &child_roles[index];
                 collect_expr_call_sites(
                     &args[index],
                     owner,
@@ -7596,8 +7667,9 @@ fn collect_expr_call_sites(
             );
         }
         Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            let child_roles = expr_sibling_roles(&format!("{role}.element"), items);
             for index in 0..items.len() {
-                let child_role = expr_sibling_role(&format!("{role}.element"), items, index);
+                let child_role = &child_roles[index];
                 collect_expr_call_sites(
                     &items[index],
                     owner,
@@ -7625,8 +7697,9 @@ fn collect_expr_call_sites(
                 out,
                 errors,
             );
+            let arm_role_batch = match_arm_roles(&format!("{role}.arm"), arms);
             for (index, arm) in arms.iter().enumerate() {
-                let arm_role = match_arm_role(&format!("{role}.arm"), arms, index);
+                let arm_role = &arm_role_batch[index];
                 if let Some(guard) = &arm.guard {
                     collect_expr_call_sites(
                         guard,
@@ -7869,8 +7942,9 @@ fn collect_expr_call_sites(
                 out,
                 errors,
             );
+            let child_roles = expr_sibling_roles(&format!("{role}.argument"), args);
             for index in 0..args.len() {
-                let child_role = expr_sibling_role(&format!("{role}.argument"), args, index);
+                let child_role = &child_roles[index];
                 collect_expr_call_sites(
                     &args[index],
                     owner,
@@ -7886,8 +7960,9 @@ fn collect_expr_call_sites(
             }
         }
         Expr::MapLiteral { entries } => {
+            let entry_roles = map_entry_roles(&format!("{role}.entry"), entries);
             for (index, (key, value)) in entries.iter().enumerate() {
-                let entry_role = map_entry_role(&format!("{role}.entry"), entries, index);
+                let entry_role = &entry_roles[index];
                 collect_expr_call_sites(
                     key,
                     owner,
@@ -8210,59 +8285,170 @@ fn canonical_shared_binding_type(
     ZonkedTy::from_resolved(ty).map_err(|error| error.to_string())
 }
 
+/// 0.39.136 perf: single-pass index over `node_meta` replacing two O(n²)
+/// patterns in the stabilizers below (per-owner full scans + per-missing-key
+/// full rescans made large expressions quadratic in the check phase —
+/// 20k-element literals took 20 s; now linear).
+///
+/// Semantics preserved from the previous implementation:
+///  * owner membership = node-id string starting with "{owner}/"
+///    (ids without `/` — the declaration node itself — are excluded);
+///  * same-owner duplicate keys keep LAST-insert-wins mapping and emit
+///    pairwise TOOL-RESOLUTION-001 diagnostics in encounter order;
+///  * a missing key consults every meta carrying that key regardless of
+///    owner ("foreign"): exactly one foreign hit ⇒ silently skipped
+///    (callee-owned default re-checked at a call site); otherwise the
+///    caller emits its no-stable-NodeId diagnostic.
+struct ExpressionKeyIndex<'a> {
+    /// owner id → (expression_key → same-owner nodes, in node_meta order).
+    /// Ownership is PREFIX-hierarchical ("fn:a/fn:b/expr…" belongs to both
+    /// "fn:a" and "fn:b" scopes), so membership keeps the exact
+    /// `starts_with("{owner}/")` relation of the previous implementation.
+    by_owner: HashMap<&'a str, HashMap<&'a ExpressionTypeKey, Vec<&'a NodeId>>>,
+    /// key → (prefix-owner when matched, node) for every meta carrying a key.
+    all_by_key: HashMap<&'a ExpressionTypeKey, Vec<(Option<&'a str>, &'a NodeId)>>,
+}
+
+impl<'a> ExpressionKeyIndex<'a> {
+    fn build<'e>(program: &'a CheckedProgram, owners: impl Iterator<Item = &'e NodeId>) -> Self
+    where
+        'e: 'a,
+    {
+        // One pass over node_meta; per meta we test the (small) set of owner
+        // prefixes — O(metas × owners) total, versus the previous O(metas)
+        // rescan PER MISSING KEY that made large bodies quadratic.
+        let owner_prefixes: Vec<(&str, String)> = owners
+            .map(|owner| (owner.0.as_str(), format!("{}/", owner.0)))
+            .collect();
+        let mut by_owner: HashMap<&'a str, HashMap<&'a ExpressionTypeKey, Vec<&'a NodeId>>> =
+            HashMap::new();
+        let mut all_by_key: HashMap<&'a ExpressionTypeKey, Vec<(Option<&'a str>, &'a NodeId)>> =
+            HashMap::new();
+        for meta in program.node_meta.values() {
+            let Some(key) = &meta.expression_key else {
+                continue;
+            };
+            let mut matched: Option<&str> = None;
+            for (owner_id, prefix) in &owner_prefixes {
+                if meta.node_id.0.starts_with(prefix.as_str()) {
+                    matched = Some(owner_id);
+                    by_owner
+                        .entry(owner_id)
+                        .or_default()
+                        .entry(key)
+                        .or_default()
+                        .push(&meta.node_id);
+                }
+            }
+            all_by_key
+                .entry(key)
+                .or_default()
+                .push((matched, &meta.node_id));
+        }
+        Self {
+            by_owner,
+            all_by_key,
+        }
+    }
+
+    /// Same-owner nodes for `key` in encounter order; the LAST entry is the
+    /// authoritative mapping (insert-overwrite semantics).
+    fn owned(&self, owner: &str, key: &ExpressionTypeKey) -> &[&'a NodeId] {
+        self.by_owner
+            .get(owner)
+            .and_then(|m| m.get(key))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Nodes carrying `key` whose owner differs from `owner`.
+    fn foreign<'slf>(
+        &'slf self,
+        owner: &'slf str,
+        key: &'slf ExpressionTypeKey,
+    ) -> impl Iterator<Item = &'a NodeId> + 'slf {
+        self.all_by_key
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(move |(mo, _)| mo.is_none_or(|matched| matched != owner))
+            .map(|(_, n)| *n)
+    }
+
+    /// Emit pairwise duplicate diagnostics for every same-owner collision,
+    /// mirroring the previous BTreeMap insert chain (`prev` = most recent
+    /// existing entry for each successive insert).
+    fn report_duplicates(
+        &self,
+        program: &CheckedProgram,
+        owner: &str,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        for (owner_part, bucket) in self.by_owner.iter() {
+            if *owner_part != owner {
+                continue;
+            }
+            for (key, nodes) in bucket.iter() {
+                if nodes.len() < 2 {
+                    continue;
+                }
+                for pair in nodes.windows(2) {
+                    let (prev, new) = (pair[0], pair[1]);
+                    let span = program
+                        .node_meta
+                        .get(new)
+                        .map(|meta| meta.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN);
+                    errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: callable '{}' expression key maps to both '{}' and '{}'",
+                        owner, prev.0, new.0
+                    ),
+                    span,
+                ));
+                }
+            }
+        }
+    }
+}
+
 fn stabilize_expression_types(
     program: &CheckedProgram,
     ephemeral: &EphemeralExpressionTypes,
 ) -> Result<StableExpressionTypes, Vec<Diagnostic>> {
+    let index = ExpressionKeyIndex::build(program, ephemeral.keys());
     let mut errors = Vec::new();
     let mut stable = BTreeMap::new();
     for (owner, expression_types) in ephemeral {
-        let owner_prefix = format!("{}/", owner.0);
-        let mut keys = BTreeMap::new();
-        for meta in program
-            .node_meta
-            .values()
-            .filter(|meta| meta.node_id.0.starts_with(&owner_prefix))
-        {
-            if let Some(key) = &meta.expression_key {
-                if let Some(previous) = keys.insert(key.clone(), meta.node_id.clone()) {
-                    errors.push(Diagnostic::error(
-                        format!(
-                            "TOOL-RESOLUTION-001: callable '{}' expression key maps to both '{}' and '{}'",
-                            owner.0, previous.0, meta.node_id.0
-                        ),
-                        meta.origin.user_span(),
-                    ));
-                }
-            }
-        }
+        // Same-owner duplicate keys are a global invariant — report them even
+        // when the key never surfaces in this owner's expression types.
+        index.report_duplicates(program, &owner.0, &mut errors);
+
         let mut owner_types = BTreeMap::new();
         for (key, ty) in expression_types {
-            let Some(node_id) = keys.get(key) else {
-                let foreign_owners = program
-                    .node_meta
-                    .values()
-                    .filter(|meta| meta.expression_key.as_ref() == Some(key))
-                    .map(|meta| &meta.node_id)
-                    .collect::<Vec<_>>();
-                if foreign_owners.len() == 1 {
-                    // The checker may re-check a declaration-owned default at
-                    // a call site. Its semantic node remains owned by the
-                    // callee and is materialized exactly once there.
+            let hits = index.owned(&owner.0, key);
+            let node_id = match hits.last() {
+                Some(node_id) => *node_id,
+                None => {
+                    // Missing here: consult foreign owners. Exactly one hit is
+                    // the callee-owned-default re-check case — skipped.
+                    let foreign_count = index.foreign(&owner.0, key).count();
+                    if foreign_count == 1 {
+                        continue;
+                    }
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: checker expression in '{}' has no stable NodeId",
+                            owner.0
+                        ),
+                        program
+                            .node_meta
+                            .get(owner)
+                            .map(|meta| meta.origin.user_span())
+                            .unwrap_or(Span::UNKNOWN),
+                    ));
                     continue;
                 }
-                errors.push(Diagnostic::error(
-                    format!(
-                        "TOOL-RESOLUTION-001: checker expression in '{}' has no stable NodeId",
-                        owner.0
-                    ),
-                    program
-                        .node_meta
-                        .get(owner)
-                        .map(|meta| meta.origin.user_span())
-                        .unwrap_or(Span::UNKNOWN),
-                ));
-                continue;
             };
             owner_types.insert(node_id.clone(), ty.clone());
         }
@@ -9502,8 +9688,9 @@ fn build_canonical_function_signatures(
                     let mut members = Vec::new();
                     let shape = match &variant.payload {
                         Some(crate::ast::VariantPayload::Tuple(payload)) => {
+                            let role_batch = type_sibling_roles("payload.element", payload);
                             for index in 0..payload.len() {
-                                let role = type_sibling_role("payload.element", payload, index);
+                                let role = &role_batch[index];
                                 let meta = payload[index].meta();
                                 let member_id = ids.anonymous(
                                     &variant_id,
