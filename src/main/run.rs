@@ -169,9 +169,10 @@ fn run_once(
         }
         match vm.run() {
             Ok(exit_code) => {
-                if exit_code != 0 {
-                    println!("-> {}", exit_code);
-                }
+                // 0.39.136: no stdout echo of a nonzero result. Native
+                // binaries print nothing here, and stdout is part of the
+                // L1-observable contract (`run_source == compile_and_run`);
+                // the exit code itself still propagates via process status.
                 Ok(exit_code as i32)
             }
             Err(e) => {
