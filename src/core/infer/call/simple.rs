@@ -258,6 +258,77 @@ impl<'a> Checker<'a> {
                     }
                     return Type::Name("string".into(), vec![]);
                 }
+                // 0.39.136 usability: these conversion builtins were
+                // registered in BOTH backends (codegen dispatch + VM registry)
+                // and in the canonical arity/purity tables, but the checker's
+                // builtin dispatch had no arms — every user call failed E0401.
+                // Seven names were fully unusable as a result.
+                "int_to_string" | "float_to_string" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 1 argument"),
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_trim" | "str_to_upper" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 1 argument"),
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !crate::core::helpers::is_string(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{name} expects a string, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Name("string".into(), vec![]);
+                }
+                "str_starts_with" | "str_ends_with" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 2 arguments"),
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !crate::core::helpers::is_string(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("{name} expects a string receiver, found {}", fmt_type(&t)),
+                            );
+                        }
+                        self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Name("bool".into(), vec![]);
+                }
+                "string_to_int" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "string_to_int expects 1 argument",
+                        );
+                    } else {
+                        let t = self.infer_expr(&args[0], scopes);
+                        if !crate::core::helpers::is_string(&t) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!("string_to_int expects a string, found {}", fmt_type(&t)),
+                            );
+                        }
+                    }
+                    return Type::Tuple(vec![
+                        Type::Name("bool".into(), vec![]),
+                        Type::Name("i64".into(), vec![]),
+                    ]);
+                }
                 "to_int" => {
                     if args.len() != 1 {
                         self.emit_code(

@@ -14442,6 +14442,36 @@ func main() -> i32 {{
 }
 
 #[test]
+fn dual_string_conversion_builtins_usable() {
+    // 0.39.136 usability: int_to_string / float_to_string / str_trim /
+    // str_to_upper / str_starts_with / str_ends_with / string_to_int were
+    // registered in BOTH backends but missing from the checker's builtin
+    // dispatch — every user call failed E0401. Seven names were fully
+    // unusable. VM stdout must equal native stdout.
+    let src = r#"
+func main() -> i64 {
+    let s = int_to_string(42)
+    let f = float_to_string(2.5)
+    let t = str_trim("  hi  ")
+    let u = str_to_upper("abc")
+    let b = str_starts_with("hello", "he")
+    let e = str_ends_with("hello", "lo")
+    let (ok, n) = string_to_int("123")
+    println(s)
+    println(f)
+    println(t)
+    println(u)
+    if b && e && ok && n == 123 {
+        0
+    } else {
+        1
+    }
+}
+"#;
+    dual_assert_soft!(src, "42\n2.5\nhi\nABC");
+}
+
+#[test]
 fn dual_maps_counter_generic_get_or_default() {
     // 0.39.136: get_or_default<T> — the read-modify-write counter pattern.
     // Before this signature was generic, `get_or_default(m, k, 0)` returned
