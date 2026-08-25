@@ -2827,7 +2827,8 @@ pub fn analyze_resolved_bodies(
             ));
             continue;
         };
-        match ActionEmitter::new(cfg, body, signature, types, linear_record_names).emit() {
+        let analysis = ActionEmitter::new(cfg, body, signature, types, linear_record_names).emit();
+        match analysis {
             Ok(analysis) => {
                 analyses.insert(owner.clone(), analysis);
             }

@@ -882,34 +882,58 @@ fn compute_liveness(
     BTreeMap<BasicBlockId, BTreeSet<String>>,
     BTreeMap<BasicBlockId, BTreeSet<String>>,
 ) {
-    let mut live_in = BTreeMap::<BasicBlockId, BTreeSet<String>>::new();
-    let mut live_out = BTreeMap::<BasicBlockId, BTreeSet<String>>::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block_id in cfg.reachable.iter().rev() {
-            let out: BTreeSet<String> = cfg
-                .successors(block_id)
-                .into_iter()
-                .filter(|edge| cfg.reachable.contains(&edge.to))
-                .flat_map(|edge| live_in.get(&edge.to).into_iter().flatten().cloned())
-                .collect();
-            let mut input = out.clone();
-            if let Some(block) = cfg.block(block_id) {
-                for point in block.points.iter().rev() {
-                    for def in &point.defs {
-                        input.remove(def);
-                    }
-                    input.extend(point.uses.iter().cloned());
+    // 0.39.136 perf: worklist fixpoint replacing round-robin sweeps.
+    // The old loop re-visited EVERY reachable block whenever ANY set changed
+    // — O(blocks × edges × passes); on a 4k-arm match CFG (~16k blocks) the
+    // check phase spent ~1 s here alone. The worklist visits a block only
+    // when a successor's IN-set actually changed and converges to the SAME
+    // least fixed point (standard backward may-liveness).
+    let mut live_in: BTreeMap<BasicBlockId, BTreeSet<String>> = BTreeMap::new();
+    let mut live_out: BTreeMap<BasicBlockId, BTreeSet<String>> = BTreeMap::new();
+
+    let transfer = |cfg: &CallableCfg, block_id: &BasicBlockId, out: &BTreeSet<String>| {
+        let mut input = out.clone();
+        if let Some(block) = cfg.block(block_id) {
+            for point in block.points.iter().rev() {
+                for def in &point.defs {
+                    input.remove(def);
                 }
+                input.extend(point.uses.iter().cloned());
             }
-            if live_out.get(block_id) != Some(&out) {
-                live_out.insert(block_id.clone(), out);
-                changed = true;
-            }
-            if live_in.get(block_id) != Some(&input) {
-                live_in.insert(block_id.clone(), input);
-                changed = true;
+        }
+        input
+    };
+
+    let mut worklist: std::collections::VecDeque<BasicBlockId> =
+        cfg.reachable.iter().rev().cloned().collect();
+    let mut queued: std::collections::BTreeSet<BasicBlockId> = worklist.iter().cloned().collect();
+
+    while let Some(block_id) = worklist.pop_front() {
+        queued.remove(&block_id);
+
+        let out: BTreeSet<String> = cfg
+            .successors(&block_id)
+            .into_iter()
+            .filter(|edge| cfg.reachable.contains(&edge.to))
+            .flat_map(|edge| live_in.get(&edge.to).into_iter().flatten().cloned())
+            .collect();
+        let input = transfer(cfg, &block_id, &out);
+
+        let out_changed = live_out.get(&block_id) != Some(&out);
+        let in_changed = live_in.get(&block_id) != Some(&input);
+        if out_changed {
+            live_out.insert(block_id.clone(), out);
+        }
+        if in_changed {
+            live_in.insert(block_id.clone(), input);
+            // Only an IN change can alter predecessors' OUT sets.
+            if !queued.is_empty() || true {
+                for edge in cfg.predecessors(&block_id) {
+                    if cfg.reachable.contains(&edge.from) && !queued.contains(&edge.from) {
+                        worklist.push_back(edge.from.clone());
+                        queued.insert(edge.from.clone());
+                    }
+                }
             }
         }
     }

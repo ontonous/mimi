@@ -1331,22 +1331,53 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        // 0.39.136 perf: adjacency index built BEFORE the reachability BFS —
+        // the old per-dequeue full edge scan made construction O(blocks×edges).
+        let mut successor_index: BTreeMap<BasicBlockId, Vec<EdgeId>> = BTreeMap::new();
+        for (id, edge) in &self.edges {
+            successor_index
+                .entry(edge.from.clone())
+                .or_default()
+                .push(id.clone());
+        }
+        let successors_of = |index: &BTreeMap<BasicBlockId, Vec<EdgeId>>, block: &BasicBlockId| {
+            index
+                .get(block)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| self.edges.get(id))
+                        .map(|edge| &edge.to)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
         let mut reachable = BTreeSet::new();
         let mut queue = VecDeque::from([entry.clone()]);
         while let Some(block) = queue.pop_front() {
             if !reachable.insert(block.clone()) {
                 continue;
             }
-            for edge in self.edges.values().filter(|edge| edge.from == block) {
-                queue.push_back(edge.to.clone());
+            for to in successors_of(&successor_index, &block) {
+                queue.push_back(to.clone());
             }
         }
+        let predecessor_index: BTreeMap<BasicBlockId, Vec<EdgeId>> = successor_index
+            .values()
+            .flatten()
+            .filter_map(|id| self.edges.get(id))
+            .map(|edge| (edge.to.clone(), edge.id.clone()))
+            .fold(BTreeMap::new(), |mut acc, (to, id)| {
+                acc.entry(to).or_default().push(id);
+                acc
+            });
         let cfg = CallableCfg {
             owner: self.owner,
             entry,
             blocks,
             edges: self.edges,
             reachable,
+            successor_index,
+            predecessor_index,
         };
         if let Err(mut errors) = cfg.validate() {
             self.errors.append(&mut errors);

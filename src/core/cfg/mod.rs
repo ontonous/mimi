@@ -152,6 +152,12 @@ pub struct CallableCfg {
     pub blocks: BTreeMap<BasicBlockId, BasicBlock>,
     pub edges: BTreeMap<EdgeId, CfgEdge>,
     pub reachable: BTreeSet<BasicBlockId>,
+    /// 0.39.136 perf: adjacency indexes built once at construction.
+    /// The `successors`/`predecessors` accessors previously scanned ALL
+    /// edges per call (O(E)), which made liveness dataflow effectively
+    /// cubic on large CFGs (20k-arm matches took minutes).
+    pub successor_index: BTreeMap<BasicBlockId, Vec<EdgeId>>,
+    pub predecessor_index: BTreeMap<BasicBlockId, Vec<EdgeId>>,
 }
 
 impl CallableCfg {
@@ -164,17 +170,43 @@ impl CallableCfg {
     }
 
     pub fn predecessors(&self, block: &BasicBlockId) -> Vec<&CfgEdge> {
-        self.edges
-            .values()
-            .filter(|edge| &edge.to == block)
-            .collect()
+        self.adjacent(block, &self.predecessor_index)
     }
 
     pub fn successors(&self, block: &BasicBlockId) -> Vec<&CfgEdge> {
-        self.edges
-            .values()
-            .filter(|edge| &edge.from == block)
-            .collect()
+        self.adjacent(block, &self.successor_index)
+    }
+
+    /// O(out-degree) edge lookup through the prebuilt index.
+    fn adjacent<'a>(
+        &'a self,
+        block: &BasicBlockId,
+        index: &'a BTreeMap<BasicBlockId, Vec<EdgeId>>,
+    ) -> Vec<&'a CfgEdge> {
+        index
+            .get(block)
+            .map(|ids| ids.iter().filter_map(|id| self.edges.get(id)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Build adjacency indexes from the edge map. Call once after all edges
+    /// are inserted (both CFG constructors route through this).
+    pub fn with_adjacency_indexes(mut self) -> Self {
+        let mut successor_index: BTreeMap<BasicBlockId, Vec<EdgeId>> = BTreeMap::new();
+        let mut predecessor_index: BTreeMap<BasicBlockId, Vec<EdgeId>> = BTreeMap::new();
+        for (id, edge) in &self.edges {
+            successor_index
+                .entry(edge.from.clone())
+                .or_default()
+                .push(id.clone());
+            predecessor_index
+                .entry(edge.to.clone())
+                .or_default()
+                .push(id.clone());
+        }
+        self.successor_index = successor_index;
+        self.predecessor_index = predecessor_index;
+        self
     }
 
     pub fn validate(&self) -> Result<(), Vec<Diagnostic>> {
