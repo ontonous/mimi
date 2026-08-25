@@ -329,6 +329,25 @@ impl<'a> Checker<'a> {
                         Type::Name("i64".into(), vec![]),
                     ]);
                 }
+                // 0.39.136: `int`/`float` are registered aliases of
+                // to_int/to_float (same VM impls, same canonical arity);
+                // mirror both the typing and the native dispatch below.
+                "int" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "int expects 1 argument");
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("i32".into(), vec![]);
+                }
+                "float" => {
+                    if args.len() != 1 {
+                        self.emit_code(crate::diagnostic::codes::E0242, "float expects 1 argument");
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                    }
+                    return Type::Name("f64".into(), vec![]);
+                }
                 "to_int" => {
                     if args.len() != 1 {
                         self.emit_code(

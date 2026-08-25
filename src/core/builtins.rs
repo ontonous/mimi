@@ -119,6 +119,11 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "str_parse_float"
             | "to_int"
             | "to_float"
+            // 0.39.136: registered aliases of to_int/to_float (same VM
+            // impls); without these the call-site catalog classified them
+            // Unknown and typed-body lowering fail-closed.
+            | "int"
+            | "float"
             | "str_index_of"
             | "str_count_substring"
             | "str_repeat"
