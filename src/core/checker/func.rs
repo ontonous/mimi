@@ -185,7 +185,15 @@ impl<'a> Checker<'a> {
                 _ => last_ty.clone(),
             };
             let coerced = is_numeric_coercion(&ret, &last_ty_clean);
-            let type_ok = coerced || self.unification.unify(&ret, &last_ty_clean).is_ok();
+            // CHK-F02 one-directional flow: an expression statically typed
+            // `Any` may be returned as ANY declared type (bottom flows into
+            // concrete). This is what makes generic stdlib accessors like
+            // `get_or_default<T>` implementable — their lookup arm holds an
+            // `Any`-tagged container value while the signature promises T.
+            let any_flows_down =
+                matches!(last_ty_clean.unlocated(), Type::Name(n, _) if n == "Any");
+            let type_ok =
+                coerced || any_flows_down || self.unification.unify(&ret, &last_ty_clean).is_ok();
             if !type_ok {
                 // 0.35.23 deep-eval: the old `!unit` exemption silently
                 // discarded a non-unit tail expression in a unit function

@@ -120,6 +120,10 @@ pub enum CheckedConversionKind {
     /// flows through as-is; this exists so the resolved body knows the
     /// conversion was checked.
     DynamicAnyPack,
+    /// Any-tagged container value flowing OUT through a concrete signature
+    /// (generic stdlib accessors: `get_or_default<T> -> T`). ABI-level
+    /// identity/narrow on both backends — the runtime box is an i64/ptr slot.
+    DynamicAnyUnpack,
     /// C3 (audit 2026-08-03): bare container annotation accepts a
     /// parameterized container (`Set<i32>` → `Set`). No codegen — Set/List
     /// are opaque i64 handles regardless of element type.

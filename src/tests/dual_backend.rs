@@ -14442,6 +14442,40 @@ func main() -> i32 {{
 }
 
 #[test]
+fn dual_maps_counter_generic_get_or_default() {
+    // 0.39.136: get_or_default<T> — the read-modify-write counter pattern.
+    // Before this signature was generic, `get_or_default(m, k, 0)` returned
+    // `Any` and `+ 1` failed E0202 (the pattern was unwritable). VM and
+    // native must agree on the unpacked arithmetic.
+    // The dual harness has no module loader, so the generic accessor is
+    // inlined verbatim from std/maps.mimi (same pattern as the wrapper
+    // recursion tests below).
+    let maps = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std/maps.mimi"),
+    )
+    .expect("read std/maps.mimi");
+    let src = format!(
+        r#"{maps}
+func main() -> i64 {{
+    let m = map_new()
+    let c0 = get_or_default(m, "hits", 0)
+    let m2 = set(m, "hits", c0 + 1)
+    let m3 = set(m2, "hits", get_or_default(m2, "hits", 0) + 1)
+    let m4 = set(m3, "hits", get_or_default(m3, "hits", 0) + 1)
+    let hits = get_or_default(m4, "hits", 0)
+    println(hits)
+    if hits == 3 {{
+        0
+    }} else {{
+        1
+    }}
+}}
+"#
+    );
+    dual_assert_soft!(src.as_str(), "3");
+}
+
+#[test]
 fn dual_maps_stdlib_wrapper_any() {
     // C3 (audit 2026-08-03): `use std::maps` emitted 55 × E0407
     // ("unknown type 'Any'") because the checker rejected stdlib 'Any'

@@ -1,0 +1,19 @@
+// Regression (L1, 0.39.136): the maps read-modify-write counter pattern was
+// UNWRITABLE before `get_or_default<T>` became generic over the default's
+// type — it returned `Any`, and Any has no arithmetic. T now binds at the
+// call site from the default expression; DynamicAnyUnpack admits the
+// container value through the concrete signature on both backends.
+
+use std::maps
+
+func main() -> i64 {
+    let m = new()
+    // the previously-unwritable read-modify-write counter pattern
+    let c0 = get_or_default(m, "hits", 0)
+    let m2 = set(m, "hits", c0 + 1)
+    let m3 = set(m2, "hits", get_or_default(m2, "hits", 0) + 1)
+    let m4 = set(m3, "hits", get_or_default(m3, "hits", 0) + 1)
+    let hits = get_or_default(m4, "hits", 0)
+    println(hits)
+    if hits == 3 { 0 } else { 1 }
+}

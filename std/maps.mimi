@@ -160,7 +160,14 @@ pub func from_list(pairs: List<(string, Any)>) -> Record {
 
 
 // get_or_default: Looks up key, returns default if not found.
-pub func get_or_default(m: Record, key: string, default: Any) -> Any {
+// 0.39.136: generic over the default's type — `get_or_default(m, k, 0)`
+// now yields a usable i32/i64 (the read-modify-write counter pattern was
+// unwritable when this returned `Any`, since Any has no arithmetic).
+// Soundness is static: T binds at the call site from the default expression,
+// so `get_or_default(m, k, "") + 1` still fails E0202. A stored tag that
+// disagrees with T remains a runtime concern exactly as before — this
+// signature changes no runtime behavior.
+pub func get_or_default<T>(m: Record, key: string, default: T) -> T {
     let result = map_get(m, key)
     if result.0 { result.1 } else { default }
 }

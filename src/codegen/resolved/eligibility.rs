@@ -982,6 +982,7 @@ fn require_conversion(
             // widens narrow ints; map/set runtime boxes already use the same
             // ABI, so this conversion is supported in the native slice.
             | CheckedConversionKind::DynamicAnyPack
+            | CheckedConversionKind::DynamicAnyUnpack
     ) {
         Ok(())
     } else {

@@ -930,7 +930,10 @@ impl<'a> Checker<'a> {
                     let t = self.check_expr(ret, e, scopes);
                     // Resolve through unification table to handle any TypeVars from C3
                     let t = self.unification.zonk_or_unknown(&t);
-                    if self.unification.unify(ret, &t).is_err() {
+                    // CHK-F02 bottom-type flow (mirrors checker/func.rs tail
+                    // check): `return any_value` satisfies any declared type.
+                    let any_flows_down = matches!(t.unlocated(), Type::Name(n, _) if n == "Any");
+                    if !any_flows_down && self.unification.unify(ret, &t).is_err() {
                         self.errors.push(
                             Diagnostic::error_code(
                                 crate::diagnostic::codes::E0207,

@@ -6027,7 +6027,20 @@ impl BodyLowerer<'_> {
                 from: from.clone(),
                 to: to.clone(),
             });
+        } // 0.39.136: DynamicAny → concrete (unpack). Mirrors the C3 pack arm:
+          // stdlib generic accessors (`get_or_default<T> -> T`) return an
+          // `Any`-tagged container value through a concrete signature. The
+          // runtime box is an i64/ptr slot on both backends, so this is an
+          // ABI-level identity/narrow — exactly what the caller would get by
+          // binding through `Any` today, now with a precise static type.
+        if matches!(self.types.get(from), Some(ResolvedType::DynamicAny { .. })) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::DynamicAnyUnpack,
+                from: from.clone(),
+                to: to.clone(),
+            });
         }
+
         // Concrete → dyn Trait packing (DynamicPack). The checker is the
         // conformance gate: a plain `let s: dyn Sensor = driver` requires the
         // (Sensor, Driver) impl (is_trait_coercion, check_stmt.rs), while

@@ -5695,6 +5695,44 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))),
                 }
             }
+            // 0.39.136: DynamicAny → concrete unpack. Mirror of Pack: the
+            // box is an i64 slot; narrow back to the concrete int width or
+            // pass through when the target already matches.
+            CheckedConversionKind::DynamicAnyUnpack => {
+                let target = self.lower_type(&conversion.to)?;
+                match value {
+                    BasicValueEnum::IntValue(iv) => {
+                        let i64_ty = self.generator.context.i64_type();
+                        if iv.get_type().get_bit_width() == 64 {
+                            if target == value.get_type() {
+                                Ok(value)
+                            } else if let BasicTypeEnum::IntType(it) = target {
+                                let truncated = self.generator.builder.build_int_truncate(
+                                    iv,
+                                    it,
+                                    "dynany_trunc",
+                                ).map_err(|e| CompileError::LlvmError(format!("dynany trunc: {}", e)))?;
+                                Ok(BasicValueEnum::IntValue(truncated))
+                            } else {
+                                Ok(value)
+                            }
+                        } else {
+                            let widened = self.generator.builder.build_int_s_extend(
+                                iv,
+                                i64_ty,
+                                "dynany_sext",
+                            ).map_err(|e| CompileError::LlvmError(format!("dynany sext: {}", e)))?;
+                            Ok(BasicValueEnum::IntValue(widened))
+                        }
+                    }
+                    _ if target == value.get_type() => Ok(value),
+                    _ => Err(CompileError::TypeMismatch(format!(
+                        "DynamicAnyUnpack: cannot unpack {} into {}",
+                        value.get_type(),
+                        target
+                    ))),
+                }
+            }
             other => Err(CompileError::Unsupported(format!(
                 "resolved conversion {other:?} escaped resolved native eligibility"
             ))),
