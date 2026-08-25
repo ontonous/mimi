@@ -21823,6 +21823,7 @@ mod future;
 pub(crate) mod fs;
 
 mod env;
+mod heap_guard;
 
 mod crypto;
 #[cfg(not(standalone))]

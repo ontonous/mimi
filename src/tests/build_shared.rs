@@ -22,7 +22,9 @@ fn compile_to_object(src: &str, module_name: &str, obj_path: &std::path::Path) {
     let mut gen = codegen::CodeGenerator::new(&context, module_name);
     gen.compile_file(&file)
         .expect("src/tests/build_shared.rs:21 unwrap failed");
-    gen.compile_to_object(obj_path)
+    // Shared-library outputs keep bare exported symbols: the host dlopen/
+    // dlsym contract resolves them by source name (SYMBOL-NAMESPACE-001).
+    gen.compile_to_object_shared(obj_path)
         .expect("src/tests/build_shared.rs:22 unwrap failed");
 }
 

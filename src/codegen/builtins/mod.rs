@@ -4606,6 +4606,17 @@ fn register_arithmetic_trap_fns<'ctx>(
     i8_ptr: inkwell::types::PointerType<'ctx>,
     void: inkwell::types::VoidType<'ctx>,
 ) {
+    // 0.39.x matrix sweep (LOOP-REBIND-HEAP-001): heap free-uniqueness guard.
+    module.add_function(
+        "mimi_heap_guard_reset",
+        void.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_heap_free_claim",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_trap_overflow(op: *const c_char) -> !
     module.add_function(
         "mimi_trap_overflow",

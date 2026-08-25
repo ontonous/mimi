@@ -800,6 +800,10 @@ declare i32 @mimi_quote_argc(ptr)
 
 declare ptr @mimi_quote_list_child(ptr, i64)
 
+declare void @mimi_heap_guard_reset()
+
+declare ptr @mimi_heap_free_claim(ptr)
+
 declare void @mimi_trap_overflow(ptr)
 
 declare void @mimi_trap_div_by_zero()
@@ -955,6 +959,7 @@ trap_overflow8:                                   ; preds = %op_ok
 
 op_ok9:                                           ; preds = %op_ok
   store i64 %op_result6, ptr %i, align 4
+  call void @mimi_heap_guard_reset()
   br label %loop
 }
 

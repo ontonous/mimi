@@ -2773,6 +2773,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .module
                 .get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+            // 0.39.x matrix sweep (LOOP-REBIND-HEAP-001): enforce release
+            // uniqueness for this flush session — multiple ownership sources
+            // (construction registration + call-result tracking + binding
+            // transfer) can legitimately point at one allocation, e.g. an impl
+            // method that returns its receiver verbatim. Duplicate entries now
+            // degrade to a leak instead of a double free.
+            match self.get_runtime_fn("mimi_heap_guard_reset") {
+                Ok(reset_fn) => {
+                    self.builder
+                        .build_call(reset_fn, &[], "heap_guard_reset")
+                        .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
+                         free-uniqueness guard inactive"
+                    );
+                }
+            }
             for entry in scope {
                 // L6: EnumBox needs a tag-conditional free (only Packed variants
                 // carry a box); handle it separately from the plain-pointer entries.
@@ -2851,20 +2870,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         unreachable!("string-list-list handled above")
                     }
                 };
-                if claimed.is_empty() {
-                    self.builder
-                        .build_call(
-                            free_fn,
-                            &[BasicMetadataValueEnum::PointerValue(ptr)],
-                            "free_heap",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
+                // mimi_heap_free_claim returns null for pointers already freed
+                // in this session; only fresh pointers reach free.
+                let guarded = if claimed.is_empty() {
+                    true
                 } else {
-                    // B9 (audit): skip the free when the pointer is a claimed
-                    // escaping closure env — ownership transferred to the
-                    // caller. Value-exact runtime comparison replaces the old
-                    // positional pop (which misfired when unrelated
-                    // allocations followed the env registration).
                     self.emit_guarded_scope_free(
                         free_fn,
                         ptr,
@@ -2872,6 +2883,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &claimed_string_lists,
                         &claimed_string_list_lists,
                     )?;
+                    false
+                };
+                if guarded {
+                    let claim_fn = self.get_runtime_fn("mimi_heap_free_claim").ok();
+                    match claim_fn {
+                        Some(claim_fn) => {
+                            let claim = self
+                                .builder
+                                .build_call(
+                                    claim_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                    "heap_claim",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("heap claim: {e}")))?
+                                .try_as_basic_value();
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let claim_ptr = match claim {
+                                inkwell::values::ValueKind::Basic(bv) => bv.into_pointer_value(),
+                                _ => ptr_ty.const_null(),
+                            };
+                            let is_fresh = self
+                                .builder
+                                .build_is_not_null(claim_ptr, "heap_claim_fresh")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("claim check: {e}"))
+                                })?;
+                            let function = self.current_function().ok_or_else(|| {
+                                CompileError::LlvmError("no current function for guard".into())
+                            })?;
+                            let do_free_bb = self
+                                .context
+                                .append_basic_block(function, "heap_guard_do_free");
+                            let skip_bb =
+                                self.context.append_basic_block(function, "heap_guard_skip");
+                            self.build_cond_br(is_fresh, do_free_bb, skip_bb)?;
+                            self.builder.position_at_end(do_free_bb);
+                            self.builder
+                                .build_call(
+                                    free_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(claim_ptr)],
+                                    "free_unique",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("free error: {e}")))?;
+                            self.build_br(skip_bb)?;
+                            self.builder.position_at_end(skip_bb);
+                        }
+                        None => {
+                            self.builder
+                                .build_call(
+                                    free_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                    "free_heap",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("free error: {}", e))
+                                })?;
+                        }
+                    }
                 }
                 // L6c (D-4, 2026-08-06): reset the heap slot to null right after
                 // the free. When a conditional (e.g. `if` with a `Some(string)`
@@ -2912,6 +2981,25 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .module
                 .get_function("free")
                 .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+            // 0.39.x matrix sweep (LOOP-REBIND-HEAP-001): enforce release
+            // uniqueness for this flush session — multiple ownership sources
+            // (construction registration + call-result tracking + binding
+            // transfer) can legitimately point at one allocation, e.g. an impl
+            // method that returns its receiver verbatim. Duplicate entries now
+            // degrade to a leak instead of a double free.
+            match self.get_runtime_fn("mimi_heap_guard_reset") {
+                Ok(reset_fn) => {
+                    self.builder
+                        .build_call(reset_fn, &[], "heap_guard_reset")
+                        .map_err(|e| CompileError::LlvmError(format!("guard reset: {e}")))?;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[mimi codegen] warning: mimi_heap_guard_reset unavailable; \
+                         free-uniqueness guard inactive"
+                    );
+                }
+            }
             for entry in scope {
                 if let HeapEntry::EnumBox {
                     slot,
@@ -2981,14 +3069,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         unreachable!("string-list-list handled above")
                     }
                 };
-                if claimed.is_empty() {
-                    self.builder
-                        .build_call(
-                            free_fn,
-                            &[BasicMetadataValueEnum::PointerValue(ptr)],
-                            "free_heap",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("free error: {}", e)))?;
+                // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
+                // mimi_heap_free_claim returns null for pointers already freed
+                // in this session; only fresh pointers reach free.
+                let guarded = if claimed.is_empty() {
+                    true
                 } else {
                     self.emit_guarded_scope_free(
                         free_fn,
@@ -2997,6 +3082,64 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &claimed_string_lists,
                         &claimed_string_list_lists,
                     )?;
+                    false
+                };
+                if guarded {
+                    let claim_fn = self.get_runtime_fn("mimi_heap_free_claim").ok();
+                    match claim_fn {
+                        Some(claim_fn) => {
+                            let claim = self
+                                .builder
+                                .build_call(
+                                    claim_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                    "heap_claim",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("heap claim: {e}")))?
+                                .try_as_basic_value();
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let claim_ptr = match claim {
+                                inkwell::values::ValueKind::Basic(bv) => bv.into_pointer_value(),
+                                _ => ptr_ty.const_null(),
+                            };
+                            let is_fresh = self
+                                .builder
+                                .build_is_not_null(claim_ptr, "heap_claim_fresh")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("claim check: {e}"))
+                                })?;
+                            let function = self.current_function().ok_or_else(|| {
+                                CompileError::LlvmError("no current function for guard".into())
+                            })?;
+                            let do_free_bb = self
+                                .context
+                                .append_basic_block(function, "heap_guard_do_free");
+                            let skip_bb =
+                                self.context.append_basic_block(function, "heap_guard_skip");
+                            self.build_cond_br(is_fresh, do_free_bb, skip_bb)?;
+                            self.builder.position_at_end(do_free_bb);
+                            self.builder
+                                .build_call(
+                                    free_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(claim_ptr)],
+                                    "free_unique",
+                                )
+                                .map_err(|e| CompileError::LlvmError(format!("free error: {e}")))?;
+                            self.build_br(skip_bb)?;
+                            self.builder.position_at_end(skip_bb);
+                        }
+                        None => {
+                            self.builder
+                                .build_call(
+                                    free_fn,
+                                    &[BasicMetadataValueEnum::PointerValue(ptr)],
+                                    "free_heap",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("free error: {}", e))
+                                })?;
+                        }
+                    }
                 }
                 if let Some(target) = reset_target {
                     let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -4846,11 +4989,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.emit_object(&tm, output_path)
     }
 
+    /// 0.39.x matrix sweep: opt out of the `u_` symbol-namespacing pass for
+    /// shared-library outputs whose exported function names are part of the
+    /// host contract (`dlsym("mul_sse16")` must keep resolving). Executable
+    /// links (the default path) keep the pass enabled.
+    pub fn compile_to_object_shared(&self, output_path: &Path) -> Result<(), CompileError> {
+        let tm = self.create_target_machine()?;
+        self.emit_object_with_namespacing(&tm, output_path, false)
+    }
+
     /// Emit an object file using a pre-created TargetMachine.
     ///
     /// Allows callers to amortise TargetMachine construction across
     /// many compilations (the test harness creates one per thread).
     pub fn emit_object(&self, tm: &TargetMachine, output_path: &Path) -> Result<(), CompileError> {
+        self.emit_object_with_namespacing(tm, output_path, true)
+    }
+
+    fn emit_object_with_namespacing(
+        &self,
+        tm: &TargetMachine,
+        output_path: &Path,
+        namespace_symbols: bool,
+    ) -> Result<(), CompileError> {
         // Run LLVM optimization passes before codegen. 0.34.34: O1 is the
         // DEFAULT (opt-out via MIMI_OPT=0/false). 0.31.21 fixed the O1 bugs
         // (try_expr i32-vs-i1 type mismatch; extern wrapper name collision
@@ -4864,6 +5025,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         // invisible.
         if let Ok(path) = std::env::var("MIMI_DUMP_MODULE") {
             let _ = self.module.print_to_file(&path);
+        }
+        // 0.39.x matrix sweep (SYMBOL-NAMESPACE-001): user functions compile
+        // to global C-ABI symbols with their bare source names. A stdlib
+        // `pub func write`/`read`/`stat` then EXPORTED those names in the
+        // dynamic symbol table, shadowing libc's write/read for every static
+        // std call site — Rust's stdout path resolved into mimi's
+        // fs::write(filename=fd) and recursed until the stack died. Renaming
+        // DEFINED functions at object-emission time is purely a linker-level
+        // change: all in-module references were already resolved by name
+        // during codegen, so nothing else needs updating. main keeps its
+        // entrypoint name; runtime (mimi_*) and libc externs have no body and
+        // are skipped by the has-body check.
+        if namespace_symbols {
+            const RESERVED_PREFIXES: [&str; 2] = ["mimi_", "u_"];
+            for func in self.module.get_functions() {
+                let name = func.get_name().to_string_lossy().into_owned();
+                if name == "main"
+                    || name.starts_with(RESERVED_PREFIXES[0])
+                    || name.starts_with(RESERVED_PREFIXES[1])
+                    || func.count_basic_blocks() == 0
+                {
+                    continue;
+                }
+                unsafe {
+                    // inkwell 0.9 has no FunctionValue::set_name; go through
+                    // the LLVM core API directly (same value-ref rename).
+                    use inkwell::llvm_sys::core::LLVMSetValueName2;
+                    use inkwell::values::AsValueRef;
+                    let new_name = format!("u_{}", name);
+                    LLVMSetValueName2(
+                        func.as_value_ref(),
+                        new_name.as_ptr() as *const std::os::raw::c_char,
+                        new_name.len(),
+                    );
+                }
+            }
         }
         if self.optimize {
             // 0.35.3 L1 (SD-9 chain convergence): fold per-op finiteness
