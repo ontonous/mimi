@@ -8704,7 +8704,52 @@ fn build_canonical_function_signatures(
     let mut functions = program.functions.values().collect::<Vec<_>>();
     functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
 
+    // 0.39.136 perf: one precomputed pass replaces three per-function
+    // node_meta × functions double scans (each with a format! allocation per
+    // pair) that made actor-heavy files superquadratic (10k actors ≈ 160 s in
+    // canon-sig building alone). A meta lands in a function's bucket only when
+    // EXACTLY ONE function prefix matches — the original `starts_with` +
+    // "no other nested function" semantics.
+    let mut uniquely_owned: std::collections::HashMap<&NodeId, Vec<&NodeMeta>> =
+        std::collections::HashMap::new();
+    {
+        let fn_prefixes: Vec<(&NodeId, String)> = program
+            .functions
+            .keys()
+            .map(|id| (id, format!("{}/", id.0)))
+            .collect();
+        for (meta_id, meta) in program.node_meta.iter() {
+            if meta.shared_binding.is_none()
+                && meta.ref_binding.is_none()
+                && meta.type_operand.is_none()
+            {
+                continue;
+            }
+            let mut owner: Option<&NodeId> = None;
+            let mut count = 0usize;
+            for (fid, prefix) in &fn_prefixes {
+                if meta_id.0.starts_with(prefix.as_str()) {
+                    count += 1;
+                    if count > 1 {
+                        break;
+                    }
+                    owner = Some(fid);
+                }
+            }
+            if count == 1 {
+                uniquely_owned
+                    .entry(owner.expect("count == 1 implies an owner"))
+                    .or_default()
+                    .push(meta);
+            }
+        }
+    }
+    let mut __t_sig = std::time::Duration::ZERO;
+    let mut __t_gen = std::time::Duration::ZERO;
+    let mut __t_par = std::time::Duration::ZERO;
+    let mut __t_exp = std::time::Duration::ZERO;
     for function in functions {
+        let __s0 = std::time::Instant::now();
         let Some((parameter_types, result_type)) =
             program.zonked_function_types.get(&function.node_id)
         else {
@@ -8744,6 +8789,8 @@ fn build_canonical_function_signatures(
             generic_parameters.push(id.clone());
         }
 
+        __t_sig += __s0.elapsed();
+        let __s1 = std::time::Instant::now();
         let module = function
             .qualified_name
             .rsplit_once("::")
@@ -8774,6 +8821,8 @@ fn build_canonical_function_signatures(
             builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
         };
 
+        __t_gen += __s1.elapsed();
+        let __s2 = std::time::Instant::now();
         let mut canonical_parameter_types = Vec::with_capacity(parameter_types.len());
         let mut signature_failed = false;
         for ty in parameter_types {
@@ -8809,6 +8858,8 @@ fn build_canonical_function_signatures(
             continue;
         }
 
+        __t_par += __s2.elapsed();
+        let __s3 = std::time::Instant::now();
         if let Some(expressions) = expression_types.get(&function.node_id) {
             for (node_id, ty) in expressions {
                 match types.intern_zonked(ty, &capabilities, &mut resolve_name) {
@@ -8911,23 +8962,20 @@ fn build_canonical_function_signatures(
                         .map(|key| (key, ty))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let owner_prefix = format!("{}/", function.node_id.0);
-            let shared_bindings = program
-                .node_meta
-                .iter()
-                .filter(|(node_id, _)| {
-                    node_id.0.starts_with(&owner_prefix)
-                        && !program.functions.keys().any(|nested| {
-                            nested != &function.node_id
-                                && node_id.0.starts_with(&format!("{}/", nested.0))
-                        })
-                })
-                .filter_map(|(node_id, meta)| {
-                    meta.shared_binding
-                        .as_ref()
-                        .map(|(kind, key)| (node_id.clone(), *kind, key.clone()))
-                })
-                .collect::<Vec<_>>();
+            let shared_bindings: Vec<(NodeId, crate::ast::SharedKind, ExpressionTypeKey)> =
+                uniquely_owned
+                    .get(&function.node_id)
+                    .map(|metas: &Vec<&NodeMeta>| {
+                        metas
+                            .iter()
+                            .filter_map(|meta| {
+                                meta.shared_binding
+                                    .as_ref()
+                                    .map(|(kind, key)| (meta.node_id.clone(), *kind, key.clone()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
             for (node_id, kind, initializer_key) in shared_bindings {
                 let Some(initializer) = expression_types_by_key.get(&initializer_key) else {
                     errors.push(Diagnostic::error(
@@ -8963,22 +9011,19 @@ fn build_canonical_function_signatures(
                 }
             }
 
-            let ref_bindings = program
-                .node_meta
-                .iter()
-                .filter(|(node_id, _)| {
-                    node_id.0.starts_with(&owner_prefix)
-                        && !program.functions.keys().any(|nested| {
-                            nested != &function.node_id
-                                && node_id.0.starts_with(&format!("{}/", nested.0))
+            let ref_bindings = uniquely_owned
+                .get(&function.node_id)
+                .map(|metas| {
+                    metas
+                        .iter()
+                        .filter_map(|meta| {
+                            meta.ref_binding
+                                .as_ref()
+                                .map(|key| (meta.node_id.clone(), key.clone()))
                         })
+                        .collect::<Vec<_>>()
                 })
-                .filter_map(|(node_id, meta)| {
-                    meta.ref_binding
-                        .as_ref()
-                        .map(|key| (node_id.clone(), key.clone()))
-                })
-                .collect::<Vec<_>>();
+                .unwrap_or_default();
             for (node_id, initializer_key) in ref_bindings {
                 let Some(initializer) = expression_types_by_key.get(&initializer_key) else {
                     errors.push(Diagnostic::error(
@@ -9019,23 +9064,19 @@ fn build_canonical_function_signatures(
         // only type operands attached to expressions. ResolvedBody uses this
         // table to type local bindings and conversions without consulting raw
         // `ast::Type` after construction.
-        let owner_prefix = format!("{}/", function.node_id.0);
-        let annotated_types = program
-            .node_meta
-            .iter()
-            .filter_map(|(node_id, meta)| {
-                meta.type_operand
-                    .as_ref()
-                    .filter(|_| {
-                        node_id.0.starts_with(&owner_prefix)
-                            && !program.functions.keys().any(|nested| {
-                                nested != &function.node_id
-                                    && node_id.0.starts_with(&format!("{}/", nested.0))
-                            })
+        let annotated_types = uniquely_owned
+            .get(&function.node_id)
+            .map(|metas| {
+                metas
+                    .iter()
+                    .filter_map(|meta| {
+                        meta.type_operand
+                            .as_ref()
+                            .map(|annotation| (meta.node_id.clone(), annotation.clone()))
                     })
-                    .map(|annotation| (node_id.clone(), annotation.clone()))
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         for (node_id, annotation) in annotated_types {
             if matches!(
                 annotation.unlocated(),
