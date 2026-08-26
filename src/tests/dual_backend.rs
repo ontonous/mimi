@@ -11545,6 +11545,46 @@ fn dual_from_json_result_record() {
     );
 }
 
+/// Option<record> / Result<record> (f64 fields, stored by pointer in native)
+/// plus nested `Result<Option<record>>` / `Option<Result<record>>` — both
+/// backends must serialize the inner record recursively, never as a pointer.
+#[test]
+fn dual_to_json_option_result_record_nested() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Point { x: f64, y: f64 }
+        type Pair { a: i32, b: i32 }
+        func main() -> i32 {
+            let o1 = Some(Point { x: 1.0, y: 2.0 });
+            println(to_json(o1));
+            let n1 = None;
+            println(to_json(n1));
+            let r1 = Ok(Point { x: 3.0, y: 4.0 });
+            println(to_json(r1));
+            let e1 = Err("boom");
+            println(to_json(e1));
+            let ro = Ok(Some(Point { x: 5.0, y: 6.0 }));
+            println(to_json(ro));
+            let or = Some(Ok(Point { x: 7.0, y: 8.0 }));
+            println(to_json(or));
+            let op = Some(Pair { a: 1, b: 2 });
+            println(to_json(op));
+            let rp = Ok(Pair { a: 3, b: 4 });
+            println(to_json(rp));
+            let os = Some("hi");
+            println(to_json(os));
+            let rs = Ok("hey");
+            println(to_json(rs));
+            0
+        }
+        "#,
+        "{\"Some\":[{\"x\":1.0,\"y\":2.0}]}\n\"None\"\n{\"Ok\":[{\"x\":3.0,\"y\":4.0}]}\n{\"Err\":[\"boom\"]}\n{\"Ok\":[{\"Some\":[{\"x\":5.0,\"y\":6.0}]}]}\n{\"Some\":[{\"Ok\":[{\"x\":7.0,\"y\":8.0}]}]}\n{\"Some\":[{\"a\":1,\"b\":2}]}\n{\"Ok\":[{\"a\":3,\"b\":4}]}\n{\"Some\":[\"hi\"]}\n{\"Ok\":[\"hey\"]}"
+    );
+}
+
 /// List of Option of named record.
 #[test]
 fn dual_from_json_list_option_record() {

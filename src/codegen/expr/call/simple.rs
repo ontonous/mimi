@@ -21,6 +21,30 @@ fn classify_is_empty_kind(type_name: &str) -> Option<&'static str> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// Depth-aware extraction of the `Ok` payload type name from a
+    /// `Result<Ok, Err>` display name. Tolerates nested angle brackets and
+    /// commas (product tuples `(i32, i32)`, nested containers
+    /// `Result<Option<List<(i32, i32)>>, string>`) and the optional space after
+    /// the separating comma emitted by `resolved_type_display_name`. Returns an
+    /// empty string when `obj_type` is not a `Result<…>` (the caller then falls
+    /// back to layout-based recovery).
+    fn extract_result_ok_type(obj_type: &str) -> String {
+        let inner = match obj_type.strip_prefix("Result<") {
+            Some(i) => i,
+            None => return String::new(),
+        };
+        let mut depth = 0i32;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                ',' if depth == 0 => return inner[..i].trim().to_string(),
+                _ => {}
+            }
+        }
+        String::new()
+    }
+
     /// 0.39.136 architecture: SINGLE source of truth for typed to_json
     /// serialization dispatch (lists, sets, maps, records, product tuples,
     /// Option/Result wrappers, and every nested-product combination).
@@ -38,6 +62,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Product tuples: JSON array via recursive field serialization.
         // Only when the *source* type is a product tuple — never Option
         // `{i1,T}`, Result, enum `{i32,i64}`, string, or list layouts.
+        // `arg_is_option_shape`: a `{i1, payload}` (2-field) struct — used to
+        // route value-shaped Options into the Option branch even when the
+        // resolved type display name is not `Option<…>` (e.g. the `None`
+        // variant, which surfaces as a bare variant name).
+        let arg_is_option_shape = match &arg0 {
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let f = sv.get_type().get_field_types();
+                f.len() == 2
+                    && matches!(f[0], BasicTypeEnum::IntType(it) if it.get_bit_width() == 1)
+            }
+            _ => false,
+        };
         if let BasicMetadataValueEnum::StructValue(sv) = arg0 {
             let fields = sv.get_type().get_field_types();
             let looks_like_option = !fields.is_empty()
@@ -2389,7 +2425,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Option / Option<T> with integer/handle payload: {i1,i64}
         // or by-value struct payload ({i1, tuple|record}).
-        if obj_type == "Option" || obj_type.starts_with("Option<") {
+        if obj_type == "Option"
+            || obj_type.starts_with("Option<")
+            || (arg_is_option_shape
+                && !obj_type.starts_with("Result")
+                && !self.type_defs.contains_key(&obj_type))
+        {
             let opt_load_sty = {
                 let parsed = crate::codegen::extract_list_elem_type(&format!("List<{}>", obj_type));
                 // extract_list_elem_type("List<Option<P>>") → Option<P>
@@ -2438,7 +2479,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             // D-3: heap-string payload is StructValue {ptr,i64} — must
             // NOT reach the generic mimi_option_i64_to_json scalar path
             // (which would print the pointer as a number) nor the
-            // product-tuple path ([ptr,len]).
+            // product-tuple path ([ptr,len]). Made `mut` so the
+            // record/product-tuple payload branch below can also mark itself
+            // as a structured (recursively-serialized) payload.
             let payload_is_string = matches!(
                 &payload_bv,
                 BasicValueEnum::StructValue(sv) if {
@@ -2463,226 +2506,295 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 let r_ok_bv = self.build_extract_value(res_sv.into(), 1, "opt_res_ok")?;
                 // Result Ok is product-tuple/record struct — rebuild nested JSON.
-                if let BasicValueEnum::StructValue(ok_sv) = r_ok_bv {
-                    let ok_fields = ok_sv.get_type().get_field_types();
-                    let ok_is_string = ok_fields.len() == 2
-                        && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
-                        && matches!(
-                            ok_fields[1],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                // Inner Result Ok payload may be a struct value OR
+                // (`Result<record>`) a pointer to the record — normalize to a
+                // record pointer so records stored by pointer serialize
+                // recursively like the bytecode VM.
+                let (ok_sv_opt, ok_rec_ptr, ok_skip) = match r_ok_bv {
+                    BasicValueEnum::StructValue(sv) => {
+                        let rec_ty = sv.get_type();
+                        let rec_alloca = self
+                            .build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_res_rec_tmp")?;
+                        self.build_store(rec_alloca, sv)?;
+                        let fields = rec_ty.get_field_types();
+                        let ok_is_string = fields.len() == 2
+                            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                            && matches!(
+                                fields[1],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            );
+                        (Some(sv), Some(rec_alloca), ok_is_string)
+                    }
+                    BasicValueEnum::PointerValue(pv) => (None, Some(pv), false),
+                    _ => (None, None, true),
+                };
+                if let Some(ok_rec_ptr) = ok_rec_ptr {
+                    if !ok_skip {
+                        let mut ok_inner = Self::extract_result_ok_type(
+                            obj_type
+                                .strip_prefix("Option<")
+                                .and_then(|s| s.strip_suffix('>'))
+                                .unwrap_or(""),
                         );
-                    if !ok_is_string && ok_fields.len() >= 2 {
-                        let mut ok_inner = obj_type
-                            .strip_prefix("Option<")
-                            .and_then(|s| s.strip_suffix('>'))
-                            .and_then(|s| s.strip_prefix("Result<"))
-                            .and_then(|s| s.split(',').next())
-                            .map(|s| s.trim().to_string())
-                            .unwrap_or_default();
                         if ok_inner.is_empty() {
-                            let pay_sty = ok_sv.get_type();
-                            for (n, ty) in &self.type_llvm {
-                                if matches!(
-                                    ty,
-                                    BasicTypeEnum::StructType(s) if *s == pay_sty
-                                ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                }) {
-                                    ok_inner = n.clone();
-                                    break;
+                            if let Some(sv) = ok_sv_opt {
+                                let pay_sty = sv.get_type();
+                                for (n, ty) in &self.type_llvm {
+                                    if matches!(
+                                        ty,
+                                        BasicTypeEnum::StructType(s) if *s == pay_sty
+                                    ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    }) {
+                                        ok_inner = n.clone();
+                                        break;
+                                    }
+                                }
+                            } else if !self.type_llvm.is_empty() {
+                                for (n, ty) in &self.type_llvm {
+                                    if matches!(ty, BasicTypeEnum::StructType(_))
+                                        && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                        })
+                                    {
+                                        ok_inner = n.clone();
+                                        break;
+                                    }
                                 }
                             }
                         }
                         let is_named_record = self.type_defs.get(&ok_inner).is_some_and(|td| {
                             matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                         });
-                        let ok_json = if is_named_record {
-                            let rec_ty = ok_sv.get_type();
-                            let rec_alloca = self.build_alloca(
-                                BasicTypeEnum::StructType(rec_ty),
-                                "opt_res_rec_tmp",
-                            )?;
-                            self.build_store(rec_alloca, ok_sv)?;
-                            self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+                        let ok_is_string = ok_sv_opt.is_some_and(|sv| {
+                            let f = sv.get_type().get_field_types();
+                            f.len() == 2
+                                && matches!(f[0], BasicTypeEnum::PointerType(_))
+                                && matches!(f[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                        });
+                        let ok_is_product_tuple =
+                            ok_inner.starts_with('(') || self.is_product_tuple_alias(&ok_inner);
+                        if !is_named_record
+                            && !ok_is_string
+                            && !ok_is_product_tuple
+                            && ok_sv_opt.is_none()
+                        {
+                            // fall through to i64 path
                         } else {
-                            self.emit_product_tuple_to_json(ok_sv)?
-                        };
-                        let disc_is_some = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "opt_res_tup_is_some",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let r_is_ok = self
-                            .builder
-                            .build_int_compare(
-                                inkwell::IntPredicate::NE,
-                                r_disc_i64,
-                                self.context.i64_type().const_int(0, false),
-                                "opt_res_tup_is_ok",
-                            )
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let function = self.current_function().ok_or("no function")?;
-                        let some_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_some");
-                        let none_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_none");
-                        let merge_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_merge");
-                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                        let out_alloca = self.build_alloca(
-                            BasicTypeEnum::PointerType(i8_ptr_ty),
-                            "toj_opt_res_tup_out",
-                        )?;
-                        self.builder
-                            .build_conditional_branch(disc_is_some, some_bb, none_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(some_bb);
-                        let ok_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_ok");
-                        let err_bb = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_err");
-                        let some_merge = self
-                            .context
-                            .append_basic_block(function, "toj_opt_res_tup_sm");
-                        self.builder
-                            .build_conditional_branch(r_is_ok, ok_bb, err_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(ok_bb);
-                        let inner_buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(1024, false),
-                            "opt_res_tup_inner",
-                        )?;
-                        let ifmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Ok\":[%s]}", "opt_res_tup_ifmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        let snprintf_fn = self.get_runtime_fn("snprintf")?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(inner_buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(1024, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(ok_json),
-                            ],
-                            "opt_res_tup_isn",
-                        )?;
-                        let outer_buf = self.malloc_or_abort(
-                            self.context.i64_type().const_int(1024, false),
-                            "opt_res_tup_outer",
-                        )?;
-                        let ofmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_ofmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(outer_buf),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(1024, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(inner_buf),
-                            ],
-                            "opt_res_tup_osn",
-                        )?;
-                        self.build_store(out_alloca, outer_buf)?;
-                        self.builder
-                            .build_unconditional_branch(some_merge)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(err_bb);
-                        // Err payload: string Err is heap {ptr,len}; scalar is i64.
-                        let r_err_bv =
-                            self.build_extract_value(res_sv.into(), 2, "opt_res_tup_errv")?;
-                        let r_err_i64 = match r_err_bv {
-                            BasicValueEnum::IntValue(iv) => {
-                                if iv.get_type().get_bit_width() < 64 {
-                                    self.builder
-                                        .build_int_s_extend(
-                                            iv,
-                                            self.context.i64_type(),
-                                            "opt_res_tup_err_i64",
+                            let ok_json = if is_named_record {
+                                self.compile_record_to_json_cstr(&ok_inner, ok_rec_ptr)?
+                            } else if ok_is_string {
+                                let sj = self.emit_heap_string_payload_json(
+                                    ok_sv_opt.ok_or_else(|| {
+                                        CompileError::Generic(
+                                            "to_json Option Result: string payload missing struct"
+                                                .into(),
                                         )
-                                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                    })?,
+                                )?;
+                                self.register_heap_alloc(sj);
+                                sj
+                            } else {
+                                let sv = if let Some(s) = ok_sv_opt {
+                                    s
                                 } else {
-                                    iv
-                                }
-                            }
-                            _ => self.context.i64_type().const_int(0, false),
-                        };
-                        let inner_err = self.emit_result_err_json(r_err_i64, true)?;
-                        let ewrap = self.malloc_or_abort(
-                            self.context.i64_type().const_int(1024, false),
-                            "opt_res_tup_err_outer",
-                        )?;
-                        let eofmt = self
-                            .builder
-                            .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_eofmt")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            snprintf_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(ewrap),
-                                BasicMetadataValueEnum::IntValue(
-                                    self.context.i64_type().const_int(1024, false),
-                                ),
-                                BasicMetadataValueEnum::PointerValue(eofmt.as_pointer_value()),
-                                BasicMetadataValueEnum::PointerValue(inner_err),
-                            ],
-                            "opt_res_tup_eosn",
-                        )?;
-                        self.build_store(out_alloca, ewrap)?;
-                        self.builder
-                            .build_unconditional_branch(some_merge)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(some_merge);
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(none_bb);
-                        let strcpy_fn = self.get_runtime_fn("strcpy")?;
-                        let none_heap = self.malloc_or_abort(
-                            self.context.i64_type().const_int(8, false),
-                            "opt_res_tup_none",
-                        )?;
-                        let none_lit = self
-                            .builder
-                            .build_global_string_ptr("\"None\"", "opt_res_tup_none_lit")
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.build_call(
-                            strcpy_fn,
-                            &[
-                                BasicMetadataValueEnum::PointerValue(none_heap),
-                                BasicMetadataValueEnum::PointerValue(none_lit.as_pointer_value()),
-                            ],
-                            "opt_res_tup_ncpy",
-                        )?;
-                        self.build_store(out_alloca, none_heap)?;
-                        self.builder
-                            .build_unconditional_branch(merge_bb)
-                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                        self.builder.position_at_end(merge_bb);
-                        let raw = self
-                            .build_load(
+                                    let rec_bty =
+                                        self.llvm_type_for(&Type::Name(ok_inner.clone(), vec![]));
+                                    let sty = match rec_bty {
+                                        Some(BasicTypeEnum::StructType(s)) => s,
+                                        _ => return Err(CompileError::LlvmError(format!(
+                                            "to_json: cannot resolve Option Result tuple type {}",
+                                            ok_inner
+                                        ))),
+                                    };
+                                    self.build_load(
+                                        BasicTypeEnum::StructType(sty),
+                                        ok_rec_ptr,
+                                        "opt_res_tup_ld",
+                                    )?
+                                    .into_struct_value()
+                                };
+                                self.emit_product_tuple_to_json(sv)?
+                            };
+                            let disc_is_some = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "opt_res_tup_is_some",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let r_is_ok = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    r_disc_i64,
+                                    self.context.i64_type().const_int(0, false),
+                                    "opt_res_tup_is_ok",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let function = self.current_function().ok_or("no function")?;
+                            let some_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_some");
+                            let none_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_none");
+                            let merge_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_merge");
+                            let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let out_alloca = self.build_alloca(
                                 BasicTypeEnum::PointerType(i8_ptr_ty),
-                                out_alloca,
-                                "opt_res_tup_result",
-                            )?
-                            .into_pointer_value();
-                        self.register_heap_alloc(raw);
-                        return Ok(Some(self.wrap_c_string(raw)?));
+                                "toj_opt_res_tup_out",
+                            )?;
+                            self.builder
+                                .build_conditional_branch(disc_is_some, some_bb, none_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_bb);
+                            let ok_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_ok");
+                            let err_bb = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_err");
+                            let some_merge = self
+                                .context
+                                .append_basic_block(function, "toj_opt_res_tup_sm");
+                            self.builder
+                                .build_conditional_branch(r_is_ok, ok_bb, err_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(ok_bb);
+                            let inner_buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "opt_res_tup_inner",
+                            )?;
+                            let ifmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Ok\":[%s]}", "opt_res_tup_ifmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            let snprintf_fn = self.get_runtime_fn("snprintf")?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(inner_buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(ifmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(ok_json),
+                                ],
+                                "opt_res_tup_isn",
+                            )?;
+                            let outer_buf = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "opt_res_tup_outer",
+                            )?;
+                            let ofmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_ofmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(outer_buf),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(ofmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(inner_buf),
+                                ],
+                                "opt_res_tup_osn",
+                            )?;
+                            self.build_store(out_alloca, outer_buf)?;
+                            self.builder
+                                .build_unconditional_branch(some_merge)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(err_bb);
+                            // Err payload: string Err is heap {ptr,len}; scalar is i64.
+                            let r_err_bv =
+                                self.build_extract_value(res_sv.into(), 2, "opt_res_tup_errv")?;
+                            let r_err_i64 = match r_err_bv {
+                                BasicValueEnum::IntValue(iv) => {
+                                    if iv.get_type().get_bit_width() < 64 {
+                                        self.builder
+                                            .build_int_s_extend(
+                                                iv,
+                                                self.context.i64_type(),
+                                                "opt_res_tup_err_i64",
+                                            )
+                                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                    } else {
+                                        iv
+                                    }
+                                }
+                                _ => self.context.i64_type().const_int(0, false),
+                            };
+                            let inner_err = self.emit_result_err_json(r_err_i64, true)?;
+                            let ewrap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(1024, false),
+                                "opt_res_tup_err_outer",
+                            )?;
+                            let eofmt = self
+                                .builder
+                                .build_global_string_ptr("{\"Some\":[%s]}", "opt_res_tup_eofmt")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                snprintf_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(ewrap),
+                                    BasicMetadataValueEnum::IntValue(
+                                        self.context.i64_type().const_int(1024, false),
+                                    ),
+                                    BasicMetadataValueEnum::PointerValue(eofmt.as_pointer_value()),
+                                    BasicMetadataValueEnum::PointerValue(inner_err),
+                                ],
+                                "opt_res_tup_eosn",
+                            )?;
+                            self.build_store(out_alloca, ewrap)?;
+                            self.builder
+                                .build_unconditional_branch(some_merge)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(some_merge);
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(none_bb);
+                            let strcpy_fn = self.get_runtime_fn("strcpy")?;
+                            let none_heap = self.malloc_or_abort(
+                                self.context.i64_type().const_int(8, false),
+                                "opt_res_tup_none",
+                            )?;
+                            let none_lit = self
+                                .builder
+                                .build_global_string_ptr("\"None\"", "opt_res_tup_none_lit")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_call(
+                                strcpy_fn,
+                                &[
+                                    BasicMetadataValueEnum::PointerValue(none_heap),
+                                    BasicMetadataValueEnum::PointerValue(
+                                        none_lit.as_pointer_value(),
+                                    ),
+                                ],
+                                "opt_res_tup_ncpy",
+                            )?;
+                            self.build_store(out_alloca, none_heap)?;
+                            self.builder
+                                .build_unconditional_branch(merge_bb)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder.position_at_end(merge_bb);
+                            let raw = self
+                                .build_load(
+                                    BasicTypeEnum::PointerType(i8_ptr_ty),
+                                    out_alloca,
+                                    "opt_res_tup_result",
+                                )?
+                                .into_pointer_value();
+                            self.register_heap_alloc(raw);
+                            return Ok(Some(self.wrap_c_string(raw)?));
+                        }
                     }
                 }
                 let r_ok = match r_ok_bv {
@@ -2907,46 +3019,99 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.register_heap_alloc(raw);
                 return Ok(Some(self.wrap_c_string(raw)?));
             }
-            // Option of product tuple / named record: multi-field struct payload.
-            if let BasicValueEnum::StructValue(pay_sv) = payload_bv {
-                let pay_fields = pay_sv.get_type().get_field_types();
-                let pay_is_string = pay_fields.len() == 2
-                    && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(
-                        pay_fields[1],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                    );
-                // Nested Option/Result start with i1 disc — never product-tuple.
-                let pay_is_nested_wrapper = !pay_fields.is_empty()
-                    && matches!(
-                        pay_fields[0],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                    );
-                // List layout {i64,ptr} is not a product tuple.
-                let pay_is_list = pay_fields.len() == 2
-                    && matches!(
-                        pay_fields[0],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+            // Option of product tuple / named record. A `StructValue` payload is a
+            // product tuple, a `String`, a `List`, or a nested `Result`/`Option`;
+            // a `PointerValue` payload is exclusively a `**record` (or `**tuple`)
+            // — string/list/result payloads are always struct *values*, never
+            // pointers. We normalize every payload to a *record pointer* and defer
+            // all struct loads to the `Some` path, so the `None` path never
+            // dereferences the (NULL) record pointer — matching the bytecode VM,
+            // which prints `"None"`.
+            let opt_inner = obj_type
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or("")
+                .to_string();
+            // Option-shaped value whose display name is not a known type (the
+            // `None` variant surfaces as a bare name) — still wrap it Some/None.
+            let force_option_wrap = arg_is_option_shape
+                && !self.type_defs.contains_key(&obj_type)
+                && !obj_type.starts_with("Result");
+            let (rec_ptr, pay_sv_opt, skip_record_block) = match payload_bv {
+                BasicValueEnum::StructValue(sv) => {
+                    let rec_ty = sv.get_type();
+                    let rec_alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_tmp")?;
+                    self.build_store(rec_alloca, sv)?;
+                    // Classify struct-value payloads that must NOT take the
+                    // record/tuple path (they are handled by earlier blocks).
+                    let fields = rec_ty.get_field_types();
+                    let pay_is_string = fields.len() == 2
+                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    let pay_is_nested = !fields.is_empty()
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                        );
+                    let pay_is_list = fields.len() == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        )
+                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    (
+                        Some(rec_alloca),
+                        Some(sv),
+                        pay_is_string || pay_is_nested || pay_is_list,
                     )
-                    && matches!(pay_fields[1], BasicTypeEnum::PointerType(_));
-                if !pay_is_string && !pay_is_nested_wrapper && !pay_is_list {
-                    let mut inner_name = obj_type
-                        .strip_prefix("Option<")
-                        .and_then(|s| s.strip_suffix('>'))
-                        .unwrap_or("")
-                        .to_string();
-                    // Bare `Option` (missing generic in var_type_names): recover
-                    // named record from payload LLVM layout.
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    // Native codegen stores `Option<record>` as `{i1, ptr}` where
+                    // the payload slot holds a *direct* pointer to the record data.
+                    // Use it as-is — no deref (the `None` case is a NULL pointer and
+                    // must not be read; the `Some` path passes it straight to
+                    // `compile_record_to_json_cstr`, which reads via struct-GEP).
+                    (Some(pv), None, false)
+                }
+                _ => (None, None, true),
+            };
+            if let Some(rec_ptr) = rec_ptr {
+                if !skip_record_block {
+                    let mut inner_name = opt_inner.clone();
+                    // Bare `Option` / missing generic / bare variant name: recover
+                    // the named record from the payload LLVM layout, falling back to
+                    // the first registered record (only relevant for the forced
+                    // None path, where the name is never dereferenced).
                     if inner_name.is_empty() || inner_name == "Option" {
-                        let pay_sty = pay_sv.get_type();
-                        for (n, ty) in &self.type_llvm {
-                            if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
-                                && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                })
-                            {
-                                inner_name = n.clone();
-                                break;
+                        let mut recovered = false;
+                        if let Some(sv) = pay_sv_opt {
+                            let pay_sty = sv.get_type();
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
+                                    && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    })
+                                {
+                                    inner_name = n.clone();
+                                    recovered = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !recovered {
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(ty, BasicTypeEnum::StructType(_))
+                                    && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    })
+                                {
+                                    inner_name = n.clone();
+                                    break;
+                                }
                             }
                         }
                     }
@@ -2954,16 +3119,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .type_defs
                         .get(&inner_name)
                         .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
-                    if is_named_record || pay_fields.len() >= 2 {
-                        let pay_json = if is_named_record {
-                            let rec_ty = pay_sv.get_type();
-                            let rec_alloca = self
-                                .build_alloca(BasicTypeEnum::StructType(rec_ty), "opt_rec_tmp")?;
-                            self.build_store(rec_alloca, pay_sv)?;
-                            self.compile_record_to_json_cstr(&inner_name, rec_alloca)?
-                        } else {
-                            self.emit_product_tuple_to_json(pay_sv)?
-                        };
+                    let is_product_tuple =
+                        inner_name.starts_with('(') || self.is_product_tuple_alias(&inner_name);
+                    if force_option_wrap || is_named_record || is_product_tuple {
                         let disc_is_some = self
                             .builder
                             .build_int_compare(
@@ -2992,6 +3150,55 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .build_conditional_branch(disc_is_some, some_bb, none_bb)
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                         self.builder.position_at_end(some_bb);
+                        // Serialize the payload only on the Some path — for None the
+                        // record pointer is NULL and must not be dereferenced
+                        // (matches the bytecode VM, which prints `"None"`).
+                        let pay_json = if is_named_record {
+                            self.compile_record_to_json_cstr(&inner_name, rec_ptr)?
+                        } else if is_product_tuple {
+                            let sv = if let Some(s) = pay_sv_opt {
+                                s
+                            } else {
+                                let rec_bty =
+                                    self.llvm_type_for(&Type::Name(inner_name.clone(), vec![]));
+                                let sty = match rec_bty {
+                                    Some(BasicTypeEnum::StructType(s)) => s,
+                                    _ => {
+                                        return Err(CompileError::LlvmError(format!(
+                                            "to_json: cannot resolve tuple type {}",
+                                            inner_name
+                                        )))
+                                    }
+                                };
+                                self.build_load(
+                                    BasicTypeEnum::StructType(sty),
+                                    rec_ptr,
+                                    "opt_tup_ld",
+                                )?
+                                .into_struct_value()
+                            };
+                            self.emit_product_tuple_to_json(sv)?
+                        } else {
+                            // Nested container (`Option<Result<…>>`,
+                            // `Option<List<…>>`, …): dispatch to_json on the
+                            // inner payload with its own type name, then wrap in
+                            // `{"Some":[…]}` — exactly like the bytecode VM.
+                            // The inner dispatch returns a Mimi-string struct
+                            // `{ptr, len}`; extract the raw `*char` (field 0) to
+                            // feed `snprintf`'s `%s`, matching the other branches
+                            // which already yield a raw pointer.
+                            let inner_val = BasicMetadataValueEnum::PointerValue(rec_ptr);
+                            match self.emit_typed_to_json_dispatch(&opt_inner, inner_val)? {
+                                Some(j) => match j {
+                                    BasicValueEnum::PointerValue(p) => p,
+                                    BasicValueEnum::StructValue(s) => self
+                                        .build_extract_value(s.into(), 0, "nested_json_ptr")?
+                                        .into_pointer_value(),
+                                    other => other.into_pointer_value(),
+                                },
+                                None => return Ok(None),
+                            }
+                        };
                         let buf = self.malloc_or_abort(
                             self.context.i64_type().const_int(1024, false),
                             "opt_tup_buf",
@@ -3402,32 +3609,36 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .into_pointer_value()
                         }
                     } else {
-                        let rt_fn = if obj_type.contains("List<string>") {
-                            "mimi_list_str_to_json"
-                        } else if obj_type.contains("f64") || obj_type.contains("f32") {
-                            "mimi_list_f64_to_json"
-                        } else if obj_type.contains("bool") {
-                            "mimi_list_bool_to_json"
-                        } else {
-                            "mimi_list_i64_to_json"
+                        // Reuse the unified `to_json` dispatch for the inner
+                        // `List<elem>` — this is exactly the path a bare
+                        // `List<elem>` takes, so it handles scalar, product-tuple,
+                        // and nested-list elements uniformly. The previous hard-coded
+                        // `mimi_list_i64_to_json` fallback mis-serialized non-scalar
+                        // elements (e.g. `List<(i32, i32)>` product tuples) as raw
+                        // i64, producing garbage JSON.
+                        let inner_list = obj_type
+                            .strip_prefix("Option<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or_else(|| obj_type.as_str());
+                        let elem_ty = inner_list
+                            .strip_prefix("List<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or_else(|| inner_list)
+                            .to_string();
+                        let inner_val = BasicMetadataValueEnum::PointerValue(list_alloca);
+                        let list_json = match self
+                            .emit_typed_to_json_dispatch(&format!("List<{}>", elem_ty), inner_val)?
+                        {
+                            Some(j) => match j {
+                                BasicValueEnum::PointerValue(p) => p,
+                                BasicValueEnum::StructValue(s) => self
+                                    .build_extract_value(s.into(), 0, "opt_list_inner_json_ptr")?
+                                    .into_pointer_value(),
+                                other => other.into_pointer_value(),
+                            },
+                            None => return Ok(None),
                         };
-                        let fn_ty = i8_ptr_ty
-                            .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
-                        let callee = self.module.get_function(rt_fn).unwrap_or_else(|| {
-                            self.module.add_function(
-                                rt_fn,
-                                fn_ty,
-                                Some(inkwell::module::Linkage::External),
-                            )
-                        });
-                        self.build_call(
-                            callee,
-                            &[BasicMetadataValueEnum::PointerValue(list_alloca)],
-                            "opt_list_json",
-                        )?
-                        .try_as_basic_value_opt()
-                        .ok_or("list to_json void")?
-                        .into_pointer_value()
+                        list_json
                     };
                     let buf = self.malloc_or_abort(
                         self.context.i64_type().const_int(1024, false),
@@ -4351,53 +4562,140 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 let o_pay_bv = self.build_extract_value(opt_sv.into(), 1, "res_opt_pay")?;
                 // Option of product-tuple/record inside Result: rebuild
-                // {"Some":[…]} from struct payload rather than i64 helper.
-                if let BasicValueEnum::StructValue(pay_sv) = o_pay_bv {
-                    let pay_fields = pay_sv.get_type().get_field_types();
-                    let pay_is_string = pay_fields.len() == 2
-                        && matches!(pay_fields[0], BasicTypeEnum::PointerType(_))
-                        && matches!(
-                            pay_fields[1],
-                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                        );
-                    if !pay_is_string && pay_fields.len() >= 1 {
-                        let mut pay_inner = obj_type
-                            .strip_prefix("Result<")
-                            .and_then(|s| s.split(',').next())
-                            .and_then(|s| s.strip_prefix("Option<"))
+                // {"Some":[…]} from payload rather than i64 helper. The inner
+                // Option payload may be a struct value OR (`Option<record>`) a
+                // pointer to the record — normalize to a record pointer.
+                let (pay_rec_ptr, pay_sv_opt, pay_skip) = match o_pay_bv {
+                    BasicValueEnum::StructValue(sv) => {
+                        let rec_ty = sv.get_type();
+                        let rec_alloca = self
+                            .build_alloca(BasicTypeEnum::StructType(rec_ty), "res_opt_rec_tmp")?;
+                        self.build_store(rec_alloca, sv)?;
+                        let fields = rec_ty.get_field_types();
+                        let pay_is_string = fields.len() == 2
+                            && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                            && matches!(
+                                fields[1],
+                                BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                            );
+                        (Some(rec_alloca), Some(sv), pay_is_string)
+                    }
+                    BasicValueEnum::PointerValue(pv) => (Some(pv), None, false),
+                    _ => (None, None, true),
+                };
+                if let Some(pay_rec_ptr) = pay_rec_ptr {
+                    if !pay_skip {
+                        let mut pay_inner = Self::extract_result_ok_type(&obj_type)
+                            .strip_prefix("Option<")
                             .and_then(|s| s.strip_suffix('>'))
                             .map(|s| s.trim().to_string())
                             .unwrap_or_default();
                         if pay_inner.is_empty() {
-                            let pay_sty = pay_sv.get_type();
-                            for (n, ty) in &self.type_llvm {
-                                if matches!(
-                                    ty,
-                                    BasicTypeEnum::StructType(s) if *s == pay_sty
-                                ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                }) {
-                                    pay_inner = n.clone();
-                                    break;
+                            if let Some(sv) = pay_sv_opt {
+                                let pay_sty = sv.get_type();
+                                for (n, ty) in &self.type_llvm {
+                                    if matches!(
+                                        ty,
+                                        BasicTypeEnum::StructType(s) if *s == pay_sty
+                                    ) && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    }) {
+                                        pay_inner = n.clone();
+                                        break;
+                                    }
+                                }
+                            } else if !self.type_llvm.is_empty() {
+                                for (n, ty) in &self.type_llvm {
+                                    if matches!(ty, BasicTypeEnum::StructType(_))
+                                        && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                            matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                        })
+                                    {
+                                        pay_inner = n.clone();
+                                        break;
+                                    }
                                 }
                             }
                         }
                         let is_named_record = self.type_defs.get(&pay_inner).is_some_and(|td| {
                             matches!(td.kind, crate::ast::TypeDefKind::Record(_))
                         });
-                        if !is_named_record && pay_fields.len() < 2 {
+                        let pay_is_string = pay_sv_opt.is_some_and(|sv| {
+                            let f = sv.get_type().get_field_types();
+                            f.len() == 2
+                                && matches!(f[0], BasicTypeEnum::PointerType(_))
+                                && matches!(f[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                        });
+                        let pay_is_product_tuple =
+                            pay_inner.starts_with('(') || self.is_product_tuple_alias(&pay_inner);
+                        let pay_is_container = pay_inner.starts_with("Option<")
+                            || pay_inner.starts_with("List<")
+                            || pay_inner.starts_with("Result<")
+                            || pay_inner.starts_with("Map<")
+                            || pay_inner.starts_with("Set<");
+                        if !is_named_record
+                            && !pay_is_string
+                            && !pay_is_product_tuple
+                            && !pay_is_container
+                            && pay_sv_opt.is_none()
+                        {
                             // fall through to i64 path
                         } else {
                             let pay_json = if is_named_record {
-                                let rec_ty = pay_sv.get_type();
-                                let rec_alloca = self.build_alloca(
-                                    BasicTypeEnum::StructType(rec_ty),
-                                    "res_opt_rec_tmp",
+                                self.compile_record_to_json_cstr(&pay_inner, pay_rec_ptr)?
+                            } else if pay_is_string {
+                                let sj = self.emit_heap_string_payload_json(
+                                    pay_sv_opt.ok_or_else(|| {
+                                        CompileError::Generic(
+                                            "to_json Result Option: string payload missing struct"
+                                                .into(),
+                                        )
+                                    })?,
                                 )?;
-                                self.build_store(rec_alloca, pay_sv)?;
-                                self.compile_record_to_json_cstr(&pay_inner, rec_alloca)?
+                                self.register_heap_alloc(sj);
+                                sj
+                            } else if pay_is_container {
+                                // Nested container inside the Ok Option
+                                // (`Option<List<…>>` / `Option<Result<…>>` / …):
+                                // `pay_rec_ptr` already points at the inner
+                                // container payload (the `List`/`Result` value),
+                                // so dispatch `to_json` on that inner container
+                                // directly — exactly as a bare `to_json(container)`
+                                // would. The surrounding `{"Some":[…]}` wrapper is
+                                // added by the Option path below, matching the
+                                // bytecode VM.
+                                let nested_val = BasicMetadataValueEnum::PointerValue(pay_rec_ptr);
+                                match self.emit_typed_to_json_dispatch(&pay_inner, nested_val)? {
+                                    Some(j) => match j {
+                                        BasicValueEnum::PointerValue(p) => p,
+                                        BasicValueEnum::StructValue(s) => self
+                                            .build_extract_value(s.into(), 0, "res_opt_nested_ptr")?
+                                            .into_pointer_value(),
+                                        other => other.into_pointer_value(),
+                                    },
+                                    None => return Ok(None),
+                                }
                             } else {
-                                self.emit_product_tuple_to_json(pay_sv)?
+                                let sv = if let Some(s) = pay_sv_opt {
+                                    s
+                                } else {
+                                    let rec_bty =
+                                        self.llvm_type_for(&Type::Name(pay_inner.clone(), vec![]));
+                                    let sty = match rec_bty {
+                                        Some(BasicTypeEnum::StructType(s)) => s,
+                                        _ => return Err(CompileError::LlvmError(format!(
+                                            "to_json: cannot resolve Result Option tuple type {}",
+                                            pay_inner
+                                        ))),
+                                    };
+                                    self.build_load(
+                                        BasicTypeEnum::StructType(sty),
+                                        pay_rec_ptr,
+                                        "res_opt_tup_ld",
+                                    )?
+                                    .into_struct_value()
+                                };
+                                self.emit_product_tuple_to_json(sv)?
                             };
                             let disc_is_ok = self
                                 .builder
@@ -5302,48 +5600,73 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.register_heap_alloc(raw);
                 return Ok(Some(self.wrap_c_string(raw)?));
             }
-            // Result of product tuple / named record Ok.
-            if let BasicValueEnum::StructValue(ok_sv) = ok_bv {
-                let ok_fields = ok_sv.get_type().get_field_types();
-                let ok_is_string = ok_fields.len() == 2
-                    && matches!(ok_fields[0], BasicTypeEnum::PointerType(_))
-                    && matches!(
-                        ok_fields[1],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                    );
-                // Nested Option/Result Ok payloads start with i1 — not product tuples.
-                let ok_is_nested_wrapper = !ok_fields.is_empty()
-                    && matches!(
-                        ok_fields[0],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
-                    );
-                let ok_is_list = ok_fields.len() == 2
-                    && matches!(
-                        ok_fields[0],
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                    )
-                    && matches!(ok_fields[1], BasicTypeEnum::PointerType(_));
-                if !ok_fields.is_empty() && !ok_is_nested_wrapper && !ok_is_list {
-                    // Note: ok_is_string deliberately NOT excluded —
-                    // heap-string Ok payloads {ptr,i64} must take the
-                    // structured JSON path (D-3), not fall through to
-                    // the scalar i64 coercion which rejects them (E0700)
-                    // or re-serializes the struct as a product tuple.
-                    let mut ok_inner = obj_type
-                        .strip_prefix("Result<")
-                        .and_then(|s| s.split(',').next())
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
+            // Result of product tuple / named record / heap-string Ok. The Ok
+            // payload may be a struct value OR (for `Result<record>` /
+            // `Result<product-tuple>`) a *pointer* to the data — normalize to a
+            // *record pointer* (no eager load) so records stored by pointer
+            // serialize recursively like the bytecode VM (`{"Ok":[{…}]}`).
+            let (ok_rec_ptr, ok_sv_opt, ok_skip) = match ok_bv {
+                BasicValueEnum::StructValue(sv) => {
+                    let rec_ty = sv.get_type();
+                    let rec_alloca =
+                        self.build_alloca(BasicTypeEnum::StructType(rec_ty), "res_rec_tmp")?;
+                    self.build_store(rec_alloca, sv)?;
+                    let fields = rec_ty.get_field_types();
+                    let ok_is_string = fields.len() == 2
+                        && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                        && matches!(
+                            fields[1],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        );
+                    // Nested Option/Result Ok payloads start with i1 — not product tuples.
+                    let ok_is_nested = !fields.is_empty()
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 1
+                        );
+                    let ok_is_list = fields.len() == 2
+                        && matches!(
+                            fields[0],
+                            BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                        )
+                        && matches!(fields[1], BasicTypeEnum::PointerType(_));
+                    (Some(rec_alloca), Some(sv), ok_is_string)
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    // `Result<record>` stores the record by pointer (`ptr` to the
+                    // record data); use it directly (no deref, no eager load).
+                    (Some(pv), None, false)
+                }
+                _ => (None, None, true),
+            };
+            if let Some(ok_rec_ptr) = ok_rec_ptr {
+                if !ok_skip {
+                    let mut ok_inner = Self::extract_result_ok_type(&obj_type);
                     if ok_inner.is_empty() {
-                        let pay_sty = ok_sv.get_type();
-                        for (n, ty) in &self.type_llvm {
-                            if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
-                                && self.type_defs.get(n.as_str()).is_some_and(|td| {
-                                    matches!(td.kind, crate::ast::TypeDefKind::Record(_))
-                                })
-                            {
-                                ok_inner = n.clone();
-                                break;
+                        if let Some(sv) = ok_sv_opt {
+                            let pay_sty = sv.get_type();
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(ty, BasicTypeEnum::StructType(s) if *s == pay_sty)
+                                    && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    })
+                                {
+                                    ok_inner = n.clone();
+                                    break;
+                                }
+                            }
+                        } else if !self.type_llvm.is_empty() {
+                            // bare-variant / unrecoverable Ok: first registered
+                            // record (only used when the name is never dereferenced).
+                            for (n, ty) in &self.type_llvm {
+                                if matches!(ty, BasicTypeEnum::StructType(_))
+                                    && self.type_defs.get(n.as_str()).is_some_and(|td| {
+                                        matches!(td.kind, crate::ast::TypeDefKind::Record(_))
+                                    })
+                                {
+                                    ok_inner = n.clone();
+                                    break;
+                                }
                             }
                         }
                     }
@@ -5351,26 +5674,86 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .type_defs
                         .get(&ok_inner)
                         .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
-                    if !is_named_record && !ok_is_string && ok_fields.len() < 2 {
+                    let ok_is_string = ok_sv_opt.is_some_and(|sv| {
+                        let f = sv.get_type().get_field_types();
+                        f.len() == 2
+                            && matches!(f[0], BasicTypeEnum::PointerType(_))
+                            && matches!(f[1], BasicTypeEnum::IntType(it) if it.get_bit_width() == 64)
+                    });
+                    let ok_is_product_tuple =
+                        ok_inner.starts_with('(') || self.is_product_tuple_alias(&ok_inner);
+                    let ok_is_container = ok_inner.starts_with("Option<")
+                        || ok_inner.starts_with("List<")
+                        || ok_inner.starts_with("Result<")
+                        || ok_inner.starts_with("Map<")
+                        || ok_inner.starts_with("Set<");
+                    let ok_fields_len = ok_sv_opt.map(|sv| sv.get_type().get_field_types().len());
+                    // Fall through to the scalar i64 path for single-field
+                    // non-record/non-string Ok payloads (matches prior behavior).
+                    if !is_named_record
+                        && !ok_is_string
+                        && !ok_is_product_tuple
+                        && !ok_is_container
+                        && ok_fields_len.map_or(true, |l| l < 2)
+                    {
                         // fall through
                     } else {
                         let ok_json = if is_named_record {
-                            let rec_ty = ok_sv.get_type();
-                            let rec_alloca = self
-                                .build_alloca(BasicTypeEnum::StructType(rec_ty), "res_rec_tmp")?;
-                            self.build_store(rec_alloca, ok_sv)?;
-                            self.compile_record_to_json_cstr(&ok_inner, rec_alloca)?
+                            self.compile_record_to_json_cstr(&ok_inner, ok_rec_ptr)?
                         } else if ok_is_string {
                             // D-3: heap-string Ok payload {ptr,i64} must
                             // NOT be treated as a 2-field product tuple
                             // (its 2 struct fields would otherwise
                             // mis-serialize as [ptr,len]). Emit a JSON
                             // string literal instead.
-                            let sj = self.emit_heap_string_payload_json(ok_sv)?;
+                            let sj = self.emit_heap_string_payload_json(ok_sv_opt.ok_or_else(
+                                || {
+                                    CompileError::Generic(
+                                        "to_json Result: Ok string payload missing struct".into(),
+                                    )
+                                },
+                            )?)?;
                             self.register_heap_alloc(sj);
                             sj
+                        } else if ok_is_container {
+                            // Nested container Ok payload (`Option<…>` / `List<…>` /
+                            // `Result<…>` / `Map<…>` / `Set<…>`): dispatch to_json
+                            // on the inner value with its own type name, so nested
+                            // containers serialize exactly like the bytecode VM.
+                            let nested_val = BasicMetadataValueEnum::PointerValue(ok_rec_ptr);
+                            match self.emit_typed_to_json_dispatch(&ok_inner, nested_val)? {
+                                Some(j) => match j {
+                                    BasicValueEnum::PointerValue(p) => p,
+                                    BasicValueEnum::StructValue(s) => self
+                                        .build_extract_value(s.into(), 0, "res_ok_nested_ptr")?
+                                        .into_pointer_value(),
+                                    other => other.into_pointer_value(),
+                                },
+                                None => return Ok(None),
+                            }
                         } else {
-                            self.emit_product_tuple_to_json(ok_sv)?
+                            let sv = if let Some(s) = ok_sv_opt {
+                                s
+                            } else {
+                                let rec_bty =
+                                    self.llvm_type_for(&Type::Name(ok_inner.clone(), vec![]));
+                                let sty = match rec_bty {
+                                    Some(BasicTypeEnum::StructType(s)) => s,
+                                    _ => {
+                                        return Err(CompileError::LlvmError(format!(
+                                            "to_json: cannot resolve Result tuple type {}",
+                                            ok_inner
+                                        )))
+                                    }
+                                };
+                                self.build_load(
+                                    BasicTypeEnum::StructType(sty),
+                                    ok_rec_ptr,
+                                    "res_tup_ld",
+                                )?
+                                .into_struct_value()
+                            };
+                            self.emit_product_tuple_to_json(sv)?
                         };
                         let err_bv = self.build_extract_value(sv.into(), 2, "res_err_tup")?;
                         let err_i64 = match err_bv {
