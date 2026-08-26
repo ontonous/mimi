@@ -7965,10 +7965,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ));
                     }
                     Type::Name(n, _) if n == "f64" => {
-                        fmt.push_str(&format!("\"{}\":%g", field.name));
-                        sprintf_args.push(BasicMetadataValueEnum::FloatValue(
-                            field_val.into_float_value(),
-                        ));
+                        // RECORD-FLOAT-JSON-PARITY (0.39.x usability sweep, Round 29):
+                        // shortest-round-trip via `mimi_to_string_f64` (same as the
+                        // VM's serde_json and the standalone `to_json` FloatValue
+                        // path), NOT `%g` (which emits `1` for `1.0`).
+                        fmt.push_str(&format!("\"{}\":%s", field.name));
+                        let fv = field_val.into_float_value();
+                        let fstr_fn = self
+                            .get_runtime_fn("mimi_to_json_f64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        let fstr = self
+                            .build_call(
+                                fstr_fn,
+                                &[BasicMetadataValueEnum::FloatValue(fv)],
+                                &format!("{}_f64_json", field.name),
+                            )
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .try_as_basic_value_opt()
+                            .ok_or_else(|| {
+                                CompileError::LlvmError("mimi_to_string_f64 returned void".into())
+                            })?
+                            .into_pointer_value();
+                        sprintf_args.push(BasicMetadataValueEnum::PointerValue(fstr));
                     }
                     _ => {
                         return Err(CompileError::Generic(format!(
@@ -8172,10 +8190,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ));
                 }
                 Type::Name(n, _) if n == "f64" => {
-                    fmt.push_str(&format!("\"{}\":%g", field.name));
-                    sprintf_args.push(BasicMetadataValueEnum::FloatValue(
-                        field_val.into_float_value(),
-                    ));
+                    // RECORD-FLOAT-JSON-PARITY (0.39.x usability sweep, Round 29):
+                    // use the same shortest-round-trip formatter the VM's
+                    // `value_to_json` (serde_json) and the standalone `to_json`
+                    // FloatValue path use `mimi_to_json_f64` (serde shortest
+                    // round-trip: `1.0` for whole numbers), NOT `mimi_to_string_f64`
+                    // (which drops the `.0` and emits `1` for `1.0`).
+                    fmt.push_str(&format!("\"{}\":%s", field.name));
+                    let fv = field_val.into_float_value();
+                    let fstr_fn = self
+                        .get_runtime_fn("mimi_to_json_f64")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let fstr = self
+                        .build_call(
+                            fstr_fn,
+                            &[BasicMetadataValueEnum::FloatValue(fv)],
+                            &format!("{}_f64_json", field.name),
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| {
+                            CompileError::LlvmError("mimi_to_string_f64 returned void".into())
+                        })?
+                        .into_pointer_value();
+                    sprintf_args.push(BasicMetadataValueEnum::PointerValue(fstr));
+                }
+                // Nested record field: serialize recursively so `to_json`
+                // matches the bytecode VM's `value_to_json` (which recurses into
+                // nested structures). Handles `Box { a: Point }`.
+                Type::Name(n, _) => {
+                    if let Some(td) = self.type_defs.get(n.as_str()) {
+                        if matches!(td.kind, TypeDefKind::Record(_)) {
+                            fmt.push_str(&format!("\"{}\":%s", field.name));
+                            let nested = self.compile_record_to_json_cstr(n, gep)?;
+                            sprintf_args.push(BasicMetadataValueEnum::PointerValue(nested));
+                            continue;
+                        }
+                    }
+                    return Err(CompileError::Generic(format!(
+                        "to_json: unsupported record field type for '{}' in {}",
+                        field.name, obj_type
+                    )));
                 }
                 _ => {
                     return Err(CompileError::Generic(format!(

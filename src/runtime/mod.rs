@@ -4006,7 +4006,17 @@ pub unsafe extern "C" fn mimi_list_f64_to_json(list: *const MimiList) -> *mut st
         // SAFETY: `lst.data` points to a valid, properly aligned value
         let bits = unsafe { *(lst.data as *const i64).offset(i) };
         let fv = f64::from_bits(bits as u64);
-        parts.push(fv.to_string());
+        // JSON float formatting must match the bytecode VM's value_to_json
+        // (serde_json shortest round-trip): whole numbers keep ".0",
+        // non-finite → "null". Mirrors `mimi_to_json_f64`.
+        let s = if !fv.is_finite() {
+            "null".to_string()
+        } else if fv.fract() == 0.0 {
+            format!("{:.1}", fv)
+        } else {
+            fv.to_string()
+        };
+        parts.push(s);
     }
     parts.push(String::from("]"));
     alloc_c_string(&parts.join(""))

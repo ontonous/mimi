@@ -20351,3 +20351,42 @@ func main() -> i32 {
 "#;
     dual_assert_prod!(src, "hello\ninvalid base64");
 }
+
+/// RECORD-FLOAT-JSON-PARITY regression (0.39.x usability sweep, Round 31):
+/// native `to_json` of float-bearing values diverged from the bytecode VM.
+/// The VM serializes floats via `serde_json::Number::from_f64`, which keeps a
+/// trailing `.0` for whole numbers (`1.0`, not Rust `Display`'s `1`) and emits
+/// `null` for non-finite values. The native backend used `mimi_to_string_f64`
+/// (Rust `Display`) for records/product-tuples, `fv.to_string()` for lists of
+/// floats, and errored on nested records. Now both backends route float
+/// serialization through the dedicated `mimi_to_json_f64` runtime formatter
+/// (serde-equivalent: whole numbers keep `.0`, non-finite → `null`), and
+/// `to_json` of a record with a record-typed field recurses exactly like the
+/// VM. Locks byte-identical output across backends for bare float, list of
+/// float, record of float, and nested record.
+#[test]
+fn dual_to_json_float_record_parity() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+type Point { x: f64, y: f64 }
+type Box { a: Point, label: string }
+
+func main() -> i32 {
+    println(to_json(1.0))
+    println(to_json(2.5))
+    println(to_json(0.0))
+    println(to_json([1.0, 2.5, -0.5]))
+    let p = Point { x: -2.0, y: 3.5 }
+    println(to_json(p))
+    let b = Box { a: Point { x: 0.0, y: 1.0 }, label: "hi" }
+    println(to_json(b))
+    0
+}
+"#;
+    dual_assert_prod!(
+        src,
+        "1.0\n2.5\n0.0\n[1.0,2.5,-0.5]\n{\"x\":-2.0,\"y\":3.5}\n{\"a\":{\"x\":0.0,\"y\":1.0},\"label\":\"hi\"}"
+    );
+}

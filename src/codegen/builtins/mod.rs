@@ -2117,6 +2117,13 @@ fn register_string_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::FloatType(ctx.f64_type())], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_to_json_f64(f64) → i8* (JSON float, serde_json shortest round-trip:
+    // "1.0" for whole numbers, "null" for non-finite — matches the VM's to_json)
+    module.add_function(
+        "mimi_to_json_f64",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::FloatType(ctx.f64_type())], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_str_clone(i8*, i64) → i64 (heap-allocated string handle for map storage)
     module.add_function(
         "mimi_str_clone",

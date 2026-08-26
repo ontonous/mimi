@@ -116,7 +116,10 @@ impl<'ctx> CodeGenerator<'ctx> {
 
                 // Finite: shortest round-trip decimal via the runtime.
                 self.builder.position_at_end(finite_bb);
-                let to_str_fn = self.get_runtime_fn("mimi_to_string_f64")?;
+                // Use the dedicated JSON float formatter (serde_json shortest
+                // round-trip: "1.0" for whole numbers, "null" for non-finite),
+                // matching the bytecode VM's value_to_json exactly.
+                let to_str_fn = self.get_runtime_fn("mimi_to_json_f64")?;
                 let finite_str = self
                     .builder
                     .build_call(
@@ -124,9 +127,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &[BasicMetadataValueEnum::FloatValue(fv64)],
                         "to_json_f64_str",
                     )
-                    .map_err(|e| format!("mimi_to_string_f64 error: {}", e))?
+                    .map_err(|e| format!("mimi_to_json_f64 error: {}", e))?
                     .try_as_basic_value_opt()
-                    .ok_or("mimi_to_string_f64 returned void")?
+                    .ok_or("mimi_to_json_f64 returned void")?
                     .into_pointer_value();
                 let finite_end = self
                     .builder

@@ -270,6 +270,30 @@ pub extern "C" fn mimi_to_string_f64(val: f64) -> *mut std::ffi::c_char {
     alloc_c_string(&val.to_string())
 }
 
+/// JSON `to_json` float formatter — mirrors the bytecode VM's `value_to_json`,
+/// which serializes floats via `serde_json::Number::from_f64`. Non-finite
+/// values become `null` (RFC 8259 has no NaN/Inf literals); finite values use
+/// serde's shortest round-trip form, so `1.0` stays `"1.0"` (Rust's
+/// `Display` would drop the `.0` and emit `"1"`, breaking double-backend
+/// `to_json` parity). Kept separate from `mimi_to_string_f64` so `format!`/
+/// `println` keep their existing Display-style output.
+#[no_mangle]
+pub extern "C" fn mimi_to_json_f64(val: f64) -> *mut std::ffi::c_char {
+    if !val.is_finite() {
+        // RFC 8259: no NaN/Inf literals — the VM maps these to JSON `null`.
+        return alloc_c_string("null");
+    }
+    // Whole numbers keep a trailing ".0" to match serde_json's shortest
+    // round-trip (1.0 → "1.0", not Display's "1"); fractional/scientific
+    // values use Rust's shortest Display, which already matches serde
+    // (1.5 → "1.5", 0.1 → "0.1", 1e21 → "1e21").
+    if val.fract() == 0.0 {
+        alloc_c_string(&format!("{:.1}", val))
+    } else {
+        alloc_c_string(&val.to_string())
+    }
+}
+
 /// §8-#96 (0.34.36): NUL-terminate `buf[offset]` for the sized display
 /// assembly. Exists as an opaque call so LLVM O1 cannot fold the
 /// straight-line memcpy chain + trailing NUL store into a miscompiled

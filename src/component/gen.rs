@@ -641,6 +641,11 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(ptr(prim(U8)))
             .effect("alloc")
     });
+    gen.export("mimi_to_json_f64", |f| {
+        f.param("val", prim(F64))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
     gen.export("mimi_any_to_string", |f| {
         // real: (value: ValueHandle = usize) -> *mut c_char (mod.rs:1508)
         f.param("value", prim(UIntPtr))
