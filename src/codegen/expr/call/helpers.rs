@@ -382,6 +382,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             },
             Expr::Call(callee, _args) => {
                 if let Expr::Ident(name) = callee.unlocated() {
+                    // VALUES-ELEM-ABI (0.39.x sweep): keys() and values() both
+                    // return List<string> — the runtime canonicalizes every
+                    // element to a fat MSTR box (string handles decode; scalar
+                    // handles stringify), so downstream indexing/printing must
+                    // use the string ABI, not raw i64 slots.
+                    if name == "keys" || name == "values" {
+                        return Some(Type::Name(
+                            "List".to_string(),
+                            vec![Type::Name("string".to_string(), vec![])],
+                        ));
+                    }
                     self.func_defs
                         .get(name)
                         .and_then(|f| f.ret.clone())

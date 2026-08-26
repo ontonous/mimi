@@ -2049,6 +2049,32 @@ pub unsafe extern "C" fn mimi_any_to_string(value: ValueHandle) -> *mut std::ffi
     // Validate before treating as pointer.
     let value_addr = value as usize;
     if value & 1 == 0 && (MIN_HEAP..MAX_ADDR).contains(&value_addr) && value % 8 == 0 {
+        // VALUES-ELEM-ABI (0.39.x sweep): a fat MimiStr box starts with the
+        // "MSTR" magic. The old scan treated the box HEADER as a C string and
+        // returned "RTSM". Decode the box instead: data at +16, len at +24.
+        if pages_mapped(value_addr, 32) {
+            let raw = value_addr as *const list_string::MimiStr;
+            let is_mstr = unsafe { (*raw).is_fat() };
+            if is_mstr {
+                let (data_ptr, len) = unsafe {
+                    let boxed = &*raw;
+                    (boxed.ptr as *const u8, boxed.len)
+                };
+                if !data_ptr.is_null() && len >= 0 {
+                    let buf = mimi_alloc(len as usize + 1) as *mut u8;
+                    if buf.is_null() {
+                        return std::ptr::null_mut();
+                    }
+                    // SAFETY: MSTR boxes are runtime-owned; data[0..len] is
+                    // initialized by alloc_mimi_str and len matches its size.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(data_ptr, buf, len as usize);
+                        *buf.add(len as usize) = 0;
+                    }
+                    return buf as *mut std::ffi::c_char;
+                }
+            }
+        }
         let ptr = value as *const u8;
         // SAFETY: `libc::sysconf`/`libc::mincore` are async-signal-safe POSIX functions
         // C12 (deep audit): a large *untagged* integer (e.g. `0x7FFF_FFFF_F000`)
@@ -2371,6 +2397,24 @@ static PRODUCT_HANDLE_WARNED: std::sync::atomic::AtomicBool =
 /// serializers previously called `from_raw_parts` on any non-null handle,
 /// segfaulting on corrupt/foreign handles. Returns None when the handle is
 /// not a plausible mapped heap pointer (warns once per process, fail-loud).
+/// VALUES-ELEM-ABI: decide whether a map ValueHandle looks like a heap
+/// C-string produced by mimi_str_clone (8-aligned, in the heap range, and
+/// its first page mapped). Mirrors the MIN_HEAP convention of
+/// safe_read_product_fields. Only a heuristic — opaque scalar handles fail
+/// every check and fall through to raw forwarding.
+fn is_plausible_heap_cstring(handle: ValueHandle) -> bool {
+    // Handles reach here from three sources: mimi_alloc heap copies (16-aligned,
+    // high addresses), non-PIE .rodata string literals (arbitrary alignment,
+    // low addresses like 0x204abc), and opaque scalar packs (small ints). The
+    // mapped-page probe is the real gate — alignment would misreject literals.
+    const MIN_FLAT: usize = 4096;
+    let addr = handle as usize;
+    if addr < MIN_FLAT {
+        return false;
+    }
+    pages_mapped(addr, 64)
+}
+
 fn safe_read_product_fields(handle: ValueHandle, n: usize) -> Option<Vec<i64>> {
     const MIN_HEAP: usize = 1_048_576;
     let addr = handle as usize;
@@ -2518,9 +2562,28 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
     if !data_ptr.is_null() {
         for (i, (k, v)) in entries.iter().enumerate() {
             let entry = if collect_values {
-                // S10: ValueHandle is an opaque integer; cast to pointer for FFI transport.
-                // Caller must NOT free these pointers — they are not heap-allocated strings.
-                **v as *mut std::ffi::c_char
+                // VALUES-ELEM-ABI (0.39.x matrix sweep): the VM's builtin_values
+                // returns the stored Value verbatim (strings stay strings), so
+                // `values()[i]` prints "mimi". The native path used to forward
+                // the raw handle, and callers reading List<string> elements
+                // printed the handle integer. When the handle is a plausible
+                // heap C-string (same probe family as safe_read_product_fields
+                // / mimi_any_to_string), re-encode it as a fat MSTR box so
+                // values() elements share keys()' element ABI. Opaque scalars
+                // (real ints/bools packed by the caller) keep the raw form.
+                let h = **v;
+                if is_plausible_heap_cstring(h) {
+                    let decoded = unsafe { cstr_to_string(h as *const std::ffi::c_char) };
+                    list_string::alloc_mimi_str(decoded.as_bytes()) as *mut std::ffi::c_char
+                } else {
+                    // Opaque scalar handle (packed int/bool): forward raw. The
+                    // slot then holds the plain integer exactly like the VM's
+                    // Value::Int, so untyped readers print the same number on
+                    // both backends. Boxing decimals here would turn every
+                    // scalar-map element into a pointer and desynchronize any
+                    // reader that has no string ABI registered.
+                    h as *mut std::ffi::c_char
+                }
             } else {
                 list_string::alloc_mimi_str(k.as_bytes()) as *mut std::ffi::c_char
             };
@@ -2531,12 +2594,13 @@ fn mimi_map_collect(handle: MapHandle, collect_values: bool) -> *mut MimiList {
         }
     }
     // 0.31.23: keys are strings, values are ValueHandles (treated as unknown)
-    let kind = if collect_values {
-        ListElementKind::Unknown
-    } else {
-        ListElementKind::String
-    };
-    let list = Box::new(MimiList::with_data(data_ptr, len, !collect_values, kind));
+    // VALUES-ELEM-ABI: every element is now a fat MSTR box on both paths.
+    let list = Box::new(MimiList::with_data(
+        data_ptr,
+        len,
+        !collect_values,
+        ListElementKind::String,
+    ));
     Box::into_raw(list)
 }
 

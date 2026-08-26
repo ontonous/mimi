@@ -221,20 +221,104 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_store(err_gep, i64_ty.const_int(0, false))?;
         self.build_br(merge_bb)?;
 
-        // Err branch: disc=0, ok=zero, err=heap {ptr,len} string handle
+        // Err branch: disc=0, ok=zero, err=heap {ptr,len} string handle.
+        // ENV-ERR-PARITY (0.39.x sweep): the VM formats
+        // `env var '{name}' not set` — build the same message at runtime by
+        // concatenating prefix + name + suffix with mimi_str_concat_ll.
         self.builder.position_at_end(err_bb);
-        let err_msg = self
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let mk = |label: &str| -> MimiResult<inkwell::values::GlobalValue<'ctx>> {
+            self.builder
+                .build_global_string_ptr(label, label)
+                .map_err(|e| {
+                    crate::error::CompileError::Generic(format!("global string error: {e}"))
+                })
+        };
+        let prefix_g = mk("env var '")?;
+        let suffix_g = mk("' not set")?;
+        let concat_fn = self
+            .get_runtime_fn("mimi_str_concat_ll")
+            .map_err(|e| crate::error::CompileError::Generic(e.to_string()))?;
+        let seg = |g: &inkwell::values::GlobalValue<'ctx>,
+                  cname: &str|
+         -> MimiResult<(BasicMetadataValueEnum<'ctx>, BasicMetadataValueEnum<'ctx>)> {
+            let p = g.as_pointer_value();
+            let l = self
+                .builder
+                .build_call(
+                    self.get_runtime_fn("strlen")
+                        .map_err(|e| crate::error::CompileError::Generic(e.to_string()))?,
+                    &[BasicMetadataValueEnum::PointerValue(p)],
+                    cname,
+                )
+                .map_err(|e| crate::error::CompileError::LlvmError(format!("strlen error: {e}")))?
+                .try_as_basic_value_opt()
+                .ok_or_else(|| crate::error::CompileError::Generic("strlen returned void".into()))?
+                .into_int_value();
+            Ok((
+                BasicMetadataValueEnum::PointerValue(p),
+                BasicMetadataValueEnum::IntValue(l),
+            ))
+        };
+        let (prefix_p, prefix_l) = seg(&prefix_g, "env_err_prefix_len")?;
+        let (suffix_p, suffix_l) = seg(&suffix_g, "env_err_suffix_len")?;
+        let name_len = self
             .builder
-            .build_global_string_ptr("env var not set", "getenv_err_msg")
-            .map_err(|e| format!("global string error: {}", e))?;
+            .build_call(
+                self.get_runtime_fn("strlen")
+                    .map_err(|e| crate::error::CompileError::Generic(e.to_string()))?,
+                &[BasicMetadataValueEnum::PointerValue(arg_ptr)],
+                "env_err_name_len",
+            )
+            .map_err(|e| crate::error::CompileError::LlvmError(format!("strlen error: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| crate::error::CompileError::Generic("strlen returned void".into()))?
+            .into_int_value();
+        // prefix + name
+        let head = self
+            .builder
+            .build_call(
+                concat_fn,
+                &[
+                    prefix_p,
+                    prefix_l,
+                    BasicMetadataValueEnum::PointerValue(arg_ptr),
+                    BasicMetadataValueEnum::IntValue(name_len),
+                ],
+                "env_err_head",
+            )
+            .map_err(|e| crate::error::CompileError::LlvmError(format!("concat error: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| crate::error::CompileError::Generic("concat returned void".into()))?
+            .into_pointer_value();
+        let head_len = self
+            .builder
+            .build_int_add(prefix_l.into_int_value(), name_len, "env_err_head_len")
+            .map_err(|e| crate::error::CompileError::LlvmError(format!("iadd: {e}")))?;
+        // head + suffix
+        let full = self
+            .builder
+            .build_call(
+                concat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(head),
+                    BasicMetadataValueEnum::IntValue(head_len),
+                    suffix_p,
+                    suffix_l,
+                ],
+                "env_err_full",
+            )
+            .map_err(|e| crate::error::CompileError::LlvmError(format!("concat error: {e}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| crate::error::CompileError::Generic("concat returned void".into()))?
+            .into_pointer_value();
+        let err_msg = full;
         let strlen_fn = self.get_runtime_fn("strlen")?;
         let err_len = self
             .builder
             .build_call(
                 strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(
-                    err_msg.as_pointer_value(),
-                )],
+                &[BasicMetadataValueEnum::PointerValue(err_msg)],
                 "getenv_err_len",
             )
             .map_err(|e| format!("strlen error: {}", e))?
@@ -253,7 +337,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .gep()
             .build_struct_gep(string_ty, heap_ptr, 0, "getenv_err_heap_ptr_gep")
             .map_err(|e| format!("gep error: {}", e))?;
-        self.build_store(err_gep0, err_msg.as_pointer_value())?;
+        self.build_store(err_gep0, err_msg)?;
         let err_gep1 = self
             .gep()
             .build_struct_gep(string_ty, heap_ptr, 1, "getenv_err_heap_len_gep")

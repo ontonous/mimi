@@ -921,7 +921,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         }
                                         // Track return types for builtins
                                         match func_name.as_str() {
-                                            "listdir" | "walk_dir" | "str_split" | "keys" => {
+                                            "listdir" | "walk_dir" | "str_split" | "keys"
+                                            | "values" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),
@@ -2148,7 +2149,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // element slot) instead of the proper struct/
                             // string pointer.
                             match fn_name.as_str() {
-                                "listdir" | "walk_dir" | "str_split" | "sort_str" | "keys" => {
+                                // VALUES-ELEM-ABI: values() elements are
+                                // canonicalized to fat MSTR boxes just like
+                                // keys() (string handles decode; scalars
+                                // stringify), so both need the string ABI.
+                                "listdir" | "walk_dir" | "str_split" | "sort_str" | "keys"
+                                | "values" => {
                                     self.var_type_names
                                         .insert(name.clone(), "List<string>".to_string());
                                     self.var_types.insert(
@@ -2223,7 +2229,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             .insert(name.clone(), "Result<(), string>".to_string());
                                     }
                                     "words" | "lines" | "split" | "str_split" | "listdir"
-                                    | "walk_dir" | "sort_str" | "keys" => {
+                                    | "walk_dir" | "sort_str" | "keys" | "values" => {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
                                         self.var_types.insert(

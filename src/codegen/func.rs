@@ -2945,11 +2945,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 }
                             } else if let Expr::Ident(func_name) = callee.unlocated() {
                                 match func_name.as_str() {
-                                    "values" => {
-                                        self.var_type_names
-                                            .insert(name.clone(), "List<Any>".to_string());
-                                    }
-                                    "keys" => {
+                                    "keys" | "values" => {
                                         self.var_type_names
                                             .insert(name.clone(), "List<string>".to_string());
                                     }
@@ -3089,7 +3085,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         // functions that return List<string>.
                                         match func_name.as_str() {
                                             "listdir" | "walk_dir" | "str_split" | "words"
-                                            | "lines" | "split" | "sort_str" | "keys" => {
+                                            | "lines" | "split" | "sort_str" | "keys"
+                                            | "values" => {
                                                 self.var_type_names.insert(
                                                     name.clone(),
                                                     "List<string>".to_string(),

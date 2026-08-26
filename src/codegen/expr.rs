@@ -1191,8 +1191,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Map collection builtins have concrete list element types. Keep
             // these visible to tuple lowering so `keys(m)[i]` is wrapped as a
             // length-aware Mimi string rather than a raw pointer field.
-            "keys" => Some("List<string>".to_string()),
-            "values" => Some("List<Any>".to_string()),
+            "keys" | "values" => Some("List<string>".to_string()),
             // zip: List<(A, B)> — pair of the two source lists' element types.
             // compile_zip now heap-packs each pair (16-byte {a,b} allocation
             // referenced by an 8-byte slot), matching the product-tuple
