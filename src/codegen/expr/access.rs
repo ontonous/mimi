@@ -855,18 +855,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         obj: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
-        if std::env::var("MIMI_TRACE_PRINT").is_ok() {
-            if let Expr::Ident(var_name) = obj.unlocated() {
-                eprintln!(
-                    "[conv] var={var_name} vt={:?} vtn={:?} list_elem={:?}",
-                    self.var_types.get(var_name),
-                    self.var_type_names.get(var_name),
-                    self.list_elem_llvm_types
-                        .get(var_name)
-                        .map(|t| format!("{t:?}"))
-                );
-            }
-        }
         if let Expr::Ident(var_name) = obj.unlocated() {
             if let Some(converted) =
                 self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
