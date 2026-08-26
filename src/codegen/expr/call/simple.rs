@@ -331,6 +331,131 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
+            // List of Option<X> (e.g. `List<Option<List<(i32, i32)>>>` /
+            // `List<Option<(i32, i32)>>` / `List<Option<i64>>`): the bytecode VM
+            // serializes each element via its own `to_json` (wrapping `None` as
+            // `"None"` and `Some(v)` as `{"Some":[<v>]}`). Mirror that here with a
+            // per-element recursive dispatch instead of falling through to the
+            // scalar `mimi_list_i64_to_json` helper, which mis-serialized tuple /
+            // list elements as raw integers → wrong JSON or segfault.
+            if inner.starts_with("Option") && !inner.contains("Map<") {
+                let opt_elem_ty =
+                    crate::codegen::extract_list_elem_type(&format!("List<{}>", inner))
+                        .ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "to_json: cannot resolve element type for {}",
+                                obj_type
+                            ))
+                        })?;
+                let opt_bty = self.llvm_type_for(&opt_elem_ty).ok_or_else(|| {
+                    CompileError::LlvmError(format!("to_json: no llvm type for element {}", inner))
+                })?;
+                let opt_struct_ty = match opt_bty {
+                    BasicTypeEnum::StructType(s) => s,
+                    _ => {
+                        return Err(CompileError::LlvmError(format!(
+                            "to_json: expected struct for Option element {}, got {:?}",
+                            inner, opt_bty
+                        )))
+                    }
+                };
+                let opt_ptr_ty = opt_struct_ty.ptr_type(inkwell::AddressSpace::default());
+                let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                // Generate (once per element type) an internal callback
+                // `i8* cb(i8* elem)` that serializes one `Option<X>` element.
+                let cb_ty =
+                    i8_ptr_ty.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false);
+                let mut cb_name: String = "mimi_list_option_".to_string();
+                for c in inner.chars() {
+                    if c.is_alphanumeric() {
+                        cb_name.push(c);
+                    } else {
+                        cb_name.push('_');
+                    }
+                }
+                cb_name.push_str("_to_json");
+                let callback = if let Some(existing) = self.module.get_function(&cb_name) {
+                    existing
+                } else {
+                    let cb_fn = self.module.add_function(
+                        &cb_name,
+                        cb_ty,
+                        Some(inkwell::module::Linkage::Internal),
+                    );
+                    let entry = self.context.append_basic_block(cb_fn, "entry");
+                    let saved = self.builder.get_insert_block();
+                    self.builder.position_at_end(entry);
+                    let elem = cb_fn
+                        .get_first_param()
+                        .ok_or_else(|| {
+                            CompileError::LlvmError("to_json Option callback: missing param".into())
+                        })?
+                        .into_pointer_value();
+                    let opt_ptr = self
+                        .builder
+                        .build_bit_cast(elem, opt_ptr_ty, "cb_opt_ptr")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_pointer_value();
+                    let res = self.emit_typed_to_json_dispatch(
+                        inner,
+                        BasicMetadataValueEnum::PointerValue(opt_ptr),
+                    )?;
+                    let raw = match res {
+                        Some(j) => match j {
+                            BasicValueEnum::PointerValue(p) => p,
+                            BasicValueEnum::StructValue(s) => self
+                                .build_extract_value(s.into(), 0, "cb_opt_json_ptr")?
+                                .into_pointer_value(),
+                            other => other.into_pointer_value(),
+                        },
+                        None => {
+                            return Err(CompileError::LlvmError(format!(
+                                "to_json: Option<{}> callback dispatch returned None",
+                                inner
+                            )))
+                        }
+                    };
+                    self.builder
+                        .build_return(Some(&raw))
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.builder.position_at_end(saved.unwrap());
+                    cb_fn
+                };
+                let callback_ptr = callback.as_global_value().as_pointer_value();
+                let list_list_fn_ty = i8_ptr_ty.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        BasicMetadataTypeEnum::PointerType(
+                            cb_ty.ptr_type(inkwell::AddressSpace::default()),
+                        ),
+                    ],
+                    false,
+                );
+                let list_list_fn = self
+                    .module
+                    .get_function("mimi_list_list_to_json")
+                    .unwrap_or_else(|| {
+                        self.module.add_function(
+                            "mimi_list_list_to_json",
+                            list_list_fn_ty,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    });
+                let raw = self
+                    .build_call(
+                        list_list_fn,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(alloca),
+                            BasicMetadataValueEnum::PointerValue(callback_ptr),
+                        ],
+                        "list_opt_json",
+                    )?
+                    .try_as_basic_value_opt()
+                    .ok_or("mimi_list_list_to_string returned void")?
+                    .into_pointer_value();
+                self.register_heap_alloc(raw);
+                return Ok(Some(self.wrap_c_string(raw)?));
+            }
             let rt_fn_name = if inner.starts_with("Map") {
                 if inner.contains("Map<string, string>") {
                     "mimi_list_map_to_json_string"
@@ -2602,10 +2727,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.llvm_type_for(&Type::Name(ok_inner.clone(), vec![]));
                                     let sty = match rec_bty {
                                         Some(BasicTypeEnum::StructType(s)) => s,
-                                        _ => return Err(CompileError::LlvmError(format!(
+                                        _ => {
+                                            return Err(CompileError::LlvmError(format!(
                                             "to_json: cannot resolve Option Result tuple type {}",
                                             ok_inner
-                                        ))),
+                                        )))
+                                        }
                                     };
                                     self.build_load(
                                         BasicTypeEnum::StructType(sty),
@@ -4683,10 +4810,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         self.llvm_type_for(&Type::Name(pay_inner.clone(), vec![]));
                                     let sty = match rec_bty {
                                         Some(BasicTypeEnum::StructType(s)) => s,
-                                        _ => return Err(CompileError::LlvmError(format!(
+                                        _ => {
+                                            return Err(CompileError::LlvmError(format!(
                                             "to_json: cannot resolve Result Option tuple type {}",
                                             pay_inner
-                                        ))),
+                                        )))
+                                        }
                                     };
                                     self.build_load(
                                         BasicTypeEnum::StructType(sty),

@@ -11585,6 +11585,35 @@ fn dual_to_json_option_result_record_nested() {
     );
 }
 
+/// `List<Option<X>>` for several element types (scalar, product tuple, nested
+/// list, string). Both backends must serialize each element via its own
+/// `to_json` (`"None"` for `None`, `{"Some":[…]}` for `Some(v)`) and join with a
+/// compact `,` separator — exactly like the bytecode VM.
+#[test]
+fn dual_to_json_list_option_nested() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let a: List<Option<i64>> = [Some(1), None, Some(2)];
+            println(to_json(a));
+            let b: List<Option<(i32, i32)>> = [Some((1, 2)), None];
+            println(to_json(b));
+            let c: List<Option<List<(i32, i32)>>> = [Some([(1, 2)]), None, Some([(3, 4), (5, 6)])];
+            println(to_json(c));
+            let d: List<Option<string>> = [Some("x"), None];
+            println(to_json(d));
+            let e: List<Option<List<i64>>> = [Some([1, 2]), None, Some([3])];
+            println(to_json(e));
+            0
+        }
+        "#,
+        "[{\"Some\":[1]},\"None\",{\"Some\":[2]}]\n[{\"Some\":[[1,2]]},\"None\"]\n[{\"Some\":[[[1,2]]]},\"None\",{\"Some\":[[[3,4],[5,6]]]}]\n[{\"Some\":[\"x\"]},\"None\"]\n[{\"Some\":[[1,2]]},\"None\",{\"Some\":[[3]]}]"
+    );
+}
+
 /// List of Option of named record.
 #[test]
 fn dual_from_json_list_option_record() {
