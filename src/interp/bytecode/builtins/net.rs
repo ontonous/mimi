@@ -171,10 +171,10 @@ fn builtin_connect(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
     // SAFETY: CString::new 保证 NUL 结尾；res 由 getaddrinfo 分配，随后 freeaddrinfo 释放。
     let err = unsafe { libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut res) };
     if err != 0 || res.is_null() {
-        return Err(InterpError::new(format!(
-            "connect: getaddrinfo failed for '{}'",
-            host
-        )));
+        // NET-RESULT-PARITY (0.39.x sweep): OS-level failures are values, not
+        // fatal raises — the stdlib wrapper maps `ret < 0` to Err(ConnectFailed).
+        // The old raise killed the VM before the wrapper could run.
+        return Ok(Value::Int(-1));
     }
     let mut ret = -1i64;
     let mut ai = res;
@@ -205,12 +205,9 @@ fn builtin_connect(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
     // SAFETY: res 为 getaddrinfo 分配的有效指针，仅释放一次。
     unsafe { libc::freeaddrinfo(res) };
     if ret != 0 {
-        return Err(InterpError::new(format!(
-            "connect() failed for '{}:{}' (OS error: {})",
-            host,
-            port,
-            std::io::Error::last_os_error()
-        )));
+        // NET-RESULT-PARITY: mirror the codegen backend (returns the negative
+        // sentinel; std::net's tcp_connect turns it into Err(ConnectFailed)).
+        return Ok(Value::Int(-1));
     }
     Ok(Value::Int(0))
 }
@@ -285,11 +282,9 @@ fn builtin_accept(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
         )
     };
     if client_fd < 0 {
-        return Err(InterpError::new(format!(
-            "accept() failed: fd={} (OS error: {})",
-            fd,
-            std::io::Error::last_os_error()
-        )));
+        // NET-RESULT-PARITY: negative sentinel; stdlib maps it to
+        // Err(AcceptFailed) exactly like the codegen backend.
+        return Ok(Value::Int(-1));
     }
     Ok(Value::Int(client_fd as i64))
 }
@@ -304,12 +299,9 @@ fn builtin_send(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
     // SAFETY: data.as_ptr() 指向 Rust String 数据，len 为有效长度；libc 按 len 字节读。
     let sent = unsafe { libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0) };
     if sent < 0 {
-        return Err(InterpError::new(format!(
-            "send() failed: fd={}, len={} (OS error: {})",
-            fd,
-            data.len(),
-            std::io::Error::last_os_error()
-        )));
+        // NET-RESULT-PARITY: negative sentinel; stdlib maps it to
+        // Err(SendFailed) exactly like the codegen backend.
+        return Ok(Value::Int(-1));
     }
     Ok(Value::Int(sent as i64))
 }

@@ -523,6 +523,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             .try_as_basic_value_opt()
             .ok_or("mimi_recv returned void")?
             .into_pointer_value();
+        // NET-RESULT-PARITY (0.39.x sweep): mimi_recv returns NULL on OS
+        // failure AND on peer EOF. Both now surface as a valid empty string —
+        // the same value the VM returns for recv failures and EOF alike. The
         // Audit wave2 (red line §1.4): mimi_recv returns NULL on error and
         // does NOT abort; the old code packed {NULL, 0} into a Mimi string
         // so ECONNRESET-style failures surfaced as Ok(dangling string).
