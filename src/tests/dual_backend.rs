@@ -20317,3 +20317,37 @@ func main() -> i32 {
 "#;
     dual_assert!(src, "{\"name\":\"bob\",\"age\":30}\n3\nx\n1\n3");
 }
+
+/// B64-DECODE-PARITY regression (0.39.x usability sweep, Round 29):
+/// `base64_decode` is declared `Result<string, string>` (crypto.mimi). The
+/// bytecode VM returns the `Ok`/`Err` variant directly; the native backend
+/// used to return the bare decoded string (and the runtime returned `""` on
+/// failure, indistinguishable from a valid empty decode). Now the runtime
+/// returns NULL on failure and the codegen emits the same
+/// `{i1 disc, string ok, i64 err}` struct used by every other
+/// `Result<string, string>` builtin, with the error message "invalid base64"
+/// preserved (pointer-as-int in the i64 slot), matching the VM. Locked on
+/// both backends for the Ok and Err arms.
+#[test]
+fn dual_base64_decode_result_parity() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+func main() -> i32 {
+    let e = base64_encode("hello")
+    let d = base64_decode(e)
+    match d {
+        Ok(s) => println(s),
+        Err(e) => println("err")
+    }
+    let bad = base64_decode("not!valid!!!")
+    match bad {
+        Ok(s) => println(s),
+        Err(e) => println(e)
+    }
+    0
+}
+"#;
+    dual_assert_prod!(src, "hello\ninvalid base64");
+}

@@ -203,12 +203,16 @@ pub unsafe extern "C" fn mimi_base64_decode(
         // SAFETY: `data` was checked non-null above.
         match unsafe { CStr::from_ptr(data) }.to_str() {
             Ok(s) => s,
-            Err(_) => return alloc_c_string(""),
+            Err(_) => return std::ptr::null_mut(),
         }
     };
     match base64_decode_str(input) {
         Ok(s) => alloc_c_string(&s),
-        Err(_) => alloc_c_string(""),
+        // NULL signals decode failure to the codegen, which lowers it into a
+        // `Result<string, string>` `Err("invalid base64")` (matching the
+        // bytecode VM's variant). Returning an empty string here would be
+        // indistinguishable from a successfully-decoded empty string.
+        Err(_) => std::ptr::null_mut(),
     }
 }
 

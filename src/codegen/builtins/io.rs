@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+use super::super::call_try_basic_value;
 use super::super::CallSiteValueExt;
 use super::CodeGenerator;
 use crate::error::{CompileError, MimiResult};
@@ -10861,7 +10862,204 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
     ) -> MimiResult<BasicValueEnum<'ctx>> {
-        self.call_runtime_str_to_str("mimi_base64_decode", args)
+        // B64-DECODE-PARITY (0.39.x usability sweep, Round 29): `base64_decode`
+        // is declared `Result<string, string>` (see crypto.mimi). The bytecode
+        // VM returns the `Ok`/`Err` variant directly; the native backend must
+        // emit the same `{i1 disc, string ok, i64 err}` struct used by every
+        // other `Result<string, string>` builtin (getenv, read_file,
+        // try_input_line). The runtime `mimi_base64_decode` returns NULL on
+        // failure so the Err branch can be taken with the message
+        // "invalid base64", mirroring the VM.
+        if args.len() != 1 {
+            return Err(CompileError::WrongArgCount(
+                "base64_decode expects 1 argument (data)".to_string(),
+            ));
+        }
+        let decode_fn = self
+            .module
+            .get_function("mimi_base64_decode")
+            .ok_or_else(|| "mimi_base64_decode not declared".to_string())?;
+        let arg_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let call = self
+            .builder
+            .build_call(
+                decode_fn,
+                &[BasicMetadataValueEnum::PointerValue(arg_ptr)],
+                "base64_decode_call",
+            )
+            .map_err(|e| format!("base64_decode error: {}", e))?;
+        let raw = match call_try_basic_value(&call) {
+            Some(BasicValueEnum::PointerValue(pv)) => pv,
+            _ => return Err("base64_decode should return a pointer".into()),
+        };
+
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let bool_ty = self.context.bool_type();
+        let string_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(i8_ptr),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+        let result_ty = self.context.struct_type(
+            &[
+                BasicTypeEnum::IntType(bool_ty),
+                BasicTypeEnum::StructType(string_ty),
+                BasicTypeEnum::IntType(i64_ty),
+            ],
+            false,
+        );
+
+        let str_alloca = self.build_alloca(string_ty, "base64_str")?;
+        let result_alloca = self.build_alloca(result_ty, "base64_result")?;
+
+        let str_ptr_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 0, "base64_str_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let str_len_gep = self
+            .gep()
+            .build_struct_gep(string_ty, str_alloca, 1, "base64_str_len")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(str_ptr_gep, i8_ptr.const_null())?;
+        self.build_store(str_len_gep, i64_ty.const_int(0, false))?;
+
+        let disc_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 0, "base64_disc")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let ok_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 1, "base64_ok")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        let err_gep = self
+            .gep()
+            .build_struct_gep(result_ty, result_alloca, 2, "base64_err")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+
+        let is_null = self
+            .builder
+            .build_is_null(raw, "base64_is_null")
+            .map_err(|e| CompileError::LlvmError(format!("is_null error: {}", e)))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::LlvmError("no current function".into()))?;
+        let ok_bb = self.context.append_basic_block(function, "base64_ok");
+        let err_bb = self.context.append_basic_block(function, "base64_err");
+        let merge_bb = self.context.append_basic_block(function, "base64_merge");
+        self.build_cond_br(is_null, err_bb, ok_bb)?;
+
+        // Ok branch: disc=1, ok=string, err=0
+        self.builder.position_at_end(ok_bb);
+        let strlen_fn = self
+            .get_runtime_fn("strlen")
+            .map_err(|e| CompileError::Generic(e.to_string()))?;
+        let str_len = self
+            .build_call(
+                strlen_fn,
+                &[BasicMetadataValueEnum::PointerValue(raw)],
+                "base64_strlen",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::Generic("strlen returned void".into()))?
+            .into_int_value();
+        self.build_store(str_ptr_gep, raw)?;
+        self.build_store(str_len_gep, str_len)?;
+        self.build_store(disc_gep, bool_ty.const_int(1, false))?;
+        let str_val = self.build_load(string_ty, str_alloca, "base64_str_val")?;
+        self.build_store(ok_gep, str_val)?;
+        self.build_store(err_gep, i64_ty.const_int(0, false))?;
+        self.build_br(merge_bb)?;
+
+        // Err branch: disc=0, ok=zero, err=heap {ptr,len} "invalid base64".
+        self.builder.position_at_end(err_bb);
+        let mk = |label: &str| -> MimiResult<inkwell::values::GlobalValue<'ctx>> {
+            self.builder
+                .build_global_string_ptr(label, label)
+                .map_err(|e| CompileError::Generic(format!("global string error: {e}")))
+        };
+        let prefix_g = mk("")?;
+        let suffix_g = mk("invalid base64")?;
+        let concat_fn = self
+            .get_runtime_fn("mimi_str_concat_ll")
+            .map_err(|e| CompileError::Generic(e.to_string()))?;
+        let seg = |g: &inkwell::values::GlobalValue<'ctx>,
+                   cname: &str|
+         -> MimiResult<(BasicMetadataValueEnum<'ctx>, BasicMetadataValueEnum<'ctx>)> {
+            let p = g.as_pointer_value();
+            let l = self
+                .build_call(
+                    self.get_runtime_fn("strlen")
+                        .map_err(|e| CompileError::Generic(e.to_string()))?,
+                    &[BasicMetadataValueEnum::PointerValue(p)],
+                    cname,
+                )
+                .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::Generic("strlen returned void".into()))?
+                .into_int_value();
+            Ok((
+                BasicMetadataValueEnum::PointerValue(p),
+                BasicMetadataValueEnum::IntValue(l),
+            ))
+        };
+        let (_prefix_p, _prefix_l) = seg(&prefix_g, "base64_err_prefix_len")?;
+        let (suffix_p, suffix_l) = seg(&suffix_g, "base64_err_suffix_len")?;
+        let err_msg = self
+            .build_call(
+                concat_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(prefix_g.as_pointer_value()),
+                    BasicMetadataValueEnum::IntValue(i64_ty.const_int(0, false)),
+                    suffix_p,
+                    suffix_l,
+                ],
+                "base64_err_msg",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("concat error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::Generic("concat returned void".into()))?
+            .into_pointer_value();
+        let err_len = self
+            .build_call(
+                self.get_runtime_fn("strlen")
+                    .map_err(|e| CompileError::Generic(e.to_string()))?,
+                &[BasicMetadataValueEnum::PointerValue(err_msg)],
+                "base64_err_len",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("strlen error: {}", e)))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::Generic("strlen returned void".into()))?
+            .into_int_value();
+        let heap = self.malloc_or_abort(i64_ty.const_int(16, false), "base64_err_heap")?;
+        let heap_ptr = self
+            .build_bit_cast(
+                heap.into(),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "base64_err_heap_ptr",
+            )?
+            .into_pointer_value();
+        let err_gep0 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 0, "base64_err_heap_ptr_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep0, err_msg)?;
+        let err_gep1 = self
+            .gep()
+            .build_struct_gep(string_ty, heap_ptr, 1, "base64_err_heap_len_gep")
+            .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+        self.build_store(err_gep1, err_len)?;
+        self.build_store(disc_gep, bool_ty.const_int(0, false))?;
+        self.build_store(ok_gep, string_ty.const_zero())?;
+        let err_ptr_int = self.build_ptr_to_int(heap_ptr, i64_ty, "base64_err_ptr_int")?;
+        self.build_store(err_gep, err_ptr_int)?;
+        self.build_br(merge_bb)?;
+
+        self.builder.position_at_end(merge_bb);
+        self.build_load(result_ty, result_alloca, "base64_loaded")
     }
 
     pub(super) fn compile_format(
