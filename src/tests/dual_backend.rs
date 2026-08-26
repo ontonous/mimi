@@ -20291,3 +20291,29 @@ fn flow_drop_production_dual_stale_after_drop() {
         "2\n2"
     );
 }
+
+/// JSON-VALUE-PARITY regression (0.39.x usability sweep, Round 7):
+/// `json_get_string`/`json_get_element` must return object/array values as the
+/// compact raw source span (key order preserved, structural whitespace
+/// stripped), byte-identical to the codegen backend. The bytecode VM previously
+/// re-serialized via serde_json (which reordered object keys — `{"age":30,
+/// "name":"bob"}` vs codegen `{"name":"bob","age":30}`) and quoted string
+/// array elements (`"a"` vs `a`). Locked on both backends.
+#[test]
+fn dual_json_value_raw_span_parity() {
+    let src = r#"
+func main() -> i32 {
+    let obj = "{\"user\":{\"name\":\"bob\",\"age\":30},\"items\":[\"a\",\"b\",\"c\"]}"
+    println(json_get_string(obj, "user"))
+    let arr = "[\"x\",\"y\",\"z\"]"
+    println(json_array_length(arr))
+    println(json_get_element(arr, 0))
+    let nested = "{\"k\": 1}"
+    println(json_get_string(nested, "k"))
+    let items = json_get_string(obj, "items")
+    println(json_array_length(items))
+    0
+}
+"#;
+    dual_assert!(src, "{\"name\":\"bob\",\"age\":30}\n3\nx\n1\n3");
+}

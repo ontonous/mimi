@@ -759,6 +759,215 @@ fn split_type_args(s: &str) -> Vec<String> {
     parts
 }
 
+/// JSON-VALUE-PARITY helpers: extract the EXACT raw source span of a JSON
+/// value, mirroring the native runtime's `JsonParser` (which returns the raw
+/// parsed substring). The bytecode VM must emit byte-identical output to the
+/// codegen backend for object/array JSON values, which serde_json's
+/// `to_string()` would otherwise reorder (object keys) or reformat.
+///
+/// Only top-level key / top-level array-index lookups are needed (the public
+/// accessors operate on the root object/array), so a focused balanced-delimiter
+/// scanner suffices — no full parser.
+
+fn json_skip_ws(bytes: &[u8], pos: &mut usize) {
+    while *pos < bytes.len() && matches!(bytes[*pos], b' ' | b'\t' | b'\n' | b'\r') {
+        *pos += 1;
+    }
+}
+
+/// Scan a JSON string starting at the opening quote; returns the inner content
+/// and the index just past the closing quote.
+fn json_scan_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    if bytes.get(start).copied()? != b'"' {
+        return None;
+    }
+    let mut pos = start + 1;
+    let mut out = String::new();
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'"' => return Some((out, pos + 1)),
+            b'\\' => {
+                if pos + 1 < bytes.len() {
+                    out.push('\\');
+                    out.push(bytes[pos + 1] as char);
+                    pos += 2;
+                } else {
+                    return None;
+                }
+            }
+            c => {
+                out.push(c as char);
+                pos += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Return the index just past the end of the JSON value starting at `start`.
+/// Handles strings (with escapes), balanced objects/arrays, and primitive
+/// tokens (number/bool/null) delimited by `, ] }` or whitespace.
+fn json_value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let c = *bytes.get(start)?;
+    match c {
+        b'"' => {
+            let (_s, end) = json_scan_string(bytes, start)?;
+            Some(end)
+        }
+        b'{' | b'[' => {
+            let open = c;
+            let close = if open == b'{' { b'}' } else { b']' };
+            let mut depth = 0usize;
+            let mut pos = start;
+            let mut in_str = false;
+            while pos < bytes.len() {
+                let ch = bytes[pos];
+                if in_str {
+                    if ch == b'\\' {
+                        pos += 2;
+                        continue;
+                    }
+                    if ch == b'"' {
+                        in_str = false;
+                    }
+                } else if ch == b'"' {
+                    in_str = true;
+                } else if ch == open {
+                    depth += 1;
+                } else if ch == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(pos + 1);
+                    }
+                }
+                pos += 1;
+            }
+            None
+        }
+        _ => {
+            let mut pos = start;
+            while pos < bytes.len()
+                && !matches!(
+                    bytes[pos],
+                    b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r'
+                )
+            {
+                pos += 1;
+            }
+            if pos == start {
+                None
+            } else {
+                Some(pos)
+            }
+        }
+    }
+}
+
+/// Mirror of the native runtime's `json_compact`: drop structural whitespace
+/// (space/tab/newline/cr) outside of string literals, leaving `:` and `,`
+/// untouched. Object/array JSON values are emitted byte-identically to the
+/// codegen backend, which compacts the parsed span before returning it.
+fn json_compact(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut in_str = false;
+    let mut esc = false;
+    for &c in bytes {
+        if in_str {
+            out.push(c);
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' => {
+                in_str = true;
+                out.push(c);
+            }
+            b':' | b',' => out.push(c),
+            b' ' | b'\t' | b'\n' | b'\r' => {}
+            _ => out.push(c),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Raw source span of the top-level value for `key` in a root JSON object.
+fn json_raw_object_value_span(json: &str, key: &str) -> Option<String> {
+    let bytes = json.as_bytes();
+    let mut pos = 0;
+    json_skip_ws(bytes, &mut pos);
+    if bytes.get(pos).copied()? != b'{' {
+        return None;
+    }
+    pos += 1;
+    loop {
+        json_skip_ws(bytes, &mut pos);
+        if pos >= bytes.len() || bytes[pos] == b'}' {
+            return None;
+        }
+        if bytes[pos] != b'"' {
+            return None;
+        }
+        let (k, kend) = json_scan_string(bytes, pos)?;
+        pos = kend;
+        json_skip_ws(bytes, &mut pos);
+        if bytes.get(pos).copied()? != b':' {
+            return None;
+        }
+        pos += 1;
+        json_skip_ws(bytes, &mut pos);
+        let vstart = pos;
+        let vend = json_value_end(bytes, pos)?;
+        if k == key {
+            return Some(json_compact(&json[vstart..vend]));
+        }
+        pos = vend;
+        json_skip_ws(bytes, &mut pos);
+        if pos < bytes.len() && bytes[pos] == b',' {
+            pos += 1;
+        } else {
+            return None;
+        }
+    }
+}
+
+/// Raw source span of the `idx`-th top-level element of a root JSON array.
+fn json_raw_array_value_span(json: &str, idx: usize) -> Option<String> {
+    let bytes = json.as_bytes();
+    let mut pos = 0;
+    json_skip_ws(bytes, &mut pos);
+    if bytes.get(pos).copied()? != b'[' {
+        return None;
+    }
+    pos += 1;
+    let mut cur = 0usize;
+    loop {
+        json_skip_ws(bytes, &mut pos);
+        if pos >= bytes.len() || bytes[pos] == b']' {
+            return None;
+        }
+        let vstart = pos;
+        let vend = json_value_end(bytes, pos)?;
+        if cur == idx {
+            return Some(json_compact(&json[vstart..vend]));
+        }
+        cur += 1;
+        pos = vend;
+        json_skip_ws(bytes, &mut pos);
+        if pos < bytes.len() && bytes[pos] == b',' {
+            pos += 1;
+        } else {
+            return None;
+        }
+    }
+}
+
 fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1]) {
         (Value::String(json_str), Value::String(key)) => {
@@ -773,7 +982,16 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
                 }))),
                 Some(serde_json::Value::Number(n)) => Ok(Value::String(Arc::new(n.to_string()))),
                 Some(serde_json::Value::Null) => Ok(Value::String(Arc::new("null".into()))),
-                Some(val) => Ok(Value::String(Arc::new(val.to_string()))),
+                // JSON-VALUE-PARITY: object/array values must be returned as the
+                // EXACT raw source span (preserving key order + whitespace),
+                // matching the native runtime's json_get_inner (which returns
+                // the raw parsed substring). serde_json's Display re-serializes
+                // and reorders object keys, diverging from codegen
+                // (`{"age":30,"name":"bob"}` vs `{"name":"bob","age":30}`).
+                Some(_) => match json_raw_object_value_span(json_str, key.as_str()) {
+                    Some(span) => Ok(Value::String(Arc::new(span))),
+                    None => Ok(Value::String(Arc::new(String::new()))),
+                },
                 None => Ok(Value::String(Arc::new(String::new()))),
             }
         }
@@ -978,7 +1196,32 @@ fn builtin_json_get_element(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Valu
         (Value::String(json_str), Value::Int(idx)) => {
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(json) => match json.get(*idx as usize) {
-                    Some(v) => Ok(Value::String(Arc::new(v.to_string()))),
+                    // JSON-VALUE-PARITY: mirror native json_get_element_try,
+                    // which returns the raw decoded element text (string
+                    // elements UNQUOTED). serde_json's Display quotes strings,
+                    // which diverged from codegen for `["a","b"]` -> `"a"` vs
+                    // `a`. Extract the inner string for String values; keep the
+                    // textual form for numbers/bools/null and raw JSON text for
+                    // nested objects/arrays.
+                    Some(serde_json::Value::String(s)) => Ok(Value::String(Arc::new(s.clone()))),
+                    Some(serde_json::Value::Bool(b)) => Ok(Value::String(Arc::new(
+                        if *b { "true" } else { "false" }.to_string(),
+                    ))),
+                    Some(serde_json::Value::Number(n)) => {
+                        Ok(Value::String(Arc::new(n.to_string())))
+                    }
+                    Some(serde_json::Value::Null) => {
+                        Ok(Value::String(Arc::new("null".to_string())))
+                    }
+                    // JSON-VALUE-PARITY: object/array elements returned as the
+                    // exact raw source span (see builtin_json_get_string note).
+                    Some(_) => match json_raw_array_value_span(json_str, *idx as usize) {
+                        Some(span) => Ok(Value::String(Arc::new(span))),
+                        None => Err(InterpError::new(format!(
+                            "json_get_element: index {} out of bounds",
+                            idx
+                        ))),
+                    },
                     None => Err(InterpError::new(format!(
                         "json_get_element: index {} out of bounds",
                         idx
