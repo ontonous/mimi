@@ -732,16 +732,6 @@ fn require_scalar_type(
                 }
             }
         }
-        // 0.1.9 (E0722 root-fix): user-defined capability nominals
-        // (`cap C`) are opaque i64 handles at the LLVM level — same admission
-        // as SystemToken/SessionChan/actor endpoints. Their typed residual
-        // surface is compile-time only (linear move + builtin consumption).
-        // Admitting them to the resolved slice lets `cap C` values and
-        // `List<cap C>` containers flow through generics (`identity<linear
-        // T>(List<cap C>)`) on the resolved emitter instead of falling back
-        // to legacy (the registered E0722 / 0.39.124-class gap). The emitter
-        // lowers `Capability` to i64 in types.rs, matching the legacy ABI.
-        Some(ResolvedType::Capability { .. }) => Ok(()),
         Some(other) => Err(UnsupportedResolvedNode::new(
             owner,
             owner,

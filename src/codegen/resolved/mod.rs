@@ -548,7 +548,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     return self.lower_type(inner);
                 }
                 // Check if this is a user-defined Nominal type (record or enum).
-                if let Some(ResolvedType::Nominal { item, arguments, .. }) =
+                if let Some(ResolvedType::Nominal { item, .. }) =
                     self.program.resolved_types().get(id)
                 {
                     let item_str = item.as_str();
@@ -627,7 +627,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             && matches!(td.kind, crate::core::resolved::ResolvedTypeKind::Record)
                     });
                     if has_record_def {
-                        let sty = self.record_llvm_type(item, arguments)?;
+                        let sty = self.record_llvm_type(item)?;
                         Ok(BasicTypeEnum::StructType(sty))
                     } else {
                         llvm_type_for_resolved(
@@ -7277,7 +7277,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     fn record_llvm_type(
         &self,
         item: &crate::core::NominalTypeId,
-        arguments: &[crate::core::ResolvedTypeId],
     ) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
         let item_str = item.as_str();
         let type_name = item_str.strip_prefix("type:").unwrap_or(item_str);
@@ -7290,32 +7289,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .ok_or_else(|| {
                 CompileError::Unsupported(format!("type definition for '{item_str}' not found"))
             })?;
-        // 0.1.9 (E0722 root-fix, case 1): generic record field displays carry
-        // the un-substituted type parameter name (e.g. `Box<linear T>` → field
-        // `data: "T"`). When the record is instantiated with a concrete type,
-        // substitute each generic parameter name with its argument's display
-        // string so the field type resolves (`resolve_type_display` would
-        // otherwise fail with "cannot resolve type display 'T'"). Non-generic
-        // records have empty `generic_parameters`, so this is a no-op there.
-        let mut subst: Vec<(String, String)> = Vec::with_capacity(td.generic_parameters.len());
-        for (i, (pname, _)) in td.generic_parameters.iter().enumerate() {
-            if let Some(arg) = arguments.get(i) {
-                subst.push((
-                    pname.clone(),
-                    resolved_type_display_name(self.program, arg),
-                ));
-            }
-        }
         // Build LLVM field types from the field type display strings.
         // Each field's type display is resolved via the ResolvedTypeTable
         // by finding a matching interned type.
         let mut field_types = Vec::with_capacity(td.fields.len());
         for (_name, type_display) in &td.fields {
-            let mut disp = type_display.clone();
-            for (p, a) in &subst {
-                disp = disp.replace(p, a);
-            }
-            let field_ty = self.resolve_type_display(&disp)?;
+            let field_ty = self.resolve_type_display(type_display)?;
             field_types.push(field_ty);
         }
         Ok(self.generator.context.struct_type(&field_types, false))
