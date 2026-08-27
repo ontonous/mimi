@@ -677,6 +677,15 @@ fn require_scalar_type(
                                     // 0.32.12: Enum types accepted. LLVM
                                     // representation is {i32 tag, i64 payload}.
                                     | crate::core::resolved::ResolvedTypeKind::Enum
+                                    // 0.1.9 L1: transparent type aliases
+                                    // (`type Id = i64`) lower to their
+                                    // underlying type in the resolved emitter
+                                    // (alias_equivalent / resolve_alias_type_name /
+                                    // cast dispatch). Admit them so functions
+                                    // spelling the alias stay on the resolved
+                                    // slice instead of silently falling back to
+                                    // legacy (dispatch --zero regression).
+                                    | crate::core::resolved::ResolvedTypeKind::Alias
                             )
                     });
                     if is_record_or_enum {
