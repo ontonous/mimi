@@ -8877,9 +8877,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if n == "Option" || n == "Result" {
                     true
                 } else {
-                    self.type_defs
-                        .get(n)
-                        .map_or(false, |td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+                    self.type_defs.get(n).map_or(false, |td| {
+                        matches!(
+                            td.kind,
+                            crate::ast::TypeDefKind::Record(_) | crate::ast::TypeDefKind::Enum(_)
+                        )
+                    })
                 }
             }
             _ => false,
@@ -9178,12 +9181,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // per-combination tree (the 115 `mimi_*_to_json_*` fns), which
                 // already produces L1-correct output. Routed back to legacy here
                 // to avoid regressing the `dual_from_json_*` nested suites.
-                _ => self.type_defs.get(n).map_or(false, |td| {
-                    if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                _ => self.type_defs.get(n).map_or(false, |td| match &td.kind {
+                    crate::ast::TypeDefKind::Record(fields) => {
                         fields.iter().all(|f| self.json_is_fully_handled(&f.ty))
-                    } else {
-                        false
                     }
+                    // Enums are fully handled by the recursive serializer
+                    // (`json_emit_enum`): the `{i32 tag, i64 payload}` layout is
+                    // read inline, and each variant's payload is serialized by the
+                    // same recursive `ser_T` machinery used for records/tuples.
+                    crate::ast::TypeDefKind::Enum(_) => true,
+                    _ => false,
                 }),
             },
             crate::ast::Type::Tuple(elems) => elems.iter().all(|e| self.json_is_fully_handled(e)),
@@ -9499,41 +9506,50 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )
                 }
                 _ => {
-                    // Record or other named struct type.
+                    // Record, Enum, or other named struct type.
                     if let Some(td) = self.type_defs.get(n) {
-                        if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
-                            let struct_ty = self
-                                .llvm_type_for(ty)
-                                .ok_or_else(|| {
-                                    CompileError::Generic(format!("no llvm type for {}", n))
-                                })?
-                                .into_struct_type();
-                            let v = load_i64()?;
-                            let sp = self
-                                .build_int_to_ptr(
-                                    v,
-                                    struct_ty.ptr_type(inkwell::AddressSpace::default()),
-                                    "json_rp",
-                                )
-                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
-                            // Sort fields by name to match the VM's BTreeMap
-                            // ordering; keep the struct declaration index for GEP.
-                            let mut sorted: Vec<(String, crate::ast::Type, u32)> = fields
-                                .iter()
-                                .enumerate()
-                                .map(|(i, f)| (f.name.clone(), f.ty.clone(), i as u32))
-                                .collect();
-                            sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                            let names: Vec<String> =
-                                sorted.iter().map(|(n, _, _)| n.clone()).collect();
-                            let field_types: Vec<crate::ast::Type> =
-                                sorted.iter().map(|(_, t, _)| t.clone()).collect();
-                            let field_indices: Vec<u32> =
-                                sorted.iter().map(|(_, _, i)| *i).collect();
-                            let san = Self::json_type_name(ty);
-                            return self.json_emit_join_slots(
-                                struct_ty, &field_types, &field_indices, sp, Some(&names), 1, &san,
-                            );
+                        match &td.kind {
+                            crate::ast::TypeDefKind::Record(fields) => {
+                                let struct_ty = self
+                                    .llvm_type_for(ty)
+                                    .ok_or_else(|| {
+                                        CompileError::Generic(format!("no llvm type for {}", n))
+                                    })?
+                                    .into_struct_type();
+                                let v = load_i64()?;
+                                let sp = self
+                                    .build_int_to_ptr(
+                                        v,
+                                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                                        "json_rp",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                                // Sort fields by name to match the VM's BTreeMap
+                                // ordering; keep the struct declaration index for GEP.
+                                let mut sorted: Vec<(String, crate::ast::Type, u32)> = fields
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, f)| (f.name.clone(), f.ty.clone(), i as u32))
+                                    .collect();
+                                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                                let names: Vec<String> =
+                                    sorted.iter().map(|(n, _, _)| n.clone()).collect();
+                                let field_types: Vec<crate::ast::Type> =
+                                    sorted.iter().map(|(_, t, _)| t.clone()).collect();
+                                let field_indices: Vec<u32> =
+                                    sorted.iter().map(|(_, _, i)| *i).collect();
+                                let san = Self::json_type_name(ty);
+                                return self.json_emit_join_slots(
+                                    struct_ty, &field_types, &field_indices, sp, Some(&names), 1,
+                                    &san,
+                                );
+                            }
+                            crate::ast::TypeDefKind::Enum(variants) => {
+                                let v = load_i64()?;
+                                let vs = variants.to_vec();
+                                return self.json_emit_enum(ty, &vs, v);
+                            }
+                            _ => {}
                         }
                     }
                     Err(CompileError::Generic(format!(
@@ -10213,6 +10229,256 @@ impl<'ctx> CodeGenerator<'ctx> {
                 BasicMetadataValueEnum::IntValue(is_obj_val),
             ],
         )
+    }
+
+    /// Serialize a custom `enum` value (layout `{i32 tag, i64 payload}`, matching
+    /// `build_nominal_variant`) by branching on the tag and serializing the
+    /// active variant's payload with the same recursive `ser_T` machinery used
+    /// for records/tuples. Mirrors the VM's `value_to_json` for enums:
+    ///   * nullary variant -> `"TagName"`
+    ///   * single-field tuple payload -> `{"TagName":[<elem>]}`
+    ///   * multi-field tuple payload -> `{"TagName":[<e0>,<e1>,...]}`
+    ///   * record payload -> `{"TagName":{<f0>:<v0>,...}}`
+    fn json_emit_enum(
+        &mut self,
+        ty: &crate::ast::Type,
+        variants: &[crate::ast::Variant],
+        v: inkwell::values::IntValue<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let i32_ty = self.context.i32_type();
+        // Enum layout: { i32 tag, i64 payload } (matches build_nominal_variant).
+        let enum_struct_ty = self
+            .context
+            .struct_type(&[i32_ty.into(), i64_ty.into()], false);
+        let enum_ptr = self
+            .build_int_to_ptr(
+                v,
+                enum_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                "json_enum_p",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let tag_gep = self
+            .gep()
+            .build_struct_gep(enum_struct_ty, enum_ptr, 0, "json_enum_tag")
+            .map_err(|e| CompileError::LlvmError(format!("enum tag gep: {}", e)))?;
+        let tag = self
+            .build_load(BasicTypeEnum::IntType(i32_ty), tag_gep, "json_enum_tag_v")?
+            .into_int_value();
+        let pay_gep = self
+            .gep()
+            .build_struct_gep(enum_struct_ty, enum_ptr, 1, "json_enum_pay")
+            .map_err(|e| CompileError::LlvmError(format!("enum pay gep: {}", e)))?;
+        let payload = self
+            .build_load(BasicTypeEnum::IntType(i64_ty), pay_gep, "json_enum_pay_v")?
+            .into_int_value();
+
+        // Tag value == position of the variant when sorted by name
+        // (build_nominal_variant assigns tags this way).
+        let mut sorted: Vec<&crate::ast::Variant> = variants.iter().collect();
+        sorted.sort_by_key(|vv| &vv.name);
+
+        let function = self
+            .current_function()
+            .ok_or_else(|| CompileError::Generic("json_emit_enum: no current function".into()))?;
+        let res_alloca = self
+            .build_alloca(i8_ptr, "json_enum_res")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let exit_bb = self.context.append_basic_block(function, "json_enum_exit");
+        let default_bb = self.context.append_basic_block(function, "json_enum_def");
+        let mut switch_cases: Vec<(
+            inkwell::values::IntValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        )> = Vec::new();
+        let mut case_bbs: Vec<(usize, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        for (i, _variant) in sorted.iter().enumerate() {
+            let bb = self
+                .context
+                .append_basic_block(function, &format!("json_enum_v{}", i));
+            switch_cases.push((i32_ty.const_int(i as u64, false), bb));
+            case_bbs.push((i, bb));
+        }
+        self.builder
+            .build_switch(tag, default_bb, &switch_cases)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        for (i, bb) in case_bbs {
+            self.builder.position_at_end(bb);
+            let variant = sorted[i];
+            let result = self.json_enum_variant_result(ty, variant, payload)?;
+            self.build_store(res_alloca, result)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_br(exit_bb)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        }
+        // Default: unknown tag (should not happen for a well-formed enum).
+        self.builder.position_at_end(default_bb);
+        let dflt = self.json_call_rt(
+            "mimi_json_alloc_literal",
+            &[BasicMetadataValueEnum::PointerValue(
+                self.builder
+                    .build_global_string_ptr("null", "json_enum_deflit")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .as_pointer_value(),
+            )],
+        )?;
+        self.build_store(res_alloca, dflt)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.build_br(exit_bb)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        self.builder.position_at_end(exit_bb);
+        let result = self
+            .build_load(BasicTypeEnum::PointerType(i8_ptr), res_alloca, "json_enum_res_v")?
+            .into_pointer_value();
+        Ok(result)
+    }
+
+    /// Serialize a single enum variant's payload and wrap it as `"TagName"` or
+    /// `{"TagName":<payload>}`. `payload` is the loaded `i64` payload field:
+    /// for a single scalar field it holds the value (bit-cast / sign-extended);
+    /// for a single struct field, or for any multi-field/record payload, it
+    /// holds `ptrtoint` of the inline payload struct.
+    fn json_enum_variant_result(
+        &mut self,
+        ty: &crate::ast::Type,
+        variant: &crate::ast::Variant,
+        payload: inkwell::values::IntValue<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let name_g = self
+            .builder
+            .build_global_string_ptr(&variant.name, "json_enum_name")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .as_pointer_value();
+        let null_ptr = i8_ptr.const_null();
+        match &variant.payload {
+            None => self.json_call_rt(
+                "mimi_json_serialize_enum_variant",
+                &[
+                    BasicMetadataValueEnum::PointerValue(name_g),
+                    BasicMetadataValueEnum::PointerValue(null_ptr),
+                ],
+            ),
+            Some(crate::ast::VariantPayload::Tuple(types)) => {
+                if types.len() == 1 {
+                    // Single field: serialize the payload i64 directly via ser_T,
+                    // then bracket it as `[<elem>]`.
+                    let pay_slot = self
+                        .build_alloca(i64_ty, "json_enum_payslot")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.build_store(pay_slot, payload)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let pay_i8 = self
+                        .build_bit_cast(
+                            BasicValueEnum::PointerValue(pay_slot),
+                            BasicTypeEnum::PointerType(i8_ptr),
+                            "json_enum_pay_i8",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_pointer_value();
+                    let ser = self.get_or_emit_json_ser(&types[0], None, false)?;
+                    let frag = self
+                        .build_call(ser, &[BasicMetadataValueEnum::PointerValue(pay_i8)], "json_enum_frag")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| CompileError::LlvmError("enum ser returned void".into()))?
+                        .into_pointer_value();
+                    let arr = self.json_call_rt(
+                        "mimi_json_surround_brackets",
+                        &[BasicMetadataValueEnum::PointerValue(frag)],
+                    )?;
+                    self.json_call_rt(
+                        "mimi_json_serialize_enum_variant",
+                        &[
+                            BasicMetadataValueEnum::PointerValue(name_g),
+                            BasicMetadataValueEnum::PointerValue(arr),
+                        ],
+                    )
+                } else {
+                    // Multi-field tuple payload: the i64 holds ptrtoint of a
+                    // packed struct `{T0,T1,...}`; serialize it as a JSON array.
+                    let field_llvm: Vec<BasicTypeEnum<'ctx>> = types
+                        .iter()
+                        .map(|t| {
+                            self.llvm_type_for(t).ok_or_else(|| {
+                                CompileError::Generic(format!("no llvm type for enum field {}", Self::json_type_name(t)))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let struct_ty = self
+                        .context
+                        .struct_type(&field_llvm, false);
+                    let pay_ptr = self
+                        .build_int_to_ptr(
+                            payload,
+                            struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                            "json_enum_mf_p",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let field_types: Vec<crate::ast::Type> = types.iter().cloned().collect();
+                    let field_indices: Vec<u32> = (0..field_types.len() as u32).collect();
+                    let san = Self::json_type_name(ty);
+                    let inner = self.json_emit_join_slots(
+                        struct_ty,
+                        &field_types,
+                        &field_indices,
+                        pay_ptr,
+                        None,
+                        0,
+                        &san,
+                    )?;
+                    self.json_call_rt(
+                        "mimi_json_serialize_enum_variant",
+                        &[
+                            BasicMetadataValueEnum::PointerValue(name_g),
+                            BasicMetadataValueEnum::PointerValue(inner),
+                        ],
+                    )
+                }
+            }
+            Some(crate::ast::VariantPayload::Record(fields)) => {
+                // Record payload: the VM serializes enum payloads *positionally*
+                // as a JSON array `[f0,f1,...]` (it ignores the record field
+                // names for enum payloads), so use the array form here too.
+                let field_llvm: Vec<BasicTypeEnum<'ctx>> = fields
+                    .iter()
+                    .map(|f| {
+                        self.llvm_type_for(&f.ty).ok_or_else(|| {
+                            CompileError::Generic(format!("no llvm type for enum field {}", f.name))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let struct_ty = self.context.struct_type(&field_llvm, false);
+                let pay_ptr = self
+                    .build_int_to_ptr(
+                        payload,
+                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        "json_enum_rec_p",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let field_types: Vec<crate::ast::Type> =
+                    fields.iter().map(|f| f.ty.clone()).collect();
+                let field_indices: Vec<u32> = (0..field_types.len() as u32).collect();
+                let san = Self::json_type_name(ty);
+                let inner = self.json_emit_join_slots(
+                    struct_ty,
+                    &field_types,
+                    &field_indices,
+                    pay_ptr,
+                    None,
+                    0,
+                    &san,
+                )?;
+                self.json_call_rt(
+                    "mimi_json_serialize_enum_variant",
+                    &[
+                        BasicMetadataValueEnum::PointerValue(name_g),
+                        BasicMetadataValueEnum::PointerValue(inner),
+                    ],
+                )
+            }
+        }
     }
 
     /// Top-level entry: if `obj_type` is fully handled by the recursive

@@ -2858,6 +2858,32 @@ fn register_set_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // Recursive `to_json` enum serializer helpers (mirrors VM value_to_json):
+    // `mimi_json_serialize_enum_variant(name, frag)` -> `"Name"` (nullary) or
+    // `{"Name":<payload>}`; `mimi_json_surround_brackets(frag)` -> `[<frag>]`
+    // (single-field tuple payload); `mimi_json_alloc_literal(lit)` allocates a
+    // fresh copy of a literal C string (default/unknown enum tag branch).
+    module.add_function(
+        "mimi_json_serialize_enum_variant",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_surround_brackets",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_alloc_literal",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_json_ok",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),

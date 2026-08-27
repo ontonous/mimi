@@ -22086,6 +22086,48 @@ pub unsafe extern "C" fn mimi_json_err(inner: *mut std::ffi::c_char) -> *mut std
     alloc_c_string(&format!("{{\"Err\":[{}]}}", s))
 }
 
+/// Serialize an enum variant.
+/// * `name` — the variant tag name (e.g. `Red`, `Circle`).
+/// * `frag` — the already-serialized *payload* JSON (already bracketed as an
+///   array `[..]` for tuple payloads, or an object `{..}` for record payloads),
+///   or null for a nullary (payload-less) variant.
+/// Takes ownership of `frag` (frees it). For a nullary variant returns `"Name"`;
+/// otherwise returns `{"Name":<payload>}`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_serialize_enum_variant(
+    name: *const std::ffi::c_char,
+    frag: *mut std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if frag.is_null() {
+        return alloc_c_string(&format!("\"{}\"", cstr_to_string(name)));
+    }
+    let s = cstr_to_string(frag);
+    mimi_free(frag as *mut std::ffi::c_void);
+    alloc_c_string(&format!("{{\"{}\":{}}}", cstr_to_string(name), s))
+}
+
+/// Wrap an already-serialized JSON string in `[..]` (single-field tuple enum
+/// payloads). Takes ownership of `frag` (frees it).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_surround_brackets(
+    frag: *mut std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    if frag.is_null() {
+        return alloc_c_string("[]");
+    }
+    let s = cstr_to_string(frag);
+    mimi_free(frag as *mut std::ffi::c_void);
+    alloc_c_string(&format!("[{}]", s))
+}
+
+/// Allocate a fresh copy of a literal C string (default/unknown enum tag branch).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_alloc_literal(
+    lit: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    alloc_c_string(&cstr_to_string(lit))
+}
+
 /// Join a list's elements (read from the `data` array of i64 slots) into a
 /// JSON array `[e0,e1,...]`. `ser_cb` receives the address of each `data[i]`
 /// slot and returns a heap C string (which this function owns and frees).

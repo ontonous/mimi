@@ -1,0 +1,67 @@
+use std::json;
+
+type Pt { name: string, y: i64, x: i64 }
+type Pair { a: i64, b: Option<i64> }
+
+func main() -> i32 {
+    let i0: i64 = 0;
+    let i1: i64 = 1;
+    let i2: i64 = 2;
+    let i3: i64 = 3;
+    let i4: i64 = 4;
+    let i5: i64 = 5;
+    let i7: i64 = 7;
+    let i8: i64 = 8;
+    let i9: i64 = 9;
+    let i10: i64 = 10;
+    let i20: i64 = 20;
+
+    println(to_json(42));
+    println(to_json(-7));
+    println(to_json(3.5));
+    println(to_json(true));
+    println(to_json(false));
+    println(to_json("hello"));
+    println(to_json("a\"b"));
+
+    let o1: Option<i64> = Some(i5);
+    println(to_json(o1));
+    let o2: Option<i64> = None;
+    println(to_json(o2));
+    let o3: Option<string> = Some("z");
+    println(to_json(o3));
+
+    let r1: Result<i64, i64> = Ok(i10);
+    println(to_json(r1));
+    let r2: Result<i64, i64> = Err(i20);
+    println(to_json(r2));
+    let r3: Result<string, i64> = Ok("ok");
+    println(to_json(r3));
+
+    let l1: List<i64> = [i1, i2, i3];
+    println(to_json(l1));
+    let none_i: Option<i64> = None;
+    let l2b: List<Option<i64>> = [Some(i1), none_i, Some(i2)];
+    println(to_json(l2b));
+    let l3: List<List<i64>> = [[i1, i2], [i3]];
+    println(to_json(l3));
+    let l4: List<string> = ["a", "b"];
+    println(to_json(l4));
+
+    let ol: Option<List<i64>> = Some([i7, i8]);
+    println(to_json(ol));
+
+    let t1: (i64, string, bool) = (i1, "x", true);
+    println(to_json(t1));
+    let t2: (Option<i64>, Result<i64, i64>) = (Some(i9), Err(i3));
+    println(to_json(t2));
+
+    let p: Pt = Pt { name: "p", y: i4, x: i3 };
+    println(to_json(p));
+    let p2: Pair = Pair { a: i1, b: Some(i2) };
+    println(to_json(p2));
+    let lrec: List<Pt> = [Pt { name: "q", y: i1, x: i2 }, Pt { name: "r", y: i2, x: i3 }];
+    println(to_json(lrec));
+
+    return 0;
+}

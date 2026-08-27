@@ -11346,6 +11346,32 @@ fn dual_to_json_tuple() {
     );
 }
 
+/// Custom enum `to_json` via the recursive serializer (mirrors the VM's
+/// `value_to_json` for enums: nullary -> `"Tag"`, payload -> `{"Tag":[...]}`).
+#[test]
+fn dual_to_json_enum() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Color { Red Green Blue }
+        type Shape { Circle(f64) Square(i32) }
+        type Point { Pt(i32, i32) }
+        func main() -> i32 {
+            println(to_json(Red))
+            println(to_json(Pt(1, 2)))
+            println(to_json([Red, Green, Blue]))
+            println(to_json([Circle(1.5), Square(9)]))
+            println(to_json(Some(Circle(4.0))))
+            println(to_json([Pt(3, 4), Pt(5, 6)]))
+            0
+        }
+        "#,
+        "\"Red\"\n{\"Pt\":[1,2]}\n[\"Red\",\"Green\",\"Blue\"]\n[{\"Circle\":[1.5]},{\"Square\":[9]}]\n{\"Some\":[{\"Circle\":[4.0]}]}\n[{\"Pt\":[3,4]},{\"Pt\":[5,6]}]"
+    );
+}
+
 /// Result of product-tuple Ok payload to_json.
 #[test]
 fn dual_to_json_result_tuple() {
