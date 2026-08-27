@@ -9163,7 +9163,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                         && self.json_is_fully_handled(&args[0])
                         && self.json_is_fully_handled(&args[1])
                 }
-                "Set" | "Map" => false,
+                // Set/Map: Phase B work-in-progress. The recursive serializer in
+                // `emit_ser_body` now has `Set`/`Map` arms, but the native Set/Map
+                // runtime stores elements/values as *handles* (i64), whereas the
+                // per-element recursive serializer (`ser_T`) expects the *inline
+                // struct* layout (as List does). For scalar elements the handle
+                // coincides with the value, but for non-scalar elements (tuples,
+                // Option/Result, nested List/Set/Map, records) reading the handle
+                // as an inline struct produces malformed IR that crashes the
+                // optimizer, and `any_value_to_handle` even discards the Option
+                // payload. Until the container element ABI is unified (store
+                // elements inline like List, or generate handle-decoding
+                // serializers), Set/Map `to_json` must keep using the legacy
+                // per-combination tree (the 115 `mimi_*_to_json_*` fns), which
+                // already produces L1-correct output. Routed back to legacy here
+                // to avoid regressing the `dual_from_json_*` nested suites.
                 _ => self.type_defs.get(n).map_or(false, |td| {
                     if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
                         fields.iter().all(|f| self.json_is_fully_handled(&f.ty))
@@ -9425,10 +9439,65 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ],
                     )
                 }
-                "Set" | "Map" => Err(CompileError::Generic(format!(
-                    "to_json: {} not yet handled by recursive generator (Phase B)",
-                    n
-                ))),
+                "Set" => {
+                    // `try_emit_json_recursive` stored `ptr_to_int(val_ptr)` (the
+                    // *address* of the Set variable storage) in the slot; the Set
+                    // variable itself holds the `SetHandle` (an i64), so deref once
+                    // to recover the handle. The per-element serializer callback
+                    // then receives a `slot` that is a pointer to the i64
+                    // element-handle, identical to the `List` element-callback ABI.
+                    let inner = &args[0];
+                    let v = load_i64()?;
+                    let hptr = self
+                        .build_int_to_ptr(
+                            v,
+                            i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                            "json_set_hp",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let handle = self
+                        .build_load(i64_ty, hptr, "json_set_h")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_int_value();
+                    let ser_inner = self.get_or_emit_json_ser(inner, None, false)?;
+                    let cb = self.json_cb_ptr(ser_inner)?;
+                    self.json_call_rt(
+                        "mimi_json_serialize_set",
+                        &[
+                            BasicMetadataValueEnum::IntValue(handle),
+                            BasicMetadataValueEnum::PointerValue(cb),
+                        ],
+                    )
+                }
+                "Map" => {
+                    // `try_emit_json_recursive` stored `ptr_to_int(val_ptr)` (the
+                    // *address* of the Map variable storage) in the slot; the Map
+                    // variable itself holds the `MapHandle` (an i64), so deref once
+                    // to recover the handle. The per-value serializer callback then
+                    // receives a `slot` that is a pointer to the i64 value-handle.
+                    let val = &args[1];
+                    let v = load_i64()?;
+                    let hptr = self
+                        .build_int_to_ptr(
+                            v,
+                            i64_ty.ptr_type(inkwell::AddressSpace::default()),
+                            "json_map_hp",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let handle = self
+                        .build_load(i64_ty, hptr, "json_map_h")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_int_value();
+                    let ser_val = self.get_or_emit_json_ser(val, None, false)?;
+                    let cb = self.json_cb_ptr(ser_val)?;
+                    self.json_call_rt(
+                        "mimi_json_serialize_map",
+                        &[
+                            BasicMetadataValueEnum::IntValue(handle),
+                            BasicMetadataValueEnum::PointerValue(cb),
+                        ],
+                    )
+                }
                 _ => {
                     // Record or other named struct type.
                     if let Some(td) = self.type_defs.get(n) {

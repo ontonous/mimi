@@ -2831,6 +2831,33 @@ fn register_set_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // Recursive to_json helpers for Set/Map (Phase B). Signature mirrors the
+    // caller contract in codegen/expr/call/simple.rs: the first arg is the
+    // container *handle* (SetHandle/MapHandle = i64, exactly like the legacy
+    // `mimi_set_to_json_*`/`mimi_map_to_json_*` runtime fns), the second is the
+    // per-element/per-value serializer callback (JsonSerCb ABI).
+    module.add_function(
+        "mimi_json_serialize_set",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_serialize_map",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_json_ok",
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
