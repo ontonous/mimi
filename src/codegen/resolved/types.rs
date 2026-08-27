@@ -121,6 +121,17 @@ fn lower_resolved_type<'ctx>(
         // safe for functions that treat the value opaquely (identity/choose/
         // pair/apply); non-erased use sites still fail closed.
         ResolvedType::GenericParameter(_) => Ok(BasicTypeEnum::IntType(context.i64_type())),
+        // 0.1.9 (E0722 root-fix): user-defined capability nominals (`cap C`)
+        // are opaque i64 handles at the LLVM level — identical to SystemToken /
+        // Map / Set. The typed residual surface (linear move, builtin
+        // consumption by token_id / *_guarded) is compile-time only, so the
+        // resolved emitter lowers them to a bare i64 slot exactly like
+        // `builtin:type:SystemToken` (eligibility.rs slice admission mirrors
+        // this). Without this arm, `cap C` containers/values passed through a
+        // generic (`identity<linear T>(List<cap C>)`) hit the catch-all
+        // `unsupported` error and the function fell back to legacy — the
+        // registered E0722 (0.39.124 class) gap.
+        ResolvedType::Capability { .. } => Ok(BasicTypeEnum::IntType(context.i64_type())),
         ResolvedType::Reference { .. } => Ok(BasicTypeEnum::PointerType(
             context.ptr_type(AddressSpace::default()),
         )),
