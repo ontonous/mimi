@@ -2111,6 +2111,13 @@ fn register_string_fns<'ctx>(
         i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_json_string_value(i8* slot) → i8* (heap JSON string; magic-aware for
+    // `MimiStr` fat boxes used by `List<string>`).
+    module.add_function(
+        "mimi_json_string_value",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_to_string_f64(f64) → i8* (heap-allocated string, Rust Display)
     module.add_function(
         "mimi_to_string_f64",
@@ -2791,6 +2798,67 @@ fn register_set_fns<'ctx>(
         "mimi_option_i64_to_json",
         i8_ptr.fn_type(
             &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // --- Recursive to_json serializer runtime helpers (Phase A generator) ---
+    module.add_function(
+        "mimi_json_int_to_string",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_bool_to_string",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_f64_to_string",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_none",
+        i8_ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_some",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_ok",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_err",
+        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_join_list",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_json_join_slots",
+        i8_ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
                 BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::IntType(i64),
             ],

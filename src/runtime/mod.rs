@@ -2711,6 +2711,47 @@ pub unsafe extern "C" fn mimi_json_escape_string(
     alloc_c_string(&escaped)
 }
 
+/// Serialize a Mimi `string` from its JSON slot to a heap JSON C string.
+///
+/// The slot holds an `i64` whose value is a pointer to the string storage:
+/// - a standalone / record-field / `Option`/`Result`-field string is a basic
+///   `{char* ptr, i64 len}` struct (field 0 is the char data pointer);
+/// - a `List<string>` (and `Set`/`Map` string) element is a `MimiStr` fat box
+///   (`{u32 magic, u32 _pad, char* ptr, i64 len}`) introduced by the
+///   `List<string>` element ABI (see `list_string.rs`). The magic lets us tell
+///   the two representations apart.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_string_value(
+    slot: *const std::ffi::c_void,
+) -> *mut std::ffi::c_char {
+    if slot.is_null() {
+        return alloc_c_string("\"\"");
+    }
+    // SAFETY: the slot is a valid i64 slot owned by the caller.
+    let p = unsafe { *(slot as *const *const std::ffi::c_void) };
+    if p.is_null() {
+        return alloc_c_string("\"\"");
+    }
+    // SAFETY: if this is a `MimiStr` fat box, `p` points to one.
+    let maybe_magic = unsafe { *(p as *const u32) };
+    if maybe_magic == list_string::MIMI_STR_MAGIC {
+        let mstr = unsafe { *(p as *const list_string::MimiStr) };
+        if mstr.ptr.is_null() {
+            return alloc_c_string("\"\"");
+        }
+        // SAFETY: `mstr.ptr`/`mstr.len` describe a valid byte range.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(mstr.ptr as *const u8, mstr.len.max(0) as usize)
+        };
+        let s = String::from_utf8_lossy(bytes);
+        let escaped = json_escape_string(&s);
+        return alloc_c_string(&escaped);
+    }
+    // Basic `{char* ptr, i64 len}` struct: field 0 is the char data pointer.
+    let char_ptr = unsafe { *(p as *const *const std::ffi::c_char) };
+    mimi_json_escape_string(char_ptr)
+}
+
 /// Byte offset of the first occurrence of `needle` in `haystack`, or -1.
 /// Unlike C `strstr`, this uses explicit lengths so embedded NUL bytes are
 /// searched correctly (P1-13).
@@ -21960,6 +22001,220 @@ pub use concurrency::*;
 mod quote;
 #[cfg(not(standalone))]
 pub use quote::*;
+
+// ===========================================================================
+// Generic recursive `to_json` engine.
+//
+// This replaces the ~99 per-combination bespoke `mimi_*_to_json` runtime
+// functions. The design mirrors the bytecode VM's `value_to_json`
+// (src/interp/bytecode/builtins/misc.rs): a small closed rule set that
+// recurses on contained types. Every serializer has the single signature
+// `i8* ser_T(*const c_void slot)` where `slot` points at an i64-sized storage
+// location:
+//   * slot-types (primitive / f64 / bool / char / string / List / Set / Map)
+//     store the value or a ptrtoint pointer;
+//   * struct-types (Option / Result / Tuple / Record / enum) store the struct
+//     address as a ptrtoint.
+// The SAME serializer therefore works for top-level values, struct fields, and
+// list/set/map elements — eliminating the combinatorial explosion.
+// ===========================================================================
+
+/// Function-pointer type for a per-type element/field serializer.
+pub type JsonSerCb = extern "C" fn(*const std::ffi::c_void) -> *mut std::ffi::c_char;
+
+/// Serialize a signed integer-like value as a JSON number.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_int_to_string(v: i64) -> *mut std::ffi::c_char {
+    alloc_c_string(&v.to_string())
+}
+
+/// Serialize a boolean value as JSON `true` / `false`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_bool_to_string(v: i64) -> *mut std::ffi::c_char {
+    alloc_c_string(if v != 0 { "true" } else { "false" })
+}
+
+/// Serialize an f64 given its bit pattern (matches serde_json shortest
+/// round-trip: whole numbers keep ".0"; non-finite -> "null").
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_f64_to_string(bits: i64) -> *mut std::ffi::c_char {
+    let fv = f64::from_bits(bits as u64);
+    let s = if !fv.is_finite() {
+        "null".to_string()
+    } else if fv.fract() == 0.0 {
+        format!("{:.1}", fv)
+    } else {
+        fv.to_string()
+    };
+    alloc_c_string(&s)
+}
+
+/// Wrap an already-serialized inner JSON string as `{"Some":[<inner>]}`.
+/// Takes ownership of `inner` (frees it).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_some(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
+    if inner.is_null() {
+        return alloc_c_string("{\"Some\":[null]}");
+    }
+    let s = cstr_to_string(inner);
+    mimi_free(inner as *mut std::ffi::c_void);
+    alloc_c_string(&format!("{{\"Some\":[{}]}}", s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_none() -> *mut std::ffi::c_char {
+    alloc_c_string("\"None\"")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_ok(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
+    if inner.is_null() {
+        return alloc_c_string("{\"Ok\":[null]}");
+    }
+    let s = cstr_to_string(inner);
+    mimi_free(inner as *mut std::ffi::c_void);
+    alloc_c_string(&format!("{{\"Ok\":[{}]}}", s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_err(inner: *mut std::ffi::c_char) -> *mut std::ffi::c_char {
+    if inner.is_null() {
+        return alloc_c_string("{\"Err\":[null]}");
+    }
+    let s = cstr_to_string(inner);
+    mimi_free(inner as *mut std::ffi::c_void);
+    alloc_c_string(&format!("{{\"Err\":[{}]}}", s))
+}
+
+/// Join a list's elements (read from the `data` array of i64 slots) into a
+/// JSON array `[e0,e1,...]`. `ser_cb` receives the address of each `data[i]`
+/// slot and returns a heap C string (which this function owns and frees).
+/// Join a list's elements into a JSON array `[e0,e1,...]`.
+///
+/// `ser_cb` receives a *slot* for each element and returns a heap C string
+/// (owned and freed by this function). The slot contract matches the rest of
+/// the recursive `to_json` generator:
+///   * `is_scalar != 0` (element is a plain scalar such as `i64`/`f64`/`bool`,
+///     or a container stored as an opaque pointer such as `List<X>`) — the slot
+///     points *directly* at the element's storage, so the serializer's
+///     `load i64(slot)` reads the value / pointer.
+///   * `is_scalar == 0` (element is a record/tuple/`string`/`Option`/`Result`
+///     stored inline by value) — the slot points at an `i64` temp holding
+///     `ptrtoint(element)`, so the serializer's `inttoptr(load i64(slot))`
+///     recovers the element's address.
+///
+/// `elem_size` is the element stride in bytes (the data array may hold 8-byte
+/// scalars, 16-byte strings, 24-byte records, …); we stride by it instead of
+/// assuming an 8-byte slot array.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_join_list(
+    list: *const MimiList,
+    ser_cb: JsonSerCb,
+    elem_size: i64,
+    is_scalar: i64,
+) -> *mut std::ffi::c_char {
+    if list.is_null() {
+        return alloc_c_string("[]");
+    }
+    let lst = &*list.cast::<MimiListAbiPrefix>();
+    if lst.data.is_null() || lst.len == 0 {
+        return alloc_c_string("[]");
+    }
+    if lst.len < 0 || lst.len > 1_000_000 {
+        return alloc_c_string("[...]");
+    }
+    let data = lst.data as *const u8;
+    let elem_size = if elem_size <= 0 { 8 } else { elem_size as usize };
+    let mut tmp: u64 = 0;
+    let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
+    parts.push(String::from("["));
+    for i in 0..lst.len as isize {
+        if i > 0 {
+            parts.push(String::from(","));
+        }
+        let elem_ptr = data.add(i as usize * elem_size) as *const std::ffi::c_void;
+        let slot: *const std::ffi::c_void = if is_scalar != 0 {
+            elem_ptr
+        } else {
+            tmp = elem_ptr as u64;
+            &tmp as *const u64 as *const std::ffi::c_void
+        };
+        let elem = ser_cb(slot);
+        if elem.is_null() {
+            parts.push(String::from("null"));
+        } else {
+            let s = cstr_to_string(elem);
+            mimi_free(elem as *mut std::ffi::c_void);
+            parts.push(s);
+        }
+    }
+    parts.push(String::from("]"));
+    alloc_c_string(&parts.join(""))
+}
+
+/// Join a precomputed array of element/field slot pointers using per-element
+/// serializers. Used for tuples (`is_object == 0`) and records
+/// (`is_object != 0`). `slots[j]` is the slot pointer passed to `cbs[j]`;
+/// `names[j]` (records only) is the JSON object key C string.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_json_join_slots(
+    slots: *const *const std::ffi::c_void,
+    cbs: *const JsonSerCb,
+    names: *const *const std::ffi::c_char,
+    n: i64,
+    is_object: i64,
+) -> *mut std::ffi::c_char {
+    if slots.is_null() || cbs.is_null() || n <= 0 {
+        return alloc_c_string(if is_object != 0 { "{}" } else { "[]" });
+    }
+    let n = n as usize;
+    let mut parts: Vec<String> = Vec::with_capacity(n + 2);
+    parts.push(if is_object != 0 {
+        String::from("{")
+    } else {
+        String::from("[")
+    });
+    for j in 0..n {
+        if j > 0 {
+            parts.push(String::from(","));
+        }
+        // `slots[j]` is itself a pointer to the i64 slot; dereference once so the
+        // serializer receives the slot pointer (same contract as a top-level
+        // `to_json` call and `mimi_json_join_list`'s element pointer).
+        let slot = *slots.add(j);
+        let cb = *cbs.add(j);
+        let frag = cb(slot);
+        let frag_s = if frag.is_null() {
+            String::from("null")
+        } else {
+            let s = cstr_to_string(frag);
+            mimi_free(frag as *mut std::ffi::c_void);
+            s
+        };
+        if is_object != 0 {
+            let name = if names.is_null() {
+                String::from("?")
+            } else {
+                let np = *names.add(j);
+                if np.is_null() {
+                    String::from("?")
+                } else {
+                    cstr_to_string(np)
+                }
+            };
+            parts.push(format!("\"{}\":{}", name, frag_s));
+        } else {
+            parts.push(frag_s);
+        }
+    }
+    let close = if is_object != 0 {
+        String::from("}")
+    } else {
+        String::from("]")
+    };
+    parts.push(close);
+    alloc_c_string(&parts.join(""))
+}
 
 // ---------------------------------------------------------------------------
 // R-C11 regression tests: live-handle registry

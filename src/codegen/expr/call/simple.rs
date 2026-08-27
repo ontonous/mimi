@@ -3,7 +3,7 @@ use crate::codegen::expr::call::helpers::infer_generic_args;
 use crate::codegen::types;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use std::collections::HashMap;
 
@@ -58,7 +58,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         obj_type: &str,
         arg0: BasicMetadataValueEnum<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        // --- Recursive generator (true architectural fix, Phase A).
+        // Handles scalars, string, Option, Result, List, Tuple, Record with a
+        // single slot-based serializer per type — replacing the 99 bespoke
+        // runtime functions + combinatorial dispatch tree. Map/Set/enum fall
+        // through to the legacy per-combination tree until Phase B lands. ---
+        if let Some(v) = self.try_emit_json_recursive(obj_type, &arg0, actual_ty)? {
+            return Ok(Some(v));
+        }
         // Product tuples: JSON array via recursive field serialization.
         // Only when the *source* type is a product tuple — never Option
         // `{i1,T}`, Result, enum `{i32,i64}`, string, or list layouts.
@@ -399,6 +408,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let res = self.emit_typed_to_json_dispatch(
                         inner,
                         BasicMetadataValueEnum::PointerValue(opt_ptr),
+                        None,
                     )?;
                     let raw = match res {
                         Some(j) => match j {
@@ -3315,7 +3325,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // feed `snprintf`'s `%s`, matching the other branches
                             // which already yield a raw pointer.
                             let inner_val = BasicMetadataValueEnum::PointerValue(rec_ptr);
-                            match self.emit_typed_to_json_dispatch(&opt_inner, inner_val)? {
+                            match self.emit_typed_to_json_dispatch(&opt_inner, inner_val, None)? {
                                 Some(j) => match j {
                                     BasicValueEnum::PointerValue(p) => p,
                                     BasicValueEnum::StructValue(s) => self
@@ -3754,7 +3764,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .to_string();
                         let inner_val = BasicMetadataValueEnum::PointerValue(list_alloca);
                         let list_json = match self
-                            .emit_typed_to_json_dispatch(&format!("List<{}>", elem_ty), inner_val)?
+                            .emit_typed_to_json_dispatch(&format!("List<{}>", elem_ty), inner_val, None)?
                         {
                             Some(j) => match j {
                                 BasicValueEnum::PointerValue(p) => p,
@@ -4792,7 +4802,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 // added by the Option path below, matching the
                                 // bytecode VM.
                                 let nested_val = BasicMetadataValueEnum::PointerValue(pay_rec_ptr);
-                                match self.emit_typed_to_json_dispatch(&pay_inner, nested_val)? {
+                                match self.emit_typed_to_json_dispatch(&pay_inner, nested_val, None)? {
                                     Some(j) => match j {
                                         BasicValueEnum::PointerValue(p) => p,
                                         BasicValueEnum::StructValue(s) => self
@@ -5850,7 +5860,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             // on the inner value with its own type name, so nested
                             // containers serialize exactly like the bytecode VM.
                             let nested_val = BasicMetadataValueEnum::PointerValue(ok_rec_ptr);
-                            match self.emit_typed_to_json_dispatch(&ok_inner, nested_val)? {
+                            match self.emit_typed_to_json_dispatch(&ok_inner, nested_val, None)? {
                                 Some(j) => match j {
                                     BasicValueEnum::PointerValue(p) => p,
                                     BasicValueEnum::StructValue(s) => self
@@ -6897,9 +6907,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             // resolved_type_display_name there.
             if name == "to_json" && !metadata_args.is_empty() {
                 let obj_type = self.infer_object_type(&args[0], vars);
-                if let Some(value) =
-                    self.emit_typed_to_json_dispatch(&obj_type, metadata_args[0])?
-                {
+                // Use the *actual* LLVM storage type of the argument when it is
+                // a bare variable: `vars` already records the true box type the
+                // legacy emitter produced (force-heap `{i1,i64}` for containers).
+                // For by-value / non-variable arguments (`to_json(Some((1, 2)))`,
+                // `to_json(f(x))`, …) the legacy emitter still force-heaps
+                // container payloads, so fall back to the force-heap `llvm_type_for`
+                // layout — otherwise `actual_ty` is `None` and the recursive
+                // serializer assumes the embedded layout, reading a boxed pointer
+                // as an inline struct and emitting garbage.
+                let actual_ty = match args[0].unlocated() {
+                    crate::ast::Expr::Ident(name) => {
+                        vars.get(name.as_str()).map(|(_, ty)| *ty)
+                    }
+                    _ => None,
+                };
+                let actual_ty = actual_ty.or_else(|| {
+                    crate::codegen::expr::call::helpers::parse_type_str(&obj_type)
+                        .and_then(|t| self.llvm_type_for(&t))
+                });
+                if let Some(value) = self.emit_typed_to_json_dispatch(
+                    &obj_type,
+                    metadata_args[0],
+                    actual_ty,
+                )? {
                     return Ok(value);
                 }
             }
@@ -8783,6 +8814,1477 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_call(snprintf_fn, &all_args, "record_json_snprintf")?;
         Ok(buf)
     }
+
+    // ===== Recursive `to_json` generator (true architectural fix, Phase A) =====
+    //
+    // One serializer per type: `i8* mimi_to_json_<san>(i8* slot)` where `slot`
+    // is always a pointer to an `i64`. For slot-types the i64 holds the value
+    // (or ptrtoint of a string/list pointer); for struct-types it holds the
+    // struct address as a ptrtoint. This single convention eliminates the
+    // 99 bespoke runtime functions and the per-combination dispatch tree.
+
+    /// Stable, unique serializer function name for a type.
+    fn json_type_name(ty: &crate::ast::Type) -> String {
+        format!("{:?}", ty).replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+    }
+
+    /// Normalize a type for JSON serialization matching:
+    /// - strip metadata-carrying `Located` wrappers,
+    /// - convert surface `Name("Option", [..])` / `Name("Result", [..])` forms
+    ///   (as stored in `type_defs`) into the canonical `Type::Option` /
+    ///   `Type::Result` variants (as produced by `parse_type_str`).
+    fn json_norm(&self, ty: &crate::ast::Type) -> crate::ast::Type {
+        match ty {
+            crate::ast::Type::Located { ty, .. } => self.json_norm(ty),
+            crate::ast::Type::Name(n, args) => match n.as_str() {
+                "Option" if args.len() == 1 => {
+                    crate::ast::Type::Option(Box::new(self.json_norm(&args[0])))
+                }
+                "Result" if args.len() == 2 => crate::ast::Type::Result(
+                    Box::new(self.json_norm(&args[0])),
+                    Box::new(self.json_norm(&args[1])),
+                ),
+                "List" if args.len() == 1 => {
+                    crate::ast::Type::Name("List".to_string(), vec![self.json_norm(&args[0])])
+                }
+                _ => crate::ast::Type::Name(
+                    n.clone(),
+                    args.iter().map(|a| self.json_norm(a)).collect(),
+                ),
+            },
+            crate::ast::Type::Option(inner) => {
+                crate::ast::Type::Option(Box::new(self.json_norm(inner)))
+            }
+            crate::ast::Type::Result(a, b) => crate::ast::Type::Result(
+                Box::new(self.json_norm(a)),
+                Box::new(self.json_norm(b)),
+            ),
+            crate::ast::Type::Tuple(es) => {
+                crate::ast::Type::Tuple(es.iter().map(|e| self.json_norm(e)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Is this type laid out as an inline struct (needs an address in the slot)?
+    fn json_is_struct_type(&self, ty: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(ty);
+        let ty = &nty;
+        match ty {
+            crate::ast::Type::Option(_) | crate::ast::Type::Result(_, _) => true,
+            crate::ast::Type::Tuple(_) => true,
+            crate::ast::Type::Name(n, _) => {
+                if n == "Option" || n == "Result" {
+                    true
+                } else {
+                    self.type_defs
+                        .get(n)
+                        .map_or(false, |td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)))
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Is `ty` a leaf that is always stored inline by value (a numeric/char/bool
+    /// scalar or a `string` struct)? Such payloads are never heap-packed inside
+    /// an `Option`/`Result`, so the simple `json_ser_field_call` path is correct.
+    /// Everything else (List/Set/Map/Record/Tuple/Option/Result payloads) may be
+    /// stored either embedded or heap-packed, and needs the runtime probe.
+    fn json_is_scalar_or_string(&self, ty: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(ty);
+        match &nty {
+            crate::ast::Type::Name(n, _) => matches!(
+                n.as_str(),
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
+                    | "bool" | "f32" | "f64" | "string"
+            ),
+            _ => false,
+        }
+    }
+
+    /// The *native-width* LLVM storage type for a scalar element of a
+    /// `List<scalar>`. The legacy emitter widens narrow ints (`i8`/`i16`/`i32`/
+    /// `u8`/…) and `f32` to `i64`/`f64` in `llvm_type_for`, but the list data
+    /// array keeps elements at their true width — so the per-element serializer
+    /// must read the narrow width and the iteration stride must match it. The
+    /// resolved emitter already lowers these to their native width, so this
+    /// helper is a no-op there and purely a legacy-layout correction.
+    fn json_native_scalar_llvm(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
+        let nty = self.json_norm(ty);
+        match nty.unlocated() {
+            crate::ast::Type::Name(n, _) => match n.as_str() {
+                "i8" | "u8" => Some(self.context.i8_type().into()),
+                "i16" | "u16" => Some(self.context.i16_type().into()),
+                "i32" | "u32" => Some(self.context.i32_type().into()),
+                "f32" => Some(self.context.f32_type().into()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Load a (possibly narrowed) integer-like slot as a full `i64` for JSON
+    /// emission. The slot storage width follows `actual_ty`:
+    /// * `Some(IntType(bits))` with `bits < 64` → load that width and sign/zero
+    ///   extend to `i64` (e.g. an `i32` element of `List<i32>` is stored as a raw
+    ///   4-byte value, not a widened `i64`).
+    /// * otherwise (widened payload slots, top-level i64-padded args) → `load i64`.
+    fn json_load_int_as_i64(
+        &mut self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+        signed: bool,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        if let Some(BasicTypeEnum::IntType(it)) = actual_ty {
+            let bw = it.get_bit_width();
+            if bw < 64 {
+                let raw = self
+                    .build_load(BasicTypeEnum::IntType(it), slot, "json_ld_w")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_cast_sign_flag(raw, i64_ty, signed, "json_iscalar")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()));
+            }
+        }
+        self.build_load(BasicTypeEnum::IntType(i64_ty), slot, "json_ld")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))
+            .map(|v| v.into_int_value())
+    }
+
+    /// Load a float slot as the `f64` bit pattern in an `i64`. A narrowed `f32`
+    /// element of `List<f32>` is stored as a raw 4-byte value: load `f32`,
+    /// extend to `f64`, and bitcast to `i64` so `mimi_json_f64_to_string` sees a
+    /// valid `f64` bit pattern.
+    fn json_load_float_as_i64(
+        &mut self,
+        slot: inkwell::values::PointerValue<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        if let Some(BasicTypeEnum::FloatType(ft)) = actual_ty {
+            if ft.get_bit_width() == 32 {
+                let raw = self
+                    .build_load(BasicTypeEnum::FloatType(ft), slot, "json_ld_f")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_float_value();
+                let f64v = self
+                    .builder
+                    .build_float_ext(raw, self.context.f64_type(), "json_fext")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                return self
+                    .builder
+                    .build_bit_cast(f64v, i64_ty, "json_fbits")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))
+                    .map(|v| v.into_int_value());
+            }
+        }
+        self.build_load(BasicTypeEnum::IntType(i64_ty), slot, "json_ld")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))
+            .map(|v| v.into_int_value())
+    }
+
+    /// Does `ty`, when stored as a *payload* of an enclosing `Option`/`Result`, get
+    /// heap-boxed (the `{disc, box_ptr, payload}` external form, with the inner
+    /// aggregate itself stored reversed as `{value, box_ptr}`)?  This happens for
+    /// `Option`/`Result` whose payload values hold a scalar (e.g. `Option<i64>`,
+    /// `Result<i64,string>`); container payloads (`List`, `Map`, `Set`, records,
+    /// tuples) are stored inline instead.  A bare scalar/string is never boxed.
+    fn json_is_boxable(&self, ty: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(ty);
+        match &nty {
+            crate::ast::Type::Option(inner) => self.json_holds_scalar(inner),
+            crate::ast::Type::Result(ok, _) => self.json_holds_scalar(ok),
+            _ => false,
+        }
+    }
+
+    /// Does `ty` transitively carry a scalar/string value (used to decide boxing)?
+    fn json_holds_scalar(&self, ty: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(ty);
+        match &nty {
+            crate::ast::Type::Name(n, _) => matches!(
+                n.as_str(),
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
+                    | "bool" | "f32" | "f64" | "string"
+            ),
+            crate::ast::Type::Option(inner) => self.json_holds_scalar(inner),
+            crate::ast::Type::Result(ok, err) => {
+                self.json_holds_scalar(ok) || self.json_holds_scalar(err)
+            }
+            _ => false,
+        }
+    }
+
+    /// When `inner` is the payload of an `Option`/`Result`, does it get heap-boxed
+    /// (stored reversed as `{value, box_ptr}`)? This is true only for an `Option`/
+    /// `Result` *aggregate* whose payload holds a scalar — i.e. `Option<i64>`,
+    /// `Result<i64,…>`, `Option<Option<i64>>`, etc. A plain scalar inner (`i64`)
+    /// or a container/record/tuple inner is stored inline, not boxed.
+    fn json_inner_boxable(&self, inner: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(inner);
+        match nty.unlocated() {
+            crate::ast::Type::Option(_) | crate::ast::Type::Result(_, _) => {
+                self.json_holds_scalar(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// The *runtime storage layout* of a Mimi value as stored inside an
+    /// `Option<T>` / `Result<T, E>` payload slot (or as a list element / record
+    /// field).  This deliberately mirrors the actual ABI the compiler emits,
+    /// which for `Option<T>` / `Result<T, E>` is **not** `{i1 disc, payload}`:
+    /// the discriminant lives in the low bit of an 8-byte tagged pointer at
+    /// field 0, and the payload begins at offset 8.  `llvm_type_for` instead
+    /// returns a force-heap `{i1, i64}` shape whose field-1 offset (4 on this
+    /// target) does not match the runtime, which is what produced the
+    /// misaligned-list crash for nested `Option<List>` / `Result<Option<List>>`.
+    ///
+    /// We recurse so that e.g. `Option<Option<List>>` and
+    /// `Result<Option<List>, string>` get the correct nested offsets for both
+    /// the discriminant (field 0) and the inner payload.
+    fn json_storage_llvm(
+        &self,
+        ty: &crate::ast::Type,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        use crate::ast::Type;
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        match ty.unlocated() {
+            // `Option<T>` is always stored inline as `{disc, payload}` (the
+            // discriminant in the low bit of the 8-byte tag at field 0, the payload
+            // inline at field 1) — matching the runtime's flattened layout.
+            Type::Option(inner) => {
+                let p = self.json_storage_llvm(inner)?;
+                Some(
+                    self.context
+                        .struct_type(&[BasicTypeEnum::IntType(i64_ty), p], false)
+                        .into(),
+                )
+            }
+            // `Result<T,E>` with a boxable `T`/`E` is stored as
+            // `{disc, T, E}` where `T`/`E` themselves keep their own (possibly
+            // boxed/flattened) storage — matching the runtime's flattened layout.
+            Type::Result(ok, err) => {
+                let o = self.json_storage_llvm(ok)?;
+                let e = self.json_storage_llvm(err)?;
+                Some(
+                    self.context
+                        .struct_type(
+                            &[BasicTypeEnum::IntType(i64_ty), o, e],
+                            false,
+                        )
+                        .into(),
+                )
+            }
+            Type::Name(n, _) if n == "List" => Some(
+                self.list_struct_type().into(),
+            ),
+            Type::Name(n, _) if n == "string" => {
+                Some(BasicTypeEnum::IntType(i64_ty))
+            }
+            // Map/Set/record/tuple/scalars.  Scalar ints narrower than 64 bits
+            // are widened to `i64` in the payload slot (matching `llvm_type_for`'s
+            // Option/Result widening), so the stored value occupies 8 bytes and
+            // field 1 stays at offset 8.
+            Type::Name(n, _) => match n.as_str() {
+                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => {
+                    Some(BasicTypeEnum::IntType(i64_ty))
+                }
+                "i64" | "u64" | "char" | "bool" | "f32" | "f64" => {
+                    self.llvm_type_for(ty)
+                }
+                // Map/Set/record/tuple: use the normal inline LLVM type.
+                _ => self.llvm_type_for(ty),
+            },
+            _ => self.llvm_type_for(ty),
+        }
+    }
+
+    /// The *embedded / boxed* storage layout of `ty` when it appears as a heap-boxed
+    /// payload of an enclosing `Option`/`Result`.  A boxable `Option<T>` is stored
+    /// reversed as `{value, box_ptr}` (disc becomes `(box_ptr != 0)`); a boxable
+    /// `Result<T,E>` keeps `{disc, T, E}` (its fields are inlined by the runtime).
+    fn json_storage_llvm_boxed(
+        &self,
+        ty: &crate::ast::Type,
+    ) -> Option<BasicTypeEnum<'ctx>> {
+        use crate::ast::Type;
+        let i64_ty = self.context.i64_type();
+        match ty.unlocated() {
+            Type::Option(inner) => {
+                // reversed boxed form: {payload_value, box_ptr}
+                let v = self.json_storage_llvm(inner)?;
+                Some(
+                    self.context
+                        .struct_type(
+                            &[v, BasicTypeEnum::IntType(i64_ty)],
+                            false,
+                        )
+                        .into(),
+                )
+            }
+            Type::Result(ok, err) => self.json_storage_llvm(ty),
+            Type::Name(n, _) if n == "List" => Some(self.list_struct_type().into()),
+            Type::Name(n, _) if n == "string" => {
+                Some(BasicTypeEnum::IntType(i64_ty))
+            }
+            Type::Name(n, _) => match n.as_str() {
+                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => {
+                    Some(BasicTypeEnum::IntType(i64_ty))
+                }
+                _ => self.llvm_type_for(ty),
+            },
+            _ => self.llvm_type_for(ty),
+        }
+    }
+
+    /// Can the recursive generator fully serialize this type (all inner types
+    /// handled)? Map/Set/enum return false and fall through to legacy.
+    fn json_is_fully_handled(&self, ty: &crate::ast::Type) -> bool {
+        let nty = self.json_norm(ty);
+        let ty = &nty;
+        match ty {
+            crate::ast::Type::Option(inner) => self.json_is_fully_handled(inner),
+            crate::ast::Type::Result(ok, err) => {
+                self.json_is_fully_handled(ok) && self.json_is_fully_handled(err)
+            }
+            crate::ast::Type::Name(n, args) => match n.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
+                | "bool" | "f64" | "f32" | "string" => true,
+                "List" => args.len() == 1 && self.json_is_fully_handled(&args[0]),
+                "Option" => args.len() == 1 && self.json_is_fully_handled(&args[0]),
+                "Result" => {
+                    args.len() == 2
+                        && self.json_is_fully_handled(&args[0])
+                        && self.json_is_fully_handled(&args[1])
+                }
+                "Set" | "Map" => false,
+                _ => self.type_defs.get(n).map_or(false, |td| {
+                    if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                        fields.iter().all(|f| self.json_is_fully_handled(&f.ty))
+                    } else {
+                        false
+                    }
+                }),
+            },
+            crate::ast::Type::Tuple(elems) => elems.iter().all(|e| self.json_is_fully_handled(e)),
+            _ => false,
+        }
+    }
+
+    /// Build the LLVM struct type for the `string` type (used for field GEP).
+    fn json_string_struct_type(&self) -> Result<inkwell::types::StructType<'ctx>, CompileError> {
+        let t = self
+            .llvm_type_for(&crate::ast::Type::Name("string".to_string(), vec![]))
+            .ok_or_else(|| CompileError::Generic("no llvm type for string".into()))?;
+        Ok(t.into_struct_type())
+    }
+
+    /// Call a runtime JSON helper that returns a fresh `*mut c_char`.
+    fn json_call_rt(
+        &self,
+        name: &str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let f = self.get_runtime_fn(name)?;
+        let raw = self
+            .build_call(f, args, name)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError(format!("{} returned void", name)))?
+            .into_pointer_value();
+        Ok(raw)
+    }
+
+    /// Bitcast a generated serializer FunctionValue into the `JsonSerCb` pointer
+    /// type expected by `mimi_json_join_list`.
+    fn json_cb_ptr(
+        &self,
+        ser: inkwell::values::FunctionValue<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let join_fn = self.get_runtime_fn("mimi_json_join_list")?;
+        let cb_ty = join_fn.get_type().get_param_types()[1];
+        let cb_ty_bte = match cb_ty {
+            BasicMetadataTypeEnum::PointerType(p) => BasicTypeEnum::PointerType(p),
+            _ => {
+                return Err(CompileError::Generic(
+                    "json cb param is not a pointer type".into(),
+                ))
+            }
+        };
+        let fptr = ser.as_global_value().as_pointer_value();
+        let cb = self
+            .build_bit_cast(
+                BasicValueEnum::PointerValue(fptr),
+                cb_ty_bte,
+                "json_cb",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        Ok(cb.into_pointer_value())
+    }
+
+    /// Generate (or fetch cached) the serializer function for `ty`.
+    /// `is_boxed` distinguishes the embedded/heap-boxed layout (`{value,
+    /// box_ptr}`, discriminant from `(box_ptr != 0)`) from the standalone layout
+    /// (`{disc, payload}`).
+    /// A short, layout-describing string for an LLVM type, used to key cached
+    /// serializers by their real storage layout (so packed/unpacked variants of
+    /// the same Mimi type get distinct functions).
+    fn json_type_brief(&self, t: BasicTypeEnum<'ctx>) -> String {
+        match t {
+            BasicTypeEnum::IntType(i) => format!("i{}", i.get_bit_width()),
+            BasicTypeEnum::FloatType(f) => format!("f{}", f.get_bit_width()),
+            BasicTypeEnum::PointerType(_) => "p".to_string(),
+            BasicTypeEnum::ArrayType(a) => format!("a{}", a.len()),
+            BasicTypeEnum::StructType(s) => {
+                let parts: Vec<String> = s
+                    .get_field_types()
+                    .iter()
+                    .map(|f| self.json_type_brief(f.clone()))
+                    .collect();
+                format!("S({})", parts.join(""))
+            }
+            _ => "x".to_string(),
+        }
+    }
+
+    fn get_or_emit_json_ser(
+        &mut self,
+        ty: &crate::ast::Type,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+        is_boxed: bool,
+    ) -> Result<inkwell::values::FunctionValue<'ctx>, CompileError> {
+        let nty = self.json_norm(ty);
+        let ty = &nty;
+        let san = Self::json_type_name(ty);
+        // Key the cached serializer by the *real* storage layout too: two requests
+        // for the same Mimi `ty` but with different `actual_ty` (e.g. packed vs
+        // unpacked nested structs) need distinct functions so each one's GEP
+        // offsets match its own runtime layout.
+        let lay = match actual_ty {
+            None => "Ln".to_string(),
+            Some(BasicTypeEnum::StructType(st)) => {
+                let parts: Vec<String> = st
+                    .get_field_types()
+                    .iter()
+                    .map(|f| self.json_type_brief(f.clone()))
+                    .collect();
+                format!("Ls{}", parts.join(""))
+            }
+            Some(other) => format!("Lo{}", self.json_type_brief(other)),
+        };
+        let fname = format!(
+            "mimi_to_json_{}_{}_{}",
+            san,
+            lay,
+            if is_boxed { "b" } else { "s" }
+        );
+        if let Some(f) = self.module.get_function(&fname) {
+            return Ok(f);
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let fn_ty = i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false);
+        let f = self
+            .module
+            .add_function(&fname, fn_ty, Some(inkwell::module::Linkage::Internal));
+        let entry = self.context.append_basic_block(f, "entry");
+        let saved = self.builder.get_insert_block();
+        self.builder.position_at_end(entry);
+        let slot = f.get_first_param().unwrap().into_pointer_value();
+        let raw = self.emit_ser_body(ty, slot, actual_ty, is_boxed)?;
+        self.builder
+            .build_return(Some(&raw))
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        if std::env::var_os("MIMI_JSON_VERIFY").is_some() {
+            if let Err(msg) = self.module.verify() {
+                eprintln!("[JSONVERIFY] ser {} FAILED:\n{}", san, msg.to_string());
+            }
+        }
+        if std::env::var_os("MIMI_JSON_IR").is_some() && san.contains("Option_Name__i64") {
+            eprintln!("=== IR for {} ===", san);
+            f.print_to_stderr();
+        }
+        self.builder.position_at_end(saved.unwrap());
+        Ok(f)
+    }
+
+    /// Build the body of `ser_T(slot)` for type `ty`.
+    /// `actual_ty`, when present, is the *real* LLVM storage type of this value
+    /// (e.g. the resolved emitter's `lower_type`, which embeds a `List` payload
+    /// into `Option<List>` as `{i1,{i64,ptr}}`); it overrides the force-heap
+    /// `llvm_type_for` so the serializer's GEP/field layout matches the actual
+    /// variable storage. Nested serializers are generated with `None` and rely
+    /// on `llvm_type_for` (correct for records/tuples/lists, whose layout is
+    /// deterministic).
+    fn emit_ser_body(
+        &mut self,
+        ty: &crate::ast::Type,
+        slot: inkwell::values::PointerValue<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+        is_boxed: bool,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let nty = self.json_norm(ty);
+        let ty = &nty;
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let load_i64 = || {
+            self.build_load(BasicTypeEnum::IntType(i64_ty), slot, "json_ld")
+                .map(|v| v.into_int_value())
+        };
+        match ty {
+            crate::ast::Type::Name(n, args) => match n.as_str() {
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char" => {
+                    let signed =
+                        matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "char");
+                    let v = self.json_load_int_as_i64(slot, actual_ty, signed)?;
+                    self.json_call_rt(
+                        "mimi_json_int_to_string",
+                        &[BasicMetadataValueEnum::IntValue(v)],
+                    )
+                }
+                "bool" => {
+                    let v = self.json_load_int_as_i64(slot, actual_ty, false)?;
+                    self.json_call_rt(
+                        "mimi_json_bool_to_string",
+                        &[BasicMetadataValueEnum::IntValue(v)],
+                    )
+                }
+                "f64" | "f32" => {
+                    let bits = self.json_load_float_as_i64(slot, actual_ty)?;
+                    self.json_call_rt(
+                        "mimi_json_f64_to_string",
+                        &[BasicMetadataValueEnum::IntValue(bits)],
+                    )
+                }
+                "string" => {
+                    // The slot holds an `i64` whose value is a pointer to the
+                    // string storage (basic `{ptr,len}` struct, or a `MimiStr`
+                    // fat box for `List<string>`). `mimi_json_string_value`
+                    // decodes it (magic-aware) into a heap JSON string.
+                    let slot_ptr = self
+                        .build_pointer_cast(
+                            slot,
+                            i8_ptr,
+                            "json_s_slot",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    self.json_call_rt(
+                        "mimi_json_string_value",
+                        &[BasicMetadataValueEnum::PointerValue(slot_ptr)],
+                    )
+                }
+                "List" => {
+                    let inner = &args[0];
+                    let v = load_i64()?;
+                    let lp = self
+                        .build_int_to_ptr(
+                            v,
+                            self.list_struct_type().ptr_type(inkwell::AddressSpace::default()),
+                            "json_lp",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let inner_llvm = self
+                        .json_native_scalar_llvm(inner)
+                        .or_else(|| self.llvm_type_for(inner));
+                    // Scalar/string elements are stored by *value* in the list's
+                    // data array (e.g. an `i32` occupies 4 raw bytes, not a widened
+                    // `i64`); struct/tuple/container elements are stored as a
+                    // *pointer* (8 bytes). Pass the real element storage type as
+                    // `actual_ty` so the per-element serializer reads the correct
+                    // width, and use that width as the iteration stride. The
+                    // native-width LLVM type (not the widened `llvm_type_for`) is
+                    // what matches the data array, so narrowed ints/floats get the
+                    // correct 1/2/4-byte stride.
+                    let elem_size = if self.json_is_scalar_or_string(inner) {
+                        inner_llvm
+                            .as_ref()
+                            .and_then(|t| t.size_of())
+                            .and_then(|sz| sz.get_zero_extended_constant())
+                            .unwrap_or(8)
+                    } else {
+                        8
+                    };
+                    let ser_inner = self.get_or_emit_json_ser(inner, inner_llvm, false)?;
+                    let cb = self.json_cb_ptr(ser_inner)?;
+                    self.json_call_rt(
+                        "mimi_json_join_list",
+                        &[
+                            BasicMetadataValueEnum::PointerValue(lp),
+                            BasicMetadataValueEnum::PointerValue(cb),
+                            BasicMetadataValueEnum::IntValue(
+                                i64_ty.const_int(elem_size, false),
+                            ),
+                            BasicMetadataValueEnum::IntValue(
+                                i64_ty.const_int(1u64, false),
+                            ),
+                        ],
+                    )
+                }
+                "Set" | "Map" => Err(CompileError::Generic(format!(
+                    "to_json: {} not yet handled by recursive generator (Phase B)",
+                    n
+                ))),
+                _ => {
+                    // Record or other named struct type.
+                    if let Some(td) = self.type_defs.get(n) {
+                        if let crate::ast::TypeDefKind::Record(fields) = &td.kind {
+                            let struct_ty = self
+                                .llvm_type_for(ty)
+                                .ok_or_else(|| {
+                                    CompileError::Generic(format!("no llvm type for {}", n))
+                                })?
+                                .into_struct_type();
+                            let v = load_i64()?;
+                            let sp = self
+                                .build_int_to_ptr(
+                                    v,
+                                    struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    "json_rp",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            // Sort fields by name to match the VM's BTreeMap
+                            // ordering; keep the struct declaration index for GEP.
+                            let mut sorted: Vec<(String, crate::ast::Type, u32)> = fields
+                                .iter()
+                                .enumerate()
+                                .map(|(i, f)| (f.name.clone(), f.ty.clone(), i as u32))
+                                .collect();
+                            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                            let names: Vec<String> =
+                                sorted.iter().map(|(n, _, _)| n.clone()).collect();
+                            let field_types: Vec<crate::ast::Type> =
+                                sorted.iter().map(|(_, t, _)| t.clone()).collect();
+                            let field_indices: Vec<u32> =
+                                sorted.iter().map(|(_, _, i)| *i).collect();
+                            let san = Self::json_type_name(ty);
+                            return self.json_emit_join_slots(
+                                struct_ty, &field_types, &field_indices, sp, Some(&names), 1, &san,
+                            );
+                        }
+                    }
+                    Err(CompileError::Generic(format!(
+                        "to_json: unsupported named type {}",
+                        n
+                    )))
+                }
+            },
+            crate::ast::Type::Tuple(elems) => {
+                let struct_ty = self
+                    .llvm_type_for(ty)
+                    .ok_or_else(|| CompileError::Generic("no llvm type for tuple".into()))?
+                    .into_struct_type();
+                let v = load_i64()?;
+                let sp = self
+                    .build_int_to_ptr(
+                        v,
+                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        "json_tp",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let field_types: Vec<crate::ast::Type> = elems.iter().cloned().collect();
+                let field_indices: Vec<u32> = (0..field_types.len() as u32).collect();
+                let san = Self::json_type_name(ty);
+                self.json_emit_join_slots(
+                    struct_ty,
+                    &field_types,
+                    &field_indices,
+                    sp,
+                    None,
+                    0,
+                    &san,
+                )
+            }
+            crate::ast::Type::Option(inner) => {
+                // The runtime always stores `Option<T>` inline as `{disc, payload}`
+                // (discriminant at field 0, payload inline at field 1).  When we
+                // have the *real* storage type (`actual_ty`, e.g. the resolved
+                // emitter's packed struct), use it directly so GEP offsets match
+                // the runtime exactly; otherwise fall back to the same inline shape
+                // produced by `json_storage_llvm`.
+                let struct_ty: inkwell::types::StructType<'ctx> = match actual_ty {
+                    Some(BasicTypeEnum::StructType(st)) => st,
+                    _ => self
+                        .json_storage_llvm(ty)
+                        .ok_or_else(|| CompileError::Generic("no llvm type for Option".into()))?
+                        .into_struct_type(),
+                };
+                let v = load_i64()?;
+                let sp = self
+                    .build_int_to_ptr(
+                        v,
+                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        "json_op",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                // Discriminant = low bit of the 8-byte tag at field 0.
+                let disc_ptr = self
+                    .gep()
+                    .build_struct_gep(struct_ty, sp, 0, "json_o_disc")
+                    .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+                let disc_i64 = self
+                    .build_load(
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        disc_ptr,
+                        "json_o_disc_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let disc_bit = self
+                    .builder
+                    .build_and(
+                        disc_i64,
+                        self.context.i64_type().const_int(1u64, false),
+                        "json_o_disc_bit",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let tag = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_bit,
+                        self.context.i64_type().const_int(0u64, false),
+                        "json_o_is_some",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let pl_ptr = self
+                    .gep()
+                    .build_struct_gep(struct_ty, sp, 1, "json_o_pl")
+                    .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+                let inner_actual = struct_ty.get_field_type_at_index(1);
+                // A container payload is heap-packed (the field holds a pointer) when
+                // the field's *runtime* type is not the inline struct itself — i.e.
+                // `actual_ty` field type is a scalar/pointer (`i64`) rather than the
+                // aggregate. The legacy emitter force-heaps `Option<Container>` as
+                // `{i1, i64}` (field 1 = pointer), while the resolved emitter embeds
+                // it as `{i64, {i64, ptr}}` (field 1 = inline struct). Disambiguate
+                // from the field type so `load_i64(slot)` reads the right thing.
+                let inner_is_boxed =
+                    !matches!(inner_actual, Some(BasicTypeEnum::StructType(_)));
+                let cur_fn = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let some_bb = self.context.append_basic_block(cur_fn, "json_o_some");
+                let none_bb = self.context.append_basic_block(cur_fn, "json_o_none");
+                let merge_bb = self.context.append_basic_block(cur_fn, "json_o_merge");
+                self.builder
+                    .build_conditional_branch(tag, some_bb, none_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(some_bb);
+                let (inner_raw, inner_def_bb) = if !self.json_is_scalar_or_string(inner) {
+                    self.json_ser_container_payload_slot(inner, pl_ptr, inner_actual, inner_is_boxed)?
+                } else {
+                    let inner_field_ty = inner_actual
+                        .ok_or_else(|| CompileError::Generic("option payload field type missing".into()))?;
+                    self.json_ser_field_call(inner, pl_ptr, inner_field_ty)?
+                };
+                let some_w = self.json_call_rt(
+                    "mimi_json_some",
+                    &[BasicMetadataValueEnum::PointerValue(inner_raw)],
+                )?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(none_bb);
+                let none_w = self.json_call_rt("mimi_json_none", &[])?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let phi = self
+                    .builder
+                    .build_phi(i8_ptr, "json_o_phi")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                phi.add_incoming(&[(&some_w, inner_def_bb), (&none_w, none_bb)]);
+                Ok(phi.as_basic_value().into_pointer_value())
+            }
+            crate::ast::Type::Result(ok, err) => {
+                // Same inline `{disc, ok, err}` storage as `Option` (see above):
+                // use the real `actual_ty` when available so GEP offsets match the
+                // runtime, and thread the real ok/err field types into the nested
+                // serializers.
+                let struct_ty: inkwell::types::StructType<'ctx> = match actual_ty {
+                    Some(BasicTypeEnum::StructType(st)) => st,
+                    _ => self
+                        .json_storage_llvm(ty)
+                        .ok_or_else(|| CompileError::Generic("no llvm type for Result".into()))?
+                        .into_struct_type(),
+                };
+                let v = load_i64()?;
+                let sp = self
+                    .build_int_to_ptr(
+                        v,
+                        struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                        "json_rp",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let disc_ptr = self
+                    .gep()
+                    .build_struct_gep(struct_ty, sp, 0, "json_r_disc")
+                    .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+                let disc_i64 = self
+                    .build_load(
+                        BasicTypeEnum::IntType(self.context.i64_type()),
+                        disc_ptr,
+                        "json_r_disc_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let disc_bit = self
+                    .builder
+                    .build_and(
+                        disc_i64,
+                        self.context.i64_type().const_int(1u64, false),
+                        "json_r_disc_bit",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let is_ok = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        disc_bit,
+                        self.context.i64_type().const_int(0u64, false),
+                        "json_r_is_ok",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let cur_fn = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let ok_bb = self.context.append_basic_block(cur_fn, "json_r_ok");
+                let err_bb = self.context.append_basic_block(cur_fn, "json_r_err");
+                let merge_bb = self.context.append_basic_block(cur_fn, "json_r_merge");
+                self.builder
+                    .build_conditional_branch(is_ok, ok_bb, err_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(ok_bb);
+                let ok_ptr = self
+                    .gep()
+                    .build_struct_gep(struct_ty, sp, 1, "json_r_okp")
+                    .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+                let ok_actual = struct_ty.get_field_type_at_index(1);
+                let ok_is_boxed = !matches!(ok_actual, Some(BasicTypeEnum::StructType(_)));
+                let (ok_raw, ok_def_bb) = if !self.json_is_scalar_or_string(ok) {
+                    self.json_ser_container_payload_slot(ok, ok_ptr, ok_actual, ok_is_boxed)?
+                } else {
+                    let ok_field_ty = ok_actual
+                        .ok_or_else(|| CompileError::Generic("result ok field type missing".into()))?;
+                    self.json_ser_field_call(ok, ok_ptr, ok_field_ty)?
+                };
+                let ok_w = self.json_call_rt(
+                    "mimi_json_ok",
+                    &[BasicMetadataValueEnum::PointerValue(ok_raw)],
+                )?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(err_bb);
+                let err_ptr = self
+                    .gep()
+                    .build_struct_gep(struct_ty, sp, 2, "json_r_errp")
+                    .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+                let err_actual = struct_ty.get_field_type_at_index(2);
+                // Same heap-packed detection as the Option payload: a container
+                // `Err` payload is boxed when the field type is not the inline
+                // struct itself (legacy force-heap `{i1, i64}` → boxed; resolved
+                // embedded struct → not boxed).
+                let err_is_boxed = !matches!(err_actual, Some(BasicTypeEnum::StructType(_)));
+                let (err_raw, err_def_bb) = if !self.json_is_scalar_or_string(err) {
+                    self.json_ser_container_payload_slot(err, err_ptr, err_actual, err_is_boxed)?
+                } else {
+                    let err_field_ty = err_actual
+                        .ok_or_else(|| CompileError::Generic("result err field type missing".into()))?;
+                    self.json_ser_field_call(err, err_ptr, err_field_ty)?
+                };
+                let err_w = self.json_call_rt(
+                    "mimi_json_err",
+                    &[BasicMetadataValueEnum::PointerValue(err_raw)],
+                )?;
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.builder.position_at_end(merge_bb);
+                let phi = self
+                    .builder
+                    .build_phi(i8_ptr, "json_r_phi")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                phi.add_incoming(&[(&ok_w, ok_def_bb), (&err_w, err_def_bb)]);
+                Ok(phi.as_basic_value().into_pointer_value())
+            }
+            _ => Err(CompileError::Generic(format!(
+                "to_json: unsupported type {:?}",
+                ty
+            ))),
+        }
+    }
+
+    /// Build the slot pointer passed to an element/field serializer. For
+    /// struct-types it is a temp i64 holding the field address; for string/list
+    /// it is a temp i64 holding the char/list pointer; for primitives the field
+    /// storage itself is the slot.
+    fn json_field_slot_ptr(
+        &mut self,
+        ty: &crate::ast::Type,
+        field_ptr: inkwell::values::PointerValue<'ctx>,
+        field_llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let nty = self.json_norm(ty);
+        let ty = &nty;
+        let i64_ty = self.context.i64_type();
+        if self.json_is_struct_type(ty) {
+            // `Option<T>` / `Result<T>` payloads are stored two ways, chosen by
+            // the program's global heap-packing: embedded inline (the field *is*
+            // the payload struct → `ptr_to_int` of the field) or heap-packed
+            // (the field holds a pointer → `load i64` of the field gives the
+            // `ptrtoint` of the payload). `field_llvm_ty` (the *actual* field
+            // type from the parent struct) disambiguates.
+            let tmp = self
+                .build_alloca(i64_ty, "json_fslot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let as_i64 = if field_llvm_ty.is_struct_type() {
+                self.build_ptr_to_int(field_ptr, i64_ty, "json_fp_i64")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            } else {
+                self.build_load(
+                    BasicTypeEnum::IntType(i64_ty),
+                    field_ptr,
+                    "json_fp_ld",
+                )
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                .into_int_value()
+            };
+            self.build_store(tmp, as_i64)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            Ok(tmp)
+        } else if let crate::ast::Type::Name(n, _) = ty {
+            match n.as_str() {
+                "string" => {
+                    let tmp = self
+                        .build_alloca(i64_ty, "json_fslot")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    // A string *field* may be stored either as a `string` struct by
+                    // value (then `field_ptr` is a `string*`, so the slot holds the
+                    // struct address) or as an `i64` handle (then `field_ptr` points
+                    // at the handle and the slot must hold the handle *value*).
+                    // `field_llvm_ty` disambiguates the two layouts.
+                    let val = if field_llvm_ty.is_struct_type() {
+                        self.build_ptr_to_int(field_ptr, i64_ty, "json_fs_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        self.build_load(
+                            BasicTypeEnum::IntType(i64_ty),
+                            field_ptr,
+                            "json_fs_ld",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_int_value()
+                    };
+                    self.build_store(tmp, val)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    Ok(tmp)
+                }
+                "List" | "Set" | "Map" => {
+                    // Container fields / Option·Result payloads can be stored two
+                    // ways, and the choice is context-dependent (a program that
+                    // contains `List<List>` forces global heap-packing):
+                    //   * embedded inline: the field *is* the `{data,len}` struct
+                    //     (e.g. `Option<List>` as `{i1, {i64, ptr}}`) → slot holds
+                    //     the struct address (`ptr_to_int` of the field);
+                    //   * heap-packed: the field holds a *pointer* to the struct
+                    //     (e.g. `Option<List>` as `{i1, ptr}`) → slot holds the
+                    //     pointer (`load i64` of the field).
+                    // `field_llvm_ty` is the *actual* field type (from the parent
+                    // struct's `llvm_type_for`), so it tells us which case holds.
+                    let tmp = self
+                        .build_alloca(i64_ty, "json_fslot")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let val = if field_llvm_ty.is_struct_type() {
+                        self.build_ptr_to_int(field_ptr, i64_ty, "json_fc_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        self.build_load(
+                            BasicTypeEnum::IntType(i64_ty),
+                            field_ptr,
+                            "json_fc_ld",
+                        )
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_int_value()
+                    };
+                    self.build_store(tmp, val)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    Ok(tmp)
+                }
+                _ => {
+                    // Other nominal fields. Scalar leaf types (i8/i16/i32/i64/
+                    // u8/u16/u32/u64/char/bool/f32/f64) are `Type::Name`
+                    // variants, so they reach this arm too — for those the field
+                    // *holds the value*, so load it (zero-extending/bit-casting
+                    // as needed). Only genuinely nested records/enums are stored
+                    // by value as a struct the serializer `inttoptr`s from, which
+                    // is the `ptr_to_int` fallback below.
+                    let tmp = self
+                        .build_alloca(i64_ty, "json_fslot")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    let as_i64 = match field_llvm_ty {
+                        BasicTypeEnum::IntType(it) => {
+                            let loaded = self
+                                .build_load(field_llvm_ty, field_ptr, "json_fv")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            if it.get_bit_width() < 64 {
+                                self.builder
+                                    .build_int_z_extend(
+                                        loaded.into_int_value(),
+                                        i64_ty,
+                                        "json_fzext",
+                                    )
+                                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            } else {
+                                loaded.into_int_value()
+                            }
+                        }
+                        BasicTypeEnum::FloatType(_) => {
+                            let loaded = self
+                                .build_load(field_llvm_ty, field_ptr, "json_fv")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.builder
+                                .build_bit_cast(
+                                    loaded,
+                                    BasicTypeEnum::IntType(i64_ty),
+                                    "json_fbits",
+                                )
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                                .into_int_value()
+                        }
+                        _ => self
+                            .build_ptr_to_int(field_ptr, i64_ty, "json_fp_i64")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?,
+                    };
+                    self.build_store(tmp, as_i64)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                    Ok(tmp)
+                }
+            }
+        } else {
+            // Scalar field (i64 / f64 / bool / …): the top-level serializer
+            // contract is `slot = pointer to an i64 holding the value`, and
+            // `mimi_json_join_slots` dereferences `slots[j]` once to obtain that
+            // slot. So wrap the loaded scalar in a fresh i64 slot here (mirroring
+            // `try_emit_json_recursive`'s scalar handling) instead of returning
+            // `field_ptr` directly — otherwise the callback receives the scalar
+            // VALUE reinterpreted as a pointer and dereferences garbage, corrupting
+            // adjacent stack slots (non-deterministic SIGSEGV on later calls).
+            let tmp = self
+                .build_alloca(i64_ty, "json_fslot")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let loaded = self
+                .build_load(field_llvm_ty, field_ptr, "json_fv")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            let as_i64 = match loaded {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_z_extend(iv, i64_ty, "json_fzext")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    } else {
+                        iv
+                    }
+                }
+                BasicValueEnum::FloatValue(fv) => self
+                    .builder
+                    .build_bit_cast(
+                        BasicValueEnum::FloatValue(fv),
+                        BasicTypeEnum::IntType(i64_ty),
+                        "json_fbits",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value(),
+                _ => loaded.into_int_value(),
+            };
+            self.build_store(tmp, as_i64)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            Ok(tmp)
+        }
+    }
+
+    /// Serialize a single field/element of type `ty` whose value lives at
+    /// `field_ptr`, returning a fresh `*mut c_char`. `field_llvm_ty` is the
+    /// *actual* LLVM type of the field (from the parent struct's layout) and is
+    /// used to distinguish inline vs heap-packed container storage.
+    fn json_ser_field_call(
+        &mut self,
+        ty: &crate::ast::Type,
+        field_ptr: inkwell::values::PointerValue<'ctx>,
+        field_llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<
+        (
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        ),
+        CompileError,
+    > {
+        let slot = self.json_field_slot_ptr(ty, field_ptr, field_llvm_ty)?;
+        // `json_field_slot_ptr` returns a pointer of the field's element type;
+        // the serializer contract expects a uniform `i8*`, so bitcast.
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot = self
+            .build_bit_cast(
+                BasicValueEnum::PointerValue(slot),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "json_fser_slot",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let ser = self.get_or_emit_json_ser(ty, Some(field_llvm_ty), false)?;
+        let raw = self
+            .build_call(ser, &[BasicMetadataValueEnum::PointerValue(slot)], "json_fser")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("json field ser returned void".into()))?
+            .into_pointer_value();
+        let def_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::Generic("no insert block for json_ser_field_call".into()))?;
+        Ok((raw, def_bb))
+    }
+
+    /// Compute the serializer slot for a *container* payload of an
+    /// `Option<T>` / `Result<T, E>` whose storage location is `field_ptr`.
+    ///
+    /// The container payload (`List`/`Map`/`Set`/`Record`/`Tuple`/`Option`/
+    /// `Result`) is stored one of two ways depending on the program's global
+    /// heap-packing, and the static `actual_ty` we are given does **not**
+    /// reliably reflect the runtime layout:
+    ///   * embedded inline — the field *is* the payload struct; the serializer
+    ///     needs `slot` such that `load_i64(slot) == ptrtoint(&payload_struct)`,
+    ///     i.e. `slot` holds `ptrtoint(field_ptr)`;
+    ///   * heap-packed — the field *holds a pointer* to the payload struct; the
+    ///     serializer needs `load_i64(slot) == ptrtoint(&payload_struct)`, i.e.
+    ///     `slot == field_ptr` (so `load_i64(slot)` reads the pointer value).
+    ///
+    /// We disambiguate at runtime: read the 8 raw bytes at `field_ptr`. For a
+    /// heap-packed layout that is a real heap/stack pointer (always a large
+    /// address); for an embedded layout it is the first word of the inline
+    /// struct (e.g. a `List` length, always a small non-pointer value). A real
+    /// pointer exceeds `1_000_000`, so we branch on that.
+    fn json_ser_container_payload_slot(
+        &mut self,
+        ty: &crate::ast::Type,
+        field_ptr: inkwell::values::PointerValue<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+        is_boxed: bool,
+    ) -> Result<
+        (
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::basic_block::BasicBlock<'ctx>,
+        ),
+        CompileError,
+    > {
+        // Every serializer's slot contract is `load_i64(slot) ==
+        // ptrtoint(&target_struct)`.
+        //
+        // For an *embedded* container payload (`is_boxed == false`, e.g. the `Ok`
+        // payload of a `Result` or the payload of an `Option`) the struct lives
+        // inline at `field_ptr`, so `slot` holds `ptrtoint(field_ptr)`.
+        //
+        // For a *boxed* container payload (`is_boxed == true`, e.g. the `Err`
+        // payload of a `Result<_, Container>` where the runtime stores the inner
+        // value behind a heap pointer held in the `i64` err field) `field_ptr`
+        // points at an `i64` that *is* a pointer to the payload struct; we must
+        // load that pointer and use it as the slot value.
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let emb_tmp = self
+            .build_alloca(i64_ty, "json_cpay_tmp")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let field_addr = if is_boxed {
+            // `field_ptr` addresses an `i64` slot holding the heap pointer.
+            self.build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                field_ptr,
+                "json_cpay_box_ld",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_int_value()
+        } else {
+            self.build_ptr_to_int(field_ptr, i64_ty, "json_cpay_addr")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+        };
+        self.build_store(emb_tmp, field_addr)
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        let slot = self
+            .build_bit_cast(
+                BasicValueEnum::PointerValue(emb_tmp),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "json_cpay_bc",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        // Serialize the container payload through its own recursive serializer and
+        // return the resulting `*mut c_char` (what the Option/Result arm expects).
+        // `actual_ty` is the *real* field type (e.g. the nested struct layout), so
+        // the nested serializer's GEP offsets match the runtime exactly.
+        let ser = self.get_or_emit_json_ser(ty, actual_ty, false)?;
+        let raw = self
+            .build_call(ser, &[BasicMetadataValueEnum::PointerValue(slot)], "json_cpay_ser")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("json container payload ser void".into()))?
+            .into_pointer_value();
+        let cur_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::Generic("no insert block for json_ser_container_payload_slot".into()))?;
+        Ok((raw, cur_bb))
+    }
+
+    /// Emit a call to `mimi_json_join_slots` over the struct's fields.
+    /// `field_indices[j]` is the struct declaration index for `field_types[j]`
+    /// (used for GEP); the JSON ordering follows `field_types`/`names` order.
+    fn json_emit_join_slots(
+        &mut self,
+        struct_ty: inkwell::types::StructType<'ctx>,
+        field_types: &[crate::ast::Type],
+        field_indices: &[u32],
+        sp: inkwell::values::PointerValue<'ctx>,
+        names: Option<&[String]>,
+        is_object: i64,
+        san: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CompileError> {
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let n = field_types.len();
+        let arr_ty = i8_ptr.array_type(n as u32);
+        let slots_alloca = self
+            .build_alloca(arr_ty, "json_slots")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        for (j, ft) in field_types.iter().enumerate() {
+            let struct_idx = field_indices[j];
+            let field_ptr = self
+                .gep()
+                .build_struct_gep(struct_ty, sp, struct_idx, "json_f")
+                .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+            let field_llvm_ty = struct_ty
+                .get_field_type_at_index(struct_idx)
+                .ok_or_else(|| {
+                    CompileError::Generic(format!("json field {} type missing", struct_idx))
+                })?;
+            let slot_j = self.json_field_slot_ptr(ft, field_ptr, field_llvm_ty)?;
+            let slot_j_i8 = self
+                .build_bit_cast(
+                    BasicValueEnum::PointerValue(slot_j),
+                    BasicTypeEnum::PointerType(i8_ptr),
+                    "json_sj",
+                )
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                .into_pointer_value();
+            let elem_ptr = self
+                .gep()
+                .build_in_bounds_gep(
+                    arr_ty,
+                    slots_alloca,
+                    &[i64_ty.const_int(0, false), i64_ty.const_int(j as u64, false)],
+                    "json_slots_e",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
+            self.build_store(elem_ptr, slot_j_i8)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        }
+        // Callback function-pointer array (array of i8*).
+        let mut cb_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::with_capacity(n);
+        for ft in field_types {
+            let ser = self.get_or_emit_json_ser(ft, None, false)?;
+            cb_ptrs.push(ser.as_global_value().as_pointer_value());
+        }
+        let cb_arr_ty = i8_ptr.array_type(n as u32);
+        let cb_g = self
+            .module
+            .add_global(cb_arr_ty, None, &format!("json_cbs_{}", san));
+        cb_g.set_initializer(&i8_ptr.const_array(&cb_ptrs));
+        let cb_ptr = cb_g.as_pointer_value();
+        // Field-name array (null for tuples).
+        let names_ptr = match names {
+            Some(ns) => {
+                let mut name_ptrs: Vec<inkwell::values::PointerValue<'ctx>> = Vec::with_capacity(n);
+                for (i, nm) in ns.iter().enumerate() {
+                    let gs = self
+                        .builder
+                        .build_global_string_ptr(nm, &format!("json_nm_{}_{}", san, i))
+                        .map_err(|e| CompileError::LlvmError(format!("{}", e)))?;
+                    name_ptrs.push(gs.as_pointer_value());
+                }
+                let name_g = self.module.add_global(
+                    i8_ptr.array_type(n as u32),
+                    None,
+                    &format!("json_names_{}", san),
+                );
+                name_g.set_initializer(&i8_ptr.const_array(&name_ptrs));
+                name_g.as_pointer_value()
+            }
+            None => i8_ptr.const_null(),
+        };
+        let n_val = i64_ty.const_int(n as u64, false);
+        let is_obj_val = i64_ty.const_int(is_object as u64, false);
+        self.json_call_rt(
+            "mimi_json_join_slots",
+            &[
+                BasicMetadataValueEnum::PointerValue(slots_alloca),
+                BasicMetadataValueEnum::PointerValue(cb_ptr),
+                BasicMetadataValueEnum::PointerValue(names_ptr),
+                BasicMetadataValueEnum::IntValue(n_val),
+                BasicMetadataValueEnum::IntValue(is_obj_val),
+            ],
+        )
+    }
+
+    /// Top-level entry: if `obj_type` is fully handled by the recursive
+    /// generator, build the slot and call the serializer; otherwise return
+    /// `None` so the caller falls through to the legacy dispatch tree.
+    fn try_emit_json_recursive(
+        &mut self,
+        obj_type: &str,
+        arg0: &BasicMetadataValueEnum<'ctx>,
+        actual_ty: Option<BasicTypeEnum<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        let ty = match crate::codegen::expr::call::helpers::parse_type_str(obj_type) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        if !self.json_is_fully_handled(&ty) {
+            return Ok(None);
+        }
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        // Materialize the value into a pointer we can take an address of.
+        let val_ptr: inkwell::values::PointerValue<'ctx> = match arg0 {
+            BasicMetadataValueEnum::PointerValue(pv) => *pv,
+            BasicMetadataValueEnum::IntValue(iv) => {
+                let a = self
+                    .build_alloca(i64_ty, "json_vp")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_store(a, *iv)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                a
+            }
+            BasicMetadataValueEnum::FloatValue(fv) => {
+                let a = self
+                    .build_alloca(i64_ty, "json_vp")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let bits = self
+                    .build_bit_cast(
+                        BasicValueEnum::FloatValue(*fv),
+                        BasicTypeEnum::IntType(i64_ty),
+                        "json_bits",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                self.build_store(a, bits)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                a
+            }
+            BasicMetadataValueEnum::StructValue(sv) => {
+                let a = self
+                    .build_alloca(sv.get_type(), "json_vp")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                self.build_store(a, *sv)
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                a
+            }
+            _ => {
+                return Err(CompileError::Generic(format!(
+                    "to_json: unsupported arg kind for {}",
+                    obj_type
+                )))
+            }
+        };
+        // Build the i64 slot consumed by the serializer.
+        let slot = self
+            .build_alloca(i64_ty, "json_slot")
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        if self.json_is_struct_type(&ty) {
+            let as_i64 = self
+                .build_ptr_to_int(val_ptr, i64_ty, "json_vp_i64")
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+            self.build_store(slot, as_i64)
+                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+        } else {
+            match arg0 {
+                BasicMetadataValueEnum::IntValue(_) | BasicMetadataValueEnum::FloatValue(_) => {
+                    let v = self
+                        .build_load(BasicTypeEnum::IntType(i64_ty), val_ptr, "json_ld")
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                        .into_int_value();
+                    self.build_store(slot, v)
+                        .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                }
+                BasicMetadataValueEnum::StructValue(_) => {
+                    if let crate::ast::Type::Name(n, _) = &ty {
+                        if n == "string" {
+                            // `val_ptr` points to the `string` struct by value;
+                            // store its address as the `string*` slot.
+                            let sp_i64 = self
+                                .build_ptr_to_int(val_ptr, i64_ty, "json_s_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_store(slot, sp_i64)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        } else if n == "List" || n == "Set" || n == "Map" {
+                            let p_i64 = self
+                                .build_ptr_to_int(val_ptr, i64_ty, "json_c_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_store(slot, p_i64)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        }
+                    }
+                }
+                BasicMetadataValueEnum::PointerValue(_) => {
+                    if let crate::ast::Type::Name(n, _) = &ty {
+                        if n == "List" || n == "Set" || n == "Map" {
+                            let p_i64 = self
+                                .build_ptr_to_int(val_ptr, i64_ty, "json_c_i64")
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                            self.build_store(slot, p_i64)
+                                .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ser = self.get_or_emit_json_ser(&ty, actual_ty, false)?;
+        // `slot` is an `i64` alloca holding the value/pointer; the serializer
+        // contract expects a uniform `i8*`, so bitcast.
+        let slot_i8 = self
+            .build_bit_cast(
+                BasicValueEnum::PointerValue(slot),
+                BasicTypeEnum::PointerType(i8_ptr),
+                "json_slot_i8",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .into_pointer_value();
+        let raw = self
+            .build_call(
+                ser,
+                &[BasicMetadataValueEnum::PointerValue(slot_i8)],
+                "json_ser",
+            )
+            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("json ser returned void".into()))?
+            .into_pointer_value();
+        self.register_heap_alloc(raw);
+        let wrapped = self.wrap_c_string(raw)?;
+        Ok(Some(wrapped))
+    }
+
 }
 
 /// Convert a BasicValueEnum to its metadata type for indirect calls.

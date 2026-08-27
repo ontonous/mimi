@@ -2625,15 +2625,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                             }
                         }
                         if let Some(ty_ref) = &ty {
-                            if let Type::Name(tn, args) = ty_ref.unlocated() {
-                                if !args.is_empty() {
-                                    // Store full generic type name for method dispatch
-                                    if let Some(full) = self.get_full_type_name(ty_ref) {
-                                        self.var_type_names.insert(name.clone(), full);
-                                    }
-                                } else {
-                                    self.var_type_names.insert(name.clone(), tn.clone());
-                                }
+                            // Store the canonical display type name (e.g.
+                            // `(Option<i64>, Result<i64, i64>)` for tuples,
+                            // `Option<i64>` for wrappers, `List<i64>` for
+                            // generics) so `to_json` / dispatch routing resolves
+                            // the real type instead of falling back to the bare
+                            // variable name. `get_full_type_name` renders every
+                            // surface type form the recursive to_json generator
+                            // understands.
+                            if let Some(full) = self.get_full_type_name(ty_ref) {
+                                self.var_type_names.insert(name.clone(), full);
+                            } else if let Type::Name(tn, _) = ty_ref.unlocated() {
+                                self.var_type_names.insert(name.clone(), tn.clone());
                             }
                         } else if self.expr_is_string(init) {
                             self.var_type_names

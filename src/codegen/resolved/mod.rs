@@ -4054,9 +4054,30 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 self.program,
                                 &call.arguments[0].value.ty,
                             );
+                            // The recursive serializer must GEP the *real* box
+                            // layout. For a bare variable argument the resolved
+                            // emitter allocates `Option<List>` / `Result<List>`
+                            // either embedded (`{i1,{i64,ptr}}`) or heap-packed
+                            // (`{i1,ptr}` / `{i1,i64}`) depending on the program's
+                            // global heap-packing, while `llvm_type_for` always
+                            // force-heaps. So take the *actual* storage type from
+                            // the variable entry when the argument is a plain
+                            // variable; otherwise fall back to `llvm_type_for`.
+                            let actual_ty: Option<BasicTypeEnum<'ctx>> =
+                                match &call.arguments[0].value.kind {
+                                    ResolvedExprKind::Load(place)
+                                        if place.projections.is_empty() =>
+                                    {
+                                        frame.locals.get(&place.base).map(|entry| entry.llvm_type)
+                                    }
+                                    _ => crate::codegen::expr::call::helpers::parse_type_str(
+                                        &obj_type,
+                                    )
+                                    .and_then(|t| self.generator.llvm_type_for(&t)),
+                                };
                             if let Some(value) = self
                                 .generator
-                                .emit_typed_to_json_dispatch(&obj_type, arguments[0])?
+                                .emit_typed_to_json_dispatch(&obj_type, arguments[0], actual_ty)?
                             {
                                 return self.wrap_builtin_string_result(value, &call.result);
                             }
