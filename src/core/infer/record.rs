@@ -352,6 +352,15 @@ impl<'a> Checker<'a> {
         entries: &[(Expr, Expr)],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        // Capture the (unified) value type so the resolved/native emitter can
+        // select a *typed* `to_json` serializer (e.g. `mimi_map_to_json_f64_*`)
+        // instead of the type-erased `mimi_map_to_json_any`. The untyped
+        // `Record` path stores float values as bare i64 bit-patterns, which the
+        // type-erased serializer prints as integers (e.g. `4607182418800017408`
+        // for f64 `1.0`) — breaking VM≡native parity for `to_json({"a":1.0})`.
+        // Mirrors `infer_set_literal`, which already carries the element type.
+        let mut val_ty: Type = Type::TypeVar(self.unification.fresh_var());
+        let mut homogeneous = !entries.is_empty();
         for (k, v) in entries {
             let key_ty = self.infer_expr(k, scopes);
             if !crate::core::helpers::is_string(&key_ty) {
@@ -363,20 +372,38 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
-            let val_ty = self.infer_expr(v, scopes);
+            let val_t = self.infer_expr(v, scopes);
             // 0.31.17: flow states cannot be map values.
-            if self.is_flow_state_type(&val_ty) {
+            if self.is_flow_state_type(&val_t) {
                 self.emit_code(
                     crate::diagnostic::codes::E0427,
                     format!(
                         "linear resource of type {} cannot be stored in a map; \
                          flow states must have exactly one owner",
-                        fmt_type(&val_ty),
+                        fmt_type(&val_t),
                     ),
                 );
             }
+            // Unify all value types into one; a mismatch (heterogeneous map
+            // literal) falls back to the untyped `Record` representation so we
+            // preserve the previous (type-erased) behaviour rather than raising
+            // a spurious unification error.
+            if homogeneous {
+                if self.unification.unify(&val_ty, &val_t).is_err() {
+                    homogeneous = false;
+                } else {
+                    val_ty = self.unification.zonk_or_unknown(&val_ty);
+                }
+            }
         }
-        Type::Name("Record".into(), vec![])
+        if homogeneous {
+            Type::Name(
+                "Map".into(),
+                vec![Type::Name("string".into(), vec![]), val_ty],
+            )
+        } else {
+            Type::Name("Record".into(), vec![])
+        }
     }
 
     pub(in crate::core) fn infer_set_literal(
