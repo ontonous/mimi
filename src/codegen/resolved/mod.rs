@@ -156,6 +156,12 @@ struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     /// fault/exit(...) paths, discarded on normal return).
     defer_scopes: Vec<ResolvedBlock>,
     comp_scopes: Vec<ResolvedBlock>,
+    /// 0.39.x E0722 根治 scaffold: composite-T / cap generic call sites that
+    /// currently route to the legacy monomorphizer (route-a, Call arm) are
+    /// recorded here, keyed by (callee qualified name, concrete type args). A
+    /// later round can emit resolved monomorphized instances for these instead
+    /// of falling back to legacy. Populated without changing emission behavior.
+    pending_generic_instances: Vec<(String, Vec<ResolvedTypeId>)>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -180,6 +186,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             place_inputs: BTreeMap::new(),
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
+            pending_generic_instances: Vec::new(),
         }
         .compile_program()
         .map_err(|error| {
@@ -198,7 +205,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         program: &CheckedProgram,
         eligible: &std::collections::BTreeSet<NodeId>,
-    ) -> Result<usize, Vec<Diagnostic>> {
+    ) -> Result<(usize, Vec<(String, Vec<ResolvedTypeId>)>), Vec<Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
         NativeResolvedEmitter {
             program,
@@ -207,6 +214,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             place_inputs: BTreeMap::new(),
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
+            pending_generic_instances: Vec::new(),
         }
         .compile_subset(eligible)
         .map_err(|error| {
@@ -302,6 +310,39 @@ pub(super) fn resolved_type_to_ast(
                 .collect();
             Some(crate::ast::Type::Name(name.to_string(), args))
         }
+        // 0.1.9 (bare-T return ABI, L1): monomorphized generic instances whose
+        // bare type parameter `T` is instantiated to a composite (tuple / Option
+        // / Result) must lower that composite into the legacy `type_map` so the
+        // instance's parameter and return layouts match the resolved caller.
+        // Without these arms `resolved_type_to_ast` returned `None` for the
+        // composite, leaving `type_map` empty and erasing the bare-T slot to the
+        // i64 skeleton — which then disagrees with the caller's real `{i64,i64}`
+        // (or `{i1, …}`) value and crashes codegen (E0700 / numeric-convert).
+        Tuple(elements) => {
+            let elems: Vec<crate::ast::Type> = elements
+                .iter()
+                .filter_map(|tid| table.get(tid).and_then(|t| resolved_type_to_ast(t, table)))
+                .collect();
+            if elems.len() == elements.len() {
+                Some(crate::ast::Type::Tuple(elems))
+            } else {
+                None
+            }
+        }
+        Option(payload) => table
+            .get(payload)
+            .and_then(|t| resolved_type_to_ast(t, table))
+            .map(|p| crate::ast::Type::Name("Option".to_string(), vec![p])),
+        Result { ok, error } => {
+            let ok_t = table.get(ok).and_then(|t| resolved_type_to_ast(t, table));
+            let err_t = table.get(error).and_then(|t| resolved_type_to_ast(t, table));
+            match (ok_t, err_t) {
+                (Some(o), Some(e)) => {
+                    Some(crate::ast::Type::Name("Result".to_string(), vec![o, e]))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -346,7 +387,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     fn compile_subset(
         &mut self,
         eligible: &std::collections::BTreeSet<NodeId>,
-    ) -> Result<usize, CompileError> {
+    ) -> Result<(usize, Vec<(String, Vec<ResolvedTypeId>)>), CompileError> {
         let mut functions: Vec<_> = self
             .program
             .functions()
@@ -467,7 +508,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 failed
             );
         }
-        Ok(count)
+        Ok((count, std::mem::take(&mut self.pending_generic_instances)))
     }
 
     /// 0.34.42: delete every basic block of a partially-emitted function,
@@ -1692,7 +1733,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     Some(self.ensure_returned_heap_strings_owned(
                         value,
                         result_type,
-                        return_type_id,
+                        return_type_id.clone(),
                     )?)
                 } else {
                     None
@@ -1712,6 +1753,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // frees for all function-local heap scopes before the ret.
                 // The scopes are not popped here; end_function_heap_scope
                 // balances bookkeeping after the function body finishes.
+                //
+                // 0.39.x L1 (E0722 family): the returned value's heap pointers
+                // were claimed above via `claim_returned_heap_pointers` — this
+                // now includes generic `List<T>` (see `claim_returned_generic_list`
+                // + `emit_generic_list_contains`), so its data-array buffer is
+                // excluded from the flush and ownership transfers to the caller,
+                // matching the bytecode VM. `List<string>` / `List<List<string>>`
+                // are claimed by their own dedicated paths. The flush below frees
+                // every other function-local allocation.
                 self.generator.flush_heap_scopes_to_boundary()?;
                 self.generator.build_return(
                     value
@@ -2492,6 +2542,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             };
                             let needs_legacy = !abi_safe_in_skeleton;
                             if needs_legacy {
+                                // E0722 根治 scaffold: record the composite-T / cap
+                                // generic instance required by this call so a later
+                                // round can emit a resolved monomorphization instead
+                                // of routing to the legacy monomorphizer. Emission
+                                // behavior is unchanged by this recording.
+                                self.pending_generic_instances
+                                    .push((callee_fn.qualified_name.clone(), call.type_arguments.clone()));
                                 if let Some(fdef) = self
                                     .generator
                                     .func_defs
@@ -7289,13 +7346,36 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .ok_or_else(|| {
                 CompileError::Unsupported(format!("type definition for '{item_str}' not found"))
             })?;
-        // Build LLVM field types from the field type display strings.
-        // Each field's type display is resolved via the ResolvedTypeTable
-        // by finding a matching interned type.
+        // Build LLVM field types. PREFER the resolved type table: each record
+        // field has a stable NodeId (in `td.field_ids`) whose concrete
+        // ResolvedType lives in `program.resolved_field_types`. Lowering that
+        // ResolvedType with `lower_type` — the exact path every other type in
+        // the resolved emitter uses — means composite field types (tuple
+        // `(i32, i32)`, `Option<T>`, `Result<T, E>`, nested records) get the
+        // SAME layout as the rest of the program and stay ABI-compatible with
+        // the legacy backend (which lowers the same record via
+        // `register_type_def` → `llvm_type_for`/`mimi_type_to_llvm`, widening
+        // sub-64-bit integer tuple fields to i64 exactly as `lower_type` does).
+        //
+        // The old display-string path (`resolve_type_display` on each
+        // `td.fields` entry) cannot represent tuple/Option/Result field types:
+        // it failed on "(i32, i32)" and forced `main` to fall back to the
+        // legacy emitter, which then mis-lowered generic returns over such
+        // records (error[E0700] field access on an i64 slot). We keep it only
+        // as a fallback when a field identity is not present in the resolved
+        // field-type map.
         let mut field_types = Vec::with_capacity(td.fields.len());
-        for (_name, type_display) in &td.fields {
-            let field_ty = self.resolve_type_display(type_display)?;
-            field_types.push(field_ty);
+        let resolved_fields = self.program.resolved_field_types();
+        for (name, type_display) in &td.fields {
+            let lowered = td
+                .field_ids
+                .get(name)
+                .and_then(|fid| resolved_fields.get(fid))
+                .map(|rid| self.lower_type(rid));
+            match lowered {
+                Some(ty) => field_types.push(ty?),
+                None => field_types.push(self.resolve_type_display(type_display)?),
+            }
         }
         Ok(self.generator.context.struct_type(&field_types, false))
     }
@@ -12702,6 +12782,41 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 list_ty,
                                 elem_list_ty,
                             )?;
+                        }
+                    }
+                }
+                // 0.39.x L1 (E0722 family): a returned generic `List<T>` whose
+                // element type is neither a string nor a nested `List<string>`
+                // owns exactly one heap buffer — its i64 data array. Claim it
+                // (via `claim_returned_generic_list`) so the early-return flush
+                // transfers that buffer's ownership to the caller. This mirrors
+                // `claim_returned_string_list` for `List<string>`, but here the
+                // data array itself is the owned payload (a generic list has no
+                // per-element heap pointers to claim), so `emit_generic_list_contains`
+                // matches the data-array pointer directly.
+                if item.as_str() == "builtin:type:List" && arguments.len() == 1 {
+                    let elem = self.program.resolved_types().get(&arguments[0]);
+                    let elem_is_string = matches!(
+                        elem,
+                        Some(ResolvedType::Primitive(PrimitiveType::String))
+                    );
+                    let elem_is_nested_string = matches!(
+                        elem,
+                        Some(ResolvedType::Nominal { item: eitem, arguments: eargs, .. })
+                            if eitem.as_str() == "builtin:type:List"
+                                && eargs.len() == 1
+                                && matches!(
+                                    self.program.resolved_types().get(&eargs[0]),
+                                    Some(ResolvedType::Primitive(PrimitiveType::String))
+                                )
+                    );
+                    if !elem_is_string && !elem_is_nested_string {
+                        if let (
+                            BasicValueEnum::StructValue(sv),
+                            BasicTypeEnum::StructType(list_ty),
+                        ) = (value, ty)
+                        {
+                            self.generator.claim_returned_generic_list(sv, list_ty)?;
                         }
                     }
                 }

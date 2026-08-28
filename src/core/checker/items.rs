@@ -1201,7 +1201,9 @@ impl<'a> Checker<'a> {
                             self.emit_code(
                                 crate::diagnostic::codes::E0402,
                                 format!(
-                                    "user-declared state 'Fault' in flow '{}' is incompatible with the system Fault sink (required fields: last_state, unexpected_event, snapshot, trace)",
+                                    "state name 'Fault' is reserved by the system Fault sink and is incompatible with a user-declared `state Fault` in flow '{}'. \
+                                     Rename your state (e.g. `Failed` or `Errored`), or declare a typed fault payload with `fault <ErrorType> {{ ... }}` instead of `state Fault`. \
+                                     The system Fault sink requires exactly these fields: last_state, unexpected_event, snapshot, trace.",
                                     f.name
                                 ),
                             );

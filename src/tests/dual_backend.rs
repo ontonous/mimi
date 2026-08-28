@@ -3169,6 +3169,128 @@ fn dual_generic_identity_turbofish() {
 }
 
 #[test]
+fn dual_generic_identity_explicit_return_string() {
+    // L1 regression: a generic body ending in an EXPLICIT `return` used to emit a
+    // second (malformed) terminator plus a duplicate string-copy block in the
+    // native monomorphized instance (instructions after a terminator). `mimi build`
+    // shipped it without running LLVM verification and crashed at runtime, while
+    // `mimi run` was correct. Repro: `func id<T>(x: T) -> T { return x }` with a
+    // string argument segfaulted natively. Fix: compile_generic_func_inner now
+    // mirrors compile_func_legacy's ControlFlow::Break path and skips the implicit
+    // return when the body already terminates with an explicit `return`.
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func id<T>(x: T) -> T { return x }
+        func main() -> i32 {
+            println(id(42));
+            println(id("hi"));
+            println(id(7));
+            0
+        }
+        "#,
+        "42\nhi\n7"
+    );
+}
+
+#[test]
+#[ignore = "L1: generic fn returning a tuple then indexing fields fails natively (E0700 \
+'tuple index requires a tuple value, got IntValue') — the monomorphized legacy instance \
+lowers the tuple return via llvm_type_for which returns None -> i64 skeleton ABI, so the \
+caller receives i64 and .0/.1 indexing breaks. Root cause class: generic composite-return \
+ABI needs resolved monomorphization (route-b / E0722). VM is correct. Repro: t_g_tuple.mimi."]
+fn dual_generic_identity_tuple_return_index() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func f<T>(x: T) -> T { return x }
+        func main() -> i32 {
+            let p = f((3, 4))
+            println(p.0)
+            println(p.1)
+            0
+        }
+        "#,
+        "3\n4"
+    );
+}
+
+#[test]
+#[ignore = "L1: generic fn returning Option<string> then match fails natively (E0713 \
+'literal-pattern arm requires a struct scrutinee') — the caller's match scrutinee is \
+treated as i64 instead of the Option struct. Same generic-composite-return ABI class as the \
+tuple case (route-b / E0722). VM is correct. Repro: t_g_optstr.mimi."]
+fn dual_generic_identity_option_string_return_match() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func f<T>(x: T) -> T { return x }
+        func main() -> i32 {
+            let o = f(Some("hi"))
+            match o {
+                Some(s) => println(s),
+                None => println("none"),
+            }
+            0
+        }
+        "#,
+        "hi"
+    );
+}
+
+#[test]
+#[ignore = "L1: generic fn returning a (i32, bool) tuple then indexing fails natively (E0700). \
+Same generic composite-return ABI class as the (i32,i32) case — legacy/resolved tuple-layout \
+split + caller call.result not substituted. VM correct. Repro: t_g_tuple_bool.mimi."]
+fn dual_generic_identity_tuple_bool_return_index() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func f<T>(x: T) -> T { return x }
+        func main() -> i32 {
+            let p = f((3, true))
+            println(p.0)
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+#[ignore = "L1: generic fn returning a record that CONTAINS a tuple field then field access \
+fails natively (E0700 'field access requires a struct or actor type, got i64'). Generic \
+composite-return ABI class (record-with-tuple treated as i64 skeleton). VM correct. \
+Repro: t_g_rec_tuple.mimi."]
+fn dual_generic_identity_record_with_tuple_field_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type Pt { x: (i32, i32), y: i64 }
+        func f<T>(x: T) -> T { return x }
+        func main() -> i32 {
+            let p = f(Pt { x: (1, 2), y: 9 })
+            println(p.x.0)
+            println(p.x.1)
+            println(p.y)
+            0
+        }
+        "#,
+        "1\n2\n9"
+    );
+}
+
+#[test]
 fn dual_generic_type_inference() {
     if !can_link() {
         return;

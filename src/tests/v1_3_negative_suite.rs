@@ -258,3 +258,47 @@ fn e0257_too_many_args() {
         crate::diagnostic::codes::E0257,
     );
 }
+
+// ── Dogfood (SONAURI) pain point 1: integer literal widens to the target
+// integer type (i32 → i64) without an explicit `as i64`. ──────────────
+#[test]
+fn dogfood_int_literal_coerces_to_i64() {
+    let src = "flow Transport {\n    state Idle { sample_rate: i64, channels: i64 }\n    \
+               transition open(Idle, sr: i64, ch: i64) -> Idle { return Idle { sample_rate: sr, channels: ch } }\n}\n\
+               func main() { let t0 = Idle { sample_rate: 100, channels: 2 }; println(t0.sample_rate); }";
+    check_source(src).expect("integer literal should coerce into i64 field/let without `as i64`");
+}
+
+// ── Dogfood (SONAURI) pain point 1 (negative): value that does not fit
+// still errors (narrowing requires `as`). ──────────────────────────────
+#[test]
+fn dogfood_int_literal_out_of_range_still_errors() {
+    let src = "func main() -> i32 { let big: i32 = 3000000000; big }";
+    assert_err_code(src, crate::diagnostic::codes::E0209);
+}
+
+// ── Dogfood (SONAURI) pain point 2: the reserved `Fault` state name must
+// produce an actionable diagnostic suggesting a rename or `fault <ErrorType>`. ─
+#[test]
+fn dogfood_fault_state_diagnostic_hint() {
+    let src = "flow Transport {\n    state Idle { }\n    state Fault { reason: string }\n\
+               transition open(Idle) -> Fault { return Fault { reason: \"x\" } }\n}\n\
+               func main() { let _ = Idle { }; }";
+    let errors = match check_source(src) {
+        Err(errors) => errors,
+        Ok(()) => panic!("expected E0402 for user-declared 'Fault' state\nsrc: {src}"),
+    };
+    assert!(
+        errors.iter().any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0402)),
+        "expected E0402, got: {errors:?}\nsrc: {src}"
+    );
+    let msg = errors
+        .iter()
+        .find(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0402))
+        .map(|e| e.message.clone())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("Failed") && msg.contains("fault"),
+        "Fault diagnostic should suggest renaming or `fault <ErrorType>`, got: {msg}"
+    );
+}

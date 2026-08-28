@@ -262,6 +262,20 @@ pub struct CodeGenerator<'ctx> {
             inkwell::types::StructType<'ctx>,
         )>,
     >,
+    /// 0.39.x L1 (E0722 family): escaped generic `List<T>` values (T not a
+    /// string and not a nested `List<string>`) whose DATA ARRAY must survive
+    /// the callee's early-return flush. Unlike `List<string>` — whose element
+    /// string buffers are the owned payloads — a generic `List<T>` (e.g.
+    /// `List<i32>`) owns exactly one heap buffer: the i64 data array itself.
+    /// Each entry is an entry-block alloca holding the returned list struct
+    /// plus its LLVM type, so `emit_generic_list_contains` can compare a
+    /// to-be-freed pointer against the list's data-array pointer.
+    claimed_returned_generic_lists: std::cell::RefCell<
+        Vec<(
+            inkwell::values::PointerValue<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )>,
+    >,
     /// 0.35.23 deep-eval: names of the current legacy-body function's
     /// view/mutate borrow params. Their list storage IS the caller's struct
     /// (pointer ABI) — `claim_returned_lists` must not null their data
@@ -685,6 +699,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             claimed_returned_envs: std::cell::RefCell::new(Vec::new()),
             claimed_returned_string_lists: std::cell::RefCell::new(Vec::new()),
             claimed_returned_string_list_lists: std::cell::RefCell::new(Vec::new()),
+            claimed_returned_generic_lists: std::cell::RefCell::new(Vec::new()),
             borrow_param_names: std::collections::HashSet::new(),
             heap_boundaries: std::cell::RefCell::new(Vec::new()),
             ensures_stmts: Vec::new(),
@@ -2459,6 +2474,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    /// Claim a returned generic `List<T>` value (T not a string and not a
+    /// nested `List<string>`). The list struct is stored in an entry-block
+    /// alloca so that, at flush time, `emit_generic_list_contains` can compare
+    /// the to-be-freed data-array pointer against this list's data-array
+    /// pointer and skip the free — ownership of the single heap buffer
+    /// transfers to the caller. This mirrors `claim_returned_string_list` but
+    /// for the generic data array rather than string element payloads.
+    pub(super) fn claim_returned_generic_list(
+        &self,
+        list_sv: inkwell::values::StructValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<(), CompileError> {
+        let slot = self.build_entry_alloca(
+            BasicTypeEnum::StructType(list_ty),
+            "claimed_generic_list_slot",
+        )?;
+        self.build_store(slot, list_sv)?;
+        self.claimed_returned_generic_lists
+            .borrow_mut()
+            .push((slot, list_ty));
+        Ok(())
+    }
+
     /// Track the result type of `weak_var.upgrade()` for a `let` binding.
     /// `w.upgrade()` returns `Option<T>` where `T` is the inner type of the
     /// weak reference. Updating `var_type_names`/`var_types` lets downstream
@@ -2627,6 +2665,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
             std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let claimed_generic_lists =
+            std::mem::take(&mut *self.claimed_returned_generic_lists.borrow_mut());
         let boundary = self
             .heap_boundaries
             .borrow()
@@ -2714,6 +2754,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             if claimed.is_empty()
                 && claimed_string_lists.is_empty()
                 && claimed_string_list_lists.is_empty()
+                && claimed_generic_lists.is_empty()
             {
                 self.builder
                     .build_call(
@@ -2732,6 +2773,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     &claimed,
                     &claimed_string_lists,
                     &claimed_string_list_lists,
+                    &claimed_generic_lists,
                 )?;
             }
         }
@@ -2764,6 +2806,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
             std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let claimed_generic_lists =
+            std::mem::take(&mut *self.claimed_returned_generic_lists.borrow_mut());
         let scope = self.heap_allocs.borrow_mut().pop();
         if self.heap_allocs.borrow().len() > 1 {
             // codegen_mod F1: claims persist across nested scope pops so an
@@ -2884,7 +2928,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
                 // mimi_heap_free_claim returns null for pointers already freed
                 // in this session; only fresh pointers reach free.
-                let guarded = if claimed.is_empty() {
+                let guarded = if claimed.is_empty()
+                    && claimed_string_lists.is_empty()
+                    && claimed_string_list_lists.is_empty()
+                    && claimed_generic_lists.is_empty()
+                {
                     true
                 } else {
                     self.emit_guarded_scope_free(
@@ -2893,6 +2941,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &claimed,
                         &claimed_string_lists,
                         &claimed_string_list_lists,
+                        &claimed_generic_lists,
                     )?;
                     false
                 };
@@ -2986,6 +3035,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             std::mem::take(&mut *self.claimed_returned_string_lists.borrow_mut());
         let claimed_string_list_lists =
             std::mem::take(&mut *self.claimed_returned_string_list_lists.borrow_mut());
+        let claimed_generic_lists =
+            std::mem::take(&mut *self.claimed_returned_generic_lists.borrow_mut());
         let scope = self.heap_allocs.borrow().last().cloned();
         if let Some(scope) = scope {
             let free_fn = self
@@ -3083,7 +3134,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // LOOP-REBIND-HEAP-001: route through the uniqueness guard.
                 // mimi_heap_free_claim returns null for pointers already freed
                 // in this session; only fresh pointers reach free.
-                let guarded = if claimed.is_empty() {
+                let guarded = if claimed.is_empty()
+                    && claimed_string_lists.is_empty()
+                    && claimed_string_list_lists.is_empty()
+                    && claimed_generic_lists.is_empty()
+                {
                     true
                 } else {
                     self.emit_guarded_scope_free(
@@ -3092,6 +3147,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &claimed,
                         &claimed_string_lists,
                         &claimed_string_list_lists,
+                        &claimed_generic_lists,
                     )?;
                     false
                 };
@@ -3520,6 +3576,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_int_value())
     }
 
+    /// Returns `true` when `ptr` equals the DATA ARRAY pointer of the claimed
+    /// generic `List<T>` stored at `slot`. For a generic list (e.g. `List<i32>`)
+    /// the only heap allocation is the i64 data array itself, so protecting it
+    /// transfers ownership of the whole list to the caller. Unlike
+    /// `emit_string_list_contains` (which matches element payloads), this is a
+    /// single direct pointer comparison against field 1 of the list struct.
+    fn emit_generic_list_contains(
+        &mut self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        slot: inkwell::values::PointerValue<'ctx>,
+        list_ty: inkwell::types::StructType<'ctx>,
+    ) -> Result<inkwell::values::IntValue<'ctx>, CompileError> {
+        let list_sv = self
+            .builder
+            .build_load(
+                BasicTypeEnum::StructType(list_ty),
+                slot,
+                "claimed_generic_list_load",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed generic list load: {e}")))?
+            .into_struct_value();
+        let data = self
+            .builder
+            .build_extract_value(list_sv, 1, "claimed_generic_list_data")
+            .map_err(|e| CompileError::LlvmError(format!("claimed generic list data: {e}")))?
+            .into_pointer_value();
+        let eq = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                data,
+                ptr,
+                "claimed_generic_list_data_eq",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("claimed generic list cmp: {e}")))?;
+        Ok(eq)
+    }
+
     /// Emit `if (ptr != claimed_0 && ptr != claimed_1 && ...) { free(ptr); }`.
     /// Also skips when `ptr` is one of the string elements in a claimed
     /// `List<string>`. Splits the current block; the insertion point is left
@@ -3536,6 +3630,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         claimed_string_list_lists: &[(
             inkwell::values::PointerValue<'ctx>,
             inkwell::types::StructType<'ctx>,
+            inkwell::types::StructType<'ctx>,
+        )],
+        claimed_generic_lists: &[(
+            inkwell::values::PointerValue<'ctx>,
             inkwell::types::StructType<'ctx>,
         )],
     ) -> Result<(), CompileError> {
@@ -3565,6 +3663,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_or(matched, in_list, "b9_string_list_list_matched")
                 .map_err(|e| CompileError::LlvmError(format!("b9 string list list or: {e}")))?;
+        }
+        for (slot, list_ty) in claimed_generic_lists {
+            let is_list = self.emit_generic_list_contains(ptr, *slot, *list_ty)?;
+            matched = self
+                .builder
+                .build_or(matched, is_list, "b9_generic_list_matched")
+                .map_err(|e| CompileError::LlvmError(format!("b9 generic list or: {e}")))?;
         }
         let parent = self
             .builder
@@ -3672,7 +3777,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             // Guarded: skip if the box is claimed (returned to the caller).
             // emit_guarded_scope_free leaves insertion at its merge block.
-            self.emit_guarded_scope_free(free_fn, box_ptr, claimed, &[], &[])?;
+            self.emit_guarded_scope_free(free_fn, box_ptr, claimed, &[], &[], &[])?;
             self.build_br(done_bb)?;
         }
         self.builder.position_at_end(done_bb);
@@ -3943,16 +4048,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             // Option/Result of named records must use type_llvm for the payload
             // slot — mimi_type_to_llvm maps unknown names to i64.
             Type::Option(inner) => {
-                // List and nested Option stay classic {i1,i64} heap-pack
-                // (Option ABI split). Never embed List by-value — packing
-                // Option<List> into an outer List would zero/dangle the payload.
+                // Container payloads (List/Map/Set) stay classic {i1,i64}
+                // heap-pack (Option ABI split): never embed a List/Map/Set
+                // by-value — packing Option<List> into an outer List would
+                // zero/dangle the payload. A *nested value* Option<Option<T>>
+                // or Option<Result<T,E>> carries no container, so it uses the
+                // same by-value nested layout `{i1, {i1, payload}}` as the
+                // resolved emitter and the VM. The old code also heap-packed
+                // every nested Option (and Option written as a Name), which
+                // produced a flat `{i1, i64}` that disagreed with the resolved
+                // emitter's by-value layout and broke dual-backend equivalence
+                // (E0713 / garbage return for Option<Option<T>>).
                 let force_heap = match inner.as_ref().unlocated() {
                     Type::Option(_) => true,
                     Type::Name(n, _)
-                        if n == "List" || n == "Option" || n == "Map" || n == "Set" =>
+                        if n == "List" || n == "Map" || n == "Set" =>
                     {
                         true
                     }
+                    Type::Name(n, _) if n == "Option" || n == "Result" => false,
                     _ => false,
                 };
                 if force_heap {

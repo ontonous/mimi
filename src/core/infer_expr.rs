@@ -19,6 +19,32 @@ impl<'a> Checker<'a> {
         result
     }
 
+    /// Dogfood report (SONAURI) pain point 1: bidirectional integer literal
+    /// coercion. Returns true when `expected` is a concrete integer type and the
+    /// integer literal `v` fits in its range, so `100` can flow into an `i64`
+    /// field/let/argument without an explicit `as i64`. Narrowing that loses the
+    /// value (e.g. `100000` into `i32`) still falls through to normal inference
+    /// and keeps its diagnostic.
+    fn int_literal_coerces_to(expected: &Type, v: i64) -> bool {
+        let Type::Name(name, args) = expected.unlocated() else {
+            return false;
+        };
+        if !args.is_empty() {
+            return false;
+        }
+        match name.as_str() {
+            "i8" => v >= i8::MIN as i64 && v <= i8::MAX as i64,
+            "i16" => v >= i16::MIN as i64 && v <= i16::MAX as i64,
+            "i32" => v >= i32::MIN as i64 && v <= i32::MAX as i64,
+            "i64" | "i128" => true,
+            "u8" => v >= 0 && v <= u8::MAX as i64,
+            "u16" => v >= 0 && v <= u16::MAX as i64,
+            "u32" => v >= 0 && v <= u32::MAX as i64,
+            "u64" | "u128" => v >= 0,
+            _ => false,
+        }
+    }
+
     fn check_expr_inner(
         &mut self,
         expected: &Type,
@@ -26,6 +52,15 @@ impl<'a> Checker<'a> {
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
         match expr.unlocated() {
+            // Dogfood report (SONAURI) pain point 1: bidirectional integer
+            // literal coercion. When the expected type is a concrete integer
+            // type and the literal value fits, coerce the literal to that type
+            // instead of defaulting to i32 — eliminating `100 as i64` boilerplate.
+            // Out-of-range / mismatched literals fall through to normal inference
+            // and keep their diagnostic (E0247; narrowing requires an explicit `as`).
+            Expr::Literal(Lit::Int(v)) if Self::int_literal_coerces_to(expected, *v) => {
+                return expected.clone();
+            }
             // C3: None in context of Option<T> → infer Option<T>
             Expr::Literal(Lit::Unit) if matches!(expected.unlocated(), Type::Option(_)) => {
                 expected.clone()

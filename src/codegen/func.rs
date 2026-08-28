@@ -4613,13 +4613,28 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let ret_ty_ast = func.ret.as_ref();
         self.current_fn_ret_ty_ast = func.ret.clone();
-        let last_expr = func.body.last().and_then(|s| match s.unlocated() {
-            Stmt::Expr(e) => Some(e),
+        let last_stmt = func.body.last().map(|s| s.unlocated());
+        let last_expr = match last_stmt {
+            Some(Stmt::Expr(e)) => Some(e),
             _ => None,
-        });
+        };
+        // GENERIC-IMPLICIT-RET (0.39.x L1 fix): a body whose final statement is an
+        // explicit `return` already emits its own terminator inside
+        // compile_block_last_val (via emit_return). Calling emit_implicit_return
+        // afterwards appended a SECOND return — and a duplicate string-copy block
+        // — into the already-terminated entry block, producing malformed IR
+        // (instructions after a terminator) that the native toolchain ships
+        // without running LLVM verification and that crashes at runtime. Repro:
+        // `func id<T>(x: T) -> T { return x }` called with a string segfaulted on
+        // `mimi build` while `mimi run` was correct (L1 violation). Mirror
+        // compile_func_legacy's ControlFlow::Break path: skip the implicit return
+        // when the body already terminates with an explicit `return`.
+        let ends_with_explicit_return = matches!(last_stmt, Some(Stmt::Return(_)));
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
-        self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
+        if !ends_with_explicit_return {
+            self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
+        }
         self.end_function_heap_scope();
         // 0.39.x stdlib matrix sweep (nondeterministic-SIGSEGV root cause #2,
         // valgrind/IR-diff pinned): some body shapes can finish "successfully"

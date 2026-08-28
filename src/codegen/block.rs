@@ -1903,6 +1903,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // as compile_block's Return; was unbound here too).
                     self.compile_ensures_asserts(Some(val), ret_type, vars)?;
                     val = self.load_return_value_if_needed(val)?;
+                    // 0.39.x (generic List<T> return ABI): mirror func.rs
+                    // emit_return's ownership transfer for list returns so the
+                    // scope-exit flush below does NOT free a buffer the caller
+                    // must own. `claim_returned_lists` nulls a returned List
+                    // *variable's* data slot (flush turns into free(null));
+                    // `claim_returned_list_literals` deep-copies a returned List
+                    // *literal* into a fresh caller-owned buffer. Without these,
+                    // `func wrap<T>(x:T)->List<T>{return [x]}` returned a struct
+                    // whose data pointer dangled (garbage / double-free). The
+                    // implicit-return arm (emit_implicit_return) already does
+                    // this; the explicit-return arm did not.
+                    self.claim_returned_lists(Some(e), vars);
+                    val = self.claim_returned_list_literals(val, Some(e))?;
                     // 0.34.36 (audit §6.7): full return-path cleanup parity
                     // with compile_block's Return (block.rs:128-140). The old
                     // code only flushed heap scopes: registered shared
