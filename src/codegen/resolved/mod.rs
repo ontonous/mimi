@@ -2521,7 +2521,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // fail closed to the legacy emitter. Unknown result
                             // types fail closed the same way.
                             let rt = self.program.resolved_types().get(&call.result);
-                            let abi_safe_in_skeleton = match rt {
+                            let result_abi_safe = match rt {
                                 Some(ResolvedType::Primitive(p)) => matches!(
                                     p,
                                     PrimitiveType::I8
@@ -2540,7 +2540,42 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 ),
                                 _ => false,
                             };
-                            let needs_legacy = !abi_safe_in_skeleton;
+                            // A generic function whose type parameter is
+                            // instantiated to a composite / non-skeleton type
+                            // (string, float, i128, tuple, named, …) cannot be
+                            // lowered by the resolved skeleton, which collapses
+                            // the type variable T to i64. The body needs the
+                            // concrete type to decode `List<T>` elements
+                            // (Display / index / to_json / contains), so route it
+                            // to the legacy monomorphizer — exactly the same
+                            // treatment already given to composite RETURN types.
+                            // Previously only the RETURN type was checked, so
+                            // `func show<T>(xs: List<T>)` (returns Unit) stayed an
+                            // abstract skeleton and printed `List<unknown>`,
+                            // breaking cross-emitter `List<(T,T)>` / nested
+                            // non-scalar element returns. Closes that gap.
+                            let args_abi_safe = call.type_arguments.iter().all(|tid| {
+                                match self.program.resolved_types().get(tid) {
+                                    Some(ResolvedType::Primitive(p)) => matches!(
+                                        p,
+                                        PrimitiveType::I8
+                                            | PrimitiveType::I16
+                                            | PrimitiveType::I32
+                                            | PrimitiveType::I64
+                                            | PrimitiveType::Isize
+                                            | PrimitiveType::U8
+                                            | PrimitiveType::U16
+                                            | PrimitiveType::U32
+                                            | PrimitiveType::U64
+                                            | PrimitiveType::Usize
+                                            | PrimitiveType::Bool
+                                            | PrimitiveType::Char
+                                            | PrimitiveType::Unit
+                                    ),
+                                    _ => false,
+                                }
+                            });
+                            let needs_legacy = !result_abi_safe || !args_abi_safe;
                             if needs_legacy {
                                 // E0722 根治 scaffold: record the composite-T / cap
                                 // generic instance required by this call so a later

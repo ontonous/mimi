@@ -3196,16 +3196,11 @@ fn dual_generic_identity_explicit_return_string() {
 }
 
 #[test]
-#[ignore = "L1: generic fn returning a tuple then indexing fields fails natively (E0700 \
-'tuple index requires a tuple value, got IntValue') — the monomorphized legacy instance \
-lowers the tuple return via llvm_type_for which returns None -> i64 skeleton ABI, so the \
-caller receives i64 and .0/.1 indexing breaks. Root cause class: generic composite-return \
-ABI needs resolved monomorphization (route-b / E0722). VM is correct. Repro: t_g_tuple.mimi."]
 fn dual_generic_identity_tuple_return_index() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         func f<T>(x: T) -> T { return x }
         func main() -> i32 {
@@ -3220,15 +3215,11 @@ fn dual_generic_identity_tuple_return_index() {
 }
 
 #[test]
-#[ignore = "L1: generic fn returning Option<string> then match fails natively (E0713 \
-'literal-pattern arm requires a struct scrutinee') — the caller's match scrutinee is \
-treated as i64 instead of the Option struct. Same generic-composite-return ABI class as the \
-tuple case (route-b / E0722). VM is correct. Repro: t_g_optstr.mimi."]
 fn dual_generic_identity_option_string_return_match() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         func f<T>(x: T) -> T { return x }
         func main() -> i32 {
@@ -3245,14 +3236,11 @@ fn dual_generic_identity_option_string_return_match() {
 }
 
 #[test]
-#[ignore = "L1: generic fn returning a (i32, bool) tuple then indexing fails natively (E0700). \
-Same generic composite-return ABI class as the (i32,i32) case — legacy/resolved tuple-layout \
-split + caller call.result not substituted. VM correct. Repro: t_g_tuple_bool.mimi."]
 fn dual_generic_identity_tuple_bool_return_index() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         func f<T>(x: T) -> T { return x }
         func main() -> i32 {
@@ -3266,15 +3254,11 @@ fn dual_generic_identity_tuple_bool_return_index() {
 }
 
 #[test]
-#[ignore = "L1: generic fn returning a record that CONTAINS a tuple field then field access \
-fails natively (E0700 'field access requires a struct or actor type, got i64'). Generic \
-composite-return ABI class (record-with-tuple treated as i64 skeleton). VM correct. \
-Repro: t_g_rec_tuple.mimi."]
 fn dual_generic_identity_record_with_tuple_field_return() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         type Pt { x: (i32, i32), y: i64 }
         func f<T>(x: T) -> T { return x }
@@ -3287,6 +3271,78 @@ fn dual_generic_identity_record_with_tuple_field_return() {
         }
         "#,
         "1\n2\n9"
+    );
+}
+
+#[test]
+/// L1 regression (independent issue split from E0722): a generic function whose
+/// type parameter is instantiated to a non-scalar element — `List<(T, T)>`,
+/// `List<List<…>>`, `List<Option<…>>`, `List<Result<…>>` — must decode those
+/// elements correctly on BOTH backends. The resolved emitter used to compile
+/// such a generic body once as an abstract skeleton (collapsing `T` to i64) and
+/// printed `List<unknown>` / raw pointers because the concrete element type was
+/// lost. The fix routes any generic instance whose type argument is a composite
+/// (tuple / record / nested list / Option / Result / string / float / i128) to
+/// the legacy monomorphizer, which substitutes the concrete type and registers
+/// the correct `var_type_names` so Display / to_json / index all decode the
+/// boxed element slots. `func show<T>(xs: List<T>)` returns Unit, so the old
+/// check (which only inspected the RETURN type) wrongly treated it as ABI-safe.
+fn dual_generic_list_nonscalar_element_return() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func show<T>(xs: List<T>) {
+            println(xs)
+            println(to_json(xs))
+        }
+        func make<T>(x: T) -> List<T> { return [x, x] }
+        func main() -> i32 {
+            show([(7, 9), (1, 2)])
+            let a: List<i32> = [1, 2, 3]
+            let b: List<i32> = [4, 5]
+            show([a, b])
+            let ox: Option<(i32, i32)> = Some((3, 4))
+            let oy: Option<(i32, i32)> = None()
+            show([ox, oy])
+            let okv: Result<(i32, i32), string> = Ok((5, 6))
+            let errv: Result<(i32, i32), string> = Err("boom")
+            show([okv, errv])
+            let r = make((11, 22))
+            println(r)
+            println(to_json(r))
+            0
+        }
+        "#,
+        "[(7, 9), (1, 2)]\n[[7,9],[1,2]]\n[[1, 2, 3], [4, 5]]\n[[1,2,3],[4,5]]\n[Some((3, 4)), None()]\n[{\"Some\":[[3,4]]},\"None\"]\n[Ok((5, 6)), Err(boom)]\n[{\"Ok\":[[5,6]]},{\"Err\":[\"boom\"]}]\n[(11, 22), (11, 22)]\n[[11,22],[11,22]]"
+    );
+}
+
+/// L1 regression: the SAME `List<(T, T)>` element representation must agree when
+/// a legacy-monomorphized generic RETURN (producer) hands the list to a resolved
+/// caller (consumer) — the cross-emitter boundary the E0722 buffer-ownership fix
+/// left for this dedicated issue. Both box non-scalar elements identically, so
+/// the resolved reader (`convert_list_elem_i64`) must dereference the same slots.
+#[test]
+fn dual_generic_identity_list_tuple_return_cross_emitter() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"
+        func wrap<T>(x: T) -> List<T> { return [x] }
+        func main() -> i32 {
+            let xs = wrap((7, 9))
+            let first = xs[0]
+            println(first.0)
+            println(first.1)
+            let ys = wrap([(1, 2), (3, 4)])
+            println(ys)
+            0
+        }
+        "#,
+        "7\n9\n[[(1, 2), (3, 4)]]"
     );
 }
 
