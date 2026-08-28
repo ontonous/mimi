@@ -2696,7 +2696,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             let mid =
                 Self::strip_first_type_arg(list_ty, "List").unwrap_or_else(|| "List".to_string());
             let elem = Self::strip_first_type_arg(&mid, "List").unwrap_or_default();
-            if elem.starts_with('(') {
+            if elem.starts_with("List<") {
+                // 3+ nesting levels: `mid` (the outer element type) is itself a
+                // list (`List<List<…>>`). Format each element by loading it as an
+                // inner list and recursing with `mid`; the recursive call
+                // terminates at the 1-/2-level formatters below.
+                self.emit_list_list_nested_to_string(sv, &mid)?
+            } else if elem.starts_with('(') {
                 // List of List of product tuples.
                 self.emit_list_list_product_tuple_to_string(sv, &elem)?
             } else if elem == "f64" || elem == "f32" {
@@ -2705,6 +2711,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.emit_list_list_scalar_to_string(sv, ScalarListKind::I64)?
             } else if elem == "bool" {
                 self.emit_list_list_scalar_to_string(sv, ScalarListKind::Bool)?
+            } else if elem.starts_with("Option")
+                || elem.starts_with("Result")
+                || self.type_defs.get(elem.as_str()).is_some_and(|td| {
+                    matches!(
+                        td.kind,
+                        crate::ast::TypeDefKind::Record(_) | crate::ast::TypeDefKind::Enum(_)
+                    )
+                })
+            {
+                // Non-trivial element kind (Option/Result/record/enum): the
+                // element is itself a boxed value, so format each element by
+                // recursing with its concrete list type rather than the flat
+                // i32 formatter.
+                self.emit_list_list_nested_to_string(sv, &mid)?
             } else {
                 let inner_fn = if elem == "string" {
                     "mimi_list_to_string"
@@ -8538,6 +8558,66 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ok_or("mimi_list_list_to_string returned void")?
             .into_pointer_value();
         Ok(raw)
+    }
+
+    /// Display `List<List<…>>` where the element type is *itself* a list (3+ nesting
+    /// levels: `List<List<List<X>>>` and beyond). Each outer element is a boxed
+    /// `List<…>` value (an i64 slot holding a pointer); we load it as an inner list
+    /// struct and format it via the element type's own `emit_list_typed_to_string`,
+    /// which recurses for deeper nesting and terminates at the 1-/2-level
+    /// formatters. Uses exact-size two-pass assembly (same as the tuple/scalar
+    /// list-of-list formatters) so deeply nested lists cannot overflow the display
+    /// buffer.
+    fn emit_list_list_nested_to_string(
+        &self,
+        sv: inkwell::values::StructValue<'ctx>,
+        elem_ty: &str,
+    ) -> MimiResult<inkwell::values::PointerValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let list_ty = self.list_struct_type();
+        let alloca =
+            self.build_alloca(BasicTypeEnum::StructType(list_ty), "list_list_nested_print")?;
+        self.build_store(alloca, sv)?;
+        let len = self.load_list_len(alloca)?;
+        let buf = self.emit_sized_list_of_pieces(
+            len,
+            ", ",
+            |idx| {
+                let data_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, alloca, 1, "list_list_nested_data_gep")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let data_ptr = self
+                    .build_load(i8_ptr, data_gep, "list_list_nested_data")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_pointer_value();
+                let elem_slot = self
+                    .gep()
+                    .build_gep(i64_ty, data_ptr, &[idx], "list_list_nested_slot")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let elem_i64 = self
+                    .build_load(i64_ty, elem_slot, "list_list_nested_elem")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value();
+                let inner_ptr = self
+                    .builder
+                    .build_int_to_ptr(elem_i64, i8_ptr, "list_list_nested_as_ptr")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?;
+                let inner_sv = self
+                    .build_load(
+                        BasicTypeEnum::StructType(list_ty),
+                        inner_ptr,
+                        "list_list_nested_ld",
+                    )
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_struct_value();
+                self.emit_list_typed_to_string(inner_sv, elem_ty)
+            },
+            "list_list_nested",
+        )?;
+        self.register_display_alloc(buf);
+        Ok(buf)
     }
 
     /// Materialize a list struct value into an alloca and call the runtime

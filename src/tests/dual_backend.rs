@@ -3346,6 +3346,54 @@ fn dual_generic_identity_list_tuple_return_cross_emitter() {
     );
 }
 
+/// L1 regression: deep (2+ level) nested-list Display must agree between the
+/// interpreter and the production native emitter for *every* element kind —
+/// scalar, product tuple, string, `Option<…>`, `Result<…>`, record. The previous
+/// fixed-depth list Display dispatch only handled 2 levels and fell through to a
+/// flat `i32` formatter for 3+ levels or for `List<List<Option<…>>>`-style boxed
+/// elements, printing raw heap pointers on native. The fix routes any element
+/// whose type is itself a list (or a boxed Option/Result/record/enum) through a
+/// recursive formatter that terminates at the 1-level per-kind formatters.
+#[test]
+fn dual_nested_list_display() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"type Pt { x: i32, y: i32 }
+func main() -> i32 {
+    // 2-level with non-trivial elements
+    println([[Some((1, 2)), None()], [Some((3, 4))]])
+    println([[Ok((1, 2)), Err("boom")]])
+    println([[Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }]])
+    // 3-level with those
+    println([[[Some((1, 2)), None()]]])
+    println([[[Pt { x: 1, y: 2 }]]])
+    // mixed: List<List<List<Result<(i32,i32),string>>>>
+    println([[[Ok((1, 2)), Err("x")]]])
+    0
+}"#,
+        "[[Some((1, 2)), None()], [Some((3, 4))]]\n[[Ok((1, 2)), Err(boom)]]\n[[Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }]]\n[[[Some((1, 2)), None()]]]\n[[[Pt { x: 1, y: 2 }]]]\n[[[Ok((1, 2)), Err(x)]]]"
+    );
+}
+
+#[test]
+fn dual_generic_nested_list_display() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        r#"func wrap<T>(x: T) -> List<List<List<T>>> { return [[[x]]] }
+func main() -> i32 {
+    println(wrap((7, 9)))
+    println(wrap("hi"))
+    0
+}
+"#,
+        "[[[(7, 9)]]]\n[[[hi]]]"
+    );
+}
+
 #[test]
 fn dual_generic_type_inference() {
     if !can_link() {
