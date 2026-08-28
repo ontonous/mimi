@@ -815,14 +815,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BinOp::Div => "div requires same numeric types",
                     _ => "arithmetic requires same numeric types",
                 };
-                if std::env::var("MIMI_VERBOSE").is_ok() {
-                    eprintln!(
-                        "DBG arithmetic fail: op={op:?} lhs={:?} rhs={:?}",
-                        lhs.get_type(),
-                        rhs.get_type()
-                    );
-                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
-                }
                 Err(msg.into())
             }
         }
@@ -1340,15 +1332,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into())
                 }
                 _ => {
-                    if std::env::var("MIMI_VERBOSE").is_ok() {
-                        eprintln!(
-                            "DBG eq fail: lhs={:?} rhs={:?} op={:?}",
-                            lhs.get_type(),
-                            rhs.get_type(),
-                            op
-                        );
-                        eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
-                    }
                     Err("eq requires same types".into())
                 }
             },

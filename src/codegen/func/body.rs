@@ -1087,12 +1087,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_load(BasicTypeEnum::StructType(sty), elem_ptr, "loop_elem_struct")?;
             return Ok(Some(struct_val));
         }
-        if std::env::var("MIMI_VERBOSE").is_ok() {
-            eprintln!(
-                "DBG try_convert_loop_elem: elem_ty={:?} concrete={:?} llvm_type_for=None",
-                elem_ty, concrete_ty
-            );
-        }
         Ok(None)
     }
 
@@ -1104,16 +1098,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         iterable: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<Type> {
-        if std::env::var("MIMI_VERBOSE").is_ok() {
-            if let Expr::Ident(n) = iterable.unlocated() {
-                eprintln!(
-                    "DBG resolve_loop_elem_type: var={} var_types={:?} var_type_names={:?}",
-                    n,
-                    self.var_types.get(n),
-                    self.var_type_names.get(n)
-                );
-            }
-        }
         // Check var_types first (handles Type::Ref for generic trait method self)
         if let Expr::Ident(name) = iterable.unlocated() {
             if let Some(ty) = self.var_types.get(name) {

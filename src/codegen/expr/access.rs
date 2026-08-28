@@ -600,14 +600,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
             _ => {
-                if std::env::var("MIMI_VERBOSE").is_ok() {
-                    eprintln!(
-                        "DBG E0700 field access: obj_type={} value={:?}",
-                        obj_type,
-                        obj_val.get_type()
-                    );
-                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
-                }
                 Err(CompileError::Generic(format!(
                     "field access requires a struct or actor type, got {}",
                     obj_val.get_type()

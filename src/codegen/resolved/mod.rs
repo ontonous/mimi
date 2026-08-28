@@ -4067,9 +4067,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         _ => continue,
                                     };
                                     if arg_basic.get_type() != param_ty {
-                                        if std::env::var("MIMI_VERBOSE").is_ok() {
-                                            eprintln!("DBG runtime param coerce: fn={runtime_fn_name} arg#{i} {:?} → {param_ty:?} owner={}", arg_basic.get_type(), frame.owner.0);
-                                        }
                                         let coerced = self.coerce_to(arg_basic, param_ty)?;
                                         *arg = BasicMetadataValueEnum::from(coerced);
                                     }
@@ -6696,13 +6693,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.wrap_c_string(pv).map(BasicValueEnum::from)
             }
             _ => {
-                if std::env::var("MIMI_VERBOSE").is_ok() {
-                    eprintln!(
-                        "DBG numeric_convert fail: {:?} → {target:?}",
-                        value.get_type()
-                    );
-                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
-                }
                 Err(CompileError::Unsupported(format!(
                     "resolved numeric conversion {:?} → {target:?} is not supported",
                     value.get_type()

@@ -2591,15 +2591,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                         // the element bound as bare i64 and field access
                         // failed E0700 in the legacy emitter.
                         if let Expr::Ident(src_name) = init.unlocated() {
-                            if std::env::var("MIMI_VERBOSE").is_ok() {
-                                eprintln!(
-                                    "DBG let-ident inherit: name={} src={} src_ty_names={:?} src_ty={:?}",
-                                    name,
-                                    src_name,
-                                    self.var_type_names.get(src_name),
-                                    self.var_types.get(src_name)
-                                );
-                            }
                             if !self.var_type_names.contains_key(name.as_str()) {
                                 if let Some(src_ty) = self.var_type_names.get(src_name).cloned() {
                                     self.var_type_names.insert(name.clone(), src_ty);

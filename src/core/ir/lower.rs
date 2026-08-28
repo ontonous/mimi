@@ -8012,19 +8012,6 @@ mod tests {
         let bodies = lower_checked_transition_bodies(&file, &program).expect("lower transition");
         let owner = NodeId("transition:Calc::add::Zero".into());
         let body = &bodies[&owner];
-        eprintln!("DBG root ty: {:?}", body.root.ty);
-        eprintln!(
-            "DBG root stmts: {:?}",
-            body.root
-                .statements
-                .iter()
-                .map(|s| &s.kind)
-                .collect::<Vec<_>>()
-        );
-        eprintln!(
-            "DBG result: {:?}",
-            body.root.result.as_ref().map(|r| &r.kind)
-        );
         assert!(body
             .locals
             .values()

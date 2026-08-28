@@ -262,9 +262,6 @@ impl<'a> Checker<'a> {
         }
 
         let obj_ty = self.infer_expr(obj, scopes);
-        if std::env::var("MIMI_DBG_LK").is_ok() {
-            eprintln!("DBG obj_ty={}", crate::core::fmt_type(&obj_ty));
-        }
         // Capability method dispatch: Type::Cap(name) with split/drop.
         // Interp: Value::Cap(components); split() → Tuple of single-component
         // caps, drop() → unit. Checker mirrors the component count from the
