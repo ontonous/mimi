@@ -1,0 +1,23 @@
+// Regression guard for the dual-backend parity fix: map_list / filter_list /
+// reduce_list were VM-only builtins and produced error[E0700] in the native
+// backend when called directly (without `use std::collections`). They are the
+// same higher-order-list operations as map / filter / reduce and must compile
+// and run identically on both the interpreter (mimi run) and the native backend
+// (mimi build). This file exercises the DIRECT builtin spelling (no import),
+// on i32 and f64. See hof_list_builtins_std.mimi for the stdlib-import path.
+func main() {
+    let xs = [1, 2, 3, 4]
+
+    let doubled = map_list(xs, fn(x: i32) -> i32 { x * 2 })
+    let big = filter_list(xs, fn(x: i32) -> bool { x > 2 })
+    let total = reduce_list(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
+
+    println(doubled)
+    println(len(big))
+    println(total)
+
+    // f64 variant must also round-trip through both backends.
+    let fs = [1.0, 2.0, 3.0, 4.0]
+    let ftotal = reduce_list(fs, fn(acc: f64, x: f64) -> f64 { acc + x }, 0.0)
+    println(ftotal)
+}

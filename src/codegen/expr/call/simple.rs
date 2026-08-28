@@ -6311,8 +6311,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Ident(name) => {
                 match name.as_str() {
                     "type_name" | "type_fields" | "type_variants" | "keys" | "values" | "map"
-                    | "filter" | "reduce" => {
-                        return self.compile_builtin_intrinsic(name, args, vars);
+                    | "filter" | "reduce" | "map_list" | "filter_list" | "reduce_list" => {
+                        // `map_list` / `filter_list` / `reduce_list` are the same
+                        // higher-order list operations as `map` / `filter` / `reduce`;
+                        // the `*_list` spellings were only ever wired through the VM
+                        // interpreter, leaving the native backend to fall through to
+                        // the E0700 catch-all. Route them to the canonical intrinsic
+                        // so both backends share one implementation (no dual-backend
+                        // split, no redundant second code path to maintain).
+                        let canonical = match name.as_str() {
+                            "map_list" => "map",
+                            "filter_list" => "filter",
+                            "reduce_list" => "reduce",
+                            other => other,
+                        };
+                        return self.compile_builtin_intrinsic(canonical, args, vars);
                     }
                     // 条款 11 escape hatch: unsafe_cast_protocol(x) is an
                     // identity cast — the value passes through unchanged; the

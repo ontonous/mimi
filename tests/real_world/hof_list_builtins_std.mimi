@@ -1,0 +1,22 @@
+// Companion to hof_list_builtins.mimi: exercises map_list / filter_list /
+// reduce_list through the `use std::collections` stdlib-import path (which
+// delegates to the trait method `xs.map(f)`), ensuring the native backend keeps
+// compiling and running it identically to the interpreter. Regression guard
+// against breaking the originally-working path.
+use std::collections
+
+func main() {
+    let xs = [1, 2, 3, 4]
+
+    let doubled = map_list(xs, fn(x: i32) -> i32 { x * 2 })
+    let big = filter_list(xs, fn(x: i32) -> bool { x > 2 })
+    let total = reduce_list(xs, fn(acc: i32, x: i32) -> i32 { acc + x }, 0)
+
+    println(doubled)
+    println(len(big))
+    println(total)
+
+    let fs = [1.0, 2.0, 3.0, 4.0]
+    let ftotal = reduce_list(fs, fn(acc: f64, x: f64) -> f64 { acc + x }, 0.0)
+    println(ftotal)
+}
