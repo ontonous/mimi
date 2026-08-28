@@ -1,6 +1,6 @@
 # Phase E 判死/出清状态（0.1.7）
 
-> 来源：`devdocs/v0.37/feature-design-review-0.37.md` §3/§5。
+> 来源：`v0.37/feature-design-review-0.37.md` §3/§5。
 > 本文件是受控文档快照，随删除提交持续更新。
 
 | # | 项 | 状态 | 证据 |

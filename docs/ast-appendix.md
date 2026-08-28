@@ -189,7 +189,7 @@ The pre-0.1 design requires:
 
 ## 4. Required Next Layer: Typed Resolved IR
 
-*[source: devdocs/pre-0.1/05-rc-migration-and-gates.md §2 Phase 2]*
+*[source: pre-0.1/05-rc-migration-and-gates.md §2 Phase 2]*
 
 The normative requirement `TOOL-RESOLUTION-001` requires a typed resolved IR layer between checker and backends. The current implementation is partial: declaration catalogs and finalized function signatures exist, while body-level calls, conversions, effects, Session residuals, and general resource facts are not yet fully typed. The target semantics remain authoritative in the language specification.
 

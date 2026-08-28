@@ -1,8 +1,8 @@
 # Mimi 语法参考（EBNF）
 
-> **Authority**: 本文档是 `devdocs/v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）
+> **Authority**: 本文档是 `v0.34/golden/syntax-reference.golden.md`（parser 实况 EBNF）
 > 的渲染副本。语法以 golden 为准；本文档 0.34.5 起由 golden 重新生成。
-> **Semantic authority**: `docs/language-spec.md`（extracted from `devdocs/pre-0.1/`）。
+> **Semantic authority**: `docs/language-spec.md`（extracted from `pre-0.1/`）。
 > When this file and `language-spec.md` conflict on semantics, `language-spec.md` prevails.
 >
 > **Status tags**: Each production is tagged `[stable]`, `[experimental]`, `[removed]`, or `[not-yet-implemented]`.
@@ -10,7 +10,7 @@
 >
 > Version: v0.1.8-dev (2026-08-19, 0.1.7 shipped; 0.1.8 identity campaign；synced from golden — 0.36.54 Phase D 定案)
 > Implementation: v0.1.8-dev (internal sprint 0.38.0)
-> Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `devdocs/v0.34/golden/syntax-reference.golden.md`
+> Data sources: `src/lexer/`, `src/parser/`, `src/ast.rs`, `v0.34/golden/syntax-reference.golden.md`
 > 渲染例外（与 golden 的有意差异）：golden 的标题/引言元块与 §7 差异台账不进入本副本；
 > §7 台账见 golden 原文（0.34.33 起差异归零）。
 
@@ -354,7 +354,7 @@ Attributes := { '#[' 'derive' '(' ('Debug'|'Clone'|'Eq') { ',' } ')' ']'    (* C
 ## 7. 与 golden 的差异
 
 无差异（0.34.33 起由 golden 重新生成）。差异台账维护在
-`devdocs/v0.34/golden/syntax-reference.golden.md` §7。
+`v0.34/golden/syntax-reference.golden.md` §7。
 
 ---
 ## 附录 A：产生式坐标速查

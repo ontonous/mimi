@@ -62,9 +62,9 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 
 ## 设计不变量
 
-[架构修正案（2026-07-25）](devdocs/v0.31/architecture-amendment-1.0.md)经九轮外部盲审后确立了 10 条设计裁决：
+架构修正案（2026-07-25）经九轮外部盲审后确立了 10 条设计裁决：
 
-> **⚠ 这是设计裁决，不是冻结的 API。** Mimi 是实验性早期语言，距离 1.0 遥远：破坏性更改可自由进行，"冻结"意味着**锚定**开发，而非**锁定**表面语法。裁决固定的是设计**取向**（稀疏优于稠密、禁止嵌套 Flow、无 WAL）——其表面拼写仍可 break。真正的长期资产只有设计思想与不变量套件（L1/L2/L3 + 双后端等价）。见 `devdocs/v0.36/README.md`。
+> **⚠ 这是设计裁决，不是冻结的 API。** Mimi 是实验性早期语言，距离 1.0 遥远：破坏性更改可自由进行，"冻结"意味着**锚定**开发，而非**锁定**表面语法。裁决固定的是设计**取向**（稀疏优于稠密、禁止嵌套 Flow、无 WAL）——其表面拼写仍可 break。真正的长期资产只有设计思想与不变量套件（L1/L2/L3 + 双后端等价）。见 CHANGELOG.md。
 
 | # | 不变量 | 含义 |
 |---|--------|------|
@@ -79,7 +79,7 @@ Mimi 是生产编译后端。意图层设计使用 **MimiSpec**（`.mms`），�
 | 9 | **`?` 之前禁止线性消费** | Checker 静态拦截：fallible 操作之前消费线性资源 → 编译错误。 |
 | 10 | **无同步 Pinned 超时** | 可能挂死的 C 函数放到 ForeignTask（异步）。不存在同步看门狗。 |
 
-> 完整修正案：13 条款 + 10 不变量。与白皮书（`devdocs/Mimi语言特性设计研究.md`）冲突时以修正案为准。
+> 完整修正案：13 条款 + 10 不变量。与白皮书冲突时以修正案为准。
 
 ---
 
@@ -366,7 +366,6 @@ mimi/
 ├── examples/                   # 示例程序（28 个）
 ├── demos/                      # 演示程序（23 个）
 ├── tests/real_world/           # MCDD 真实程序双后端套件（69 个程序）
-├── devdocs/                    # 设计文档、盲审报告、修正案、路线图
 ├── scripts/                    # 构建与 CI 脚本
 ├── Cargo.toml
 └── CHANGELOG.md
@@ -424,8 +423,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ### 文档索引与外部盲审
 
-精选关键文档与九轮外部盲审索引已下沉至 [`devdocs/key-references.md`](devdocs/key-references.md)；
-完整活跃文档索引见 [`devdocs/README.md`](devdocs/README.md)。
+精选关键文档与九轮外部盲审索引均汇总于 CHANGELOG.md。
 
 
 ---
@@ -434,13 +432,13 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 ## 版本历史
 
 ### 1. 当前版本
-- **0.1.9-dev**（当前）：在 0.1.8 语义诚实 + 身份纯度基础上，延续至 linear T + 权限闭环（0.1.9）。见 `devdocs/v0.38/README.md`、`devdocs/v0.39/README.md`。
+- **0.1.9-dev**（当前）：在 0.1.8 语义诚实 + 身份纯度基础上，延续至 linear T + 权限闭环（0.1.9）。见 CHANGELOG.md。
 
 ### 2. 当前大版本（0.1.x）
-- **0.1.0 → 0.1.8**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）。逐 minor 细节见 `devdocs/v0.34/`–`v0.39/`。
+- **0.1.0 → 0.1.8**：CheckedProgram 语义中枢、Typed Resolved IR、HM 统一、CFG/ownership、Bytecode VM 唯一解释器、Codegen 全量迁移、黄金文档 + 语法冻结（0.1.4）、  核心深度闭环（0.1.6）、Wave-3 基建诚实收口（0.1.7）。逐 minor 细节见 CHANGELOG.md。
 
 ### 3. PRE0.1（v0.7 – v0.30）
-- v0.7（Z3 + FFI codegen）→ v0.30（止血，清零 15 项架构债务）。1863 commits、66 个 `mimi-v*` tag。详细历史归档于 `devdocs/archive/`。
+- v0.7（Z3 + FFI codegen）→ v0.30（止血，清零 15 项架构债务）。1863 commits、  66 个 `mimi-v*` tag。详细历史见 CHANGELOG.md。
 
 > 完整变更日志：[CHANGELOG.md](CHANGELOG.md)。
 

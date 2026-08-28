@@ -4,7 +4,7 @@
 #
 # ⚠ "stable" 澄清（2026-08）：本索引的 `target = "stable"` 是"当前锚定态"（给
 # sprint 的稳定靶子），不是 1.0 锁定承诺。Mimi 是实验性早期语言，breaking 自由；
-# 核心深度闭环（0.36.x，见 devdocs/v0.36/README.md）可推翻 stable 项。
+# 核心深度闭环（0.36.x，见 v0.36/README.md）可推翻 stable 项。
 schema_version = 1
 spec_version = "mimi-1.0-draft-1"
 

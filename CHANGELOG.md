@@ -78,8 +78,45 @@
 real_world `probe_q15.mimi`（CLI 级双后端输出对拍）。已知边界登记：未类型化 map 的
 f64/bool 异构值受句柄类型擦除限制仍需窄提示（单类型链精确）。
 
-门禁：lib **5669/0/7**、dual 1030 全绿、golden 重生成（新增两条 runtime 声明）、
+ 门禁：lib **5669/0/7**、dual 1030 全绿、golden 重生成（新增两条 runtime 声明）、
 fmt 干净。
+
+### 0.39.142+ — JSON 序列化双后端 parity 全闭合 + E0722 跨发射器泛型 ABI 根治（L1 修复族）
+
+0.39.141 之后的 to_json 序列化族与 E0722 跨发射器泛型 ABI 族修复（双后端对拍驱动，
+全部收编 real_world / `dual_` 回归）：
+
+- **to_json 递归序列化器单一真源（L1 parity）**：native `to_json` 改为镜像 VM
+  `value_to_json`（`mimi_value_to_json` 递归序列化器，3aaba88f），消除两套实现长期
+  漂移；新增专用 `mimi_to_json_f64`（按小步语义 §3 浮点确定性渲染）+ 嵌套 record
+  递归（7ba4734f），修复前 native 浮点/嵌套 record 与 VM 不一致。
+- **嵌套容器正确序列化**：`Option<List<X>>`（d7da1a85）、`Result<Option<List<X>>>`
+  （d7da1a85）、`List<Option<X>>`（232fd890）经递归序列化器正确展开，修复前 native
+  输出裸句柄或非法 JSON。
+- **自定义 enum / Set / Map 递归序列化**：自定义 enum 经递归序列化器路由
+  （b46d1fd4）；Set/Map 递归序列化受容器元素 ABI 修复门控（49807761），修复前
+  复合值序列化缺失。
+- **透明类型别名准入 resolved native slice（36f5a81e）**：`type Id = i64` 等透明别名
+  此前在 `to_json` 路径以内部诊断 E0700 fail-closed；现与底层原始类型同权（承接
+  0.39.140 透明别名同权，补齐序列化面）。
+- **map-literal 值类型推断（a865f1c8）**：动态 map 字面量值类型此前未推断，resolved
+  管线 `to_json(m)` 落整数臂输出裸句柄；现与 VM parity（承接 0.39.141 未类型化 map
+  序列化根修）。
+- **E0722 跨发射器泛型 ABI 根治（9b9a153a + ba58c607）**：根因 = resolved emitter
+  Call 臂对带 `type_arguments` 的泛型调用、及复合 T 容器（`List<(T,T)>` 等非标量列表
+  元素）在跨发射器 ABI 发生类型擦除 → E0722（0.39.124 / 0.39.135 类缺口）。修复：
+  (1) 泛型实例化签名用具体实参类型替换（route-a legacy 单态兜底收敛为根治）；
+  (2) 非标量列表元素表示跨发射器统一（ba58c607）。6 个 E0722 靶测
+  （`dual_generic_linear_option_flip_cap_ok` / `linear_kind_infection_nested_dual_backend`
+  / `dual_container_destructure_tuple_alias` 等）现零 E0722 硬错、native≡VM。
+- **修复史注记（防回退）**：`478a2c1a` 的"放宽 slice 准入"式修复曾引入 6 项 L1 回归
+  （usability-ledger Round 56），经 `74d4a130` revert，最终由 `9b9a153a` / `ba58c607`
+  的根因修复替代，零回归。`usability-ledger.md` Round 32–56 的 E0722 调查台账随之闭环。
+- **清理**：移除 codegen 遗留 DBG `eprintln!` 调试输出（220df6e8）。
+
+门禁：`dual_` 套件全绿（含 6 个 E0722 靶测 + to_json 嵌套/递归回归）；`dispatch_stat
+check --zero` 维持全语料 0 fallback（透明别名 + map 推断使更多 callable 入 resolved
+slice，E0722 形态不再触发）。
 
 ### 0.39.140 — 泛型调用返回 ABI/所有权归一 + actor 容器返回 + 透明别名同权（L1 修复族）
 

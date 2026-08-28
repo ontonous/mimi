@@ -62,9 +62,9 @@ Mimi is the production compilation backend. MimiSpec (`.mms`) was removed in 0.1
 
 ## Design Invariants
 
-The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1.0.md) established 10 design rulings after nine rounds of external blind review:
+The Architecture Amendment (2026-07-25) established 10 design rulings after nine rounds of external blind review:
 
-> **⚠ Design rulings, not a frozen API.** Mimi is an early experimental language far from 1.0: breaking changes are freely allowed, and "freeze" means **anchoring** development, not **locking** surface syntax. The rulings fix design *orientation* (sparse over dense, no nested Flow, no WAL) — their surface spelling is still breakable. The only long-term assets are the design ideas and the invariant suite (L1/L2/L3 + dual-backend equivalence). See `devdocs/v0.36/README.md`.
+> **⚠ Design rulings, not a frozen API.** Mimi is an early experimental language far from 1.0: breaking changes are freely allowed, and "freeze" means **anchoring** development, not **locking** surface syntax. The rulings fix design *orientation* (sparse over dense, no nested Flow, no WAL) — their surface spelling is still breakable. The only long-term assets are the design ideas and the invariant suite (L1/L2/L3 + dual-backend equivalence). See CHANGELOG.md.
 
 | # | Invariant | Meaning |
 |---|-----------|---------|
@@ -79,7 +79,7 @@ The [Architecture Amendment (2026-07-25)](devdocs/v0.31/architecture-amendment-1
 | 9 | **No linear consumption before `?`** | Checker statically rejects consuming linear resources before a fallible operation. |
 | 10 | **No synchronous pinned timeout** | Hanging C functions go to ForeignTask (async). No synchronous watchdog. |
 
-> Full amendment: 13 clauses + 10 invariants. Supersedes the white paper (`devdocs/Mimi语言特性设计研究.md`) where they conflict.
+> Full amendment: 13 clauses + 10 invariants. Supersedes the white paper where they conflict.
 
 ---
 
@@ -367,7 +367,6 @@ mimi/
 ├── examples/                   # Example programs (28)
 ├── demos/                      # Demo programs (23)
 ├── tests/real_world/           # MCDD real-world dual-backend suite (69 programs)
-├── devdocs/                    # Design docs, blind reviews, amendment, roadmap
 ├── scripts/                    # Build & CI scripts
 ├── Cargo.toml
 └── CHANGELOG.md
@@ -425,9 +424,8 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ### References & External Reviews
 
-Curated key references and the nine-round external blind-review index are maintained in
-[`devdocs/key-references.md`](devdocs/key-references.md). The full active-document index is
-[`devdocs/README.md`](devdocs/README.md).
+Curated key references and the nine-round external blind-review index are summarized in
+CHANGELOG.md.
 
 
 ---
@@ -437,17 +435,17 @@ Curated key references and the nine-round external blind-review index are mainta
 
 ### 1. Current Version
 - **0.1.9-dev** (current): continues the semantic-honesty + identity-purity line (0.1.8) into
-  linear kinds + capabilities (0.1.9). See `devdocs/v0.38/README.md`, `devdocs/v0.39/README.md`.
+  linear kinds + capabilities (0.1.9). See CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)
 - **0.1.0 → 0.1.8**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,
   Bytecode VM as sole interpreter, full codegen migration, golden document + syntax freeze (0.1.4),
   Deep core closure (0.1.6), Wave-3 honest infrastructure closeout (0.1.7). Per-minor detail in
-  `devdocs/v0.34/`–`v0.39/`.
+  CHANGELOG.md.
 
 ### 3. Pre-0.1 (v0.7 – v0.30)
 - v0.7 (Z3 + FFI codegen) → v0.30 (hemostasis, 15 architecture debts cleared). 1863 commits,
-  66 `mimi-v*` tags. Detailed history archived in `devdocs/archive/`.
+  66 `mimi-v*` tags. Detailed history in CHANGELOG.md.
 
 > Full changelog: [CHANGELOG.md](CHANGELOG.md).
 

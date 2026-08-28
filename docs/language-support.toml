@@ -4,12 +4,12 @@ schema_version = 1
 implementation_version = "0.1.9-dev (internal sprint 0.39.128)"
 
 # ⚠ 2026-08-02：本文件由 0.31.36 落后状态在 0.34.5 刷新版本号。
-# 与实现冲突时以 devdocs/v0.34/golden-document.md 与
+# 与实现冲突时以 v0.34/golden-document.md 与
 # golden/syntax-reference.golden.md 为准。probe 规则见 golden-document §9.3。
 #
 # ⚠ 成熟度框架澄清（2026-08）：本矩阵描述"当前锚定态"（给 sprint 的稳定靶子），
 # 不是 1.0 锁定承诺。Mimi 是实验性早期语言，breaking 自由；核心深度闭环
-# （0.36.x，见 devdocs/v0.36/README.md）可推翻本矩阵中的 stable 项。
+# （0.36.x，见 v0.36/README.md）可推翻本矩阵中的 stable 项。
 
 # Every dimension uses:
 # unsupported | partial | complete | not_applicable
@@ -240,7 +240,7 @@ verify = "unsupported"
 fmt = "partial"
 lsp = "partial"
 probe = "LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test capability -- --test-threads=1"
-evidence = "Raw string effects and the old `cap` keyword still use a thread-local registry with cross-thread re-registration (src/runtime/capability.rs) — not the experimental target model. Since 0.1.9 phase-d (0.39.71–90, src/tests/phase_d.rs) `SystemToken` (make_token / token_id / TokenChannel) implements process-wide unique identity and cross-task move with old-end invalidation (E0304), superseding the re-register protocol (devdocs/v0.39/phase-d-plan.md §2). The `cap` keyword remains the legacy path pending deprecation."
+evidence = "Raw string effects and the old `cap` keyword still use a thread-local registry with cross-thread re-registration (src/runtime/capability.rs) — not the experimental target model. Since 0.1.9 phase-d (0.39.71–90, src/tests/phase_d.rs) `SystemToken` (make_token / token_id / TokenChannel) implements process-wide unique identity and cross-task move with old-end invalidation (E0304), superseding the re-register protocol (v0.39/phase-d-plan.md §2). The `cap` keyword remains the legacy path pending deprecation."
 
 [[support]]
 requirement = "VERIFY-CORE-001"
