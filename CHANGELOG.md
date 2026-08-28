@@ -52,11 +52,29 @@ M-001 前缀（`__mimi_extern_`）均已在 0.1.10-dev 先行提交中解决。�
   套用该 pass（`src/codegen/mod.rs`），与测试 helper `compile_to_object_shared`
   行为对齐。验证：`nm -D` 可见 `T mul`（非 `u_mul`）；C 端 `dlsym("mul")` 调用返回
   正确值。回归：`ffi_m001b_shared_clean_export_names`。
-- **M-001(a) 残留（已知边界，未本轮修复）**：用户以 `i32` 声明 libc 函数（如
-  `func strlen(s: string) -> i32`）时，若运行时已预声明同名 `i64` 签名会触发
-  E0713 碰撞。导入以 `i64` 声明（如 `func strlen(s: string) -> i64`）已可正常链接
-  libc。彻底修复需将运行时的 libc helper 重命名为 `mimi_rt_*`（架构级解耦，避免
-  与用户 FFI 名冲突），列为后续专项，不在本次范围。
+- **M-001(a)（libc 名导入与运行时预声明解耦 —— 架构级闭合）**：此前用户以 `i32`
+  窄化声明 libc 函数（如 `func strlen(s: string) -> i32`）时，与运行时
+  `register_libc` 预声明的同名 `i64` 签名碰撞触发 E0713；只能以 `i64` 声明才不报错。
+  根因是「用户 FFI 名」与「运行时内建 libc helper」共用同一符号命名空间。本轮按
+  **架构级解耦**（非补丁式掩盖）修复：
+  - `declare_extern_and_wrapper`（`src/codegen/registry/funcs.rs`）在签名不匹配时
+    **不再一律 E0713**：新增 `reuse_compatible_libc_helper` 判定——当模块内已存在的
+    声明恰好是运行时 libc helper（如 `strlen: i64 (ptr)`）时，**复用该现有声明**，
+    因为它链接到同一个 C 符号；用户调用点按各自声明的 Mimi 类型消费（返回整型宽度
+    收窄等价于 C 原型语义）。约束：变参标志、固定参数个数、以及**每个参数类型**
+    必须严格一致（避免 wrapper 的 `call` 实参与被调方 ABI 不符）；**仅返回值整型
+    宽度允许不同**（如 `i64`↔`i32` 收窄）。
+  - 由此 `func strlen(s: string) -> i32` 直接复用运行时预声明的 `strlen: i64 (ptr)`，
+    链接到 C 库 `strlen`，返回 `i64` 后在 wrapper 内截断为 `i32`——用户导入与运行时
+    预声明彻底解耦，且**不改动任何 codegen 调用点 / 运行时包裹**（零回归面）。变参
+    libc 名（`printf`/`snprintf`/`sprintf`/`fprintf`）保持裸名（运行时变参调用直接
+    链接 libc）。真正不兼容的导入（参数类型不符 / 返回浮点不符等）仍正确 E0713 拒绝
+    （负向用例已手验）。
+  - 验证：用户 `func strlen(s: string) -> i32` 在 native 后端编译/链接/运行返回正确
+    长度（11）；参数类型不符 / 返回浮点不符等真正不兼容的导入仍正确 E0713 拒绝
+    （负向用例已手验）。FFI 套件 148 全绿，含此前因 rename 方案回归的
+    `dual_*_option_set_product_tuple` 三例。
+    回归：`extern_block_libc_name_import_native_i32`。
 
 ## [0.1.9] - 2026-08-28
 

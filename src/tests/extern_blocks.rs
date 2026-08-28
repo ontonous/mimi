@@ -94,3 +94,26 @@ func main() -> i32 {
     let v = run_source(src);
     assert_eq!(v, interp::Value::Int(42));
 }
+
+#[test]
+fn extern_block_libc_name_import_native_i32() {
+    // M-001(a): a user FFI import of a libc name at a *narrower* int width
+    // (`i32` instead of the runtime's pre-declared `i64`) must not collide with
+    // the codegen pre-declared helper. The runtime now declares its libc helpers
+    // under the `mimi_rt_*` prefix, leaving the bare libc name free for the
+    // user import (links to libc directly). This is the architectural closure of
+    // the import-naming collision — builtins (`mimi_rt_*`) and user FFI imports
+    // (`*`) live in disjoint symbol namespaces.
+    let src = r#"
+extern "C" {
+    func strlen(s: string) -> i32;
+}
+func main() -> i32 {
+    let s = "hello world";
+    println(strlen(s));
+    0
+}
+"#;
+    let out = compile_and_run(src).expect("native compile+run of libc-name import failed");
+    assert_eq!(out.trim(), "11");
+}

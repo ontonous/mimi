@@ -747,6 +747,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// M-001(a): decide whether a user FFI import may *reuse* a pre-existing
+    /// module declaration (typically a runtime libc helper from `register_libc`)
+    /// whose signature is not byte-for-byte identical.
+    ///
+    /// The only relaxation allowed is the **return** integer width: a user
+    /// importing `func strlen(s: string) -> i32` against the runtime's
+    /// `strlen: i64 (ptr)` reuses the same C symbol and truncates the `size_t`
+    /// result — exactly C prototype semantics. **Parameters must match exactly**
+    /// (count, variadic flag, and each type), because the wrapper builds the
+    /// `call` against the reused declaration's parameter types; a mismatched
+    /// integer-width parameter would emit an argument whose LLVM type disagrees
+    /// with the callee and corrupt the ABI. A genuinely different param type
+    /// still rejects with E0713, which is the correct outcome.
+    fn reuse_compatible_libc_helper(
+        e_ty: &FunctionType<'ctx>,
+        w_ty: &FunctionType<'ctx>,
+    ) -> bool {
+        if e_ty.is_var_arg() != w_ty.is_var_arg() {
+            return false;
+        }
+        let e_params = e_ty.get_param_types();
+        let w_params = w_ty.get_param_types();
+        if e_params.len() != w_params.len() {
+            return false;
+        }
+        // Parameters must match exactly — no integer-width relaxation (see above).
+        if e_params != w_params {
+            return false;
+        }
+        // Return type may differ only by integer width.
+        match (e_ty.get_return_type(), w_ty.get_return_type()) {
+            (Some(a), Some(b)) => {
+                a == b
+                    || matches!(a, BasicTypeEnum::IntType(_))
+                        && matches!(b, BasicTypeEnum::IntType(_))
+            }
+            (None, None) => true, // both void
+            _ => false,
+        }
+    }
+
     /// Declare the raw extern symbol and the Mimi wrapper function.
     fn declare_extern_and_wrapper(
         &self,
@@ -773,6 +814,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 && e_ty.get_return_type() == w_ty.get_return_type()
                 && e_ty.get_param_types() == w_ty.get_param_types();
             if sig_matches {
+                existing
+            } else if Self::reuse_compatible_libc_helper(&e_ty, &w_ty) {
+                // M-001(a): the module already declares this symbol as a runtime
+                // libc helper (e.g. `strlen: i64 (ptr)` via register_libc). A user
+                // FFI import with a narrower int *return* width (e.g.
+                // `func strlen(s: string) -> i32`) would otherwise collide (E0713).
+                // Reuse the existing declaration: it links to the very same C
+                // symbol, and the user's call sites consume it through their
+                // declared Mimi type (int-width truncation on return matches C
+                // prototype semantics). Parameters must match exactly (count +
+                // variadic flag + each type) so the wrapper's `call` agrees with
+                // the callee; only the return integer width may differ.
                 existing
             } else {
                 return Err(CompileError::LlvmError(format!(
