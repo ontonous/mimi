@@ -1,0 +1,29 @@
+// Regression (L1 + L3): spawn of a nested `List<List<i32>>` used to read
+// garbage / out-of-bounds on the native backend. The inner-list deep-copy
+// allocated `count*inner_elem_size` bytes where `inner_elem_size` was the
+// SEMANTIC width (e.g. 4 for i32) instead of the storage stride of 8 (every
+// list element is stored as i64). The worker then read 64 bytes out of a
+// 40-byte allocation. VM was always correct.
+//
+// After the fix (inner storage stride forced to 8, matching FIX 1 at the
+// top level) the worker sees the exact same elements on both backends.
+// Self-asserts via exit code so the dual-backend harness passes for free.
+func sum_nested(xs: List<List<i32>>) -> i32 {
+    let mut total = 0
+    for inner in xs {
+        for x in inner {
+            total = total + x
+        }
+    }
+    total
+}
+
+func main() -> i32 {
+    // single 10-element inner list -> sum 55
+    let t1 = spawn sum_nested([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
+    let r1 = await t1
+    // multiple inner lists -> (1+2+3)+(4+5+6)+(7+8+9+10) = 55
+    let t2 = spawn sum_nested([[1, 2, 3], [4, 5, 6], [7, 8, 9, 10]])
+    let r2 = await t2
+    if r1 == 55 && r2 == 55 { 0 } else { 1 }
+}

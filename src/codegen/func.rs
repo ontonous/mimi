@@ -4624,7 +4624,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let last_val = self.compile_block_last_val(&func.body, &mut vars)?;
 
         if !ends_with_explicit_return {
-            self.emit_implicit_return(ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr)?;
+            self.emit_implicit_return(
+                ret_type, ret_ty_ast, last_val, &func.name, &vars, last_expr,
+            )?;
         }
         self.end_function_heap_scope();
         // 0.39.x stdlib matrix sweep (nondeterministic-SIGSEGV root cause #2,

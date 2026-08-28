@@ -760,10 +760,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// integer-width parameter would emit an argument whose LLVM type disagrees
     /// with the callee and corrupt the ABI. A genuinely different param type
     /// still rejects with E0713, which is the correct outcome.
-    fn reuse_compatible_libc_helper(
-        e_ty: &FunctionType<'ctx>,
-        w_ty: &FunctionType<'ctx>,
-    ) -> bool {
+    fn reuse_compatible_libc_helper(e_ty: &FunctionType<'ctx>, w_ty: &FunctionType<'ctx>) -> bool {
         if e_ty.is_var_arg() != w_ty.is_var_arg() {
             return false;
         }

@@ -335,7 +335,9 @@ pub(super) fn resolved_type_to_ast(
             .map(|p| crate::ast::Type::Name("Option".to_string(), vec![p])),
         Result { ok, error } => {
             let ok_t = table.get(ok).and_then(|t| resolved_type_to_ast(t, table));
-            let err_t = table.get(error).and_then(|t| resolved_type_to_ast(t, table));
+            let err_t = table
+                .get(error)
+                .and_then(|t| resolved_type_to_ast(t, table));
             match (ok_t, err_t) {
                 (Some(o), Some(e)) => {
                     Some(crate::ast::Type::Name("Result".to_string(), vec![o, e]))
@@ -2617,8 +2619,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // round can emit a resolved monomorphization instead
                                 // of routing to the legacy monomorphizer. Emission
                                 // behavior is unchanged by this recording.
-                                self.pending_generic_instances
-                                    .push((callee_fn.qualified_name.clone(), call.type_arguments.clone()));
+                                self.pending_generic_instances.push((
+                                    callee_fn.qualified_name.clone(),
+                                    call.type_arguments.clone(),
+                                ));
                                 if let Some(fdef) = self
                                     .generator
                                     .func_defs
@@ -4187,22 +4191,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // force-heaps. So take the *actual* storage type from
                             // the variable entry when the argument is a plain
                             // variable; otherwise fall back to `llvm_type_for`.
-                            let actual_ty: Option<BasicTypeEnum<'ctx>> =
-                                match &call.arguments[0].value.kind {
-                                    ResolvedExprKind::Load(place)
-                                        if place.projections.is_empty() =>
-                                    {
-                                        frame.locals.get(&place.base).map(|entry| entry.llvm_type)
-                                    }
-                                    _ => crate::codegen::expr::call::helpers::parse_type_str(
-                                        &obj_type,
-                                    )
-                                    .and_then(|t| self.generator.llvm_type_for(&t)),
-                                };
-                            if let Some(value) = self
-                                .generator
-                                .emit_typed_to_json_dispatch(&obj_type, arguments[0], actual_ty)?
+                            let actual_ty: Option<BasicTypeEnum<'ctx>> = match &call.arguments[0]
+                                .value
+                                .kind
                             {
+                                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                                    frame.locals.get(&place.base).map(|entry| entry.llvm_type)
+                                }
+                                _ => crate::codegen::expr::call::helpers::parse_type_str(&obj_type)
+                                    .and_then(|t| self.generator.llvm_type_for(&t)),
+                            };
+                            if let Some(value) = self.generator.emit_typed_to_json_dispatch(
+                                &obj_type,
+                                arguments[0],
+                                actual_ty,
+                            )? {
                                 return self.wrap_builtin_string_result(value, &call.result);
                             }
                         }
@@ -4590,13 +4593,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 Ok(integer.const_zero().into())
             }
             (ResolvedLiteral::String(text), BasicTypeEnum::StructType(st)) => {
-                // String ABI: {ptr, i64} struct (ptr to null-terminated data, byte length).
-                let global = self
+                // String ABI: {ptr, i64} struct (ptr to data, byte length).
+                // NUL-safe global (BUG E): a string's bytes are stored verbatim
+                // (trailing NUL appended for C consumers); the embedded NUL in a
+                // literal like "a\0b" must NOT truncate the buffer — `build_global_string_ptr`
+                // would, so use `build_global_string_bytes`.
+                let ptr_val = self
                     .generator
-                    .builder
-                    .build_global_string_ptr(text, "resolved_str")
-                    .map_err(|e| CompileError::LlvmError(format!("string literal: {e}")))?;
-                let ptr_val = global.as_pointer_value();
+                    .build_global_string_bytes(text, "resolved_str")?;
                 let len_val = self
                     .generator
                     .context
@@ -4631,12 +4635,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 Ok(integer.const_zero().into())
             }
             (ResolvedConstValue::String(text), BasicTypeEnum::StructType(st)) => {
-                let global = self
+                // NUL-safe global (BUG E): see `emit_resolved_literal` for rationale.
+                let ptr_val = self
                     .generator
-                    .builder
-                    .build_global_string_ptr(text, "resolved_const_str")
-                    .map_err(|e| CompileError::LlvmError(format!("const string: {e}")))?;
-                let ptr_val = global.as_pointer_value();
+                    .build_global_string_bytes(text, "resolved_const_str")?;
                 let len_val = self
                     .generator
                     .context
@@ -4665,11 +4667,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             })
             .collect();
         if let Some(text) = all_text {
-            let global = self
+            // NUL-safe global (BUG E): a text-only f-string may itself contain an
+            // embedded NUL (e.g. f"a\0b"); use the byte-preserving helper.
+            let ptr_val = self
                 .generator
-                .builder
-                .build_global_string_ptr(&text, "resolved_fstr")
-                .map_err(|e| CompileError::LlvmError(format!("fstring literal: {e}")))?;
+                .build_global_string_bytes(&text, "resolved_fstr")?;
             let ptr_ty = self
                 .generator
                 .context
@@ -4683,8 +4685,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 false,
             );
             let len_val = i64_ty.const_int(text.len() as u64, false);
-            let agg =
-                struct_ty.const_named_struct(&[global.as_pointer_value().into(), len_val.into()]);
+            let agg = struct_ty.const_named_struct(&[ptr_val.into(), len_val.into()]);
             return Ok(agg.into());
         }
 
@@ -6133,8 +6134,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             let is_last = arm_index == arms.len() - 1;
             // Unreachable if an earlier arm matches the known state without a
             // guard (it would always take first).
-            let unconditionally_taken_before = (0..arm_index)
-                .any(|j| pattern_matches_static(&arms[j]) && arms[j].guard.is_none());
+            let unconditionally_taken_before =
+                (0..arm_index).any(|j| pattern_matches_static(&arms[j]) && arms[j].guard.is_none());
             let pms = pattern_matches_static(arm);
             let is_live = pms && arm.guard.is_none() && !unconditionally_taken_before;
             let is_live_guarded = pms && arm.guard.is_some() && !unconditionally_taken_before;
@@ -6799,12 +6800,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             {
                 self.generator.wrap_c_string(pv).map(BasicValueEnum::from)
             }
-            _ => {
-                Err(CompileError::Unsupported(format!(
-                    "resolved numeric conversion {:?} → {target:?} is not supported",
-                    value.get_type()
-                )))
-            }
+            _ => Err(CompileError::Unsupported(format!(
+                "resolved numeric conversion {:?} → {target:?} is not supported",
+                value.get_type()
+            ))),
         }
     }
 
@@ -9908,7 +9907,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         let elem_slot =
             self.generator
                 .build_in_bounds_gep(i64_ty, data, &[idx], "spawn_str_list_elem_slot")?;
-        let elem_ptr = self
+        let elem_i64 = self
             .generator
             .build_load(
                 BasicTypeEnum::IntType(i64_ty),
@@ -9916,17 +9915,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "spawn_str_list_elem_i64",
             )?
             .into_int_value();
-        let elem_ptr = self
-            .generator
-            .builder
-            .build_int_to_ptr(elem_ptr, ptr_ty, "spawn_str_list_elem_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("spawn string elem ptr: {e}")))?;
-        let free_str = self.generator.get_runtime_fn("mimi_string_free")?;
+        // Each `List<string>` slot is a fat `MimiStr` box handle (an i64), not a
+        // bare C-string pointer. Freeing it with `mimi_string_free` (which frees
+        // the 16-byte box as a single byte buffer) leaked the boxed string's
+        // inner byte allocation and is otherwise wrong. Use `mimi_str_free_box`,
+        // which frees both the inner bytes and the box.
+        let free_box = self.generator.get_runtime_fn("mimi_str_free_box")?;
         self.generator
             .builder
             .build_call(
-                free_str,
-                &[BasicMetadataValueEnum::PointerValue(elem_ptr)],
+                free_box,
+                &[BasicMetadataValueEnum::IntValue(elem_i64)],
                 "spawn_str_list_elem_free",
             )
             .map_err(|e| CompileError::LlvmError(format!("spawn string elem free: {e}")))?;
@@ -10012,35 +10011,57 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 "spawn_str_list_clone_src_i64",
             )?
             .into_int_value();
-        let src_ptr = self
+        // Since 0.1.8 every `List<string>` slot is a fat `MimiStr` box handle
+        // (an i64 that points at `{magic, _pad, char* ptr, i64 len}`), NOT a
+        // raw C-string pointer. The old code inttoptr'd the box to a `char*` and
+        // ran `strlen` + `mimi_str_clone` on it, so it read the magic bytes as
+        // "string data" and returned garbage (BUG C). Unbox the handle into
+        // `(ptr, len)` and deep-copy the bytes into a fresh owned box so the
+        // worker thread owns its own copy of each string element.
+        let out_ptr_slot = self
             .generator
-            .builder
-            .build_int_to_ptr(src_i64, ptr_ty, "spawn_str_list_clone_src_ptr")
-            .map_err(|e| CompileError::LlvmError(format!("spawn string list src ptr: {e}")))?;
-        let strlen_fn = self.generator.get_runtime_fn("strlen")?;
-        let src_len = self
+            .build_alloca(BasicTypeEnum::PointerType(ptr_ty), "spawn_str_list_out_ptr")?;
+        let out_len_slot = self
             .generator
+            .build_alloca(BasicTypeEnum::IntType(i64_ty), "spawn_str_list_out_len")?;
+        let unbox_fn = self.generator.get_runtime_fn("mimi_str_unbox")?;
+        self.generator
             .builder
             .build_call(
-                strlen_fn,
-                &[BasicMetadataValueEnum::PointerValue(src_ptr)],
-                "spawn_str_list_clone_strlen",
+                unbox_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(src_i64),
+                    BasicMetadataValueEnum::PointerValue(out_ptr_slot),
+                    BasicMetadataValueEnum::PointerValue(out_len_slot),
+                ],
+                "spawn_str_list_clone_unbox",
             )
-            .map_err(|e| CompileError::LlvmError(format!("spawn string list strlen: {e}")))?
-            .try_as_basic_value_opt()
-            .ok_or_else(|| {
-                CompileError::LlvmError("spawn string list strlen returned void".into())
-            })?
+            .map_err(|e| CompileError::LlvmError(format!("spawn string list unbox: {e}")))?;
+        let inner_ptr = self
+            .generator
+            .build_load(
+                BasicTypeEnum::PointerType(ptr_ty),
+                out_ptr_slot,
+                "spawn_str_list_clone_inner_ptr",
+            )?
+            .into_pointer_value();
+        let inner_len = self
+            .generator
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                out_len_slot,
+                "spawn_str_list_clone_inner_len",
+            )?
             .into_int_value();
-        let clone_fn = self.generator.get_runtime_fn("mimi_str_clone")?;
+        let box_copy_fn = self.generator.get_runtime_fn("mimi_str_box_copy")?;
         let clone_handle = self
             .generator
             .builder
             .build_call(
-                clone_fn,
+                box_copy_fn,
                 &[
-                    BasicMetadataValueEnum::PointerValue(src_ptr),
-                    BasicMetadataValueEnum::IntValue(src_len),
+                    BasicMetadataValueEnum::PointerValue(inner_ptr),
+                    BasicMetadataValueEnum::IntValue(inner_len),
                 ],
                 "spawn_str_list_clone",
             )
@@ -10182,7 +10203,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.emit_spawn_string_list_clone(inner_len, inner_data, inner_clone_data)?;
             inner_clone_data
         } else {
-            let inner_size = i64_ty.const_int(inner_elem_size, false);
+            // Each inner-list element is stored as an i64 (8-byte stride) in the
+            // data buffer, exactly like the top-level scalar-list clone path (FIX
+            // 1): `emit_list_literal` allocates `count*8` bytes and coerces every
+            // element to i64. `inner_elem_size` is the *semantic* width (e.g. 4
+            // for i32, 1 for bool), which would under-copy the buffer and leave
+            // the worker reading garbage / OOB. The storage stride is always 8.
+            let inner_size = i64_ty.const_int(8, false);
             let inner_bytes = self
                 .generator
                 .builder
@@ -11456,6 +11483,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 if is_heap_struct_arg[i] {
                     let sv = field_val.into_struct_value();
                     for path in &heap_struct_string_paths[i] {
+                        if path.is_empty() {
+                            continue;
+                        }
                         let mut cur = sv;
                         let last = path.len() - 1;
                         for (idx, &field_idx) in path.iter().enumerate() {
@@ -11479,6 +11509,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         }
                     }
                     for path in &heap_struct_list_paths[i] {
+                        // An empty path means the value itself (not a field of a
+                        // struct) was classified as a heap-struct list/string; it
+                        // is handled by the `is_list_arg` / `is_string_list_arg`
+                        // arms above, not here. Skipping it also avoids the
+                        // `path.len() - 1` underflow panic that fired for
+                        // `List<List<List<T>>>` (the nested-list classifier pushes
+                        // an empty prefix when the element type is itself a
+                        // list/string shape).
+                        if path.is_empty() {
+                            continue;
+                        }
                         let mut cur = sv;
                         let last = path.len() - 1;
                         for (idx, &field_idx) in path.iter().enumerate() {
@@ -11829,7 +11870,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .generator
                         .build_extract_value(sv.into(), 1, "spawn_list_data_in")?
                         .into_pointer_value();
-                    let elem_size = i64_ty.const_int(list_elem_sizes[i], false);
+                    // List data buffers store every scalar element as `i64`
+                    // (8-byte stride) — see `emit_list_literal`, which allocates
+                    // `count * 8` bytes and `coerce_to_i64`s each element, and
+                    // the for-loop reader which GEPs `i64` over the data pointer.
+                    // The semantic element width (`list_elem_sizes[i]`, e.g. 4
+                    // for i32) is NOT the storage width; using it here allocated
+                    // only half the bytes and the worker then read out of bounds
+                    // (heap OOB) past the malloc'd region. Storage stride is
+                    // always 8 bytes, matching the sibling string/nested-list
+                    // clone paths below.
+                    let elem_size = i64_ty.const_int(8, false);
                     let total = self
                         .generator
                         .builder
@@ -12928,10 +12979,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // matches the data-array pointer directly.
                 if item.as_str() == "builtin:type:List" && arguments.len() == 1 {
                     let elem = self.program.resolved_types().get(&arguments[0]);
-                    let elem_is_string = matches!(
-                        elem,
-                        Some(ResolvedType::Primitive(PrimitiveType::String))
-                    );
+                    let elem_is_string =
+                        matches!(elem, Some(ResolvedType::Primitive(PrimitiveType::String)));
                     let elem_is_nested_string = matches!(
                         elem,
                         Some(ResolvedType::Nominal { item: eitem, arguments: eargs, .. })

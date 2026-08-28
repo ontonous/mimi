@@ -599,12 +599,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .into())
                 }
             }
-            _ => {
-                Err(CompileError::Generic(format!(
-                    "field access requires a struct or actor type, got {}",
-                    obj_val.get_type()
-                )))
-            }
+            _ => Err(CompileError::Generic(format!(
+                "field access requires a struct or actor type, got {}",
+                obj_val.get_type()
+            ))),
         }
     }
 

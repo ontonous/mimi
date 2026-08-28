@@ -3044,11 +3044,16 @@ impl BodyLowerer<'_> {
     /// Matches on the short state name to tolerate `Flow::State` vs `State`
     /// spellings in the canonical type / transition-owner strings.
     fn flow_for_state_method(&self, state_name: &str, event: &str) -> Option<String> {
-        let state_short = state_name.rsplit_once("::").map(|(_, s)| s).unwrap_or(state_name);
+        let state_short = state_name
+            .rsplit_once("::")
+            .map(|(_, s)| s)
+            .unwrap_or(state_name);
         self.signatures.keys().find_map(|owner| {
             let (candidate_flow, candidate_event, source_state) = parse_transition_owner(owner)?;
-            let source_short =
-                source_state.rsplit_once("::").map(|(_, s)| s).unwrap_or(source_state);
+            let source_short = source_state
+                .rsplit_once("::")
+                .map(|(_, s)| s)
+                .unwrap_or(source_state);
             ((source_short == state_short || source_state == state_name)
                 && candidate_event == event)
                 .then(|| candidate_flow.to_string())

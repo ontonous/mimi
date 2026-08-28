@@ -1,0 +1,20 @@
+// Regression (L1 + L3): spawn of `List<string>` used to return an empty / wrong
+// string on the native backend. Each element slot is a fat `MimiStr` box handle
+// (an i64) under the 0.1.8 fat ABI, but the clone path inttoptr'd the box to a
+// `char*` and strlen'd it (reading the magic bytes as "data"), then cloned that.
+// The deep-copy now unboxes each handle to (ptr, len) and boxes a fresh copy so
+// the worker owns its element data. Free path now frees the box (not a bare
+// C-string). VM was always correct.
+func concat_all(xs: List<string>) -> string {
+    let mut acc = ""
+    for s in xs {
+        acc = acc + s
+    }
+    acc
+}
+
+func main() -> i32 {
+    let t = spawn concat_all(["abc", "def"])
+    let r = await t
+    if r == "abcdef" { 0 } else { 1 }
+}

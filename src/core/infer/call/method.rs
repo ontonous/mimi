@@ -384,9 +384,7 @@ impl<'a> Checker<'a> {
             // flow-qualified transition resolution by re-entering with the flow
             // name as the receiver and the original receiver prepended as the
             // source-state argument (preserving linear-generation bookkeeping).
-            if let Some(flow_name) =
-                self.flow_transition_for_state_method(type_name, method_name)
-            {
+            if let Some(flow_name) = self.flow_transition_for_state_method(type_name, method_name) {
                 let mut new_args: Vec<Expr> = vec![obj.clone()];
                 new_args.extend_from_slice(args);
                 return self.infer_method_call(

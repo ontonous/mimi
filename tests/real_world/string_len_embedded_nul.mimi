@@ -1,0 +1,15 @@
+// Regression (L1): `.len()` of a string with an embedded NUL (and of a
+// multi-byte UTF-8 string) was wrong on native. String literals were lowered
+// through `build_global_string_ptr`, which truncates the constant at the first
+// embedded NUL — so "a\0b" produced a 2-byte global while the struct still
+// recorded len = 3, and `.len()` counted a truncated/garbage prefix. The fix
+// builds a NUL-preserving byte-array global and counts UTF-8 chars within the
+// recorded byte length. VM was always correct.
+func main() -> i32 {
+    let n1 = "a\0b".len()
+    let nul = "a\0b"
+    let n2 = nul.len()
+    let uni = "你好世界".len()
+    let empty = "".len()
+    if n1 == 3 && n2 == 3 && uni == 4 && empty == 0 { 0 } else { 1 }
+}

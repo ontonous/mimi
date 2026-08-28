@@ -3763,9 +3763,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .unwrap_or_else(|| inner_list)
                             .to_string();
                         let inner_val = BasicMetadataValueEnum::PointerValue(list_alloca);
-                        let list_json = match self
-                            .emit_typed_to_json_dispatch(&format!("List<{}>", elem_ty), inner_val, None)?
-                        {
+                        let list_json = match self.emit_typed_to_json_dispatch(
+                            &format!("List<{}>", elem_ty),
+                            inner_val,
+                            None,
+                        )? {
                             Some(j) => match j {
                                 BasicValueEnum::PointerValue(p) => p,
                                 BasicValueEnum::StructValue(s) => self
@@ -4802,7 +4804,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 // added by the Option path below, matching the
                                 // bytecode VM.
                                 let nested_val = BasicMetadataValueEnum::PointerValue(pay_rec_ptr);
-                                match self.emit_typed_to_json_dispatch(&pay_inner, nested_val, None)? {
+                                match self
+                                    .emit_typed_to_json_dispatch(&pay_inner, nested_val, None)?
+                                {
                                     Some(j) => match j {
                                         BasicValueEnum::PointerValue(p) => p,
                                         BasicValueEnum::StructValue(s) => self
@@ -6930,20 +6934,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // serializer assumes the embedded layout, reading a boxed pointer
                 // as an inline struct and emitting garbage.
                 let actual_ty = match args[0].unlocated() {
-                    crate::ast::Expr::Ident(name) => {
-                        vars.get(name.as_str()).map(|(_, ty)| *ty)
-                    }
+                    crate::ast::Expr::Ident(name) => vars.get(name.as_str()).map(|(_, ty)| *ty),
                     _ => None,
                 };
                 let actual_ty = actual_ty.or_else(|| {
                     crate::codegen::expr::call::helpers::parse_type_str(&obj_type)
                         .and_then(|t| self.llvm_type_for(&t))
                 });
-                if let Some(value) = self.emit_typed_to_json_dispatch(
-                    &obj_type,
-                    metadata_args[0],
-                    actual_ty,
-                )? {
+                if let Some(value) =
+                    self.emit_typed_to_json_dispatch(&obj_type, metadata_args[0], actual_ty)?
+                {
                     return Ok(value);
                 }
             }
@@ -8868,10 +8868,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             crate::ast::Type::Option(inner) => {
                 crate::ast::Type::Option(Box::new(self.json_norm(inner)))
             }
-            crate::ast::Type::Result(a, b) => crate::ast::Type::Result(
-                Box::new(self.json_norm(a)),
-                Box::new(self.json_norm(b)),
-            ),
+            crate::ast::Type::Result(a, b) => {
+                crate::ast::Type::Result(Box::new(self.json_norm(a)), Box::new(self.json_norm(b)))
+            }
             crate::ast::Type::Tuple(es) => {
                 crate::ast::Type::Tuple(es.iter().map(|e| self.json_norm(e)).collect())
             }
@@ -8912,8 +8911,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         match &nty {
             crate::ast::Type::Name(n, _) => matches!(
                 n.as_str(),
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
-                    | "bool" | "f32" | "f64" | "string"
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "char"
+                    | "bool"
+                    | "f32"
+                    | "f64"
+                    | "string"
             ),
             _ => false,
         }
@@ -9024,8 +9033,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         match &nty {
             crate::ast::Type::Name(n, _) => matches!(
                 n.as_str(),
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
-                    | "bool" | "f32" | "f64" | "string"
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "char"
+                    | "bool"
+                    | "f32"
+                    | "f64"
+                    | "string"
             ),
             crate::ast::Type::Option(inner) => self.json_holds_scalar(inner),
             crate::ast::Type::Result(ok, err) => {
@@ -9063,10 +9082,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// We recurse so that e.g. `Option<Option<List>>` and
     /// `Result<Option<List>, string>` get the correct nested offsets for both
     /// the discriminant (field 0) and the inner payload.
-    fn json_storage_llvm(
-        &self,
-        ty: &crate::ast::Type,
-    ) -> Option<BasicTypeEnum<'ctx>> {
+    fn json_storage_llvm(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         use crate::ast::Type;
         let i64_ty = self.context.i64_type();
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -9090,30 +9106,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let e = self.json_storage_llvm(err)?;
                 Some(
                     self.context
-                        .struct_type(
-                            &[BasicTypeEnum::IntType(i64_ty), o, e],
-                            false,
-                        )
+                        .struct_type(&[BasicTypeEnum::IntType(i64_ty), o, e], false)
                         .into(),
                 )
             }
-            Type::Name(n, _) if n == "List" => Some(
-                self.list_struct_type().into(),
-            ),
-            Type::Name(n, _) if n == "string" => {
-                Some(BasicTypeEnum::IntType(i64_ty))
-            }
+            Type::Name(n, _) if n == "List" => Some(self.list_struct_type().into()),
+            Type::Name(n, _) if n == "string" => Some(BasicTypeEnum::IntType(i64_ty)),
             // Map/Set/record/tuple/scalars.  Scalar ints narrower than 64 bits
             // are widened to `i64` in the payload slot (matching `llvm_type_for`'s
             // Option/Result widening), so the stored value occupies 8 bytes and
             // field 1 stays at offset 8.
             Type::Name(n, _) => match n.as_str() {
-                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => {
-                    Some(BasicTypeEnum::IntType(i64_ty))
-                }
-                "i64" | "u64" | "char" | "bool" | "f32" | "f64" => {
-                    self.llvm_type_for(ty)
-                }
+                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => Some(BasicTypeEnum::IntType(i64_ty)),
+                "i64" | "u64" | "char" | "bool" | "f32" | "f64" => self.llvm_type_for(ty),
                 // Map/Set/record/tuple: use the normal inline LLVM type.
                 _ => self.llvm_type_for(ty),
             },
@@ -9125,10 +9130,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// payload of an enclosing `Option`/`Result`.  A boxable `Option<T>` is stored
     /// reversed as `{value, box_ptr}` (disc becomes `(box_ptr != 0)`); a boxable
     /// `Result<T,E>` keeps `{disc, T, E}` (its fields are inlined by the runtime).
-    fn json_storage_llvm_boxed(
-        &self,
-        ty: &crate::ast::Type,
-    ) -> Option<BasicTypeEnum<'ctx>> {
+    fn json_storage_llvm_boxed(&self, ty: &crate::ast::Type) -> Option<BasicTypeEnum<'ctx>> {
         use crate::ast::Type;
         let i64_ty = self.context.i64_type();
         match ty.unlocated() {
@@ -9137,22 +9139,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let v = self.json_storage_llvm(inner)?;
                 Some(
                     self.context
-                        .struct_type(
-                            &[v, BasicTypeEnum::IntType(i64_ty)],
-                            false,
-                        )
+                        .struct_type(&[v, BasicTypeEnum::IntType(i64_ty)], false)
                         .into(),
                 )
             }
             Type::Result(ok, err) => self.json_storage_llvm(ty),
             Type::Name(n, _) if n == "List" => Some(self.list_struct_type().into()),
-            Type::Name(n, _) if n == "string" => {
-                Some(BasicTypeEnum::IntType(i64_ty))
-            }
+            Type::Name(n, _) if n == "string" => Some(BasicTypeEnum::IntType(i64_ty)),
             Type::Name(n, _) => match n.as_str() {
-                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => {
-                    Some(BasicTypeEnum::IntType(i64_ty))
-                }
+                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" => Some(BasicTypeEnum::IntType(i64_ty)),
                 _ => self.llvm_type_for(ty),
             },
             _ => self.llvm_type_for(ty),
@@ -9170,8 +9165,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.json_is_fully_handled(ok) && self.json_is_fully_handled(err)
             }
             crate::ast::Type::Name(n, args) => match n.as_str() {
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char"
-                | "bool" | "f64" | "f32" | "string" => true,
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char" | "bool"
+                | "f64" | "f32" | "string" => true,
                 "List" => args.len() == 1 && self.json_is_fully_handled(&args[0]),
                 "Option" => args.len() == 1 && self.json_is_fully_handled(&args[0]),
                 "Result" => {
@@ -9253,11 +9248,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         };
         let fptr = ser.as_global_value().as_pointer_value();
         let cb = self
-            .build_bit_cast(
-                BasicValueEnum::PointerValue(fptr),
-                cb_ty_bte,
-                "json_cb",
-            )
+            .build_bit_cast(BasicValueEnum::PointerValue(fptr), cb_ty_bte, "json_cb")
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         Ok(cb.into_pointer_value())
     }
@@ -9373,8 +9364,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         match ty {
             crate::ast::Type::Name(n, args) => match n.as_str() {
                 "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "char" => {
-                    let signed =
-                        matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "char");
+                    let signed = matches!(n.as_str(), "i8" | "i16" | "i32" | "i64" | "char");
                     let v = self.json_load_int_as_i64(slot, actual_ty, signed)?;
                     self.json_call_rt(
                         "mimi_json_int_to_string",
@@ -9401,11 +9391,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // fat box for `List<string>`). `mimi_json_string_value`
                     // decodes it (magic-aware) into a heap JSON string.
                     let slot_ptr = self
-                        .build_pointer_cast(
-                            slot,
-                            i8_ptr,
-                            "json_s_slot",
-                        )
+                        .build_pointer_cast(slot, i8_ptr, "json_s_slot")
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                     self.json_call_rt(
                         "mimi_json_string_value",
@@ -9418,7 +9404,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     let lp = self
                         .build_int_to_ptr(
                             v,
-                            self.list_struct_type().ptr_type(inkwell::AddressSpace::default()),
+                            self.list_struct_type()
+                                .ptr_type(inkwell::AddressSpace::default()),
                             "json_lp",
                         )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9450,12 +9437,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         &[
                             BasicMetadataValueEnum::PointerValue(lp),
                             BasicMetadataValueEnum::PointerValue(cb),
-                            BasicMetadataValueEnum::IntValue(
-                                i64_ty.const_int(elem_size, false),
-                            ),
-                            BasicMetadataValueEnum::IntValue(
-                                i64_ty.const_int(1u64, false),
-                            ),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(elem_size, false)),
+                            BasicMetadataValueEnum::IntValue(i64_ty.const_int(1u64, false)),
                         ],
                     )
                 }
@@ -9553,7 +9536,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     sorted.iter().map(|(_, _, i)| *i).collect();
                                 let san = Self::json_type_name(ty);
                                 return self.json_emit_join_slots(
-                                    struct_ty, &field_types, &field_indices, sp, Some(&names), 1,
+                                    struct_ty,
+                                    &field_types,
+                                    &field_indices,
+                                    sp,
+                                    Some(&names),
+                                    1,
                                     &san,
                                 );
                             }
@@ -9661,8 +9649,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // `{i1, i64}` (field 1 = pointer), while the resolved emitter embeds
                 // it as `{i64, {i64, ptr}}` (field 1 = inline struct). Disambiguate
                 // from the field type so `load_i64(slot)` reads the right thing.
-                let inner_is_boxed =
-                    !matches!(inner_actual, Some(BasicTypeEnum::StructType(_)));
+                let inner_is_boxed = !matches!(inner_actual, Some(BasicTypeEnum::StructType(_)));
                 let cur_fn = self
                     .builder
                     .get_insert_block()
@@ -9677,10 +9664,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?;
                 self.builder.position_at_end(some_bb);
                 let (inner_raw, inner_def_bb) = if !self.json_is_scalar_or_string(inner) {
-                    self.json_ser_container_payload_slot(inner, pl_ptr, inner_actual, inner_is_boxed)?
+                    self.json_ser_container_payload_slot(
+                        inner,
+                        pl_ptr,
+                        inner_actual,
+                        inner_is_boxed,
+                    )?
                 } else {
-                    let inner_field_ty = inner_actual
-                        .ok_or_else(|| CompileError::Generic("option payload field type missing".into()))?;
+                    let inner_field_ty = inner_actual.ok_or_else(|| {
+                        CompileError::Generic("option payload field type missing".into())
+                    })?;
                     self.json_ser_field_call(inner, pl_ptr, inner_field_ty)?
                 };
                 let some_w = self.json_call_rt(
@@ -9774,8 +9767,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let (ok_raw, ok_def_bb) = if !self.json_is_scalar_or_string(ok) {
                     self.json_ser_container_payload_slot(ok, ok_ptr, ok_actual, ok_is_boxed)?
                 } else {
-                    let ok_field_ty = ok_actual
-                        .ok_or_else(|| CompileError::Generic("result ok field type missing".into()))?;
+                    let ok_field_ty = ok_actual.ok_or_else(|| {
+                        CompileError::Generic("result ok field type missing".into())
+                    })?;
                     self.json_ser_field_call(ok, ok_ptr, ok_field_ty)?
                 };
                 let ok_w = self.json_call_rt(
@@ -9799,8 +9793,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let (err_raw, err_def_bb) = if !self.json_is_scalar_or_string(err) {
                     self.json_ser_container_payload_slot(err, err_ptr, err_actual, err_is_boxed)?
                 } else {
-                    let err_field_ty = err_actual
-                        .ok_or_else(|| CompileError::Generic("result err field type missing".into()))?;
+                    let err_field_ty = err_actual.ok_or_else(|| {
+                        CompileError::Generic("result err field type missing".into())
+                    })?;
                     self.json_ser_field_call(err, err_ptr, err_field_ty)?
                 };
                 let err_w = self.json_call_rt(
@@ -9852,13 +9847,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.build_ptr_to_int(field_ptr, i64_ty, "json_fp_i64")
                     .map_err(|e| CompileError::LlvmError(e.to_string()))?
             } else {
-                self.build_load(
-                    BasicTypeEnum::IntType(i64_ty),
-                    field_ptr,
-                    "json_fp_ld",
-                )
-                .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                .into_int_value()
+                self.build_load(BasicTypeEnum::IntType(i64_ty), field_ptr, "json_fp_ld")
+                    .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                    .into_int_value()
             };
             self.build_store(tmp, as_i64)
                 .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9878,13 +9869,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_ptr_to_int(field_ptr, i64_ty, "json_fs_i64")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?
                     } else {
-                        self.build_load(
-                            BasicTypeEnum::IntType(i64_ty),
-                            field_ptr,
-                            "json_fs_ld",
-                        )
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        .into_int_value()
+                        self.build_load(BasicTypeEnum::IntType(i64_ty), field_ptr, "json_fs_ld")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_int_value()
                     };
                     self.build_store(tmp, val)
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -9909,13 +9896,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.build_ptr_to_int(field_ptr, i64_ty, "json_fc_i64")
                             .map_err(|e| CompileError::LlvmError(e.to_string()))?
                     } else {
-                        self.build_load(
-                            BasicTypeEnum::IntType(i64_ty),
-                            field_ptr,
-                            "json_fc_ld",
-                        )
-                        .map_err(|e| CompileError::LlvmError(e.to_string()))?
-                        .into_int_value()
+                        self.build_load(BasicTypeEnum::IntType(i64_ty), field_ptr, "json_fc_ld")
+                            .map_err(|e| CompileError::LlvmError(e.to_string()))?
+                            .into_int_value()
                     };
                     self.build_store(tmp, val)
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?;
@@ -10043,15 +10026,18 @@ impl<'ctx> CodeGenerator<'ctx> {
             .into_pointer_value();
         let ser = self.get_or_emit_json_ser(ty, Some(field_llvm_ty), false)?;
         let raw = self
-            .build_call(ser, &[BasicMetadataValueEnum::PointerValue(slot)], "json_fser")
+            .build_call(
+                ser,
+                &[BasicMetadataValueEnum::PointerValue(slot)],
+                "json_fser",
+            )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("json field ser returned void".into()))?
             .into_pointer_value();
-        let def_bb = self
-            .builder
-            .get_insert_block()
-            .ok_or_else(|| CompileError::Generic("no insert block for json_ser_field_call".into()))?;
+        let def_bb = self.builder.get_insert_block().ok_or_else(|| {
+            CompileError::Generic("no insert block for json_ser_field_call".into())
+        })?;
         Ok((raw, def_bb))
     }
 
@@ -10133,15 +10119,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // the nested serializer's GEP offsets match the runtime exactly.
         let ser = self.get_or_emit_json_ser(ty, actual_ty, false)?;
         let raw = self
-            .build_call(ser, &[BasicMetadataValueEnum::PointerValue(slot)], "json_cpay_ser")
+            .build_call(
+                ser,
+                &[BasicMetadataValueEnum::PointerValue(slot)],
+                "json_cpay_ser",
+            )
             .map_err(|e| CompileError::LlvmError(e.to_string()))?
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("json container payload ser void".into()))?
             .into_pointer_value();
-        let cur_bb = self
-            .builder
-            .get_insert_block()
-            .ok_or_else(|| CompileError::Generic("no insert block for json_ser_container_payload_slot".into()))?;
+        let cur_bb = self.builder.get_insert_block().ok_or_else(|| {
+            CompileError::Generic("no insert block for json_ser_container_payload_slot".into())
+        })?;
         Ok((raw, cur_bb))
     }
 
@@ -10190,7 +10179,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_in_bounds_gep(
                     arr_ty,
                     slots_alloca,
-                    &[i64_ty.const_int(0, false), i64_ty.const_int(j as u64, false)],
+                    &[
+                        i64_ty.const_int(0, false),
+                        i64_ty.const_int(j as u64, false),
+                    ],
                     "json_slots_e",
                 )
                 .map_err(|e| CompileError::LlvmError(format!("{:?}", e)))?;
@@ -10341,7 +10333,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(e.to_string()))?;
         self.builder.position_at_end(exit_bb);
         let result = self
-            .build_load(BasicTypeEnum::PointerType(i8_ptr), res_alloca, "json_enum_res_v")?
+            .build_load(
+                BasicTypeEnum::PointerType(i8_ptr),
+                res_alloca,
+                "json_enum_res_v",
+            )?
             .into_pointer_value();
         Ok(result)
     }
@@ -10392,7 +10388,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .into_pointer_value();
                     let ser = self.get_or_emit_json_ser(&types[0], None, false)?;
                     let frag = self
-                        .build_call(ser, &[BasicMetadataValueEnum::PointerValue(pay_i8)], "json_enum_frag")
+                        .build_call(
+                            ser,
+                            &[BasicMetadataValueEnum::PointerValue(pay_i8)],
+                            "json_enum_frag",
+                        )
                         .map_err(|e| CompileError::LlvmError(e.to_string()))?
                         .try_as_basic_value_opt()
                         .ok_or_else(|| CompileError::LlvmError("enum ser returned void".into()))?
@@ -10415,13 +10415,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .iter()
                         .map(|t| {
                             self.llvm_type_for(t).ok_or_else(|| {
-                                CompileError::Generic(format!("no llvm type for enum field {}", Self::json_type_name(t)))
+                                CompileError::Generic(format!(
+                                    "no llvm type for enum field {}",
+                                    Self::json_type_name(t)
+                                ))
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    let struct_ty = self
-                        .context
-                        .struct_type(&field_llvm, false);
+                    let struct_ty = self.context.struct_type(&field_llvm, false);
                     let pay_ptr = self
                         .build_int_to_ptr(
                             payload,
@@ -10632,7 +10633,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         let wrapped = self.wrap_c_string(raw)?;
         Ok(Some(wrapped))
     }
-
 }
 
 /// Convert a BasicValueEnum to its metadata type for indirect calls.

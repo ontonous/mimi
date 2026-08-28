@@ -1959,6 +1959,19 @@ fn register_string_fns<'ctx>(
         _void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_str_box_copy(i8* ptr, i64 len) → i64 (copy `len` bytes then box;
+    // used by spawn `List<string>` deep-copy so the worker owns its element data)
+    module.add_function(
+        "mimi_str_box_copy",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // str_join_ll(list*, sep, sep_len, out_len*) → i8*
     module.add_function(
         "mimi_str_join_ll",

@@ -4061,11 +4061,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // (E0713 / garbage return for Option<Option<T>>).
                 let force_heap = match inner.as_ref().unlocated() {
                     Type::Option(_) => true,
-                    Type::Name(n, _)
-                        if n == "List" || n == "Map" || n == "Set" =>
-                    {
-                        true
-                    }
+                    Type::Name(n, _) if n == "List" || n == "Map" || n == "Set" => true,
                     Type::Name(n, _) if n == "Option" || n == "Result" => false,
                     _ => false,
                 };

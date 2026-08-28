@@ -1331,9 +1331,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("cmp error: {}", e)))?
                         .into())
                 }
-                _ => {
-                    Err("eq requires same types".into())
-                }
+                _ => Err("eq requires same types".into()),
             },
         }
     }

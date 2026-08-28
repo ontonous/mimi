@@ -1,0 +1,39 @@
+// Regression (L1 + L3): real-thread spawn of a scalar-list argument used to
+// read past the end of (and corrupt) the deep-copied buffer on the native
+// backend. The clone path allocated `count*8` bytes but copied each element
+// with the SEMANTIC width retrieved from `llvm_type_size_bytes(elem_ty)`
+// (e.g. 4 for i32) instead of the actual storage stride of 8 (every list
+// element is stored as i64). For a 10-element List<i32> the worker therefore
+// read 64 bytes out of a 40-byte allocation, returning garbage and tripping
+// Valgrind "Invalid read of size 4". VM was always correct.
+//
+// After the fix (storage stride forced to 8) the worker sees the exact same
+// elements on both backends. The test self-asserts via exit code so the
+// dual-backend harness (`tests/real_world/run_suite.py`) compares native vs VM
+// output for free.
+func sum_i32(xs: List<i32>) -> i32 { let mut s = 0; for x in xs { s = s + x } s }
+func sum_i64(xs: List<i64>) -> i64 { let mut s: i64 = 0; for x in xs { s = s + x } s }
+func count_bool(xs: List<bool>) -> i32 { let mut c = 0; for x in xs { if x { c = c + 1 } } c }
+
+func main() -> i32 {
+    let mut failures = 0
+
+    // 10-element i32 list (the original crashing shape: 64 read vs 40 alloc).
+    let t1 = spawn sum_i32([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    if await t1 == 55 { println(55) } else { failures += 1 }
+
+    // 4-element i32 list (shorter shape, still strided by 8).
+    let t2 = spawn sum_i32([10, 20, 30, 40])
+    if await t2 == 100 { println(100) } else { failures += 1 }
+
+    // i64 list (8-byte semantic width, must not be widened/truncated).
+    let t3 = spawn sum_i64([10000000000, 10000000001, 10000000002])
+    let r3 = await t3
+    if r3 == 30000000003 { println(r3) } else { failures += 1 }
+
+    // bool list element stride.
+    let t4 = spawn count_bool([true, false, true, true, false])
+    if await t4 == 3 { println(3) } else { failures += 1 }
+
+    if failures == 0 { 0 } else { 1 }
+}

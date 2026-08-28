@@ -757,11 +757,7 @@ impl Parser {
     /// Parse a `const` declaration. `extern_abi` is `Some(abi)` for
     /// `extern "C" const NAME: T = V` (C-visible data export, M-004) and
     /// `None` for an ordinary inlined constant.
-    fn parse_const(
-        &mut self,
-        pub_: bool,
-        extern_abi: Option<String>,
-    ) -> Result<Item, ParseError> {
+    fn parse_const(&mut self, pub_: bool, extern_abi: Option<String>) -> Result<Item, ParseError> {
         let start_pos = self.pos;
         self.advance(); // consume `const`
         let name = self.expect_ident()?;

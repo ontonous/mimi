@@ -289,7 +289,9 @@ fn dogfood_fault_state_diagnostic_hint() {
         Ok(()) => panic!("expected E0402 for user-declared 'Fault' state\nsrc: {src}"),
     };
     assert!(
-        errors.iter().any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0402)),
+        errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some(crate::diagnostic::codes::E0402)),
         "expected E0402, got: {errors:?}\nsrc: {src}"
     );
     let msg = errors

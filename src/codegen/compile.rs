@@ -1587,18 +1587,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // Mimi string ABI = { i8*, i64 } (ptr + len).
                 let bytes = s.as_bytes();
                 let arr_ty = self.context.i8_type().array_type((bytes.len() as u32) + 1);
-                let gstr = self.module.add_global(
-                    arr_ty,
-                    None,
-                    &format!("__mimi_const_str_{}", name),
-                );
+                let gstr =
+                    self.module
+                        .add_global(arr_ty, None, &format!("__mimi_const_str_{}", name));
                 gstr.set_linkage(Linkage::Internal);
                 gstr.set_initializer(&self.context.const_string(bytes, true));
                 let ptr = gstr.as_pointer_value();
                 let len = self.context.i64_type().const_int(bytes.len() as u64, false);
-                let struct_val = self
-                    .context
-                    .const_struct(&[ptr.into(), len.into()], false);
+                let struct_val = self.context.const_struct(&[ptr.into(), len.into()], false);
                 Ok(struct_val.into())
             }
             _ => Err(CompileError::LlvmError(format!(

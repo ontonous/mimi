@@ -2740,9 +2740,8 @@ pub unsafe extern "C" fn mimi_json_string_value(
             return alloc_c_string("\"\"");
         }
         // SAFETY: `mstr.ptr`/`mstr.len` describe a valid byte range.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(mstr.ptr as *const u8, mstr.len.max(0) as usize)
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(mstr.ptr as *const u8, mstr.len.max(0) as usize) };
         let s = String::from_utf8_lossy(bytes);
         let escaped = json_escape_string(&s);
         return alloc_c_string(&escaped);
@@ -22166,7 +22165,11 @@ pub unsafe extern "C" fn mimi_json_join_list(
         return alloc_c_string("[...]");
     }
     let data = lst.data as *const u8;
-    let elem_size = if elem_size <= 0 { 8 } else { elem_size as usize };
+    let elem_size = if elem_size <= 0 {
+        8
+    } else {
+        elem_size as usize
+    };
     let mut tmp: u64 = 0;
     let mut parts: Vec<String> = Vec::with_capacity(lst.len as usize + 2);
     parts.push(String::from("["));

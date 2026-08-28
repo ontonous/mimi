@@ -520,7 +520,8 @@ func main() -> i32 { return 0 }
     let mut gen = codegen::CodeGenerator::new(&context, "m001b");
     gen.shared = true;
     gen.compile_file(&file).expect("compile_file");
-    gen.compile_to_object(&obj).expect("compile_to_object(shared)");
+    gen.compile_to_object(&obj)
+        .expect("compile_to_object(shared)");
     link_shared(&obj, &so, false);
 
     let out = std::process::Command::new("nm")
@@ -534,7 +535,11 @@ func main() -> i32 { return 0 }
         "exported function must keep bare name 'mul':\n{}",
         syms
     );
-    assert!(!syms.contains("u_mul"), "shared export must NOT be u_-namespaced:\n{}", syms);
+    assert!(
+        !syms.contains("u_mul"),
+        "shared export must NOT be u_-namespaced:\n{}",
+        syms
+    );
 }
 
 /// M-004: `extern "C" const NAME: T = V` emits a C-visible data symbol so a
@@ -557,7 +562,8 @@ func main() -> i32 { return 0 }
     let mut gen = codegen::CodeGenerator::new(&context, "m004");
     gen.shared = true;
     gen.compile_file(&file).expect("compile_file");
-    gen.compile_to_object(&obj).expect("compile_to_object(shared)");
+    gen.compile_to_object(&obj)
+        .expect("compile_to_object(shared)");
     link_shared(&obj, &so, false);
 
     let out = std::process::Command::new("nm")

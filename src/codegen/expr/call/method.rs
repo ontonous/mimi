@@ -324,14 +324,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// `Flow::method(state, args)`.
     fn flow_for_state(&self, state_name: &str, transition_name: &str) -> Option<String> {
         for (flow_name, fdef) in &self.flow_defs {
-            if fdef
-                .states
-                .iter()
-                .any(|s| s.name == state_name)
-                && fdef
-                    .transitions
-                    .iter()
-                    .any(|t| t.name == transition_name)
+            if fdef.states.iter().any(|s| s.name == state_name)
+                && fdef.transitions.iter().any(|t| t.name == transition_name)
             {
                 return Some(flow_name.clone());
             }
@@ -6718,6 +6712,37 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
         self.build_store(len_gep, len)?;
         self.build_load(struct_ty, alloca, "string_ret_val")
+    }
+
+    /// Build a NUL-safe global byte-array constant for a string literal.
+    ///
+    /// Unlike inkwell's `build_global_string_ptr` (which lowers a value through a
+    /// NUL-terminated C string and therefore TRUNCATES any embedded NUL byte),
+    /// this preserves every byte of `text` and appends a single trailing NUL for
+    /// C-string consumers. This is the correct storage for a Mimi string value,
+    /// whose byte length is carried out-of-band in the struct's `len` field
+    /// (see `build_string_struct`). Returning the array pointer (not a `[N x i8]*`
+    /// decay issue) is valid because the consuming struct field is an opaque
+    /// `ptr`.
+    pub(in crate::codegen) fn build_global_string_bytes(
+        &self,
+        text: &str,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, CompileError> {
+        let i8_ty = self.context.i8_type();
+        let bytes = text.as_bytes();
+        let mut elems: Vec<inkwell::values::IntValue<'ctx>> = Vec::with_capacity(bytes.len() + 1);
+        for &b in bytes {
+            elems.push(i8_ty.const_int(b as u64, false));
+        }
+        elems.push(i8_ty.const_int(0, false));
+        let arr_ty = i8_ty.array_type(elems.len() as u32);
+        let arr_val = i8_ty.const_array(&elems);
+        let gv = self.module.add_global(arr_ty, None, name);
+        gv.set_initializer(&arr_val);
+        gv.set_constant(true);
+        gv.set_alignment(1);
+        Ok(gv.as_pointer_value())
     }
 
     /// Check if a struct type is the Mimi string struct {ptr, i64}.

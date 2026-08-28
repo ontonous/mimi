@@ -1,0 +1,17 @@
+// Regression (L1 + L3): a string-heavy entry point with empty, embedded-NUL,
+// and Unicode literals plus concatenation used to SIGSEGV natively — the heap
+// corruption cascaded from BUG E (NUL-truncated literal globals) and from
+// box handles being mis-read as C-strings. After the NUL-safe literal fix and
+// the fat-box string handling, the program runs cleanly on both backends.
+func main() -> i32 {
+    let empty = ""
+    let nul = "a\0b"
+    let uni = "你好世界"
+    let cat = nul + uni
+    let cat2 = empty + "x"
+    if nul.len() == 3 && uni.len() == 4 && cat.len() == 7 && cat2.len() == 1 && empty.len() == 0 {
+        if cat2 == "x" { 0 } else { 1 }
+    } else {
+        1
+    }
+}
