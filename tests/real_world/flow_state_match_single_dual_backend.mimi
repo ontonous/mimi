@@ -1,0 +1,11 @@
+// L1 dual-backend regression: matching a single-state flow transition result.
+// The transition returns the concrete state `Running`, so the scrutinee's
+// static type names exactly one state (no discriminant tag). The native backend
+// must handle the common `… | _ =>` fallback instead of crashing with E0722.
+flow Counter { state Idle {} state Running { count: i32 }
+  transition start(Idle) -> Running { { return Running { count: 0 } } } }
+func main() {
+  let i = Idle {}
+  let r = Counter::start(i)
+  match r { Running { count } => println(count), _ => println(-1) }
+}

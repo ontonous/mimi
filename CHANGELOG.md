@@ -27,6 +27,42 @@
 > `default = []`，`inkwell`/`z3` 改为 `optional`，新增 `llvm`/`verify` feature，
 > `mimi build`/`mimi verify` 仅在对应 feature 下可用。本轮回溯到此，待 0.1.10 内实施。
 
+### L1 双后端等价性修复（flow-state `match` 原生后端崩溃）
+
+双后端差异实测发现一处真实 L1 分裂：原生后端对 flow 状态机/转移结果的
+`match` 在两类形状下崩溃 `error[E0722]`，而 VM 正常。根因是原生 `match`
+发射器的单态 flow 快速路径（`emit_static_flow_match`）只接受“所有臂均为
+`state:` 构造器”，一旦遇到常见的 `… | _ =>` 兜底臂就退回通用路径，而通用路径
+会把 flow 状态当作带判别标签的枚举去查变体目录（flow 状态是裸记录，无判别
+标签），于是硬报错；第二类形状是 `fails` 转移的 `Result<state, E>` 臂
+`Ok(B { n })` 内层 `state:` 构造器子模式在 `bind_pattern` 中没有解构路径。
+
+本轮**架构性修复**（非补丁式掩盖）：
+
+- `is_static_flow` 门禁放宽为允许通配/绑定兜底臂，使单态 flow 匹配整体走
+  正确路径（flow 状态无判别标签，本就不该走枚举路径）。
+- `emit_static_flow_match` 改为**按臂序、判定守卫**的活性分析：运行时值恒为
+  静态态，第一个能匹配该态的臂（构造器 / 通配 / 绑定）为生效臂；含守卫的生效
+  臂保留 fallthrough（守卫可失败）；被前置无守卫臂抢先的臂视为静态死臂但仍编译
+  （其 body 不可达）。新增 `bind_static_flow_arm_live` / `bind_static_flow_arm_dead`
+  辅助，分别绑定真实字段与哨兵字段。
+- `bind_pattern` 的 `Constructor` 臂新增 `state:` 变体分支：把 flow 状态记录按
+  字段名/下标解构，递归绑定每个子模式（mirror `bind_flow_arm_variables`），覆盖
+  `Ok(B { n })` / `Err(state)` 等内层 flow 状态构造器。
+
+回归夹具（双后端 run+build+exec 通过）：
+
+- `tests/real_world/flow_state_match_single_dual_backend.mimi`（单态态 + `_` 兜底）。
+- `tests/real_world/flow_state_match_fail_result_dual_backend.mimi`
+  （`fails` 转移 `Result<state, E>` 内层 `state:` 解构）。
+- `tests/real_world/flow_state_match_fieldless_dual_backend.mimi`
+  （无字段态臂 + 前置 `_` 兜底，覆盖臂序正确性）。
+
+不变量类别: L1
+测试: flow_state_match_single_dual_backend / flow_state_match_fail_result_dual_backend
+/ flow_state_match_fieldless_dual_backend
+（`tests/real_world/run_suite.py` 自动双后端校验，全量 lib 测试 5698 通过）
+
 ### 四大阻断项复检 — FFI 闭合（M-004 数据符号导出 + M-001 导出命名）
 
 复检确认 M-010（struct-by-value ABI SIGSEGV）、N-2/M-011②（fn 字段调用）、

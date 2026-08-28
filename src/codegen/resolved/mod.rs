@@ -2065,6 +2065,41 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                     return Ok(());
                 }
+                // 0.40.x (L1): flow-state constructor sub-patterns
+                // (`state:F::B`). These are plain flow-state records with no
+                // discriminant tag, e.g. the inner `B` of an `Ok(B { n })`
+                // Result arm for a `fails` transition. Destructure the record
+                // by field name/index, recursively binding each sub-pattern —
+                // mirroring bind_flow_arm_variables.
+                if variant.0.starts_with("state:") {
+                    let sv = match value {
+                        BasicValueEnum::StructValue(sv) => sv,
+                        BasicValueEnum::PointerValue(pv) => {
+                            let sty = self.lower_type(&pattern.ty)?;
+                            self.generator
+                                .build_load(sty, pv, "flow_state_bind_scrutinee")?
+                                .into_struct_value()
+                        }
+                        _ => {
+                            return Err(CompileError::Unsupported(
+                                "flow-state constructor pattern bound to non-struct value".into(),
+                            ))
+                        }
+                    };
+                    for (field_id, sub_pattern) in fields {
+                        let field_name = self.lookup_field_name(field_id)?;
+                        let field_idx = self.lookup_field_index(field_id, &field_name)?;
+                        let field_val = self
+                            .generator
+                            .builder
+                            .build_extract_value(sv, field_idx, "flow_state_bind_field")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("flow state field extract: {e}"))
+                            })?;
+                        self.bind_pattern(body, sub_pattern, field_val, frame)?;
+                    }
+                    return Ok(());
+                }
                 return Err(CompileError::Unsupported(format!(
                     "resolved pattern '{}' escaped resolved native eligibility",
                     pattern.node_id.0
@@ -5323,13 +5358,22 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // state binds fields directly from the record, while other state arms
         // are statically dead but still compile with sentinel bindings.
         let scrutinee_display = resolved_type_display_name(self.program, &scrutinee.ty);
+        // 0.40.x (L1): a single-state flow match is monomorphic — the scrutinee
+        // static type names exactly one state, so there is no discriminant to
+        // test. Previously this fast path required EVERY arm to be a `state:`
+        // Constructor, which excluded the common `… | _ =>` fallback (and a
+        // leading `_` arm) and forced those programs into the general path that
+        // looks the flow-state variant up in the enum catalog and hard-errors
+        // (E0722). Accept wildcard/binding arms here; emit_static_flow_match
+        // treats them as the (unreachable) fallback and still compiles them.
         let is_static_flow = scrutinee_display.starts_with("state:")
-            && arms.iter().all(|arm| {
-                matches!(
-                    &arm.pattern.kind,
-                    crate::core::ir::ResolvedPatternKind::Constructor { variant, .. }
-                        if variant.0.starts_with("state:")
-                )
+            && arms.iter().all(|arm| match &arm.pattern.kind {
+                crate::core::ir::ResolvedPatternKind::Constructor { variant, .. } => {
+                    variant.0.starts_with("state:")
+                }
+                crate::core::ir::ResolvedPatternKind::Wildcard => true,
+                crate::core::ir::ResolvedPatternKind::Binding { .. } => true,
+                _ => false,
             });
         if is_static_flow {
             return self.emit_static_flow_match(
@@ -6068,23 +6112,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             CompileError::LlvmError("no insert block for static flow match".into())
         })?;
 
+        // A single-state flow match is monomorphic: the scrutinee's static type
+        // names exactly one state, so at runtime the value is always that state.
+        // Match arms are therefore evaluated in order; the first arm whose
+        // pattern can match the known state wins. A wildcard/binding arm always
+        // matches; a `state:` Constructor matches only when its variant equals
+        // the static state. An arm is unreachable only if an earlier arm already
+        // matches unconditionally (no guard). Guarded matching arms stay
+        // reachable (the guard may fail) and fall through.
+        let pattern_matches_static = |arm: &crate::core::ir::MatchArm| match &arm.pattern.kind {
+            crate::core::ir::ResolvedPatternKind::Constructor { variant, .. } => {
+                variant.0 == static_display
+            }
+            crate::core::ir::ResolvedPatternKind::Wildcard => true,
+            crate::core::ir::ResolvedPatternKind::Binding { .. } => true,
+            _ => false,
+        };
+
         for (arm_index, arm) in arms.iter().enumerate() {
             let is_last = arm_index == arms.len() - 1;
-            let variant = match &arm.pattern.kind {
-                crate::core::ir::ResolvedPatternKind::Constructor { variant, .. } => variant,
-                _ => {
-                    return Err(CompileError::Unsupported(
-                        "static flow match arm is not a state constructor".into(),
-                    ))
-                }
-            };
-            let is_static_arm = variant.0 == static_display;
+            // Unreachable if an earlier arm matches the known state without a
+            // guard (it would always take first).
+            let unconditionally_taken_before = (0..arm_index)
+                .any(|j| pattern_matches_static(&arms[j]) && arms[j].guard.is_none());
+            let pms = pattern_matches_static(arm);
+            let is_live = pms && arm.guard.is_none() && !unconditionally_taken_before;
+            let is_live_guarded = pms && arm.guard.is_some() && !unconditionally_taken_before;
             let arm_bb = self
                 .generator
                 .context
                 .append_basic_block(function, &format!("static_arm{arm_index}"));
 
-            if !is_static_arm {
+            if !is_live && !is_live_guarded {
                 // Statically dead arm: fall through to the next arm's dispatch.
                 let next_bb = self
                     .generator
@@ -6093,9 +6152,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.builder.position_at_end(fallthrough_bb);
                 self.generator.build_br(next_bb)?;
                 fallthrough_bb = next_bb;
-            } else if let Some(guard) = &arm.guard {
-                // Live arm with guard: bind the state fields before evaluating
-                // the guard, mirroring legacy match semantics.
+            } else if is_live_guarded {
+                // Live guarded arm: bind state fields (or the whole record for a
+                // binding arm) before evaluating the guard, mirroring legacy
+                // match semantics.
                 let guard_bb = self
                     .generator
                     .context
@@ -6110,8 +6170,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 self.generator.builder.position_at_end(fallthrough_bb);
                 self.generator.build_br(guard_bb)?;
                 self.generator.builder.position_at_end(guard_bb);
-                self.bind_flow_arm_variables(arm, sv, true, callable_body, frame)?;
-                let guard_val = self.emit_expr(guard, frame)?;
+                self.bind_static_flow_arm_live(arm, sv, callable_body, frame)?;
+                let guard_val = self.emit_expr(arm.guard.as_ref().unwrap(), frame)?;
                 let guard_bool = self.ensure_bool(guard_val)?;
                 self.generator.build_cond_br(guard_bool, arm_bb, next_bb)?;
                 if !is_last {
@@ -6135,13 +6195,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
             }
 
-            // Emit the arm body. The live guarded arm already bound its
-            // variables in the guard block; the other arms bind here.
+            // Emit the arm body. A guarded live arm already bound its variables
+            // in the guard block; an unguarded live arm binds here; a dead arm
+            // binds sentinels (its body is unreachable).
             self.generator.builder.position_at_end(arm_bb);
-            if !is_static_arm {
-                self.bind_flow_arm_variables(arm, sv, false, callable_body, frame)?;
-            } else if arm.guard.is_none() {
-                self.bind_flow_arm_variables(arm, sv, true, callable_body, frame)?;
+            if is_live {
+                self.bind_static_flow_arm_live(arm, sv, callable_body, frame)?;
+            } else if !is_live_guarded {
+                self.bind_static_flow_arm_dead(arm, sv, callable_body, frame)?;
             }
             let arm_value = self.emit_expr(&arm.body, frame)?;
             if !self.current_block_terminated() {
@@ -6195,6 +6256,52 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             self.bind_pattern(callable_body, sub_pattern, val, frame)?;
         }
         Ok(())
+    }
+
+    /// Bind the variables of a *live* single-state flow match arm. For a
+    /// `state:` Constructor arm, extract the real record fields; for a binding
+    /// fallback arm, bind the whole scrutinee record; for a wildcard arm, bind
+    /// nothing. (Live = the only arm whose pattern can actually match.)
+    fn bind_static_flow_arm_live(
+        &mut self,
+        arm: &crate::core::ir::MatchArm,
+        sv: inkwell::values::StructValue<'ctx>,
+        callable_body: &crate::core::ir::ResolvedBody,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        match &arm.pattern.kind {
+            crate::core::ir::ResolvedPatternKind::Constructor { .. } => {
+                self.bind_flow_arm_variables(arm, sv, true, callable_body, frame)
+            }
+            crate::core::ir::ResolvedPatternKind::Binding { .. } => {
+                self.bind_pattern(callable_body, &arm.pattern, sv.into(), frame)
+            }
+            crate::core::ir::ResolvedPatternKind::Wildcard => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Bind the variables of a *statically dead* single-state flow match arm.
+    /// Its body is unreachable, but it must still compile. A `state:`
+    /// Constructor arm binds sentinel fields; a binding fallback binds the
+    /// whole record (harmless, never executed); a wildcard binds nothing.
+    fn bind_static_flow_arm_dead(
+        &mut self,
+        arm: &crate::core::ir::MatchArm,
+        sv: inkwell::values::StructValue<'ctx>,
+        callable_body: &crate::core::ir::ResolvedBody,
+        frame: &mut ResolvedFrame<'ctx>,
+    ) -> Result<(), CompileError> {
+        match &arm.pattern.kind {
+            crate::core::ir::ResolvedPatternKind::Constructor { .. } => {
+                self.bind_flow_arm_variables(arm, sv, false, callable_body, frame)
+            }
+            crate::core::ir::ResolvedPatternKind::Binding { .. } => {
+                self.bind_pattern(callable_body, &arm.pattern, sv.into(), frame)
+            }
+            crate::core::ir::ResolvedPatternKind::Wildcard => Ok(()),
+            _ => Ok(()),
+        }
     }
 
     fn emit_unary(

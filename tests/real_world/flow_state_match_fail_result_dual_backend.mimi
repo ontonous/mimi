@@ -1,0 +1,10 @@
+// L1 dual-backend regression: matching a `fails` transition's `Result<state, E>`.
+// The native backend must (a) test the built-in Ok/Err discriminant and (b)
+// destructure the inner flow-state constructor `B { n }` from the Ok payload,
+// rather than reporting the inner pattern as escaped native eligibility.
+flow F { state A { n: i32 } state B { n: i32 }
+  transition go(A) -> B fails string { { return B { n: self.n + 1 } } } }
+func main() {
+  let b = F::go(A { n: 1 })
+  match b { Ok(B { n }) => println(n), Err(_) => println(0) }
+}

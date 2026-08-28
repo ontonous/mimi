@@ -1,0 +1,14 @@
+// L1 dual-backend regression: a single-state flow match over states where some
+// carry no fields. Field-less state arms (a plain `Off {}` record with no
+// discriminant) must compile on the native backend, both when listed explicitly
+// and when covered by a leading `_ =>` fallback.
+flow C2 { state Off {} state On { v: i32 }
+  transition turn_on(Off) -> On { { return On { v: 7 } } } }
+func main() {
+  let o = Off {}
+  let r = C2::turn_on(o)
+  // Explicit field-less state arm plus a field-carrying arm.
+  match r { On { v } => println(v), Off {} => println(-1) }
+  // Leading wildcard fallback: the live `On` arm is dead, but must still compile.
+  match r { _ => println(99), On { v } => println(v) }
+}
