@@ -5111,7 +5111,11 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub fn compile_to_object(&self, output_path: &Path) -> Result<(), CompileError> {
         let tm = self.create_target_machine()?;
-        self.emit_object(&tm, output_path)
+        // M-001(b): a `--shared` build opts OUT of the `u_` symbol-namespacing
+        // pass so exported functions keep their bare source names for the
+        // host `dlsym` contract (SYMBOL-NAMESPACE-001). Executable links keep
+        // the pass enabled.
+        self.emit_object_with_namespacing(&tm, output_path, !self.shared)
     }
 
     /// 0.39.x matrix sweep: opt out of the `u_` symbol-namespacing pass for

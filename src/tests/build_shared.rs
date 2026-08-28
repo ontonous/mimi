@@ -496,3 +496,98 @@ fn emit_py_bindings_with_mimi_lib() {
     assert!(cmake.contains("find_library(MIMI_USER_LIB"));
     assert!(cmake.contains("greeter PRIVATE ${MIMI_USER_LIB}"));
 }
+
+/// M-001(b): a `--shared` build must keep the bare source name of an exported
+/// function (no `u_` namespace prefix) so the host `dlsym` contract resolves it.
+/// This exercises the CLI path (`compile_to_object` with `shared = true`),
+/// which now opts out of the `u_` namespacing pass.
+#[test]
+fn ffi_m001b_shared_clean_export_names() {
+    let src = r#"
+extern "C" func mul(a: i32, b: i32) -> i32 {
+    return a * b
+}
+func main() -> i32 { return 0 }
+"#;
+    let tmp = std::env::temp_dir().join(format!("mimi_m001b_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    let obj = tmp.join("m.o");
+    let so = tmp.join("libm.so");
+
+    let file = parse_and_check(src);
+    let context = inkwell::context::Context::create();
+    let mut gen = codegen::CodeGenerator::new(&context, "m001b");
+    gen.shared = true;
+    gen.compile_file(&file).expect("compile_file");
+    gen.compile_to_object(&obj).expect("compile_to_object(shared)");
+    link_shared(&obj, &so, false);
+
+    let out = std::process::Command::new("nm")
+        .arg("-D")
+        .arg(&so)
+        .output()
+        .expect("nm -D");
+    let syms = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        syms.contains(" mul") || syms.contains(" T mul"),
+        "exported function must keep bare name 'mul':\n{}",
+        syms
+    );
+    assert!(!syms.contains("u_mul"), "shared export must NOT be u_-namespaced:\n{}", syms);
+}
+
+/// M-004: `extern "C" const NAME: T = V` emits a C-visible data symbol so a
+/// `--shared` object exposes `NAME` to dlopen/dlsym consumers (component data
+/// API / clap_entry).
+#[test]
+fn ffi_m004_data_symbol_export() {
+    let src = r#"
+extern "C" const ENTRY: i32 = 42
+func main() -> i32 { return 0 }
+"#;
+    let tmp = std::env::temp_dir().join(format!("mimi_m004_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    let obj = tmp.join("m.o");
+    let so = tmp.join("libm.so");
+
+    let file = parse_and_check(src);
+    let context = inkwell::context::Context::create();
+    let mut gen = codegen::CodeGenerator::new(&context, "m004");
+    gen.shared = true;
+    gen.compile_file(&file).expect("compile_file");
+    gen.compile_to_object(&obj).expect("compile_to_object(shared)");
+    link_shared(&obj, &so, false);
+
+    let out = std::process::Command::new("nm")
+        .arg("-D")
+        .arg(&so)
+        .output()
+        .expect("nm -D");
+    let syms = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        syms.contains("ENTRY"),
+        "exported const must appear as data symbol 'ENTRY':\n{}",
+        syms
+    );
+}
+
+/// M-004 fail-loud: a computed initializer must be rejected at compile time
+/// rather than silently emitting a zero-initialised (broken) symbol.
+#[test]
+fn ffi_m004_computed_const_rejected() {
+    let src = r#"
+extern "C" const BAD: i32 = 2 + 3
+func main() -> i32 { return 0 }
+"#;
+    let file = parse_and_check(src);
+    let context = inkwell::context::Context::create();
+    let mut gen = codegen::CodeGenerator::new(&context, "m004bad");
+    gen.shared = true;
+    let err = gen.compile_file(&file).err();
+    assert!(
+        err.is_some(),
+        "computed `extern \"C\" const` initializer must be rejected"
+    );
+}

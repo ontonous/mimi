@@ -228,27 +228,7 @@ impl Parser {
                 a.pub_ = pub_;
                 Ok(Item::Actor(a))
             }
-            TokenKind::Const => {
-                let start_pos = self.pos;
-                self.advance(); // consume `const`
-                let name = self.expect_ident()?;
-                let ty = if self.at(&TokenKind::Colon) {
-                    self.advance();
-                    Some(self.parse_type()?)
-                } else {
-                    None
-                };
-                self.expect(TokenKind::Eq, "`=` after const name")?;
-                let value = self.parse_expr(0)?;
-                self.match_semi();
-                Ok(Item::Const {
-                    meta: self.consumed_meta(start_pos, AstOrigin::User),
-                    name,
-                    ty,
-                    value,
-                    pub_,
-                })
-            }
+            TokenKind::Const => self.parse_const(pub_, None),
             TokenKind::Cap => Ok(Item::Cap(self.parse_cap_def()?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_def()?)),
             TokenKind::Impl => Ok(Item::Impl(self.parse_impl_def()?)),
@@ -304,6 +284,25 @@ impl Parser {
                         f.pub_ = pub_;
                         f.extern_abi = Some(abi);
                         return Ok(Item::Func(f));
+                    } else if matches!(after_abi, Some(TokenKind::Const)) {
+                        if let Some(token) = &no_panic_attribute_token {
+                            return Err(self.attribute_error(
+                                token,
+                                "attribute `no_panic` is only supported on extern blocks, not extern functions",
+                            ));
+                        }
+                        // extern "C" const NAME: T = V — Mimi → C data export (M-004)
+                        self.advance(); // consume `extern`
+                        let abi = {
+                            let tok = self.peek().clone(); // consume string
+                            self.advance();
+                            if let TokenKind::String(s) = &tok.kind {
+                                s.clone()
+                            } else {
+                                "C".to_string()
+                            }
+                        };
+                        return self.parse_const(pub_, Some(abi));
                     }
                 }
                 Ok(Item::ExternBlock(self.parse_extern_block_with_attrs(
@@ -752,6 +751,36 @@ impl Parser {
             runs_flow,
             fields,
             methods,
+        })
+    }
+
+    /// Parse a `const` declaration. `extern_abi` is `Some(abi)` for
+    /// `extern "C" const NAME: T = V` (C-visible data export, M-004) and
+    /// `None` for an ordinary inlined constant.
+    fn parse_const(
+        &mut self,
+        pub_: bool,
+        extern_abi: Option<String>,
+    ) -> Result<Item, ParseError> {
+        let start_pos = self.pos;
+        self.advance(); // consume `const`
+        let name = self.expect_ident()?;
+        let ty = if self.at(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::Eq, "`=` after const name")?;
+        let value = self.parse_expr(0)?;
+        self.match_semi();
+        Ok(Item::Const {
+            meta: self.consumed_meta(start_pos, AstOrigin::User),
+            name,
+            ty,
+            value,
+            pub_,
+            extern_abi,
         })
     }
 

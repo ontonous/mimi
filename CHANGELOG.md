@@ -27,6 +27,37 @@
 > `default = []`，`inkwell`/`z3` 改为 `optional`，新增 `llvm`/`verify` feature，
 > `mimi build`/`mimi verify` 仅在对应 feature 下可用。本轮回溯到此，待 0.1.10 内实施。
 
+### 四大阻断项复检 — FFI 闭合（M-004 数据符号导出 + M-001 导出命名）
+
+复检确认 M-010（struct-by-value ABI SIGSEGV）、N-2/M-011②（fn 字段调用）、
+M-001 前缀（`__mimi_extern_`）均已在 0.1.10-dev 先行提交中解决。本轮收口剩余两项
+真正阻断组件消费的阻断项：
+
+- **M-004（`extern "C" const` 数据符号导出）**：此前 `const` 仅作内联常量，从不发射
+  LLVM 全局量，导致 `--shared` 动态符号表里查无组件数据入口（如 `clap_entry`）。
+  新增 `extern "C" const NAME: T = V` 语法（mirror `extern "C" func` 导出约定）：
+  - AST：`Item::Const` 增加 `extern_abi: Option<String>` 字段
+    （`src/ast.rs`）。
+  - 解析：`extern "C" const` 分支落入 `parse_const(pub_, Some(abi))`
+    （`src/parser/top_level.rs`）。
+  - codegen：`compile_file_inner` 对 `extern_abi` 常量发射 `External` 链接全局量 +
+    初始化器（标量 i32/i64/f64/bool + string `{ptr,len}` 结构）；`u_` 命名空间
+    pass 只重命名函数，数据符号保持干净源名（`src/codegen/compile.rs`）。
+  - 计算式/复合常量（如 `2 + 3`、record）**显式报错**（E0713），不静默产零残桩。
+  - 验证：`nm -D` 可见 `D ENTRY`；C 端 `dlsym("ENTRY")` 读到 `42`；`mimi run` 双后端
+    一致。回归：`ffi_m004_data_symbol_export` / `ffi_m004_computed_const_rejected`。
+- **M-001(b)（`--shared` 导出函数保持裸名）**：`compile_to_object` 此前对 shared 构建
+  仍套用 `u_` 命名空间 pass，使 `extern "C" func mul` 在 `.so` 中暴露为 `u_mul`，
+  C 端 `dlsym("mul")` 失败。现 `compile_to_object` 依据 `codegen.shared` 决定是否
+  套用该 pass（`src/codegen/mod.rs`），与测试 helper `compile_to_object_shared`
+  行为对齐。验证：`nm -D` 可见 `T mul`（非 `u_mul`）；C 端 `dlsym("mul")` 调用返回
+  正确值。回归：`ffi_m001b_shared_clean_export_names`。
+- **M-001(a) 残留（已知边界，未本轮修复）**：用户以 `i32` 声明 libc 函数（如
+  `func strlen(s: string) -> i32`）时，若运行时已预声明同名 `i64` 签名会触发
+  E0713 碰撞。导入以 `i64` 声明（如 `func strlen(s: string) -> i64`）已可正常链接
+  libc。彻底修复需将运行时的 libc helper 重命名为 `mimi_rt_*`（架构级解耦，避免
+  与用户 FFI 名冲突），列为后续专项，不在本次范围。
+
 ## [0.1.9] - 2026-08-28
 
 ### stdlib 合并唯一名（0.39.136 破坏性，迁移注记）

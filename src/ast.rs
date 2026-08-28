@@ -126,6 +126,13 @@ pub enum Item {
         ty: Option<Type>,
         value: Expr,
         pub_: bool,
+        /// When `Some(abi)`, this constant is exported as a C-visible data
+        /// symbol (`extern "C" const NAME: T = V`). The native backend emits an
+        /// `External`-linkage module global so a `--shared` build exposes `NAME`
+        /// to dlopen/dlsym consumers — this closes M-004 (component data API,
+        /// e.g. `clap_entry`). Plain `const` items are inlined and never emit a
+        /// global.
+        extern_abi: Option<String>,
     },
     Flow(FlowDef),
     /// Session type declaration: `session Name = !T . ?U . end`

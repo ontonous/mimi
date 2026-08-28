@@ -6566,6 +6566,7 @@ pub fn eval_comptime_block_bytecode(
             ty: None,
             value: const_expr,
             pub_: false,
+            extern_abi: None,
         });
     }
 
@@ -6604,6 +6605,7 @@ pub fn eval_comptime_block_bytecode(
                     ty: None,
                     value: const_expr,
                     pub_: false,
+                    extern_abi: None,
                 });
             }
             let mut compiler2 = BytecodeCompiler::new();

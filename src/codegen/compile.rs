@@ -4,8 +4,11 @@ use std::collections::HashMap;
 use crate::error::{CompileError, MimiResult};
 
 use super::CodeGenerator;
+use inkwell::module::Linkage;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine};
+use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValueEnum;
 use inkwell::OptimizationLevel;
 
 fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> String {
@@ -648,9 +651,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .or_insert_with(|| imp.type_args.clone());
                     }
                 }
-                Item::Const { name, value, .. } => {
-                    // Store const for later reference
+                Item::Const {
+                    name,
+                    value,
+                    ty,
+                    extern_abi,
+                    ..
+                } => {
+                    // Store const for later reference (inlined at use sites)
                     self.const_values.insert(name.clone(), value.clone());
+                    // M-004: `extern "C" const NAME: T = V` exports a C-visible
+                    // data symbol. Emit an `External`-linkage module global with
+                    // the initializer so `--shared` exposes `NAME` to dlopen/
+                    // dlsym consumers (component data API / clap_entry). Plain
+                    // `const` items are inlined and never emit a global.
+                    if extern_abi.is_some() {
+                        self.emit_exported_const(name, ty.as_ref(), value)?;
+                    }
                 }
                 Item::Flow(f) => {
                     // Register flow state payload types so record construction
@@ -1475,6 +1492,119 @@ impl<'ctx> CodeGenerator<'ctx> {
                 );
                 Ok(())
             }
+        }
+    }
+
+    /// M-004: emit a C-visible data symbol for `extern "C" const NAME: T = V`.
+    ///
+    /// Builds an `External`-linkage module global initialised with the const
+    /// value so a `--shared` object exposes `NAME` to dlopen/dlsym consumers
+    /// (component data API, e.g. `clap_entry`). Only scalar literals (int /
+    /// float / bool) and string initializers are supported today; computed or
+    /// composite consts are rejected loudly rather than emitted as a broken
+    /// (zero-initialised) symbol.
+    fn emit_exported_const(
+        &self,
+        name: &str,
+        ty: Option<&crate::ast::Type>,
+        value: &Expr,
+    ) -> MimiResult<()> {
+        // 1. Resolve the const's type (explicit annotation, else inferred from
+        //    the literal).
+        let const_ty: crate::ast::Type = match ty {
+            Some(t) => t.clone(),
+            None => match value.unlocated() {
+                Expr::Literal(Lit::Int(_)) => Type::Name("i64".into(), vec![]),
+                Expr::Literal(Lit::Float(_)) => Type::Name("f64".into(), vec![]),
+                Expr::Literal(Lit::Bool(_)) => Type::Name("bool".into(), vec![]),
+                Expr::Literal(Lit::String(_)) => Type::Name("string".into(), vec![]),
+                _ => {
+                    return Err(CompileError::LlvmError(format!(
+                        "exported const '{}' must have an explicit type annotation \
+                         (computed/untyped initializers are not supported for `extern \"C\" const`)",
+                        name
+                    )))
+                }
+            },
+        };
+
+        // 2. Fold the initializer to a concrete value (literals only — computed
+        //    consts would need VM evaluation, which is not wired up for data
+        //    export yet).
+        let val = match value.unlocated() {
+            Expr::Literal(Lit::Int(n)) => crate::interp::Value::Int(*n),
+            Expr::Literal(Lit::Float(f)) => crate::interp::Value::Float(*f),
+            Expr::Literal(Lit::Bool(b)) => crate::interp::Value::Bool(*b),
+            Expr::Literal(Lit::String(s)) => {
+                crate::interp::Value::String(std::sync::Arc::new(s.clone()))
+            }
+            _ => {
+                return Err(CompileError::LlvmError(format!(
+                    "exporting computed const '{}' via `extern \"C\" const` is not yet \
+                     supported; use a literal initializer (e.g. `const {} = 42;`)",
+                    name, name
+                )))
+            }
+        };
+
+        // 3. Determine the LLVM type and build the initializer constant.
+        let llvm_ty = self.llvm_type_for(&const_ty).ok_or_else(|| {
+            CompileError::LlvmError(format!(
+                "cannot determine LLVM type for exported const '{}' of type {:?}",
+                name, const_ty
+            ))
+        })?;
+        let init = self.const_global_initializer(name, &const_ty, &llvm_ty, &val)?;
+
+        // 4. Emit the External-linkage global. The `u_` namespacing pass only
+        //    renames functions, so the exported data symbol keeps its clean
+        //    source name.
+        let gv = self.module.add_global(llvm_ty, None, name);
+        gv.set_linkage(Linkage::External);
+        gv.set_initializer(&init);
+        Ok(())
+    }
+
+    /// Build an LLVM constant initializer for an exported const value.
+    fn const_global_initializer(
+        &self,
+        name: &str,
+        ty: &crate::ast::Type,
+        llvm_ty: &BasicTypeEnum<'ctx>,
+        val: &crate::interp::Value,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        match (val, llvm_ty) {
+            (crate::interp::Value::Int(n), BasicTypeEnum::IntType(it)) => {
+                Ok(it.const_int(*n as u64, false).into())
+            }
+            (crate::interp::Value::Float(f), BasicTypeEnum::FloatType(ft)) => {
+                Ok(ft.const_float(*f).into())
+            }
+            (crate::interp::Value::Bool(b), BasicTypeEnum::IntType(it)) => {
+                Ok(it.const_int(*b as u64, false).into())
+            }
+            (crate::interp::Value::String(s), BasicTypeEnum::StructType(_st)) => {
+                // Mimi string ABI = { i8*, i64 } (ptr + len).
+                let bytes = s.as_bytes();
+                let arr_ty = self.context.i8_type().array_type((bytes.len() as u32) + 1);
+                let gstr = self.module.add_global(
+                    arr_ty,
+                    None,
+                    &format!("__mimi_const_str_{}", name),
+                );
+                gstr.set_linkage(Linkage::Internal);
+                gstr.set_initializer(&self.context.const_string(bytes, true));
+                let ptr = gstr.as_pointer_value();
+                let len = self.context.i64_type().const_int(bytes.len() as u64, false);
+                let struct_val = self
+                    .context
+                    .const_struct(&[ptr.into(), len.into()], false);
+                Ok(struct_val.into())
+            }
+            _ => Err(CompileError::LlvmError(format!(
+                "exporting const '{}' of value {:?} (type {:?}) is not yet supported",
+                name, val, ty
+            ))),
         }
     }
 }
