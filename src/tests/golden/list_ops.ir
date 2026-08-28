@@ -391,6 +391,8 @@ declare ptr @mimi_to_string_i64(i64)
 
 declare ptr @mimi_json_escape_string(ptr)
 
+declare ptr @mimi_json_string_value(ptr)
+
 declare ptr @mimi_to_string_f64(double)
 
 declare ptr @mimi_to_json_f64(double)
@@ -533,6 +535,34 @@ declare ptr @mimi_set_to_display_string(i64)
 declare ptr @mimi_set_to_display_f64(i64)
 
 declare ptr @mimi_option_i64_to_json(i64, i64)
+
+declare ptr @mimi_json_int_to_string(i64)
+
+declare ptr @mimi_json_bool_to_string(i64)
+
+declare ptr @mimi_json_f64_to_string(i64)
+
+declare ptr @mimi_json_none()
+
+declare ptr @mimi_json_some(ptr)
+
+declare ptr @mimi_json_serialize_set(i64, ptr)
+
+declare ptr @mimi_json_serialize_map(i64, ptr)
+
+declare ptr @mimi_json_serialize_enum_variant(ptr, ptr)
+
+declare ptr @mimi_json_surround_brackets(ptr)
+
+declare ptr @mimi_json_alloc_literal(ptr)
+
+declare ptr @mimi_json_ok(ptr)
+
+declare ptr @mimi_json_err(ptr)
+
+declare ptr @mimi_json_join_list(ptr, ptr)
+
+declare ptr @mimi_json_join_slots(ptr, ptr, ptr, i64, i64)
 
 declare ptr @mimi_option_map_to_json(i64, i64, i64)
 
