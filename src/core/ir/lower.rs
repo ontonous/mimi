@@ -8677,17 +8677,27 @@ mod tests {
 
     #[test]
     fn local_annotation_and_call_retain_numeric_widening() {
+        // The explicit `: i64` annotation on a binding must retain a genuine
+        // numeric-widening conversion. An *untyped integer literal* is now
+        // bidirectionally coerced to the annotated type (0.1.10 integer-literal
+        // coercion change), so `let widened: i64 = 40` no longer materializes a
+        // widen node — the literal is i64 directly. To keep this test exercising
+        // the real invariant (a widening from a narrower *value* is preserved),
+        // widen from an `i32` variable instead, which still requires a genuine
+        // NumericWiden and must not be silently dropped.
         let file = parse(
-            "func identity(value: i64) -> i64 { value }\nfunc main() -> i64 { let widened: i64 = 40; identity(widened + 1) }",
+            "func identity(value: i64) -> i64 { value }\nfunc main() -> i64 { let n: i32 = 40; let widened: i64 = n; identity(widened + 1) }",
         );
         let program = crate::core::check_program(&file).expect("check widening");
         let body = program
             .resolved_body(&NodeId("function:main".into()))
             .expect("main body");
+        // The annotated widening binding is the *second* statement
+        // (`let widened: i64 = n`); the first is the `i32` source.
         let ResolvedStmtKind::Bind {
             pattern,
             initializer: Some(initializer),
-        } = &body.root.statements[0].kind
+        } = &body.root.statements[1].kind
         else {
             panic!("annotated binding expected");
         };
