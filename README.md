@@ -4,7 +4,7 @@
 
 **A Flow-first, Typestate-Oriented system programming language**
 
-[![Version](https://img.shields.io/badge/version-0.1.6--dev-blue.svg)](https://github.com/ontonous/mimi)
+[![Version](https://img.shields.io/badge/version-0.1.10--dev-blue.svg)](https://github.com/ontonous/mimi)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-5400%2B-brightgreen.svg)](#)
 [![Semantics](https://img.shields.io/badge/semantics-Pre--1.0-orange.svg)](#)
@@ -419,7 +419,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status
 
-**Current**: 0.1.9-dev. 0.1.7 shipped (2026-08-19): Wave-3 honest infrastructure closeout; 0.1.8 gates green (semantic honesty + identity purity: L1 spawn, production dual, Narrow, value ABI, Flow S / Actor A / Session K); 0.1.9 in progress (linear kinds + capabilities). Does not yet claim VM≡native.
+**Current**: 0.1.10-dev. 0.1.7 shipped (2026-08-19): Wave-3 honest infrastructure closeout; 0.1.8 gates green (semantic honesty + identity purity); 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.1.10-dev in progress (real-world pain-point repairs — integer-literal bidirectional coercion, Fault diagnostic, `state.method` desugar — and FFI component-symbol closure). Does not yet claim VM≡native.
 
 
 ### References & External Reviews
@@ -434,8 +434,10 @@ CHANGELOG.md.
 ## Version History
 
 ### 1. Current Version
-- **0.1.9-dev** (current): continues the semantic-honesty + identity-purity line (0.1.8) into
-  linear kinds + capabilities (0.1.9). See CHANGELOG.md.
+- **0.1.10-dev** (current): continues 0.1.9 (linear kinds + capabilities) into real-world
+  pain-point repairs — integer-literal bidirectional coercion, Fault diagnostic,
+  `state.method` desugar — and FFI component-symbol closure (M-004 `extern "C" const`
+  export, M-001 export-prefix). See CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)
 - **0.1.0 → 0.1.8**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,
