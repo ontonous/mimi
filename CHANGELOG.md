@@ -1,6 +1,35 @@
 # Changelog
 
-## [Unreleased] — 0.1.9-dev
+## [Unreleased] — 0.1.10-dev
+
+### Pain-point 修复（PAIN_LOG P1–P3）
+
+从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
+
+- **P1 (E0247) 整数字面量默认 i32 + 双向强制**：已在前序提交解决（`infer_expr.rs`
+  字面量默认 i32、对 i64/i32 字段双向弹性强制）。本次仅补充回归验证：
+  `100` 同时可赋 `i64` 与 `i32` 字段，VM 与 codegen 双后端一致。无代码改动。
+- **P2 (E0402) `state Fault` 与系统 Fault sink 冲突诊断**：修正建议语法——
+  旧提示错误地写成 `fault <ErrorType> { ... }`，实际语法为
+  `fault <ErrorType>;`（`src/core/checker/items.rs`）。
+- **P3 (E0221) `state.method(args)` 方法式 flow 转移调用**：`t.start()` 此前报错
+  “type 'Idle' has no method 'start'”。已补完 desugar 为 `Flow::method(state, args)`：
+  - 类型检查：`src/core/infer/call/method.rs`（`flow_transition_for_state_method`）。
+  - Resolved 降级（单一事实源）：`src/core/ir/lower.rs` 新增
+    `lower_state_method_transition_call`，接收者按 `.callee.inner` 编目、事件参数保留
+    原 `.argument.i` 角色，规避 `TOOL-RESOLUTION-001`。
+  - LLVM codegen：`src/codegen/expr/call/method.rs`（`flow_for_state`）。
+  - Bytecode VM：`src/interp/bytecode/compiler.rs`（flow-state 编目 +
+    转移键预注册，使 `main` 在 Pass 4 之前即可识别转移）。
+  - 回归夹具：`tests/real_world/flow_method_call.mimi`（双后端 run+build+exec 通过）。
+
+> P4（LLVM codegen 剥为可选 Cargo Feature、VM 为默认 runtime）已确认方案：
+> `default = []`，`inkwell`/`z3` 改为 `optional`，新增 `llvm`/`verify` feature，
+> `mimi build`/`mimi verify` 仅在对应 feature 下可用。本轮回溯到此，待 0.1.10 内实施。
+
+## [0.1.9] - 2026-08-28
+
+### stdlib 合并唯一名（0.39.136 破坏性，迁移注记）
 
 ### stdlib 合并唯一名（0.39.136 破坏性，迁移注记）
 

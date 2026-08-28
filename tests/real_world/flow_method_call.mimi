@@ -1,0 +1,27 @@
+// MCDD real_world: P3 fix — method-style flow transition calls.
+//
+// `state.method(args)` now desugars to `Flow::method(state, args)` so the
+// receiver can be a flow-state VALUE (the variable holding the state), not the
+// flow name. This exercises the desugar on both the bytecode VM and the LLVM
+// codegen backends, including chained transitions and event parameters.
+
+flow Transport {
+    state Idle
+    state Running { speed: i32 }
+    state Stopped
+
+    transition start(Idle) -> Running { return Running { speed: 0 } }
+    transition accelerate(Running, by: i32) -> Running { return Running { speed: self.speed + by } }
+    transition stop(Running) -> Stopped { return Stopped { } }
+}
+
+func main() -> i32 {
+    // Method-style transitions read naturally on the state value.
+    let t = Idle {}
+    let t2 = t.start()
+    let t3 = t2.accelerate(5)
+    println(t3.speed)
+    let _t4 = t3.stop()
+    println("done")
+    0
+}

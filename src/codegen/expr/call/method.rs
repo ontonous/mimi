@@ -319,6 +319,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(loaded)
     }
 
+    /// P3: locate the flow owning `state_name` that declares a transition
+    /// `transition_name`, so `state.method(args)` can desugar to
+    /// `Flow::method(state, args)`.
+    fn flow_for_state(&self, state_name: &str, transition_name: &str) -> Option<String> {
+        for (flow_name, fdef) in &self.flow_defs {
+            if fdef
+                .states
+                .iter()
+                .any(|s| s.name == state_name)
+                && fdef
+                    .transitions
+                    .iter()
+                    .any(|t| t.name == transition_name)
+            {
+                return Some(flow_name.clone());
+            }
+        }
+        None
+    }
+
     /// Handle method dispatch for obj.method(args) calls.
     pub(in crate::codegen) fn compile_method_call(
         &mut self,
@@ -330,6 +350,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Method call: obj.method(args)
         // Determine the type of the object to find the actor/trait name
         let obj_type = self.infer_object_type(obj, vars);
+
+        // P3: method-style flow transition call. `state.method(args)` desugars
+        // to `Flow::method(state, args)`. When the receiver's static type is a
+        // flow state, emit the flow transition with the receiver prepended as
+        // the source-state argument (the existing flow-transition codegen path).
+        if let Some(flow_name) = self.flow_for_state(&obj_type, method_name) {
+            let mut all_args: Vec<Expr> = vec![obj.clone()];
+            all_args.extend(args.iter().cloned());
+            return self.compile_flow_transition_call(&flow_name, method_name, &all_args, vars);
+        }
 
         // 0. Special case: weak<T>.upgrade() -> Option<T*>
         if method_name == "upgrade"

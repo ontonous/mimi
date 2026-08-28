@@ -574,6 +574,26 @@ impl BytecodeCompiler {
             if let Item::Flow(f) = item {
                 self.flow_names.insert(f.name.clone());
                 self.flow_defs.insert(f.name.clone(), f.clone());
+                // P3: register each flow state as a value constructor so the
+                // bytecode type inferer resolves `Idle {}` (and `let t = Idle {}`)
+                // to `User("<State>")`. This lets the method-call desugar detect
+                // `state.method(args)` receivers during surface-AST compilation.
+                for s in &f.states {
+                    self.func_ret_types
+                        .insert(s.name.clone(), VarType::User(s.name.clone()));
+                }
+                // P3: pre-register every transition's (flow, event, source_state)
+                // key so the `state.method(args)` desugar (which runs while
+                // compiling `main`, BEFORE Pass 4 compiles transition bodies)
+                // can detect flow transitions. The `FuncIdx` value is a
+                // placeholder here; Pass 4's `insert` overwrites it with the
+                // real function index. The runtime re-derives the function from
+                // the source-state value, so the placeholder is never used.
+                for t in &f.transitions {
+                    self.flow_transition_funcs
+                        .entry((f.name.clone(), t.name.clone(), t.from_state.clone()))
+                        .or_insert(0u32);
+                }
                 // Fault shadowing metadata (v0.29.12/14).
                 if !f.persistent_fields.is_empty() {
                     self.flow_persistent
@@ -3660,6 +3680,47 @@ impl BytecodeCompiler {
 
         // Method call: obj.method(args) → method(obj, args)
         if let Expr::Field(obj, method) = callee.unlocated() {
+            // P3: method-style flow transition call. `state.method(args)` desugars
+            // to `Flow::method(state, args)`. When the receiver's static type is a
+            // flow state of a flow that declares a transition `method`, emit the
+            // flow transition with the receiver prepended as the from-state value.
+            if let VarType::User(state_name) = self.infer_expr_type(fc, obj) {
+                if let Some(flow) = self
+                    .flow_transition_funcs
+                    .keys()
+                    .find(|(f, t, s)| t == method && s == &state_name)
+                    .map(|(f, _, _)| f.clone())
+                {
+                    // Compile [obj] + args into consecutive registers and emit the
+                    // flow transition (first register holds the source state).
+                    let total = args.len() + 1;
+                    let base = fc.proto.alloc_reg();
+                    for _ in 1..total {
+                        fc.proto.alloc_reg();
+                    }
+                    let r0 = self.compile_expr_into(fc, obj, base)?;
+                    if r0 != base {
+                        fc.emit(Op::Mov { rd: base, rs: r0 });
+                    }
+                    for (i, a) in args.iter().enumerate() {
+                        let t = base + ((i + 1) as Reg);
+                        let r = self.compile_expr_into(fc, a, t)?;
+                        if r != t {
+                            fc.emit(Op::Mov { rd: t, rs: r });
+                        }
+                    }
+                    let flow_idx = fc.proto.add_const(ConstValue::Str(flow.clone()));
+                    let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
+                    fc.emit(Op::FlowTransition {
+                        rd,
+                        flow: flow_idx,
+                        method: method_idx,
+                        args_base: base,
+                        argc: total as u16,
+                    });
+                    return Ok(rd);
+                }
+            }
             // ── Actor spawn: ActorName.spawn() / ActorName.spawn_detached() ──
             // Checked BEFORE flow transitions (tree-walker order): a flow and an
             // actor may share a name (e.g. `flow W` + `actor W`); `W.spawn()`
@@ -6205,6 +6266,24 @@ impl BytecodeCompiler {
     }
 
     /// Infer the VarType of an expression (lightweight, for int/float dispatch).
+    /// P3 helper: the (first) target state of a flow transition
+    /// `(flow, event, source_state)`. Used by `infer_expr_type` so the result of
+    /// `state.method(args)` carries the resulting flow-state type, enabling
+    /// chained `state.method(args)` calls in the bytecode compiler.
+    fn flow_transition_target(
+        &self,
+        flow: &str,
+        event: &str,
+        source_state: &str,
+    ) -> Option<String> {
+        let def = self.flow_defs.get(flow)?;
+        let transition = def
+            .transitions
+            .iter()
+            .find(|t| t.name == event && t.from_state == source_state)?;
+        transition.to_states.first().cloned()
+    }
+
     fn infer_expr_type(&self, fc: &FuncCompiler, expr: &Expr) -> VarType {
         match expr.unlocated() {
             Expr::Literal(Lit::Int(v)) => {
@@ -6306,6 +6385,23 @@ impl BytecodeCompiler {
                     if fc.lookup_var(name).is_none() {
                         if let Some(ty) = self.func_ret_types.get(name) {
                             return ty.clone();
+                        }
+                    }
+                } else if let Expr::Field(obj, method) = callee.unlocated() {
+                    // P3: the result type of `state.method(args)` is the
+                    // transition's target state, so chained transitions keep
+                    // their flow-state type through `let t2 = t1.method(args)`.
+                    if let VarType::User(state_name) = self.infer_expr_type(fc, obj) {
+                        if let Some((flow, _, _)) = self
+                            .flow_transition_funcs
+                            .keys()
+                            .find(|(f, t, s)| t == method && s == &state_name)
+                        {
+                            if let Some(target) =
+                                self.flow_transition_target(flow, method, &state_name)
+                            {
+                                return VarType::User(target);
+                            }
                         }
                     }
                 }

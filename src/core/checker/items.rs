@@ -1202,7 +1202,7 @@ impl<'a> Checker<'a> {
                                 crate::diagnostic::codes::E0402,
                                 format!(
                                     "state name 'Fault' is reserved by the system Fault sink and is incompatible with a user-declared `state Fault` in flow '{}'. \
-                                     Rename your state (e.g. `Failed` or `Errored`), or declare a typed fault payload with `fault <ErrorType> {{ ... }}` instead of `state Fault`. \
+                                     Rename your state (e.g. `Failed` or `Errored`), or declare a typed fault payload with `fault <ErrorType>;` — where `<ErrorType>` is a type you defined earlier (e.g. `fault TransportError`) — instead of `state Fault`. \
                                      The system Fault sink requires exactly these fields: last_state, unexpected_event, snapshot, trace.",
                                     f.name
                                 ),

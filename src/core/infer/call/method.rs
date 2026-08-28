@@ -56,6 +56,27 @@ impl<'a> Checker<'a> {
         *ret = subst_type_params(ret, &gen_slice, &type_map);
     }
 
+    /// P3: locate the flow that owns `state_name` and declares a transition
+    /// named `transition_name`. Enables desugaring `state.transition(args)`
+    /// into `Flow::transition(state, args)`. Returns None when the receiver
+    /// type is not a flow state, so ordinary method/field resolution proceeds.
+    fn flow_transition_for_state_method(
+        &self,
+        state_name: &str,
+        transition_name: &str,
+    ) -> Option<String> {
+        for item in &self.file.items {
+            if let Item::Flow(f) = item {
+                if f.states.iter().any(|s| s.name == state_name)
+                    && f.transitions.iter().any(|t| t.name == transition_name)
+                {
+                    return Some(f.name.clone());
+                }
+            }
+        }
+        None
+    }
+
     pub(in crate::core) fn infer_method_call(
         &mut self,
         obj: &Expr,
@@ -357,6 +378,24 @@ impl<'a> Checker<'a> {
             }
         };
         if !type_name.is_empty() {
+            // P3: method-style flow transition call. `state.method(args)` desugars
+            // to `Flow::method(state, args)`, so users can write `t_idle.open(...)`
+            // instead of `Transport::open(t_idle, ...)`. Reuse the existing
+            // flow-qualified transition resolution by re-entering with the flow
+            // name as the receiver and the original receiver prepended as the
+            // source-state argument (preserving linear-generation bookkeeping).
+            if let Some(flow_name) =
+                self.flow_transition_for_state_method(type_name, method_name)
+            {
+                let mut new_args: Vec<Expr> = vec![obj.clone()];
+                new_args.extend_from_slice(args);
+                return self.infer_method_call(
+                    &Expr::Ident(flow_name),
+                    method_name,
+                    &new_args,
+                    scopes,
+                );
+            }
             // 0.1.8 Phase E: SessionChan method surface.
             // `ch.send(v)` == `session_send(ch, v)`, `ch.recv() == session_recv(ch)`,
             // `ch.close() == session_close(ch)`. Builtin methods deliberately

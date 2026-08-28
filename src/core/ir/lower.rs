@@ -2383,22 +2383,44 @@ impl BodyLowerer<'_> {
                 }
             }
         }
-        if let Expr::Field(flow, event) = callee.unlocated() {
-            if let Expr::Ident(flow) = flow.unlocated() {
-                if self.has_transition_callee(flow, event) {
+        if let Expr::Field(receiver, event) = callee.unlocated() {
+            if let Expr::Ident(flow_name) = receiver.unlocated() {
+                if self.has_transition_callee(flow_name, event) {
                     return self.lower_transition_call(
                         node_id,
-                        flow,
+                        flow_name,
                         event,
                         arguments,
                         role,
                         type_arguments,
                     );
                 }
+                // P3: method-style flow transition call. `state.method(args)`
+                // where the receiver is a flow-state VALUE (the identifier names
+                // the variable, not the flow). Resolve the receiver's static type
+                // to its owning flow and desugar to `Flow::method(state, args)`
+                // so the existing flow-transition lowering/backends apply.
+                if let Ok(state_ty) =
+                    self.expression_type(&self.expr_id(receiver, &format!("{role}.callee.inner"))?)
+                {
+                    if let Some(ResolvedType::Nominal { item, .. }) = self.types.get(&state_ty) {
+                        if let Some(real_flow) = self.flow_for_state_method(item.as_str(), event) {
+                            return self.lower_state_method_transition_call(
+                                node_id,
+                                &real_flow,
+                                event,
+                                receiver,
+                                arguments,
+                                role,
+                                type_arguments,
+                            );
+                        }
+                    }
+                }
                 if matches!(event.as_str(), "spawn" | "spawn_detached") {
                     if let Some(call) = self.lower_actor_spawn_call(
                         node_id,
-                        flow,
+                        flow_name,
                         event,
                         arguments,
                         type_arguments,
@@ -3014,6 +3036,244 @@ impl BodyLowerer<'_> {
                             .rsplit_once("::")
                             .is_some_and(|(_, short)| short == flow))
             })
+        })
+    }
+
+    /// P3: given a flow-state type name and a transition name, return the owning
+    /// flow so `state.method(args)` can desugar to `Flow::method(state, args)`.
+    /// Matches on the short state name to tolerate `Flow::State` vs `State`
+    /// spellings in the canonical type / transition-owner strings.
+    fn flow_for_state_method(&self, state_name: &str, event: &str) -> Option<String> {
+        let state_short = state_name.rsplit_once("::").map(|(_, s)| s).unwrap_or(state_name);
+        self.signatures.keys().find_map(|owner| {
+            let (candidate_flow, candidate_event, source_state) = parse_transition_owner(owner)?;
+            let source_short =
+                source_state.rsplit_once("::").map(|(_, s)| s).unwrap_or(source_state);
+            ((source_short == state_short || source_state == state_name)
+                && candidate_event == event)
+                .then(|| candidate_flow.to_string())
+        })
+    }
+
+    /// P3: `state.event(args)` desugar. The receiver is a flow-state VALUE (its
+    /// identifier names the variable, not the flow). Lower the receiver under
+    /// its catalog role `.callee.inner` and the event arguments under their
+    /// original `.argument.i` roles, then resolve the transition exactly like
+    /// `lower_transition_call` (which handles the `Flow::event(state, args)`
+    /// spelling where the source is argument 0). Keeping the receiver out of
+    /// the positional argument list is required so the node catalog (keyed by
+    /// role) matches the already-catalogued Field-receiver / call-argument nodes.
+    fn lower_state_method_transition_call(
+        &mut self,
+        node_id: &NodeId,
+        flow: &str,
+        event: &str,
+        receiver: &Expr,
+        arguments: &[Expr],
+        role: &str,
+        type_arguments: &[ResolvedTypeId],
+    ) -> Result<ResolvedCall, Vec<ResolvedBodyError>> {
+        if !type_arguments.is_empty() {
+            return self.unsupported(node_id, "generic arguments on transition call");
+        }
+        if matches!(receiver.unlocated(), Expr::NamedArg(_, _)) {
+            return self.unsupported(node_id, "named transition source argument");
+        }
+        let source_role = format!("{role}.callee.inner");
+        let source = self.lower_expr(receiver, &source_role)?;
+        let mut candidates = self
+            .signatures
+            .iter()
+            .filter_map(|(owner, signature)| {
+                let (candidate_flow, candidate_event, source_state) =
+                    parse_transition_owner(owner)?;
+                let flow_matches = candidate_flow == flow
+                    || candidate_flow
+                        .rsplit_once("::")
+                        .is_some_and(|(_, short)| short == flow);
+                (flow_matches
+                    && candidate_event == event
+                    && signature
+                        .parameters
+                        .first()
+                        .is_some_and(|parameter| parameter.ty == source.ty))
+                .then_some((
+                    owner.clone(),
+                    signature.clone(),
+                    candidate_flow.to_string(),
+                    source_state.to_string(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        // 0.36.10 (裁决 6 follow-up): recover/reset widening (see lower_transition_call).
+        let mut widened_recover_reset = false;
+        if candidates.is_empty() && matches!(event, "recover" | "reset") {
+            let flow_event_only: Vec<_> = self
+                .signatures
+                .iter()
+                .filter_map(|(owner, signature)| {
+                    let (candidate_flow, candidate_event, source_state) =
+                        parse_transition_owner(owner)?;
+                    let flow_matches = candidate_flow == flow
+                        || candidate_flow
+                            .rsplit_once("::")
+                            .is_some_and(|(_, short)| short == flow);
+                    (flow_matches && candidate_event == event).then(|| {
+                        (
+                            owner.clone(),
+                            signature.clone(),
+                            candidate_flow.to_string(),
+                            source_state.to_string(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if flow_event_only.len() == 1 {
+                candidates = flow_event_only;
+                widened_recover_reset = true;
+            }
+        }
+        let [(_owner, signature, qualified_flow, source_state)] = candidates.as_slice() else {
+            let available = self
+                .signatures
+                .iter()
+                .filter_map(|(owner, signature)| {
+                    let (candidate_flow, candidate_event, source_state) =
+                        parse_transition_owner(owner)?;
+                    (candidate_event == event
+                        && (candidate_flow == flow
+                            || candidate_flow
+                                .rsplit_once("::")
+                                .is_some_and(|(_, short)| short == flow)))
+                    .then(|| {
+                        format!(
+                            "{}:{}",
+                            source_state,
+                            signature
+                                .parameters
+                                .first()
+                                .map(|parameter| parameter.ty.as_str())
+                                .unwrap_or("missing")
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "transition call '{flow}::{event}' with source '{}' does not resolve to exactly one source-state overload (available: {available})",
+                    source.ty.as_str()
+                ),
+            )]);
+        };
+        if arguments.len() + 1 != signature.parameters.len() {
+            return Err(vec![ResolvedBodyError::new(
+                node_id.clone(),
+                format!(
+                    "transition argument count {} does not match canonical parameter count {}",
+                    arguments.len() + 1,
+                    signature.parameters.len()
+                ),
+            )]);
+        }
+
+        let mut slots = vec![None; signature.parameters.len()];
+        slots[0] = Some((source, source_role));
+        let mut next_positional = 1;
+        let sibling_roles = expr_sibling_roles(&format!("{role}.argument"), arguments);
+        for index in 0..arguments.len() {
+            let argument_role = sibling_roles[index].clone();
+            let (slot, value, value_role) = match arguments[index].unlocated() {
+                Expr::NamedArg(name, value) => {
+                    let slot = signature
+                        .parameters
+                        .iter()
+                        .position(|parameter| parameter.name == *name)
+                        .ok_or_else(|| {
+                            vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                format!("named transition argument '{name}' has no parameter"),
+                            )]
+                        })?;
+                    (slot, value.as_ref(), format!("{argument_role}.inner"))
+                }
+                _ => {
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
+                    let slot = next_positional;
+                    next_positional += 1;
+                    (slot, &arguments[index], argument_role)
+                }
+            };
+            if slot == 0 || slots[slot].is_some() {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "transition parameter '{}' is supplied more than once",
+                        signature.parameters[slot].name
+                    ),
+                )]);
+            }
+            let value = self.lower_expr(value, &value_role)?;
+            slots[slot] = Some((value, value_role));
+        }
+
+        let mut lowered = Vec::with_capacity(slots.len());
+        for (index, (parameter, slot)) in signature.parameters.iter().zip(slots).enumerate() {
+            let Some((value, _)) = slot else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!("transition parameter '{}' has no argument", parameter.name),
+                )]);
+            };
+            let conversion = if widened_recover_reset && index == 0 {
+                CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    to: value.ty.clone(),
+                    from: value.ty.clone(),
+                }
+            } else {
+                self.implicit_conversion(node_id, &value.ty, &parameter.ty)?
+            };
+            lowered.push(ResolvedArgument {
+                parameter: parameter.id.clone(),
+                value,
+                conversion,
+            });
+        }
+        let call_result = self.node_types.get(node_id).ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                node_id.clone(),
+                "transition call has no checker-finalized result type",
+            )]
+        })?;
+        let call_result_type = if signature.result == *call_result
+            || self.is_system_fault_refinement(&signature.result, call_result)
+            || self.is_flow_state_set_refinement(&signature.result, call_result)
+        {
+            signature.result.clone()
+        } else {
+            call_result.clone()
+        };
+        let flow_id = crate::core::FlowId(qualified_flow.clone());
+        Ok(ResolvedCall {
+            callee: ResolvedCallee::Transition(crate::core::TransitionId {
+                flow: flow_id.clone(),
+                event: event.to_string(),
+                source: crate::core::StateId {
+                    flow: flow_id,
+                    name: source_state.clone(),
+                },
+            }),
+            result: call_result_type,
+            type_arguments: Vec::new(),
+            arguments: lowered,
+            permission: Some(super::Permission::Consume),
+            effects: signature.effects.clone(),
+            session: Vec::new(),
         })
     }
 
