@@ -877,10 +877,60 @@ impl<'ctx> CodeGenerator<'ctx> {
         let tuple_val = self.compile_expr(tuple_expr, vars)?;
         Ok(match tuple_val {
             BasicValueEnum::PointerValue(pv) => {
-                let struct_ty = self
-                    .tuple_type_stack
-                    .last()
-                    .ok_or_else(|| "tuple type stack empty".to_string())?;
+                // 0.40.1.18 (F-014): a tuple carried as a POINTER — e.g. a comprehension
+                // loop variable of tuple type (bound as `PointerValue` since 0.40.1.17) —
+                // needs its struct layout for the GEP/load. `tuple_type_stack` is only
+                // populated during tuple-LITERAL compilation (compile_tuple_expr push/pop,
+                // record.rs:724+726), so for a tuple *variable/loop var* it is empty and
+                // `.last()` fails with "tuple type stack empty". Derive the struct type from
+                // the variable's registered Mimi type name via the existing `llvm_type_for`
+                // single source (no new heuristic / type whitelist / shape enum — the SAME
+                // resolver the literal path ultimately uses). Falls back to the stack for
+                // non-Ident tuple pointers (tuple literals still flow through it).
+                // 0.40.1.18 (F-014): a tuple carried as a POINTER — e.g. a comprehension
+                // loop variable of tuple type (bound as `PointerValue` since 0.40.1.17) —
+                // needs its struct layout for the GEP/load. `tuple_type_stack` is only
+                // populated during tuple-LITERAL compilation (compile_tuple_expr push/pop,
+                // record.rs:724+726), so for a tuple *variable/loop var* it is empty and
+                // `.last()` fails with "tuple type stack empty". Derive the struct type from
+                // the variable's registered Mimi type name via the existing `llvm_type_for`
+                // single source (no new heuristic / type whitelist / shape enum — the SAME
+                // resolver the literal path ultimately uses), push it onto `tuple_type_stack`
+                // exactly like a literal would, and pop it after the load so the stack stays
+                // balanced. Falls back to the stack for non-Ident tuple pointers (tuple
+                // literals still flow through it).
+                let mut derived_pushed = false;
+                let struct_ty = if let Expr::Ident(name) = tuple_expr.unlocated() {
+                    if let Some(tn) = self.var_type_names.get(name) {
+                        if let Some(ty) = self.tuple_type_from_name(tn) {
+                            if let Some(BasicTypeEnum::StructType(st)) = self.llvm_type_for(&ty) {
+                                self.tuple_type_stack.push(st);
+                                derived_pushed = true;
+                                self.tuple_type_stack
+                                    .last()
+                                    .ok_or_else(|| {
+                                        "tuple type stack empty (derived)".to_string()
+                                    })?
+                            } else {
+                                self.tuple_type_stack
+                                    .last()
+                                    .ok_or_else(|| "tuple type stack empty".to_string())?
+                            }
+                        } else {
+                            self.tuple_type_stack
+                                .last()
+                                .ok_or_else(|| "tuple type stack empty".to_string())?
+                        }
+                    } else {
+                        self.tuple_type_stack
+                            .last()
+                            .ok_or_else(|| "tuple type stack empty".to_string())?
+                    }
+                } else {
+                    self.tuple_type_stack
+                        .last()
+                        .ok_or_else(|| "tuple type stack empty".to_string())?
+                };
                 let field_gep = self
                     .gep()
                     .build_struct_gep(
@@ -894,7 +944,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let field_ty = field_types
                     .get(index)
                     .ok_or_else(|| format!("tuple field {} out of bounds", index))?;
-                self.build_load(*field_ty, field_gep, &format!("tuple_{}", index))?
+                let res = self.build_load(*field_ty, field_gep, &format!("tuple_{}", index))?;
+                // 0.40.1.18 (F-014): drop the derived entry we pushed above so the
+                // `tuple_type_stack` stays balanced (literals push/pop symmetrically).
+                if derived_pushed {
+                    self.tuple_type_stack.pop();
+                }
+                res
             }
             BasicValueEnum::StructValue(sv) => {
                 self.build_extract_value(sv.into(), index as u32, &format!("tuple_{}", index))?
@@ -907,6 +963,43 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         })
     }
+
+    /// Resolve a tuple type NAME (e.g. `(i32, List<i32>)`) to its `Type::Tuple`,
+    /// reusing `llvm_type_for` as the single source of truth (0.40.1.18 / F-014 —
+    /// tuple variables/loop vars have no `tuple_type_stack` entry, so the tuple
+    /// struct layout for `.0`/`.1` indexing must be derived from the registered name
+    /// instead of the literal-only stack).
+    fn tuple_type_from_name(&self, name: &str) -> Option<crate::ast::Type> {
+        let inner = name.strip_prefix('(').and_then(|s| s.strip_suffix(')'))?;
+        let elems: Vec<crate::ast::Type> = split_top_level_types(inner)
+            .iter()
+            .map(|e| self.single_type_from_name(e.trim()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(crate::ast::Type::Tuple(elems))
+    }
+
+    /// Map a single type NAME (primitive / record / container / nested tuple) to its
+    /// `Type` AST node; the final LLVM layout is resolved by `llvm_type_for` (the same
+    /// resolver the tuple-literal path uses). No hand-coded type whitelist — every
+    /// element is funnelled through `llvm_type_for`.
+    fn single_type_from_name(&self, name: &str) -> Option<crate::ast::Type> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if name.starts_with('(') && name.ends_with(')') {
+            return self.tuple_type_from_name(name);
+        }
+        if let Some((container, inner)) = name.split_once('<') {
+            let inner = inner.strip_suffix('>')?;
+            let args: Vec<crate::ast::Type> = split_top_level_types(inner)
+                .iter()
+                .map(|a| self.single_type_from_name(a.trim()))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(crate::ast::Type::Name(container.trim().to_string(), args));
+        }
+        Some(crate::ast::Type::Name(name.to_string(), vec![]))
+    }
 }
 
 fn require_int_index<'ctx>(
@@ -916,4 +1009,32 @@ fn require_int_index<'ctx>(
         BasicValueEnum::IntValue(iv) => Ok(iv),
         _ => Err("index must be i64".into()),
     }
+}
+
+/// Split a comma-separated type list at top level only (nested `()` / `<>` keep their
+/// commas). Used to parse tuple type names like `(i32, List<i32>, (bool, f64))`.
+fn split_top_level_types(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for c in s.chars() {
+        match c {
+            '(' | '<' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | '>' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        parts.push(cur);
+    }
+    parts
 }

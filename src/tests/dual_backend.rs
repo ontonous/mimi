@@ -3504,6 +3504,51 @@ fn dual_comprehension_tuple_param_loopvar() {
     );
 }
 
+// F-014 (0.40.1.18): tuple field access (.0/.1) on a comprehension loop variable.
+// The loop var is bound as a `PointerValue` (tuple handle), so `compile_tuple_index_expr`
+// must derive the tuple struct type from the registered Mimi type name (the
+// `tuple_type_stack` is only populated for tuple *literals*).
+#[test]
+fn dual_comprehension_tuple_index_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ts = [(1, 2), (3, 4), (5, 6)];
+            let s = [t.0 + t.1 for t in ts];
+            let flt = [t for t in ts if t.1 > 1];
+            println(s[0] + s[1] + s[2]);
+            println(len(flt));
+            0
+        }
+        "#,
+        "21\n3"
+    );
+}
+
+// F-014 (0.40.1.18): tuple field access where the tuple loop var is the element of a
+// nested tuple/list-of-tuples, exercising deeper field+index interleaving.
+#[test]
+fn dual_comprehension_tuple_index_loopvar_nested() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ts = [(1, 2), (3, 4), (5, 6)];
+            let s = [(t.0, t.1 * 2) for t in ts];
+            let out = [p.0 + p.1 for p in s];
+            println(out[0] + out[1] + out[2]);
+            0
+        }
+        "#,
+        "33"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

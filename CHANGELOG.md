@@ -337,6 +337,43 @@ Set L3 仍列专用高优先切片。
 `/tmp/f19_b.mimi`（R2{inner:r}=5）≡ VM、`/tmp/f19_c.mimi`（f(r)=4）≡ VM、
 `/tmp/f19_f.mimi`（T2{inner:t}=5）≡ VM、`/tmp/f19_g.mimi`（g(t)=4）≡ VM
 
+### 0.40.1.18 — F-014：推导式循环变量（tuple 类型）字段访问 `.0`/`.1` 的 struct 布局派生
+
+F-013 把 tuple 循环变量在绑定站点归一为 `PointerValue`（tuple 句柄），record 字段 /
+函数参数消费站点随之收敛；但 **tuple 字段访问**（`[t.0 + t.1 for t in ts]`、`[t.0 for t in ts]`、
+`[t for t in ts if t.1 > 1]`）native 报 `E0700 tuple type stack empty`，VM 给出正确值——
+又一处 L1 分歧（fail-closed：native 编译期拒绝，非静默错译）。普通 tuple 变量（`let t = (1,2)`）
+正常，故缺陷**仅针对循环变量**（PointerValue 路径）。
+
+根因：`compile_tuple_index_expr` 的 `PointerValue` 臂用 `tuple_type_stack.last()` 取 tuple struct
+布局，而 `tuple_type_stack` **仅在 tuple 字面量编译时由 `compile_tuple_expr` push/pop 填充**
+（record.rs:724-726）。tuple 变量（含循环变量）从不入栈，故 `.last()` 为空 → 报错。普通 tuple
+变量返回 `StructValue`（走 `build_extract_value` 臂）绕过此路径；循环变量是 `PointerValue`（bit-cast
+句柄），正好命中 `.last()` 空栈。
+
+修复（S2 合规：在访问站点用**既有 `llvm_type_for` 单一事实源**补全 tuple 变量布局，**未**新增
+启发式 / 类型白名单 / 形状枚举；`tuple_type_stack` 机制本身不变，tuple 变量只是像字面量一样借栈）：
+- `src/codegen/expr/access.rs` `compile_tuple_index_expr` `PointerValue` 臂：当 `tuple_expr` 是
+  `Expr::Ident` 且其 `var_type_names` 为 tuple 类型名时，经 `tuple_type_from_name(tn)` →
+  `llvm_type_for` 派生 `StructType`，**push 到 `tuple_type_stack`（与字面量完全相同的做法）**，
+  load 之后 **pop 回**（保持栈平衡，无栈残留误读）；非 Ident 的 tuple 指针（字面量）仍走原 `.last()`。
+- 新增 `tuple_type_from_name` / `single_type_from_name`：把 `(i32, List<i32>)` 这类 tuple 类型名
+  递归拆成 `Type::Tuple` / `Type::Name`（容器 `List<X>` 解析为 `Type::Name("List", [X])`），
+  **全部经 `llvm_type_for` 求布局**——同一解析器、零手写类型映射。
+- 新增自由函数 `split_top_level_types`：按顶层逗号切分（嵌套 `()` / `<>` 内部逗号不计），结构解析用。
+
+内存语义：借栈 push/pop 对称，不改变任何既有栈使用者的语义；tuple 变量字段访问全程不脱离既有
+`build_struct_gep` / `build_load` 路径。
+
+分类: 一次性缺陷（tuple 变量布局在字段访问站点的单一事实源补全，F-013 同根的声明侧/类型侧收敛，
+未触 S2/S3；未触 deep-copy/claim 冻结红线）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_tuple_index_loopvar`（map+filter 双形态，
+`21\n3`）、`dual_comprehension_tuple_index_loopvar_nested`（嵌套 tuple 字段+索引，`33`）
+（均双后端 run+build+exec MATCH）；repro `/tmp/f20_i.mimi`=21、`/tmp/f20_m.mimi`=9、
+`/tmp/f20_k.mimi`=3、`/tmp/f20_j.mimi`=2（均 ≡ VM）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
