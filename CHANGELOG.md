@@ -291,6 +291,52 @@ F-011 以「调用点手工镜像」方式在 record/tuple 字段、`List` 参�
 （均双后端 run+build+exec MATCH）；repro `/tmp/f18_c.mimi`（reverse=5）≡ VM、
 `/tmp/f18_g.mimi`（contains=1）≡ VM、``/tmp/f18_i.mimi`（pop=6）≡ VM
 
+### 0.40.1.17 — F-013：推导式循环变量（record/tuple 聚合类型）统一绑定为 PointerValue，关闭 record 字段/函数参数消费站点的 L1 分歧
+
+F-012 将 **List** 循环变量在绑定站点归一为 `PointerValue`，但同根的「聚合类型以 i64 句柄
+携带」家族还包含 **record / tuple**：`[R2 { inner: r } for r in rs]`（record 字段含 record
+循环变量）与 `[f(r) for r in rs]`（record 循环变量作函数实参）native 读垃圾（VM 给正确值），
+`[T2 { inner: t } for t in ts]`（tuple 字段含 tuple 循环变量）同样。根因与 F-012 完全一致——
+循环变量按约定以 i64 句柄携带，消费站点 `infer_object_type(Ident)` 回 `i64`，单一事实源修复
+只能在绑定站点（已掌握元素类型）。
+
+修复（S2 合规，声明侧绑定点做唯一权威归一，无新启发式 / 类型白名单 / 形状枚举，不触 deep-copy/claim
+冻结红线；仅**补全**既有 `needs_load` 谓词的枚举缺口——tuple 类型名 `(A,B)` 不在 `type_defs`
+故被漏判，属既有枚举的遗漏而非新增逐站点镜像）：
+- `src/codegen/expr/record.rs` `compile_comprehension_expr`：将 F-012 的 `var_is_list`
+  （`is_list_type_name`）扩为 `var_is_ptr`——**所有非标量聚合句柄类型**（List / record / tuple）
+  均在父级 data 数组以 i64 句柄（聚合结构指针 cast 到 i64）存放，标量（i32/i64/bool/char/f64）
+  直接存值。判定 `!is_scalar && iter_elem != "string" && !iter_elem.starts_with("Set")`。
+- `src/codegen/expr/record.rs` `emit_comprehension_loop`：当 `var_is_ptr` 时，把 i64 句柄
+  `build_bit_cast` 回聚合结构指针并**以 `PointerValue` 绑定**（与 F-012 同一路径）。record/tuple
+  循环变量随之流经与普通 record/tuple 变量完全相同的既有 `PointerValue` 路径，record 字段 /
+  tuple 字段 / record 参数 / tuple 参数 / `len`/reverse/contains/pop/索引全部经其既有臂收敛。
+- `src/codegen/expr/call/simple.rs` `coerce_args_to_param_types`：将 F-012 的 `PointerValue` 臂
+  从「仅 `List`/`Set`」**泛化为任意 `StructType` 目标**——聚合实参已为结构指针、按 struct-by-value
+  参数声明类型 `build_load` 出结构值（覆盖 record/tuple 参数，如 `f(r)`、`g(t)`）。单规则，无逐类型白名单。
+- `src/codegen/expr/record.rs` `maybe_load_compound_field_value`：既有 `PointerValue` 臂的
+  `needs_load` 谓词补全 **tuple** 形状（`val_type.starts_with("(") && val_type.ends_with(")")`），
+  使 tuple 循环变量（及任意 tuple）作为 record 字段值时正确从指针 load 出结构（此前 `(A,B)` 不在
+  `type_defs` 被漏判，`T2 { inner: t }` 写指针而非结构）；record 已由 `type_defs` 覆盖，无需改。
+
+内存语义：元素存储（`emit_comprehension_store` `PointerValue` 臂）已含 record/tuple 堆打包，
+与普通聚合变量同构，无新增泄漏/UB。
+
+已知相邻缺口（**保持 F-012 标记，未变动**）：string 循环变量（native E0700 fail-closed，守住）
+与 Set 循环变量（F-011 `starts_with("Set")` 误按 list 结构 bit-cast 的既存 L3 段错误）仍不纳入
+`var_is_ptr` 归一（`string`/`Set` 在判定中显式排除），回落到既有 i64 句柄路径（不新增回归）；
+Set L3 仍列专用高优先切片。
+
+分类: 一次性缺陷（record/tuple 句柄在推导式循环变量绑定处的表示归一，单一事实源；F-012 同根的
+声明侧绑定点收敛，未触 S2/S3）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_record_field_loopvar`（5）、
+`dual_comprehension_record_param_loopvar`（4）、`dual_comprehension_tuple_field_loopvar`（5）、
+`dual_comprehension_tuple_param_loopvar`（4）（均双后端 run+build+exec MATCH）；repro
+`/tmp/f19_b.mimi`（R2{inner:r}=5）≡ VM、`/tmp/f19_c.mimi`（f(r)=4）≡ VM、
+`/tmp/f19_f.mimi`（T2{inner:t}=5）≡ VM、`/tmp/f19_g.mimi`（g(t)=4）≡ VM
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

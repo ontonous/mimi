@@ -3424,6 +3424,86 @@ fn dual_comprehension_pop_loopvar() {
     );
 }
 
+// ─── 27b. Comprehension loop variables: record / tuple aggregate (F-013) ──
+
+#[test]
+fn dual_comprehension_record_field_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32, b: i32 }
+        type R2 { inner: R }
+        func main() -> i32 {
+            let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }];
+            let out = [R2 { inner: r } for r in rs];
+            println(out[0].inner.a + out[1].inner.b);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_record_param_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32, b: i32 }
+        func f(r: R) -> i32 { return r.a; }
+        func main() -> i32 {
+            let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }];
+            let out = [f(r) for r in rs];
+            println(out[0] + out[1]);
+            0
+        }
+        "#,
+        "4"
+    );
+}
+
+#[test]
+fn dual_comprehension_tuple_field_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type T2 { inner: (i32, i32) }
+        func main() -> i32 {
+            let ts = [(1, 2), (3, 4)];
+            let out = [T2 { inner: t } for t in ts];
+            println(out[0].inner.0 + out[1].inner.1);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_tuple_param_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func g(t: (i32, i32)) -> i32 { return t.0; }
+        func main() -> i32 {
+            let ts = [(1, 2), (3, 4)];
+            let out = [g(t) for t in ts];
+            println(out[0] + out[1]);
+            0
+        }
+        "#,
+        "4"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]
