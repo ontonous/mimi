@@ -2998,13 +2998,28 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
 /// documented otherwise), live Mimi list pointers from `mimi_list_*` calls,
 /// and key/value arrays must have at least `len` valid elements.
 #[no_mangle]
+/// Boxed Mimi string returned by runtime string helpers: `{ data_ptr, byte_len }`.
+/// Must match the codegen string struct layout `{ i8*, i64 }` so the result can be
+/// used directly as a Mimi `string` value without re-boxing via `strlen` (BUG H).
+#[repr(C)]
+pub struct MimiStrBox {
+    pub ptr: *mut std::ffi::c_char,
+    pub len: i64,
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn mimi_str_substring(
     s: *const std::ffi::c_char,
+    len: i64,
     start: i64,
     end: i64,
-) -> *mut std::ffi::c_char {
-    // SAFETY: `cstr_to_string` handles null pointers safely.
-    let ss = unsafe { cstr_to_string(s) };
+) -> MimiStrBox {
+    // Length-aware: read exactly `len` bytes (embedded NUL preserved) instead
+    // of relying on NUL-termination. Fixes `.substring()` on strings that
+    // contain embedded NUL bytes (BUG H — fat-ABI migration gap). The result
+    // is returned as a fully-boxed `{ ptr, len }` struct so the caller needs
+    // no `strlen` and no out-pointer.
+    let ss = str_from_ptr_len(s, len);
     if start < 0 || end < 0 {
         mimi_runtime_abort(
             b"str_substring: index out of bounds\0".as_ptr() as *const std::ffi::c_char
@@ -3022,7 +3037,11 @@ pub unsafe extern "C" fn mimi_str_substring(
         );
     }
     let result: String = chars[s_idx..e_idx].iter().collect();
-    alloc_c_string(&result)
+    let boxed = alloc_c_string(&result);
+    MimiStrBox {
+        ptr: boxed,
+        len: result.len() as i64,
+    }
 }
 
 /// audit-wave1 helper: read a `(ptr, len)` string ABI into a Rust String
@@ -3064,7 +3083,7 @@ pub unsafe extern "C" fn mimi_str_substring_clamp(
     len: i64,
     start: i64,
     end: i64,
-) -> *mut std::ffi::c_char {
+) -> MimiStrBox {
     let ss = str_from_ptr_len(ptr, len);
     let chars: Vec<char> = ss.chars().collect();
     let n = chars.len();
@@ -3075,7 +3094,11 @@ pub unsafe extern "C" fn mimi_str_substring_clamp(
         mimi_runtime_abort(b"str_substring: start > end\0".as_ptr() as *const std::ffi::c_char);
     }
     let result: String = chars[si..ei].iter().collect();
-    alloc_c_string(&result)
+    let boxed = alloc_c_string(&result);
+    MimiStrBox {
+        ptr: boxed,
+        len: result.len() as i64,
+    }
 }
 
 /// audit-wave1: Unicode-correct full-string case conversion (VM parity:
@@ -4363,15 +4386,26 @@ pub unsafe extern "C" fn mimi_try_exit_str(str: *const std::ffi::c_char, len: i6
 #[no_mangle]
 pub unsafe extern "C" fn mimi_str_count_substring(
     s: *const std::ffi::c_char,
+    s_len: i64,
     sub: *const std::ffi::c_char,
+    sub_len: i64,
 ) -> i32 {
     if s.is_null() || sub.is_null() {
         return 0;
     }
-    // SAFETY: `CStr::from_ptr` requires a null-terminated string. Mimi strings
-    // are null-terminated at the ABI boundary (see `cstr_to_string`).
-    let s_bytes = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes();
-    let sub_bytes = unsafe { std::ffi::CStr::from_ptr(sub) }.to_bytes();
+    // Length-aware: read exactly the declared byte lengths so embedded NUL
+    // bytes are not truncated by NUL-termination. Fixes `count_substring` on
+    // strings that contain embedded NUL bytes (BUG H — fat-ABI migration gap).
+    let s_bytes: &[u8] = if s_len <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(s as *const u8, s_len as usize) }
+    };
+    let sub_bytes: &[u8] = if sub_len <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(sub as *const u8, sub_len as usize) }
+    };
     if sub_bytes.is_empty() {
         return 0;
     }
@@ -22721,29 +22755,29 @@ mod audit_wave1_tests {
         let p = s.as_ptr() as *const std::ffi::c_char;
         // In-range: identical to VM function form.
         assert_eq!(
-            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 1, 4) }),
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 1, 4).ptr }),
             "ell"
         );
         // End beyond char count clamps to len (VM parity; method form aborts).
         assert_eq!(
-            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 2, 99) }),
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 2, 99).ptr }),
             "llo"
         );
         // Start beyond char count clamps to len → empty slice.
         assert_eq!(
-            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 99, 100) }),
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 99, 100).ptr }),
             ""
         );
         // Empty range.
         assert_eq!(
-            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 0, 0) }),
+            owned_str(unsafe { mimi_str_substring_clamp(p, 5, 0, 0).ptr }),
             ""
         );
         // Unicode chars (byte len 6, char count 5): indices are char-based.
         let u = "héllo"; // é is 2 bytes
         let up = u.as_ptr() as *const std::ffi::c_char;
         assert_eq!(
-            owned_str(unsafe { mimi_str_substring_clamp(up, u.len() as i64, 1, 3) }),
+            owned_str(unsafe { mimi_str_substring_clamp(up, u.len() as i64, 1, 3).ptr }),
             "él"
         );
     }

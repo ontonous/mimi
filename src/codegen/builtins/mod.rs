@@ -13,6 +13,7 @@ use inkwell::attributes::AttributeLoc;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::BasicTypeEnum;
 use inkwell::AddressSpace;
 
 /// Mark a function declaration as `noreturn` so LLVM's optimizer knows
@@ -29,6 +30,15 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     let i32 = ctx.i32_type();
     let i64 = ctx.i64_type();
     let void = ctx.void_type();
+    // Boxed Mimi string `{ i8*, i64 }` — used as the return type of runtime
+    // string helpers that must preserve embedded NUL bytes (BUG H fix).
+    let str_box_ty = ctx.struct_type(
+        &[
+            BasicTypeEnum::PointerType(i8_ptr),
+            BasicTypeEnum::IntType(i64),
+        ],
+        false,
+    );
 
     register_libc(module, ctx, i8_ptr, i32, i64, void);
     register_map_record_fns(module, ctx, i8_ptr, i32, i64, void);
@@ -1905,6 +1915,14 @@ fn register_string_fns<'ctx>(
     // String runtime functions
     // MimiList* = i8* (opaque pointer to {i64, i8**} struct)
     // str_split(s, delim) → MimiList*
+    // Boxed Mimi string `{ i8*, i64 }` — return type of substring helpers (BUG H).
+    let str_box_ty = ctx.struct_type(
+        &[
+            BasicTypeEnum::PointerType(i8_ptr),
+            BasicTypeEnum::IntType(i64),
+        ],
+        false,
+    );
     module.add_function(
         "mimi_str_split",
         i8_ptr.fn_type(
@@ -2049,12 +2067,31 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-    // mimi_str_substring(s, start, end) → i8* (Unicode scalar indices; aborts on bad range)
+    // mimi_str_substring(s, len, start, end) → {i8*, i64} (length-aware;
+    // Unicode scalar indices; aborts on bad range). `len` is the boxed byte
+    // length so embedded NUL bytes are preserved (BUG H fix). Returns the
+    // result as a fully-boxed string struct so callers need no strlen/out-ptr.
     module.add_function(
         "mimi_str_substring",
-        i8_ptr.fn_type(
+        str_box_ty.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_str_substring_clamp(ptr, len, start, end) → {i8*, i64} (length-aware,
+    // indices clamped to char count). Returns a boxed string struct (BUG H fix).
+    module.add_function(
+        "mimi_str_substring_clamp",
+        str_box_ty.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::IntType(i64),
             ],
@@ -2204,13 +2241,17 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-    // mimi_str_count_substring(s, sub) → i32 (count of non-overlapping occurrences)
+    // mimi_str_count_substring(s, s_len, sub, sub_len) → i32 (count of
+    // non-overlapping occurrences). Both byte lengths are explicit so embedded
+    // NUL bytes are preserved (BUG H fix).
     module.add_function(
         "mimi_str_count_substring",
         _i32.fn_type(
             &[
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
                 BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
             ],
             false,
         ),

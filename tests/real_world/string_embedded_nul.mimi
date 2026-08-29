@@ -1,0 +1,22 @@
+// BUG H regression: string values carry an authoritative byte length (fat-ABI),
+// so len/.len() and substring/.substring() must NOT NUL-walk. Embedded NUL bytes
+// must survive through both the method form and the function form on BOTH
+// backends. This program would have failed to LINK on native before the
+// `mimi_str_substring` (strict) export fix, and would have truncated length
+// before the NUL-aware len/substring fixes.
+use std::strings
+
+func main() {
+    let a = "a\0b\0c"
+    // method form substring (strict) + chained len/contains
+    let x = a.substring(0, 3)
+    println(x.len())
+    println(x.contains("\0"))
+    println(x.contains("b"))
+    // function form substring (clamp)
+    let y = substring(a, 0, 3)
+    println(y.len())
+    println(len(a))
+    // NUL-aware length on a plain literal too
+    println(len("x\0y\0z"))
+}

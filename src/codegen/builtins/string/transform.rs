@@ -333,8 +333,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // method.rs routes it to `str_substring_strict` (2026-08-06, D-5),
         // whose emitter calls `mimi_str_substring` instead of this clamp path.
         let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_substring")?;
-        let sub_fn = self.get_or_declare_ptr_len_str_fn("mimi_str_substring_clamp", 2)?;
-        let raw_result = self
+        let sub_fn = self.get_runtime_fn("mimi_str_substring_clamp")?;
+        // Helper returns the result already boxed as `{ i8*, i64 }` with the
+        // true byte length (embedded NUL preserved, no strlen) — BUG H fix.
+        let result = self
             .build_call(
                 sub_fn,
                 &[
@@ -347,9 +349,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("mimi_str_substring_clamp returned void")?
+            .into_struct_value();
+        let result_ptr = self
+            .builder
+            .build_extract_value(result, 0, "sub_result_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("sub result ptr: {}", e)))?
             .into_pointer_value();
-        self.register_heap_alloc(raw_result);
-        self.wrap_c_string(raw_result)
+        self.register_heap_alloc(result_ptr);
+        Ok(result.into())
     }
 
     /// Method-form `.substring(start, end)` — STRICT bounds (VM
@@ -385,13 +392,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             end
         };
-        let data_ptr = self.extract_string_arg(&args[0], "str_substring_strict")?;
+        let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_substring_strict")?;
         let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
-        let raw_result = self
+        // Helper returns the result already boxed as `{ i8*, i64 }` with the
+        // true byte length (embedded NUL preserved, no strlen) — BUG H fix.
+        let result = self
             .build_call(
                 sub_fn,
                 &[
                     BasicMetadataValueEnum::PointerValue(data_ptr),
+                    BasicMetadataValueEnum::IntValue(byte_len),
                     BasicMetadataValueEnum::IntValue(start),
                     BasicMetadataValueEnum::IntValue(end),
                 ],
@@ -399,9 +409,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or("mimi_str_substring returned void")?
+            .into_struct_value();
+        let result_ptr = self
+            .builder
+            .build_extract_value(result, 0, "sub_result_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("sub result ptr: {}", e)))?
             .into_pointer_value();
-        self.register_heap_alloc(raw_result);
-        self.wrap_c_string(raw_result)
+        self.register_heap_alloc(result_ptr);
+        Ok(result.into())
     }
 
     pub(in crate::codegen) fn compile_str_split(

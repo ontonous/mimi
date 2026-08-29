@@ -349,6 +349,8 @@ declare i32 @mimi_str_unbox(i64, ptr, ptr)
 
 declare void @mimi_str_free_box(i64)
 
+declare i64 @mimi_str_box_copy(ptr, i64)
+
 declare ptr @mimi_str_join_ll(ptr, ptr, i64, ptr)
 
 declare ptr @mimi_str_join(ptr, ptr)
@@ -361,7 +363,9 @@ declare ptr @mimi_str_char_at(ptr, i64)
 
 declare ptr @mimi_str_char_at_ll(ptr, i64, i64)
 
-declare ptr @mimi_str_substring(ptr, i64, i64)
+declare { ptr, i64 } @mimi_str_substring(ptr, i64, i64, i64)
+
+declare { ptr, i64 } @mimi_str_substring_clamp(ptr, i64, i64, i64)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
@@ -389,7 +393,7 @@ declare i64 @mimi_str_starts_with(ptr, i64, ptr, i64)
 
 declare i64 @mimi_str_ends_with(ptr, i64, ptr, i64)
 
-declare i32 @mimi_str_count_substring(ptr, ptr)
+declare i32 @mimi_str_count_substring(ptr, i64, ptr, i64)
 
 declare i32 @mimi_regex_match(ptr, ptr)
 

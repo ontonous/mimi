@@ -568,7 +568,39 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_set_method(obj, method_name, args, vars);
         }
 
-        // 2. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
+        // 2. String `.len()` must route to the free-function `len(obj)` BEFORE
+        // trait dispatch. The `Str` trait method `len(self) { len(self) }` would
+        // otherwise pass the unboxed data pointer (`ensure_self_pointer` extracts
+        // field 0) into `len`, which NUL-walks and truncates strings that carry
+        // embedded NUL bytes. Routing to `len(obj)` keeps the boxed {ptr,i64}
+        // struct so the authoritative byte length survives (BUG H fat-ABI).
+        if obj_type == "string" && method_name == "len" {
+            self.pending_len_is_string = true;
+            let obj_expr = obj.clone();
+            let call_expr =
+                Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
+            return self.compile_expr(&call_expr, vars);
+        }
+
+        // 3. Builtin string method fallback (BEFORE trait dispatch): s.trim() →
+        //     str_trim(s), s.substring() → str_substring_strict(s, ...), etc. This
+        //     must take priority over the `Str` trait impl, whose method bodies
+        //     receive `self` unboxed to a raw data pointer by `ensure_self_pointer`,
+        //     losing the embedded byte length and truncating strings that carry
+        //     NUL bytes (BUG H fat-ABI). Desugaring to the builtin passes the
+        //     boxed {ptr,i64} struct so the authoritative length survives.
+        if obj_type == "string" {
+            if let Some(builtin_name) = string_method_to_builtin(method_name) {
+                let obj_expr = obj.clone();
+                let mut all_args = vec![obj_expr];
+                all_args.extend(args.iter().cloned());
+                let call_expr =
+                    Expr::Call(Box::new(Expr::Ident(builtin_name.to_string())), all_args);
+                return self.compile_expr(&call_expr, vars);
+            }
+        }
+
+        // 4. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
         // Impl blocks are keyed by the base type name (e.g. "List") even when the
         // call site sees a concrete instantiation like "List<T>" or "List<i32>".
         // For generic impls called with concrete types, monomorphize on-demand.
@@ -756,27 +788,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => None,
             };
             if let Some(builtin_name) = builtin_name {
-                let obj_expr = obj.clone();
-                let mut all_args = vec![obj_expr];
-                all_args.extend(args.iter().cloned());
-                let call_expr =
-                    Expr::Call(Box::new(Expr::Ident(builtin_name.to_string())), all_args);
-                return self.compile_expr(&call_expr, vars);
-            }
-        }
-
-        // 5b. Builtin string method fallback: s.trim() → str_trim(s)
-        //     Mirrors the interpreter's hardcoded string methods (interp/call.rs:704-769).
-        if obj_type == "string" {
-            if method_name == "len" {
-                // len needs pending_len_is_string set before compile_call checks it.
-                self.pending_len_is_string = true;
-                let obj_expr = obj.clone();
-                let call_expr =
-                    Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
-                return self.compile_expr(&call_expr, vars);
-            }
-            if let Some(builtin_name) = string_method_to_builtin(method_name) {
                 let obj_expr = obj.clone();
                 let mut all_args = vec![obj_expr];
                 all_args.extend(args.iter().cloned());

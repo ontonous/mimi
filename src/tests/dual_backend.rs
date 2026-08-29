@@ -3000,6 +3000,29 @@ fn dual_string_len() {
     );
 }
 
+/// BUG H regression: string values carry an authoritative byte length (fat-ABI),
+/// so `len`/`.len()` must NOT NUL-walk. Embedded NUL bytes must survive on BOTH
+/// backends (L1 equivalence). The substring NUL cases are covered by the
+/// real_world/string_embedded_nul.mimi program (where `use std::strings` + the
+/// Str trait resolve); this harness test gates the `len` truncation fix.
+#[test]
+fn dual_string_embedded_nul_len() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() {
+            let a = "a\0b\0c"
+            println(len(a))
+            println(len("x\0y\0z"))
+            println(len("plain"))
+        }
+    "#,
+        "5\n5\n5"
+    );
+}
+
 #[test]
 fn dual_string_compare_equal() {
     if !can_link() {

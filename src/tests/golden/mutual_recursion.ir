@@ -2,14 +2,14 @@
 source_filename = "golden_test"
 
 @payload_malloc_oom_msg = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
-@str = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
-@str.1 = private unnamed_addr constant [7 x i8] c"Single\00", align 1
-@str.2 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
-@str.3 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
-@str.4 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
-@str.5 = private unnamed_addr constant [11 x i8] c"peer_fault\00", align 1
-@str.6 = private unnamed_addr constant [1 x i8] zeroinitializer, align 1
-@str.7 = private unnamed_addr constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str = constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str.1 = constant [7 x i8] c"Single\00", align 1
+@str.2 = constant [11 x i8] c"peer_fault\00", align 1
+@str.3 = constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
+@str.4 = constant [1 x i8] zeroinitializer, align 1
+@str.5 = constant [11 x i8] c"peer_fault\00", align 1
+@str.6 = constant [1 x i8] zeroinitializer, align 1
+@str.7 = constant [40 x i8] c"undefined transition peer_fault(Single)\00", align 1
 @ret_str_malloc_oom_msg = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
 @ret_str_malloc_oom_msg.8 = private unnamed_addr constant [14 x i8] c"out of memory\00", align 1
 @op_name = private unnamed_addr constant [12 x i8] c"subtraction\00", align 1
@@ -364,6 +364,8 @@ declare i32 @mimi_str_unbox(i64, ptr, ptr)
 
 declare void @mimi_str_free_box(i64)
 
+declare i64 @mimi_str_box_copy(ptr, i64)
+
 declare ptr @mimi_str_join_ll(ptr, ptr, i64, ptr)
 
 declare ptr @mimi_str_join(ptr, ptr)
@@ -376,7 +378,9 @@ declare ptr @mimi_str_char_at(ptr, i64)
 
 declare ptr @mimi_str_char_at_ll(ptr, i64, i64)
 
-declare ptr @mimi_str_substring(ptr, i64, i64)
+declare { ptr, i64 } @mimi_str_substring(ptr, i64, i64, i64)
+
+declare { ptr, i64 } @mimi_str_substring_clamp(ptr, i64, i64, i64)
 
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
@@ -404,7 +408,7 @@ declare i64 @mimi_str_starts_with(ptr, i64, ptr, i64)
 
 declare i64 @mimi_str_ends_with(ptr, i64, ptr, i64)
 
-declare i32 @mimi_str_count_substring(ptr, ptr)
+declare i32 @mimi_str_count_substring(ptr, i64, ptr, i64)
 
 declare i32 @mimi_regex_match(ptr, ptr)
 

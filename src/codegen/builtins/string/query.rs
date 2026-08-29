@@ -431,8 +431,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "str_count_substring expects 2 arguments".to_string(),
             ));
         }
-        let s_ptr = self.extract_raw_str_ptr(&args[0])?;
-        let sub_ptr = self.extract_raw_str_ptr(&args[1])?;
+        let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_count_substring")?;
+        let (sub_ptr, sub_len) = self.extract_string_arg_ptr_len(&args[1], "str_count_substring")?;
         let func = self
             .module
             .get_function("mimi_str_count_substring")
@@ -443,7 +443,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 func,
                 &[
                     BasicMetadataValueEnum::PointerValue(s_ptr),
+                    BasicMetadataValueEnum::IntValue(s_len),
                     BasicMetadataValueEnum::PointerValue(sub_ptr),
+                    BasicMetadataValueEnum::IntValue(sub_len),
                 ],
                 "str_count_substring_call",
             )

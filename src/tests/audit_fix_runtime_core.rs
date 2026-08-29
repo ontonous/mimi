@@ -51,17 +51,17 @@ fn runtime_core_str_substring_clamp_in_range_and_oob_clamps() {
     let p = cstr(s.as_bytes());
     // Normal range.
     assert_eq!(
-        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 1, 4) }),
+        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 1, 4).ptr }),
         "ell"
     );
     // end beyond length clamps instead of aborting (VM function-form parity).
     assert_eq!(
-        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 2, 99) }),
+        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 2, 99).ptr }),
         "llo"
     );
     // start beyond length clamps to len → empty result.
     assert_eq!(
-        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 99, 100) }),
+        take_str(unsafe { rt::mimi_str_substring_clamp(p, 5, 99, 100).ptr }),
         ""
     );
     // (start > end AFTER clamping aborts — central e2e harness covers it.)
