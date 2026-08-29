@@ -1541,7 +1541,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => err_slot_val.into(),
         };
-        let mapped = self.compile_closure_call(closure_val, &[err_arg], None)?;
+        // The closure's real return type must drive the indirect-call ABI.
+        // Passing `None` forces an `i64` return, which truncates an aggregate
+        // (e.g. string `{ptr, i64}`) result to its first field and corrupts the
+        // value — `map_err(fn(e: string) -> string { … })` then prints a raw
+        // address instead of the mapped error. Derive it from the lambda's
+        // declared return type so it matches `emit_lambda`'s compiled signature.
+        let lambda_ret_llvm = match args[0].unlocated() {
+            Expr::Lambda { ret, .. } => ret.as_ref().and_then(|t| self.llvm_type_for(t)),
+            _ => None,
+        };
+        let mapped = self.compile_closure_call(closure_val, &[err_arg], lambda_ret_llvm)?;
         let dst_err_gep = self
             .gep()
             .build_struct_gep(

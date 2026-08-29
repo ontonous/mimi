@@ -11,7 +11,7 @@ mod types;
 use crate::codegen::mono_recover::infer_type_args_from_call_site;
 use std::collections::BTreeMap;
 
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 
 use crate::ast::BinOp;
@@ -3965,20 +3965,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                             };
                             let arg_slot_llvm = self.lower_type(&arg_ty)?;
-                            // BUG O (closure ABI, part 2): the closure's *effective*
-                            // return LLVM type is, at this call site, sometimes
-                            // represented as the boxed `i64` (the err-slot
-                            // representation) and sometimes as the real value type
-                            // (`{ptr, i64}` for a string), and the same literal can
-                            // be emitted with either the resolved ABI or the legacy
-                            // `i64` string ABI non-deterministically. The actual
-                            // compiled function's return representation always
-                            // coincides with its parameter representation for these
-                            // `map`/`map_err` transforms (both are the same value
-                            // type, or both boxed identically), so deriving the call
-                            // *return* type from the *parameter* type makes the
-                            // indirect call match the real callee in every case.
-                            let ret_slot_llvm = arg_slot_llvm;
+                            // The closure's *return* LLVM type is the true result of
+                            // the transform: for `map` it is `U` (which may differ from
+                            // the parameter type `T`), for `map_err` it is `F` (which may
+                            // differ from the error parameter `E`). Derive the indirect
+                            // call's return type from the closure's actual result type so
+                            // the ABI matches the real callee and the rebuilt Result slot
+                            // has the correct shape. Deriving it from the *parameter* type
+                            // only happened to work when `U == T` / `F == E` and silently
+                            // corrupted every `map` whose Ok payload type changed — BUG O.
+                            let ret_slot_llvm = self.lower_type(&ret_ty)?;
                             let ptr_ty = self
                                 .generator
                                 .context
@@ -4183,7 +4179,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // fails with a type-mismatched insertvalue. The original
                             // handler only worked when ret_slot_llvm already lowered
                             // to i64 (e.g. Result<i64, _>).
-                            let slot_llvm_ty = src_slot.get_type();
+                            // The transformed slot's LLVM type is the *new* Result slot
+                            // type: for `map` the Ok payload becomes `U` (the closure's
+                            // return type, which may differ from the receiver's `T`); for
+                            // `map_err` the err slot is always an `i64` handle (resolved
+                            // always yields i64). Using the receiver's slot type here
+                            // produced a phi/insertvalue whose field shape didn't match
+                            // `Result<U, E>` / `Result<T, F>` and made LLVM verification
+                            // fail — BUG O.
+                            let slot_llvm_ty: BasicTypeEnum<'ctx> = if is_map {
+                                self.lower_type(&ret_ty)?
+                            } else {
+                                src_slot.get_type()
+                            };
                             let transformed_slot: BasicValueEnum<'ctx> = if is_map {
                                 // Ok/payload slot is stored inline in its natural
                                 // lowered type; the closure already produced that
@@ -4195,6 +4203,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // err->handle helper used by `Err(..)` and `?`.
                                 self.resolved_err_to_handle(transformed)?
                             };
+                            // The value above may be defined in a block different
+                            // from `has_bb`: `resolved_err_to_handle` opens its own
+                            // `err_str_malloc_ok` block for aggregates, leaving the
+                            // builder there. The merge phi must attribute the value
+                            // to its TRUE defining block, otherwise LLVM rejects the
+                            // phi (incoming block is not a predecessor of `cont_bb`)
+                            // and the whole function silently falls back to the
+                            // legacy emitter (which mis-decodes string errors).
+                            let transformed_bb = self
+                                .generator
+                                .builder
+                                .get_insert_block()
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(
+                                        "map_err: missing insert block after transform".into(),
+                                    )
+                                })?;
                             self.generator
                                 .builder
                                 .build_unconditional_branch(cont_bb)
@@ -4207,16 +4232,51 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .map_err(|e| CompileError::LlvmError(format!("map br2: {e}")))?;
                             // Merge: rebuild the Result struct.
                             self.generator.builder.position_at_end(cont_bb);
-                            let struct_ty = sv.get_type();
+                            // Rebuild with the *result* Result type's struct layout, not
+                            // the receiver's: `map` changes the Ok payload type (T -> U)
+                            // and `map_err` the error type (E -> F). Using the receiver's
+                            // struct here produced a struct whose field shape didn't match
+                            // `Result<U, E>` / `Result<T, F>`, so the caller's `coerce_to`
+                            // failed and the whole function fell back to the legacy emitter
+                            // (which mis-decodes string errors) — BUG O. The call's result
+                            // type carries the correct layout.
+                            let struct_ty_basic: BasicTypeEnum<'ctx> = self.lower_type(&call.result)?;
+                            let struct_ty: StructType<'ctx> = match struct_ty_basic {
+                                BasicTypeEnum::StructType(st) => st,
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "Result map/map_err result type is not a struct".into(),
+                                    ))
+                                }
+                            };
                             let phi_slot = self
                                 .generator
                                 .builder
                                 .build_phi(slot_llvm_ty, "map_slot_phi")
                                 .map_err(|e| CompileError::LlvmError(format!("map phi: {e}")))?;
                             let transformed_basic: BasicValueEnum<'ctx> = transformed_slot;
+                            // Passthrough incoming: for `map_err` the Ok field is
+                            // unchanged (`payload`); for `map` the Ok field changes type
+                            // `T -> U`, but on the Err path it is never read, so supply an
+                            // `undef` of the new slot type to keep the phi type-consistent
+                            // (inserting the original `i64` payload into a `{ptr, i64}`
+                            // field would fail LLVM verification).
+                            let passthrough_val: BasicValueEnum<'ctx> = if is_map {
+                                // On the Err path the Ok field is never read, but it
+                                // must have the new slot type `U` to satisfy the phi.
+                                match slot_llvm_ty {
+                                    BasicTypeEnum::StructType(st) => st.get_undef().into(),
+                                    BasicTypeEnum::IntType(it) => it.get_undef().into(),
+                                    BasicTypeEnum::FloatType(ft) => ft.get_undef().into(),
+                                    BasicTypeEnum::PointerType(pt) => pt.get_undef().into(),
+                                    other => other.const_zero(),
+                                }
+                            } else {
+                                err_slot.into()
+                            };
                             phi_slot.add_incoming(&[
-                                (&transformed_basic, has_bb),
-                                (&(if is_map { payload } else { err_slot }), passthrough_bb),
+                                (&transformed_basic, transformed_bb),
+                                (&passthrough_val, passthrough_bb),
                             ]);
                             let mut rebuilt = struct_ty.get_undef();
                             rebuilt = self
@@ -4224,11 +4284,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .builder
                                 .build_insert_value(
                                     rebuilt,
-                                    if is_map {
-                                        disc.get_type().const_int(1, false)
-                                    } else {
-                                        disc.get_type().const_int(0, false)
-                                    },
+                                    // The discriminant tag is never changed by map/map_err:
+                                    // only the Ok payload (map) or the Err value (map_err) is
+                                    // transformed, so the original tag must be preserved.
+                                    // Hardcoding `1`/`0` here silently flips an `Ok` produced
+                                    // by `map_err` (or an `Err` produced by `map`) into the
+                                    // opposite variant and corrupts the downstream match.
+                                    disc,
                                     0,
                                     "map_disc_out",
                                 )
@@ -13668,23 +13730,24 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Determine parameter and return LLVM types from the expression type.
-        let (param_tys, ret_ty) = match self.program.resolved_types().get(expr_ty) {
-            Some(ResolvedType::Function {
-                parameters, result, ..
-            }) => {
-                let mut ptys = Vec::with_capacity(parameters.len());
-                for p in parameters {
-                    ptys.push(self.lower_type(p)?);
+        let (param_tys, ret_ty) =
+            match self.program.resolved_types().get(expr_ty) {
+                Some(ResolvedType::Function {
+                    parameters, result, ..
+                }) => {
+                    let mut ptys = Vec::with_capacity(parameters.len());
+                    for p in parameters {
+                        ptys.push(self.lower_type(p)?);
+                    }
+                    let rt = self.lower_type(result)?;
+                    (ptys, rt)
                 }
-                let rt = self.lower_type(result)?;
-                (ptys, rt)
-            }
-            _ => {
-                return Err(CompileError::Unsupported(
-                    "lambda expression type is not a Function type".into(),
-                ))
-            }
-        };
+                _ => {
+                    return Err(CompileError::Unsupported(
+                        "lambda expression type is not a Function type".into(),
+                    ))
+                }
+            };
 
         // Build the LLVM function type: (ptr env, params...) -> ret.
         let ptr_ty = self

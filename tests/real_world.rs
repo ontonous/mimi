@@ -313,12 +313,18 @@ fn real_world_map_builtins() {
 
 // ===================== BUG O: Result/Option map with string closures =====================
 // 0.36.x (BUG O): `result.map` / `option.map` / `result.map_err` with a closure that
-// returns (or takes) a string/aggregate used to SEGFAULT in the native backend. Inline
-// struct slots were coerced to `i64`, corrupting the layout. `materialize_slot` now
-// passes inline struct/pointer slots through unchanged, fixing the crash. These `map`
-// cases are the verified, deterministic half of BUG O (the dual backends agree). The
-// `map_err` string-closure case is tracked separately as a non-deterministic closure
-// type-inference defect (see devdocs/bug-hunt-suspected-2026-08.md, BUG O string err).
+// returns (or takes) a string/aggregate used to SEGFAULT in the native backend. The
+// resolved emitter's `map`/`map_err` handler had three defects: (1) the merge phi
+// attributed the transformed value to the wrong incoming block (so LLVM verification
+// failed and the whole function silently fell back to the legacy emitter, which
+// mis-decodes string errors); (2) the rebuilt Result discriminant was hardcoded
+// (`1`/`0`) instead of preserved, flipping `map`'s Err and `map_err`'s Ok into the
+// opposite variant; (3) the rebuilt struct was built from the *receiver's* layout, so
+// `map` (whose Ok payload type changes T->U) and `map_err` (whose error type changes
+// E->F) produced a struct whose field shape did not match `Result<U, E>` /
+// `Result<T, F>` — again forcing a silent legacy fallback. All three are fixed
+// architecturally; the dual backends now agree for every `map`/`map_err` payload and
+// error-type combination. See real_world_result_map_err_string_resolved below.
 
 #[test]
 fn real_world_result_option_map_string_closure() {
@@ -360,6 +366,39 @@ fn real_world_result_option_map_string_closure() {
         }
     "#,
         "X",
+    );
+}
+
+// ===================== BUG O (resolved emitter): map/map_err with type-changing closures =====
+// Regression guard for the architectural fix to the resolved `map`/`map_err` handler.
+// Combines `map_err` and `map` (and type-changing closures) in ONE `main`: this used to
+// fail LLVM verification and silently fall back to the legacy emitter, which printed the
+// string error slot as a raw `i64` handle. Covers: map_err on Err (string closure),
+// map_err on Err (string concat), map_err on Ok (discriminant preserved -> `5`),
+// map on Err (discriminant preserved -> original error `div0`), and map on Ok with a
+// payload-type change (i32 -> string). `run_both` asserts dual-backend equivalence.
+#[test]
+fn real_world_result_map_err_string_resolved() {
+    run_both(
+        r#"
+        func div(a: i32, b: i32) -> Result<i32, string> {
+            if b == 0 { return Err("div0") }
+            Ok(a / b)
+        }
+        func main() {
+            let c = div(10, 0).map_err(fn(e: string) -> string { "boom" })
+            match c { Ok(v) => println(v), Err(e) => println(e) }
+            let er = div(10, 0).map_err(fn(e: string) -> string { "ERR:" + e })
+            match er { Ok(v) => println(v), Err(e) => println(e) }
+            let ok = div(10, 2).map_err(fn(e: string) -> string { "ERR:" + e })
+            match ok { Ok(v) => println(v), Err(e) => println(e) }
+            let r = div(10, 0).map(fn(x: i32) -> string { "X" })
+            match r { Ok(v) => println(v), Err(e) => println(e) }
+            let ok_map = div(10, 2).map(fn(x: i32) -> string { "Y" })
+            match ok_map { Ok(v) => println(v), Err(e) => println(e) }
+        }
+    "#,
+        "boom\nERR:div0\n5\ndiv0\nY",
     );
 }
 
