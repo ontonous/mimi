@@ -800,6 +800,52 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// `map(list, fn)` / `filter(list, fn)` -> compile-time higher-order list operation.
+    /// Coerce a list element value into the uniform `i64` storage slot used by
+    /// Mimi's list data arrays. The list reader (`emit_list_scalar_to_string`,
+    /// `emit_list_string_to_string`, …) always loads each slot as `i64` and
+    /// reinterprets it per element type, so element producers must store `i64`:
+    /// integers are widened, floats are bit-cast (bit-preserving), and pointers
+    /// (strings/records) become ptr-to-int handles. Record-by-value elements
+    /// remain a pre-existing limitation and are passed through unchanged.
+    fn list_elem_to_i64_slot(
+        &self,
+        val: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let i64_ty = self.context.i64_type();
+        match val {
+            BasicValueEnum::IntValue(iv) => {
+                let bw = iv.get_type().get_bit_width();
+                if bw < 64 {
+                    Ok(self
+                        .builder
+                        .build_int_s_extend(iv, i64_ty, "elem_sext")
+                        .map_err(|e| CompileError::LlvmError(format!("elem sext: {}", e)))?
+                        .into())
+                } else if bw > 64 {
+                    Ok(self
+                        .builder
+                        .build_int_truncate(iv, i64_ty, "elem_trunc")
+                        .map_err(|e| CompileError::LlvmError(format!("elem trunc: {}", e)))?
+                        .into())
+                } else {
+                    Ok(val)
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => Ok(self
+                .build_bit_cast(
+                    BasicValueEnum::FloatValue(fv),
+                    BasicTypeEnum::IntType(i64_ty),
+                    "elem_f64_to_i64",
+                )?
+                .into_int_value()
+                .into()),
+            BasicValueEnum::PointerValue(pv) => {
+                Ok(self.build_ptr_to_int(pv, i64_ty, "elem_ptr_to_i64")?.into())
+            }
+            _ => Ok(val),
+        }
+    }
+
     fn compile_map_filter_intrinsic(
         &mut self,
         name: &str,
@@ -949,11 +995,49 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Try to convert i64 element to struct type for user-defined record elements.
         // Keep the original i64 handle (elem_i64_int) for storage back to the output
         // array; the converted struct is used only for passing to the closure.
+        // Determine the closure's element (sole) parameter LLVM type so scalar
+        // elements can be bit-cast out of the i64 slot (floats) before the call
+        // — mirrors `compile_reduce_intrinsic`'s `elem_adj` (the list data array
+        // stores every element as `i64`; the reader bit-casts back per type).
+        let elem_ty: BasicTypeEnum<'ctx> = match &fn_ref {
+            FnRef::Named(f) => f
+                .get_nth_param(0)
+                .map(|p| p.get_type())
+                .unwrap_or(BasicTypeEnum::IntType(i64_ty)),
+            FnRef::Indirect { .. } => {
+                let param_ty = if let Expr::Lambda { params, .. } = args[1].unlocated() {
+                    params.first().map(|p| &p.ty)
+                } else {
+                    None
+                };
+                param_ty
+                    .and_then(|ty| self.llvm_type_for(ty))
+                    .or_else(|| param_ty.and_then(|ty| types::mimi_type_to_llvm(self.context, ty)))
+                    .unwrap_or(BasicTypeEnum::IntType(i64_ty))
+            }
+        };
         let (elem_for_call, is_converted) =
             if let Some(converted) = self.try_convert_list_element(elem_i64_int, &args[0], vars)? {
                 (converted, true)
             } else {
-                (elem_i64, false)
+                // Scalar element: the i64 slot holds the element's bits.
+                // Bit-cast out of the i64 slot when the closure expects a float
+                // (mirrors `compile_reduce_intrinsic`'s elem_adj); integer widths
+                // are normalized at the call site, so i64 passes through. Without
+                // this, `map_list`/`filter_list` over `List<f64>` fed i64 bits
+                // into an f64 parameter and produced garbage.
+                let v = match elem_ty {
+                    BasicTypeEnum::FloatType(ft) => self
+                        .build_bit_cast(
+                            BasicValueEnum::IntValue(elem_i64_int),
+                            BasicTypeEnum::FloatType(ft),
+                            "elem_f64_from_i64",
+                        )?
+                        .into_float_value()
+                        .into(),
+                    _ => BasicValueEnum::IntValue(elem_i64_int),
+                };
+                (v, false)
             };
         // Build metadata type from the actual call argument type
         let elem_meta = match &elem_for_call {
@@ -1114,30 +1198,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_in_bounds_gep(i64_ty, out_i64, &[idx], "out_elem")
             }
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            // Widen integer result to i64 for uniform list storage.
-            let store_val = match result {
-                BasicValueEnum::IntValue(iv) => {
-                    let bw = iv.get_type().get_bit_width();
-                    if bw < 64 {
-                        self.builder
-                            .build_int_s_extend(iv, i64_ty, "map_result_sext")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("map result sext: {}", e))
-                            })?
-                            .into()
-                    } else if bw > 64 {
-                        self.builder
-                            .build_int_truncate(iv, i64_ty, "map_result_trunc")
-                            .map_err(|e| {
-                                CompileError::LlvmError(format!("map result trunc: {}", e))
-                            })?
-                            .into()
-                    } else {
-                        result
-                    }
-                }
-                _ => result,
-            };
+            // Store the closure result into the uniform `i64` element slot:
+            // widen ints, bit-cast floats, ptr-to-int pointers — matching the
+            // convention the list reader uses when it loads each slot as `i64`
+            // and reinterprets per element type.
+            let store_val = self.list_elem_to_i64_slot(result)?;
             self.build_store(out_elem_ptr, store_val)?;
         } else {
             // For filter: if result is truthy (non-zero), store to output array
@@ -1163,12 +1228,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .build_in_bounds_gep(i64_ty, out_i64, &[wi], "out_elem")
             }
             .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-            // Store original i64 handle (not the converted struct) because the
-            // output array stores i64 values (ptr-to-int handles).
+            // Store the element into the uniform `i64` slot (same convention as
+            // `map`): for converted/record elements keep the i64 handle,
+            // otherwise coerce the live element value (int widen / float
+            // bit-cast / pointer ptr-to-int) to `i64`.
             let stored_val: BasicValueEnum<'ctx> = if is_converted {
                 BasicValueEnum::IntValue(elem_i64_int)
             } else {
-                elem_for_call
+                self.list_elem_to_i64_slot(elem_for_call)?
             };
             self.build_store(out_elem_ptr, stored_val)?;
             let next_wi = self
@@ -1208,7 +1275,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             "out_void",
         )?;
         self.build_store(out_data_gep, out_void)?;
-        Ok(result_alloca.into())
+        // Return the list BY VALUE (the canonical `{i64 len, ptr data}` struct
+        // value) — NOT by pointer to a stack alloca. Every other list producer
+        // (literals, `concat`, …) yields a struct value, and list consumers
+        // expect that representation: `extract_print_arg` (println) only matches
+        // `StructValue` to detect a list (so a pointer was mis-detected and the
+        // pointer's low byte printed as `^D`), while `list_value_to_ptr` already
+        // accepts both forms (so `len`/element access happened to work). Returning
+        // the loaded struct keeps the single canonical list ABI consistent.
+        let result_val =
+            self.build_load(BasicTypeEnum::StructType(result_ty), result_alloca, "map_result_val")?;
+        Ok(result_val)
     }
 
     /// `reduce(list, fn, init)` -> compile-time left fold over a list.

@@ -1169,14 +1169,19 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Option<String> {
         match name {
             // Element-preserving: List<T> -> List<T>.
-            "filter" | "reverse" | "sort" => {
+            "filter" | "filter_list" | "reverse" | "sort" => {
                 let src = args.first().map(|a| self.infer_object_type(a, vars))?;
                 src.starts_with("List").then_some(src)
             }
-            // map: the element type follows the lambda's declared return
-            // type when present; otherwise fall back to the source list's
-            // type (element-preserving maps).
-            "map" => {
+            // map / map_list: the element type follows the lambda's declared
+            // return type when present; otherwise fall back to the source
+            // list's type (element-preserving maps). The bare `map` builtin and
+            // the stdlib `map_list` share the same argument shape
+            // (list, lambda), so both are handled here. This also fixes the
+            // native backend printing `List<f64>`/`List<bool>` results through
+            // the i32 formatter (which truncates to the low 32 bits) — the
+            // computation was always correct; only the display type was lost.
+            "map" | "map_list" => {
                 let lambda_ret = args.get(1).and_then(|lam| match lam.unlocated() {
                     Expr::Lambda { ret: Some(ret), .. } => Some(crate::core::fmt_type(ret)),
                     _ => None,
