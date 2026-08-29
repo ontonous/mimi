@@ -3159,6 +3159,44 @@ fn dual_comprehension_record_three_elements() {
     );
 }
 
+#[test]
+fn dual_comprehension_string() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let strs = ["a", "bb", "ccc"];
+            let out = [s for s in strs];
+            println(out[0]);
+            println(out[1]);
+            println(out[2]);
+            0
+        }
+        "#,
+        "a\nbb\nccc"
+    );
+}
+
+#[test]
+fn dual_comprehension_scalar_var() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3];
+            let ys = [x for x in xs];
+            println(ys[0] + ys[1] + ys[2]);
+            0
+        }
+        "#,
+        "6"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

@@ -178,6 +178,19 @@ native 在 `ps[0].a` 先报 `E0707 must produce i64-compatible value`（`emit_co
 `dual_comprehension_tuple`、`dual_comprehension_scalar_still_ok`、
 `dual_comprehension_record_three_elements`（均双后端 run+build+exec MATCH；scalar 对照维持旧行为）
 
+### 0.40.1.13 — F-009：推导式（comprehension）产出裸循环变量元素（尤其 string）native 结果类型名误登记为 `List<varname>`（L1 分歧，元素存裸指针 / 索引按 i64 读）
+
+F-006/F-007/F-008 同胞缺陷的延续：同一「容器元素类型未登记到 `var_type_names`」家族在 **推导式元素为裸循环变量** 上的变体。`let strs = ["a", "bb", "ccc"]; let out = [s for s in strs];`（`strs: List<string>`，`s` 为推导式局部循环变量），native 把 `out` 登记成 `List<s>`（变量名而非 `string`）→ `out[0]` 按 i64 槽读取（原生把字符串裸指针当 i64 存），`println(out[0])` 打出数字 `1031836432…`（VM 打出 `a`/`bb`/`ccc`）；record/列表/元组元素因 AST 自描述类型名而正常（L1 分歧，VM 接受 / native 给出错误值 → P0「一方更好」违例）。
+
+根因（`src/codegen/func.rs` `Expr::Comprehension` 类型名登记分支，0.40.1.12 新增）：登记用 `infer_object_type(expr, vars)` 取元素类型名，但 `expr` 为裸循环变量 `s` 时，该变量在**外层 let 绑定登记点**处于作用域外 → `infer_object_type` 的 `Expr::Ident` 臂查不到 `var_type_names`/`vars`，回落到 `name.clone()` 返回变量名 `"s"`，于是 `out` 被登记成 `List<s>`。标量循环变量（`[x for x in xs]`）因元素按值存储、索引不依赖类型名而不暴露分歧；仅 string（及任何依赖类型名做装箱/结构打包的元素）暴露。
+
+修复（纯复用既有单源，无新启发式 / 类型白名单 / 形状枚举，不触 0.40.1 红线）：在登记期间把循环变量 `var` 临时绑定到**可迭代对象元素类型**——由 `infer_object_type(iter, vars)` 剥 `List<…>` 外层得到（如 `List<string>` → `string`），调用 `infer_object_type(expr)` 后即还原 `var_type_names` 原值。这样裸循环变量元素解析为真实类型（`List<string>`），与 record/列表/元组字面量元素走同一 `infer_object_type` 单源。
+
+分类: 一次性缺陷（推导式元素类型名登记缺口；复用 `infer_object_type` + 可迭代元素类型，无新 deep-copy/claim 启发式 → 无 S2/S3）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_string`、`dual_comprehension_scalar_var`（均双后端 run+build+exec MATCH）；repro `/tmp/f009_str.mimi` native `a/bb/ccc` ≡ VM `a/bb/ccc`
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
