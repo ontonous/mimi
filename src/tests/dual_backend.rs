@@ -8531,6 +8531,34 @@ fn dual_spawn_await_simple() {
     );
 }
 
+/// BUG G regression: `.len()` (string method) on a value obtained from
+/// `await` used to hard-error E0722 ("no resolved-native emitter") on native,
+/// because spawn/await force the resolved codegen path and the resolved method
+/// dispatch table omitted `string.len`. The function form `len(s)` worked, the
+/// method form did not — only spawn/await results exposed it. Both backends
+/// must agree. Uses parse_prod-backed harness helpers so the Str trait (needed
+/// for the `.len()` method) resolves.
+#[test]
+fn dual_spawn_string_method_len() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        func make() -> string { return "hello world" }
+        func main() -> i32 {
+            let task = spawn make();
+            let s = await task;
+            println(s.len());
+            println(len(s));
+            0
+        }
+    "#;
+    let (_v, vm) = run_source_with_stdout(src);
+    let native = compile_and_run(src).expect("codegen spawn string method len");
+    assert_eq!(vm.trim(), "11\n11", "vm spawn string method len");
+    assert_eq!(native.trim(), "11\n11", "native spawn string method len");
+}
+
 #[test]
 fn dual_spawn_multiple() {
     if !can_link() {

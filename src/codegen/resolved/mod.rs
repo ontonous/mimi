@@ -3016,9 +3016,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "replace" => Some("str_replace"),
                                 "repeat" => Some("str_repeat"),
                                 "char_at" => Some("str_char_at"),
+                                // `len` is special-cased before trait dispatch in
+                                // the legacy path; the resolved path receives it
+                                // as `builtin.method.string.len` and must map to
+                                // the polymorphic `len` builtin (which already
+                                // unboxes the fat-ABI string correctly). Without
+                                // this, `s.len()` on a spawn/await result hard-
+                                // errors E0722 ("no resolved-native emitter").
+                                "len" => Some("len"),
                                 // D-5 (2026-08-06): method form is strict in
                                 // the VM — match the legacy method mapping.
                                 "substring" => Some("str_substring_strict"),
+                                // Parity with the legacy `string_method_to_builtin`
+                                // table so a future checker that admits this method
+                                // does not regress to E0722.
+                                "count_substring" => Some("str_count_substring"),
                                 "index_of" => Some("str_index_of"),
                                 "parse_int" => Some("str_parse_int"),
                                 "parse_float" => Some("str_parse_float"),
