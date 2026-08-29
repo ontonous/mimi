@@ -74,6 +74,41 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map_err(|e| CompileError::LlvmError(format!("extract list len: {}", e)))
                 }
             }
+            BasicMetadataValueEnum::IntValue(iv) => {
+                // 0.40.1.15 (F-011): a list carried as an i64 handle (e.g. a
+                // comprehension LOOP VARIABLE of list type, which codegen keeps as
+                // an i64 handle in `comp_vars`) passed to `len` must be bit-cast
+                // back to the list-struct pointer so the `len` field can be read.
+                // Same root as the record/tuple-field and call-argument arms — the
+                // list value's dual i64-handle / struct-pointer representation.
+                // Reuses `build_bit_cast`; no new heuristic / type whitelist / shape
+                // enum, no 0.40.1 deep-copy / claim freeze break. Only fires for
+                // non-string handles (loop-var lists); string-builtin handling is
+                // left untouched.
+                if self.pending_len_is_string {
+                    return Err(CompileError::TypeMismatch(
+                        "len expects a list or string pointer".to_string(),
+                    ));
+                }
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let lp = self
+                    .build_bit_cast(
+                        iv.into(),
+                        BasicTypeEnum::PointerType(ptr_ty),
+                        "list_handle_to_ptr",
+                    )?
+                    .into_pointer_value();
+                let list_ty = self.list_struct_type();
+                let len_gep = self
+                    .gep()
+                    .build_struct_gep(list_ty, lp, 0, "list.len")
+                    .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
+                let len = self
+                    .builder
+                    .build_load(self.context.i64_type(), len_gep, "len")
+                    .map_err(|e| CompileError::LlvmError(format!("load error: {}", e)))?;
+                Ok(len)
+            }
             _ => Err(CompileError::TypeMismatch(
                 "len expects a list or string pointer".to_string(),
             )),

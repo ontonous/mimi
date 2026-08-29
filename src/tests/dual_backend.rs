@@ -3254,6 +3254,115 @@ fn dual_comprehension_nested_list_fn_iter() {
     );
 }
 
+// 0.40.1.15 (F-011): a comprehension element that is a record/tuple whose field
+// is the comprehension LOOP VARIABLE of list type previously stored the i64 list
+// handle into the `len` slot of the inlined list struct, leaving the `data`
+// pointer uninitialized → native garbage / segfault while the VM accepted the
+// program (L1 divergence). The loop var is carried as an i64 handle in
+// `comp_vars`; `maybe_load_compound_field_value` (record) and `compile_tuple_expr`
+// (tuple) now bit-cast the handle back to the list-struct pointer and LOAD the
+// `{len,data}` struct into the field.
+#[test]
+fn dual_comprehension_record_list_field_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { items: List<i32> }
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [R { items: x } for x in xss];
+            println(out[0].items[1] + out[1].items[0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_tuple_list_field_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [(x, x) for x in xss];
+            println(out[0].0[1] + out[1].0[0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_record_list_field_loopvar_guard() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { items: List<i32> }
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4], [5, 6]];
+            let out = [R { items: x } for x in xss if len(x) > 1];
+            println(len(out[0].items) + len(out[1].items));
+            0
+        }
+        "#,
+        "4"
+    );
+}
+
+// 0.40.1.15 (F-011): a comprehension element that is a function call returning a
+// list, where the call argument is the comprehension LOOP VARIABLE of list type,
+// previously passed the raw i64 handle where the callee expected the list struct
+// by value (ABI mismatch) → native garbage / segfault. `coerce_args_to_param_types`
+// now bit-casts the handle back to the list-struct pointer and LOADs the
+// `{len,data}` struct value before the call.
+#[test]
+fn dual_comprehension_fn_return_list_element() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func id(xs: List<i32>) -> List<i32> { return xs; }
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [id(x) for x in xss];
+            println(out[0][1] + out[1][0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_record_fn_return_list_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { items: List<i32> }
+        func id(xs: List<i32>) -> List<i32> { return xs; }
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [R { items: id(x) } for x in xss];
+            println(out[0].items[1] + out[1].items[0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

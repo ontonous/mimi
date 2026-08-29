@@ -6670,6 +6670,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut compiled_args = self.compile_arg_values(&ordered, vars)?;
         // Use ordered exprs for list-mutation/borrow paths below.
         let args = ordered.as_slice();
+        // NOTE: the list/set-handle → struct-value argument normalization for a
+        // comprehension LOOP VARIABLE of list type lives in
+        // `coerce_args_to_param_types` (the authoritative param-coercion point),
+        // keyed off the *declared parameter* type rather than the argument's
+        // inferred type (the loop var's inferred type resolves to `i64` from its
+        // `comp_vars` slot, so an argument-side check would never fire). See
+        // 0.40.1.15 (F-011).
 
         // v0.28.29 fix for mimichat gap #2: list-mutating builtins (`push`,
         // `pop`) take a `*List` pointer at the LLVM level. When the caller
@@ -8232,6 +8239,46 @@ impl<'ctx> CodeGenerator<'ctx> {
                 continue;
             }
             if let Some(target) = self.llvm_type_for(&param.ty) {
+                // 0.40.1.15 (F-011): a list/set value carried as an i64 handle
+                // (e.g. a comprehension LOOP VARIABLE of list type, which codegen
+                // keeps as an i64 handle in `comp_vars`) passed as a `List`/`Set`
+                // parameter must be bit-cast to the list/set-struct pointer and
+                // LOADED into a `{len,data}` struct value — the calling convention
+                // passes `List`/`Set` by value (see `define { i64, ptr } @id({ i64,
+                // ptr } %0)`). `adjust_int_val` has no `(IntValue, StructType)` arm,
+                // so without this the raw i64 handle was passed where a struct was
+                // expected (ABI mismatch) → native read garbage / segfault while the
+                // VM accepted the program (L1 divergence, sibling of F-008/F-010,
+                // same root as the record/tuple-field arm in
+                // `maybe_load_compound_field_value`). Keyed off the *declared
+                // parameter* type (authoritative) rather than the argument's
+                // inferred type. Reuses `build_bit_cast` + `build_load`; no new
+                // heuristic / type whitelist / shape enum, no 0.40.1 deep-copy /
+                // claim freeze break. Only fires for `IntValue` list/set handles,
+                // so it never touches the already-correct `PointerValue`/`StructValue`
+                // forms regular list vars compile to.
+                if let BasicValueEnum::IntValue(iv) = args[i] {
+                    let pname = crate::core::helpers::fmt_type(&param.ty.unlocated());
+                    if self.is_list_type_name(&pname) || pname.starts_with("Set") {
+                        if let BasicTypeEnum::StructType(st) = target {
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let lp = self
+                                .build_bit_cast(
+                                    iv.into(),
+                                    BasicTypeEnum::PointerType(ptr_ty),
+                                    "list_handle_to_ptr",
+                                )?
+                                .into_pointer_value();
+                            let loaded = self.build_load(
+                                BasicTypeEnum::StructType(st),
+                                lp,
+                                "list_arg_load",
+                            )?;
+                            args[i] = loaded;
+                            continue;
+                        }
+                    }
+                }
                 args[i] = self.adjust_int_val(args[i], target)?;
             }
         }

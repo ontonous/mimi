@@ -215,6 +215,28 @@ F-006/F-007/F-008 同胞缺陷的延续：同一「容器元素类型未登记�
  不变量类别: L1（双后端等价）
  测试: `src/tests/dual_backend.rs::dual_comprehension_nested_list`、`dual_comprehension_nested_list_fn_iter`、`dual_comprehension_nested_list_bare_elem`（均双后端 run+build+exec MATCH）；repro `/tmp/f16_p3.mimi`（5）≡ VM、`/tmp/f16_p3b.mimi`（3）≡ VM、`/tmp/f16_p3d.mimi`（1/2/3/4）≡ VM
 
+### 0.40.1.15 — F-011：推导式元素为「含循环变量（list 类型）的 record/tuple 字段」或「返回 list 的函数调用（实参为循环变量）」native 读垃圾 / 段错误（L1 分歧，list 句柄误写 `len` 槽 / 函数 ABI 句柄 ≠ 结构）
+
+  F-006/F-008/F-010 同胞缺陷的延续：同一「list 值双表示（i64 句柄 ↔ `{len,data}` 结构/指针）」家族在 **推导式循环变量** 上的变体。推导式循环变量 `x: List<i32>` 在 `comp_vars` 中按约定以 **i64 句柄**（`IntType(i64)`）携带；当它是 comprehension **元素** 的消费者时，多个站点期望的是 **`{len,data}` 结构值 / list 指针**，旧的对应路径无 `(IntValue, StructType/Pointer)` 处理臂 → ABI 错配 → native 读垃圾 / 段错误，而 VM 接受同一程序（L1 分歧）。三个相邻暴露面：
+
+  1. `type R { items: List<i32> }` + `let out = [R { items: x } for x in xss];`：record 字段 `items` 的内联布局是完整 list 结构 `{i64,ptr}`（16 字节）。`maybe_load_compound_field_value` 旧代码仅处理 `PointerValue`/`StructValue` 字段值，遇 `IntValue`（list 句柄）时把 i64 句柄原样写进 `len` 槽、`data` 槽留未初始化 → native 读出含野指针的列表（VM 给出 `5`）。
+  2. `let out = [(x, x) for x in xss];`：tuple 含 list 字段，同样的 `{len,data}` 结构内联布局，`compile_tuple_expr` 旧代码仅处理 `PointerValue` 臂，遇 `IntValue` 句柄时把 i64 写进 `len` 槽 → 同形 native 垃圾（VM 给出 `5`）。
+  3. `func id(xs: List<i32>) -> List<i32> { return xs; }` + `let out = [id(x) for x in xss];`：函数 `List` 参数 ABI 为 **结构按值**（`define { i64, ptr } @id({ i64, ptr } %0)`）。`coerce_args_to_param_types` 调 `adjust_int_val`，其无 `(IntValue, StructType)` 臂 → 把原始 i64 句柄当结构值传入 → ABI 错配（VM 给出 `5`）。同一根也覆盖 record 字段为 `id(x)` 的 `let out = [R { items: id(x) } for x in xss];`。
+  4. 守卫含 `len(x)`（`x` 为循环变量）：`compile_len` 仅接 `PointerValue`/`StructValue`，遇 `IntValue` 句柄落到 `_ => "len expects a list or string pointer"` → native 编译失败（VM 接受）。同源：list 句柄需 bit-cast 回 list 结构指针。
+
+  根因（family 共性）：list 值在父级 data 数组中以 i64 句柄存放，而 **record/tuple 字段** 与 **函数 `List` 参数** 按约定以完整 `{len,data}` 结构承载；推导式循环变量因 `comprehension_result_type` 仅临时绑定类型名（不入 `var_type_names`），其 LLVM 槽为 `IntType(i64)` 句柄。`infer_object_type(Ident)` 先查 `var_type_names`（循环变量不在）→ 落回 vars LLVM 槽 `IntType` → 返回 `"i64"`，故「按实参推断类型」的守门对循环变量永不触发；必须以**声明侧**类型（record 字段类型 / 函数参数类型）为权威出口。
+
+  修复（纯复用既有 `build_bit_cast` + `build_load` 原语，scoped，无新启发式 / 类型白名单 / 形状枚举，不触 0.40.1 deep-copy/claim 冻结红线）：
+  - `src/codegen/expr/record.rs` `maybe_load_compound_field_value`：新增 `IntValue` + `StructType` 臂——list/set 字段值以 i64 句柄携带时，`build_bit_cast(iv.into(), list_struct ptr, "list_handle_to_ptr")` 取结构指针后 `build_load(BasicTypeEnum::StructType(st), lp, "load_<field>")` 载入 `{len,data}` 结构值（set 同形）。
+  - `src/codegen/expr/record.rs` `compile_tuple_expr`：新增 `IntValue` + list 臂，镜像 `PointerValue` 臂（`build_bit_cast` → `build_load(list_ty, lp, "tuple_list")`）。
+  - `src/codegen/expr/call/simple.rs` `coerce_args_to_param_types`（权威参数归一点，`compile_call` 第 6764 行调用）：在 `adjust_int_val` 之前，若 `args[i]` 为 `IntValue` 且 `param.ty` 经 `fmt_type` 为 `List<…>`/`Set<…>`，则 `build_bit_cast` 句柄回结构指针并 `build_load` 出 `{len,data}` 结构值后 `continue`。守门以**声明参数类型**为准（覆盖实参为循环变量的 case；普通 list 变量编译为 `StructValue`/`PointerValue`，不触发）。移除此前一轮无效的 `infer_object_type` 守门循环（其按实参推断类型，对循环变量解析为 `i64`，永不触发）。
+  - `src/codegen/builtins/list/access.rs` `compile_len`：新增 `IntValue` 臂——非 string 句柄 `build_bit_cast` 回 list 结构指针读字段 0（`len`），覆盖守卫 `len(循环变量)`（string 内置处理不动）。
+
+  分类: 一次性缺陷（推导式循环变量 list 句柄在 record/tuple 字段 + 函数 `List` 参数 + `len` 内置的表示归一；复用 `build_bit_cast` + `build_load` 既有原语，无新 deep-copy/claim 启发式 → 无 S2/S3）。
+
+  不变量类别: L1（双后端等价）
+  测试: `src/tests/dual_backend.rs::dual_comprehension_record_list_field_loopvar`（5）、`dual_comprehension_tuple_list_field_loopvar`（5）、`dual_comprehension_record_list_field_loopvar_guard`（4）、`dual_comprehension_fn_return_list_element`（5）、`dual_comprehension_record_fn_return_list_field`（5）（均双后端 run+build+exec MATCH）；repro `/tmp/f17_h.mimi`（5）≡ VM、`/tmp/f17_s6.mimi`（5）≡ VM、`/tmp/f17_h8.mimi`（5）≡ VM、`/tmp/f17_h9.mimi`（2）≡ VM
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

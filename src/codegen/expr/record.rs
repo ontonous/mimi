@@ -336,29 +336,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         field: &RecordFieldExpr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) = (&val, field_ty)
-        else {
-            return Ok(val);
-        };
-        let needs_load = matches!(
-            &field.value,
-            Expr::List(_)
-                | Expr::Tuple(_)
-                | Expr::Comprehension { .. }
-                | Expr::SetLiteral(_)
-                | Expr::Block(_)
-        ) || {
-            let val_type = self.infer_object_type(&field.value, vars);
-            val_type.starts_with("List")
-                || val_type.starts_with("Set")
-                || val_type.starts_with("Option")
-                || val_type.starts_with("Result")
-                || self.type_defs.contains_key(&val_type)
-        };
-        if needs_load {
-            self.build_load(field_ty, *pv, &format!("load_{}", field.name))
-        } else {
-            Ok(val)
+        match (&val, field_ty) {
+            (BasicValueEnum::PointerValue(pv), BasicTypeEnum::StructType(_)) => {
+                let needs_load = matches!(
+                    &field.value,
+                    Expr::List(_)
+                        | Expr::Tuple(_)
+                        | Expr::Comprehension { .. }
+                        | Expr::SetLiteral(_)
+                        | Expr::Block(_)
+                ) || {
+                    let val_type = self.infer_object_type(&field.value, vars);
+                    val_type.starts_with("List")
+                        || val_type.starts_with("Set")
+                        || val_type.starts_with("Option")
+                        || val_type.starts_with("Result")
+                        || self.type_defs.contains_key(&val_type)
+                };
+                if needs_load {
+                    self.build_load(field_ty, *pv, &format!("load_{}", field.name))
+                } else {
+                    Ok(val)
+                }
+            }
+            (BasicValueEnum::IntValue(iv), BasicTypeEnum::StructType(st)) => {
+                // 0.40.1.15 (F-011): a list/set value carried as an i64 handle (e.g. a
+                // comprehension LOOP VARIABLE of list type, which codegen keeps as an i64
+                // handle in `comp_vars`) stored into a record/tuple field that inlines the
+                // compound struct ({len,data} for lists) must be bit-cast back to the struct
+                // pointer and LOADED, not dropped into the `len` slot. Without this the field
+                // held the bare handle and the `data` pointer stayed uninitialized → native read
+                // garbage / segfault while the VM accepted the program (L1 divergence, sibling of
+                // F-008/F-010). Reuses `build_bit_cast` + `build_load`; no new heuristic /
+                // type whitelist / shape enum, no 0.40.1 deep-copy / claim freeze break.
+                let vt = self.infer_object_type(&field.value, vars);
+                if vt.starts_with("List") || vt.starts_with("Set") {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let lp = self
+                        .build_bit_cast(
+                            (*iv).into(),
+                            BasicTypeEnum::PointerType(ptr_ty),
+                            "list_handle_to_ptr",
+                        )?
+                        .into_pointer_value();
+                    self.build_load(BasicTypeEnum::StructType(st), lp, &format!("load_{}", field.name))
+                } else {
+                    Ok(val)
+                }
+            }
+            _ => Ok(val),
         }
     }
 
@@ -652,6 +678,28 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if self.is_list_type_name(&tname) {
                     let list_ty = self.list_struct_basic_type();
                     let loaded = self.build_load(list_ty, pv, "tuple_list")?;
+                    field_vals.push(loaded);
+                    field_tys.push(loaded.get_type());
+                    continue;
+                }
+            } else if let BasicValueEnum::IntValue(iv) = val {
+                // 0.40.1.15 (F-011): a list carried as an i64 handle (e.g. a
+                // comprehension LOOP VARIABLE of list type) used as a tuple element
+                // must be bit-cast back to the list-struct pointer and LOADED into the
+                // struct value, mirroring the `PointerValue` arm above. Reuses
+                // `build_bit_cast` + `build_load`; no new heuristic / type whitelist.
+                let tname = self.infer_object_type(e, vars);
+                if self.is_list_type_name(&tname) {
+                    let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let lp = self
+                        .build_bit_cast(
+                            iv.into(),
+                            BasicTypeEnum::PointerType(ptr_ty),
+                            "list_handle_to_ptr",
+                        )?
+                        .into_pointer_value();
+                    let list_ty = self.list_struct_basic_type();
+                    let loaded = self.build_load(list_ty, lp, "tuple_list")?;
                     field_vals.push(loaded);
                     field_tys.push(loaded.get_type());
                     continue;
