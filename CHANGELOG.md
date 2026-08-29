@@ -237,6 +237,60 @@ F-006/F-007/F-008 同胞缺陷的延续：同一「容器元素类型未登记�
   不变量类别: L1（双后端等价）
   测试: `src/tests/dual_backend.rs::dual_comprehension_record_list_field_loopvar`（5）、`dual_comprehension_tuple_list_field_loopvar`（5）、`dual_comprehension_record_list_field_loopvar_guard`（4）、`dual_comprehension_fn_return_list_element`（5）、`dual_comprehension_record_fn_return_list_field`（5）（均双后端 run+build+exec MATCH）；repro `/tmp/f17_h.mimi`（5）≡ VM、`/tmp/f17_s6.mimi`（5）≡ VM、`/tmp/f17_h8.mimi`（5）≡ VM、`/tmp/f17_h9.mimi`（2）≡ VM
 
+### 0.40.1.16 — F-012：推导式循环变量（list/set 类型）统一绑定为 PointerValue，关闭 reverse/contains/pop 等全部消费站点的 L1 分歧
+
+F-011 以「调用点手工镜像」方式在 record/tuple 字段、`List` 参数、`len` 四处补
+`(IntValue, Struct/Pointer)` 臂，但同一「list 值双表示（i64 句柄 ↔ `{len,data}`
+结构/指针）」家族还有 **reverse/contains/pop** 等 list 内置在循环变量为 list 时同样
+分歧（native E0700，VM 接受）。若继续逐站点补臂，将落入 §3 S2「调用点手工镜像」红区。
+
+根因与 S2 判定：循环变量 `x: List<i32>` 在 `comp_vars` 中按约定以 **i64 句柄**
+（`IntType(i64)`）携带；`VarEntry` 仅持 LLVM 类型（无 Mimi 类型），`infer_object_type(Ident)`
+对循环变量回 `i64`，故「按实参推断类型」的守门在任一消费站均不可行——**检测屏障**使单一
+事实源修复只能在**绑定站点**完成（该站点已掌握迭代器元素类型）。因此 0.40.1.16 不在消费
+站点补臂，而是在 comprehension 循环变量绑定处（`emit_comprehension_loop`）做**唯一权威**归一：
+
+修复（scoped，无新启发式 / 类型白名单 / 形状枚举，不触 0.40.1 deep-copy/claim 冻结红线，
+未触发 S2——归一发生在类型已知的声明侧绑定点，属正确 ABI 转换而非启发式特判）：
+- `src/codegen/expr/record.rs` `compile_comprehension_expr`：复用既有 `iter_elem`（迭代器
+  元素类型，F-010 已算）判定 `var_is_list = is_list_type_name(iter_elem)`（**仅 `List`**：
+  `Set` 的运行时布局并非 list 的 `{i64,ptr}` 结构，F-011 误将 Set 句柄按 list 结构
+  bit-cast 是既存 L3 缺口，详见下方「已知相邻缺口」，故 Set 循环变量不在此归一）。
+- `src/codegen/expr/record.rs` `emit_comprehension_loop`：当 `var_is_list` 时，把从父级 data
+  数组读出的 i64 句柄 `build_bit_cast` 回 list 结构指针并**以 `PointerValue` 绑定循环变量**
+  （否则维持原 `IntType(i64)` 标量绑定）。如此循环变量流经与**普通 list 变量完全相同**的既有
+  `PointerValue` 路径，reverse/contains/pop/len/record 字段/tuple 字段/函数 `List` 参数全部
+  经其既有 `PointerValue` 臂收敛，无逐站点镜像。
+- `src/codegen/expr/call/simple.rs` `coerce_args_to_param_types`：新增 `PointerValue` 臂——
+  list/set 实参已为 list 结构指针时，按 `List`/`Set` 参数声明类型 `build_load` 出
+  `{len,data}` 结构值（覆盖「循环变量现在为 `PointerValue` 后传入返回 `List` 的函数」，如
+  `id(x)`）。F-011 的 `IntValue` 臂保留作其他 i64 句柄来源的防御性覆盖。
+
+内存语义：元素存储（`emit_comprehension_store` 的 `PointerValue` 臂）已通过
+`claim_nested_list_slot` 堆打包 list 元素，与普通 list 变量同构，无新增泄漏/UB。F-011 的四处
+`IntValue` 臂现转为防御性冗余（循环变量不再以 `IntValue` 形式出现），保留不删。
+
+已知相邻缺口（**fail-closed 优先，string 已守住；Set 为既存 L3，待专用切片**）：
+- **string 循环变量**：作为 list 内置实参 / record string 字段 / string 参数时同源分歧，
+  但 native 以 E0700 编译失败（拒绝而非静默错译，fail-closed 已守住）；string 结构
+  `{i8*,i64}` 布局不同且 `len` 依赖 `pending_len_is_string` 上下文，归一到 `PointerValue`
+  仍需确认该标志正确传播，故不在本轮范围，标记后续切片（同一根，表示归一家族的 string 变体）。
+- **Set 循环变量（L3，既存）**：`Set` 运行时布局并非 list 的 `{i64,ptr}` 结构，F-011 的
+  `starts_with("Set")` 误将 Set 句柄按 list 结构 bit-cast（record/tuple 字段、`len`、函数
+  `Set` 参数均触发），native 段错误（`len(set循环变量)` VM 给 `4`、native 段错误 139，
+  属静默 L3，非 fail-closed）。0.40.1.16 **未**把 Set 纳入 `var_is_list` 归一（否则会显式
+  把 Set 路由到错误的 list 结构指针路径），Set 循环变量回落到 F-011 提交前的 i64 句柄路径
+  （与 F-011 行为一致，不新增回归）。该 L3 需专用切片：以 Set 真实运行时结构指针做
+  bit-cast / `VarEntry` 携带 Mimi 类型，从根消除「按 list 结构误译 Set」——列为后续高优先修复。
+
+分类: 一次性缺陷（list 句柄在推导式循环变量绑定处的表示归一，单一事实源；未触 S2/S3）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_reverse_loopvar`（5）、
+`dual_comprehension_contains_loopvar`（1）、`dual_comprehension_pop_loopvar`（6）
+（均双后端 run+build+exec MATCH）；repro `/tmp/f18_c.mimi`（reverse=5）≡ VM、
+`/tmp/f18_g.mimi`（contains=1）≡ VM、``/tmp/f18_i.mimi`（pop=6）≡ VM
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

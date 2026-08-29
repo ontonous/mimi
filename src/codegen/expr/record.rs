@@ -379,7 +379,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "list_handle_to_ptr",
                         )?
                         .into_pointer_value();
-                    self.build_load(BasicTypeEnum::StructType(st), lp, &format!("load_{}", field.name))
+                    self.build_load(
+                        BasicTypeEnum::StructType(st),
+                        lp,
+                        &format!("load_{}", field.name),
+                    )
                 } else {
                     Ok(val)
                 }
@@ -795,6 +799,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             .strip_prefix("List<")
             .map(|s| s.strip_suffix('>').unwrap_or(s).to_string())
             .unwrap_or_else(|| iter_ty.clone());
+        // 0.40.1.16 (F-012): 仅对 `List` 元素类型做 PointerValue 绑定归一。
+        // `Set` 的运行时布局**不是** list 的 `{i64,ptr}` 结构（F-011 的
+        // `starts_with("Set")` 误将 Set 句柄按 list 结构 bit-cast 是既存的 L3 缺口，
+        // `len(set)` native 段错误为证），故 Set 循环变量不在此归一，回落到既有 i64
+        // 句柄路径（与 F-011 提交前行为一致），标记后续专用 Set 切片修复。
+        let var_is_list = self.is_list_type_name(&iter_elem);
         let prev_var = self.var_type_names.get(var).cloned();
         if !iter_elem.is_empty() {
             self.var_type_names.insert(var.to_string(), iter_elem);
@@ -803,7 +813,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             let (list_ptr, list_len, data_ptr) = self.load_comprehension_input(iter, vars)?;
             let (out_i64, out_ptr) = self.allocate_comprehension_output(list_len)?;
             let (_idx_alloca, wi_alloca) = self.emit_comprehension_loop(
-                expr, var, guard, list_ptr, list_len, data_ptr, out_i64, vars,
+                expr,
+                var,
+                var_is_list,
+                guard,
+                list_ptr,
+                list_len,
+                data_ptr,
+                out_i64,
+                vars,
             )?;
             let result_len = self.build_load(
                 BasicTypeEnum::IntType(self.context.i64_type()),
@@ -943,6 +961,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &mut self,
         expr: &Expr,
         var: &str,
+        var_is_list: bool,
         guard: &Option<Box<Expr>>,
         _list_ptr: inkwell::values::PointerValue<'ctx>,
         list_len: inkwell::values::IntValue<'ctx>,
@@ -983,12 +1002,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         let elem_ptr = self.build_in_bounds_gep(i64_ty, data_ptr, &[idx], "elem")?;
         let elem = self.build_load(BasicTypeEnum::IntType(i64_ty), elem_ptr, "elem_val")?;
         let mut comp_vars = vars.clone();
-        let elem_alloca = self.build_alloca(i64_ty, var)?;
-        self.build_store(elem_alloca, elem)?;
-        comp_vars.insert(
-            var.to_string(),
-            (elem_alloca, BasicTypeEnum::IntType(i64_ty)),
-        );
+        if var_is_list {
+            // 0.40.1.16 (F-012): a comprehension loop variable whose type is a
+            // `List`/`Set` is carried as an i64 handle in the parent list's data
+            // array (the list struct pointer cast to i64). Binding it back as a raw
+            // `IntType(i64)` made every consumer that expects the `{len,data}` struct
+            // / a list pointer (record/tuple field, function `List` parameter,
+            // `len`/`reverse`/`contains`/`pop` builtins, indexing) read garbage or hit
+            // E0700 while the VM accepted the program (L1 divergence — same root as
+            // F-008/F-010/F-011). Bit-cast the handle to the list-struct pointer and
+            // bind the loop var as a `PointerValue` so it flows through the SAME
+            // existing `PointerValue` paths a regular list variable takes — single
+            // source of truth (the binding site already knows the element type from
+            // the iterable), no per-site arms, no new heuristic / type whitelist /
+            // shape enum, no 0.40.1 deep-copy / claim freeze break. Element storage
+            // (`emit_comprehension_store`) already heap-packs a `PointerValue` list
+            // element via `claim_nested_list_slot`, identical to a regular list var.
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let elem_ptr_val = self
+                .build_bit_cast(
+                    elem.into(),
+                    BasicTypeEnum::PointerType(ptr_ty),
+                    "list_handle_to_ptr",
+                )?
+                .into_pointer_value();
+            let elem_alloca = self.build_alloca(ptr_ty, var)?;
+            self.build_store(elem_alloca, elem_ptr_val)?;
+            comp_vars.insert(
+                var.to_string(),
+                (elem_alloca, BasicTypeEnum::PointerType(ptr_ty)),
+            );
+        } else {
+            let elem_alloca = self.build_alloca(i64_ty, var)?;
+            self.build_store(elem_alloca, elem)?;
+            comp_vars.insert(
+                var.to_string(),
+                (elem_alloca, BasicTypeEnum::IntType(i64_ty)),
+            );
+        }
 
         let include = self.eval_guard(guard, &comp_vars, i64_ty)?;
         let store_bb = self.context.append_basic_block(function, "comp_store");

@@ -8279,6 +8279,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                         }
                     }
                 }
+                if let BasicValueEnum::PointerValue(pv) = args[i] {
+                    // 0.40.1.16 (F-012): a `List`/`Set` argument already carried as a
+                    // list-struct pointer (e.g. a comprehension LOOP VARIABLE of list
+                    // type, which 0.40.1.16 now binds as a `PointerValue` in
+                    // `emit_comprehension_loop`) passed as a `List`/`Set` parameter must
+                    // be LOADED into the `{len,data}` struct value — the calling
+                    // convention passes `List`/`Set` by value. Sibling of the
+                    // `IntValue` arm above (the loop var was previously an i64 handle);
+                    // now the loop var is a `PointerValue` so this arm fires instead.
+                    // Reuses `build_load`; no new heuristic / type whitelist / shape enum.
+                    let pname = crate::core::helpers::fmt_type(&param.ty.unlocated());
+                    if self.is_list_type_name(&pname) || pname.starts_with("Set") {
+                        if let BasicTypeEnum::StructType(st) = target {
+                            let loaded = self.build_load(
+                                BasicTypeEnum::StructType(st),
+                                pv,
+                                "list_arg_load",
+                            )?;
+                            args[i] = loaded;
+                            continue;
+                        }
+                    }
+                }
                 args[i] = self.adjust_int_val(args[i], target)?;
             }
         }

@@ -3363,6 +3363,67 @@ fn dual_comprehension_record_fn_return_list_field() {
     );
 }
 
+// 0.40.1.16 (F-012): the comprehension LOOP VARIABLE of list type is now bound
+// as a `PointerValue` (list-struct pointer) at the single authoritative binding
+// site (`emit_comprehension_loop`), so every consumer that expects the list
+// struct / a list pointer works uniformly via its existing `PointerValue` path —
+// no per-site arms. These close the remaining list-builtin consumers that took a
+// loop-var list and previously hit E0700 / read garbage (sibling of F-008/F-010/
+// F-011, same root: the list value's dual i64-handle / struct-pointer form).
+#[test]
+fn dual_comprehension_reverse_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [reverse(x) for x in xss];
+            println(out[0][1] + out[1][0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_contains_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [contains(x, 2) for x in xss];
+            println((if out[0] { 1 } else { 0 }) + (if out[1] { 1 } else { 0 }));
+            0
+        }
+        "#,
+        "1"
+    );
+}
+
+#[test]
+fn dual_comprehension_pop_loopvar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xss = [[1, 2], [3, 4]];
+            let out = [pop(x) for x in xss];
+            println(out[0] + out[1]);
+            0
+        }
+        "#,
+        "6"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]
