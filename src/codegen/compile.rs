@@ -28,6 +28,30 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
+        // gate — fail closed on native return types whose heap ownership the
+        // current ownership-transfer path cannot handle. The legacy
+        // `func.rs` `deep_copy_returned_value` / `type_owns_heap` path (BUG P)
+        // silently passes through `Set<_>` / `Map<_,_>` returns, so the returned
+        // handle aliases freed heap. This runs for EVERY function (user + stdlib)
+        // before any emission, so it is enforced regardless of whether the
+        // function is routed to the resolved or legacy emitter. `mimi run` (VM
+        // backend) is unaffected — it does not call this native path.
+        for function in program.functions().values() {
+            if function.is_comptime {
+                continue;
+            }
+            if crate::codegen::resolved::native_return_owns_unclaimed_heap(program, &function.ret) {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::diagnostic::codes::E0723,
+                    format!(
+                        "returning a value of type `{}` from a native (LLVM) function is not yet supported: its heap ownership (Set/Map payload) cannot be transferred safely across the return boundary. Use `mimi run` (VM backend), or restructure to avoid returning this type. Tracked as 0.1.10 A2 ownership-glue work (E0723).",
+                        crate::core::fmt_type(&function.ret)
+                    ),
+                    crate::span::Span::UNKNOWN,
+                )]);
+            }
+        }
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
         let tables = program.build_transition_tables();
         self.resolved_transitions = Some(tables.resolved);
@@ -792,6 +816,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
         if let Some((program, Some(eligible))) = resolved_ctx {
             if let Err(diagnostics) = self.compile_resolved_subset(program, eligible) {
+                // 0.40.1.3 (A3, blind-spots-evaluation-2026-08-29.md §1.3-3/4): a
+                // fail-closed ownership error (E0723) must NOT be silently
+                // downgraded to the legacy emitter — that would re-emit broken IR
+                // that aliases freed heap (the BUG P hole). Escalate it as a hard
+                // compile error.
+                if diagnostics
+                    .iter()
+                    .any(|d| d.code.as_deref() == Some("E0723"))
+                {
+                    return Err(CompileError::Unsupported(
+                        diagnostics
+                            .iter()
+                            .find(|d| d.code.as_deref() == Some("E0723"))
+                            .map(|d| d.message.clone())
+                            .unwrap_or_else(|| "E0723: unsupported native return".into()),
+                    ));
+                }
                 // 0.1.8 Phase 0: core-callee emit failures are hard errors
                 // (function name + reason), not a quiet legacy downgrade.
                 if let Some(diag) = diagnostics

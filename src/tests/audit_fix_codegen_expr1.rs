@@ -498,3 +498,40 @@ fn audit_expr1_deref_unknown_pointee_fails_closed() {
         cg_err
     );
 }
+
+/// 0.40.1.3 (A3, `devdocs/v0.40/blind-spots-evaluation-2026-08-29.md` §1.3-3/4):
+/// the native (LLVM) backend must fail closed with E0723 when a function
+/// returns a heap-owning aggregate whose ownership cannot be transferred
+/// across the return boundary — the BUG P silent pass-through hole in the
+/// legacy `func.rs` `deep_copy_returned_value` / `type_owns_heap` path.
+///
+/// Concrete nested non-string lists (`List<List<i32>>`) are one such hole: the
+/// outer list's data array is claimed but the inner list's is not, aliasing
+/// freed heap. The VM backend (`mimi run`) is unaffected and remains supported.
+#[test]
+fn audit_expr1_native_heap_aggregate_return_fails_closed_e0723() {
+    let src = r#"
+        func nested() -> List<List<i32>> {
+            [[1, 2], [3, 4]]
+        }
+        func main() -> i32 {
+            let _ = nested();
+            0
+        }
+    "#;
+    check_source(src).expect("checker must accept the nested-list return");
+
+    // Native (LLVM) codegen must fail closed.
+    let cg_err = checked_codegen_compile_and_run(src)
+        .expect_err("native codegen must fail closed (E0723) on heap-owning aggregate returns");
+    assert!(
+        cg_err.contains("E0723"),
+        "fail-closed heap-return message must cite E0723: {}",
+        cg_err
+    );
+
+    // The VM backend (`mimi run`) must still accept and run the same program —
+    // the fail-closed is native-only, never a language-level rejection.
+    let (_val, vm_out) = checked_run_source_with_stdout(src);
+    assert_eq!(vm_out, "", "VM path must run the heap-aggregate return");
+}

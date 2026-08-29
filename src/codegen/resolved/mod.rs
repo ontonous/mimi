@@ -349,6 +349,125 @@ pub(super) fn resolved_type_to_ast(
     }
 }
 
+// ---------------------------------------------------------------------------
+// 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): deep-copy
+// ownership fail-closed for the native (LLVM) backend.
+//
+// The documented silent pass-through blind spots in the legacy `func.rs`
+// `deep_copy_returned_value` / `type_owns_heap` path (BUG P) are return types
+// whose heap ownership the current transfer path cannot move across the return
+// boundary, so the returned handle aliases freed heap:
+//   - `Set<_>` / `Map<_,_>` payloads (`type_owns_heap` returns `false` for them),
+//   - `List<List<X>>` where `X` is a concrete non-string head (the outer list's
+//     data array is claimed but the inner list's is not — a UAF hole).
+// These are fail-closed with E0723.
+//
+// Scoping note: top-level user RECORD returns and `List<List<string>>` are
+// already transferred safely by `claim_returned_heap_pointers` in the resolved
+// emitter (verified: `make_outer() -> Outer{inner: Inner{items: List<i32>}}`
+// builds and runs correctly), so they are intentionally NOT flagged. Generic
+// `List<List<T>>` (e.g. stdlib `chunks`/`group_by`) is excluded by treating
+// bare unknown type names as generic parameters, and `List<Record{heap}>`
+// (e.g. `List<LogEntry>`) is left unflagged to avoid regressing working code;
+// their residual ownership gaps are tracked for 0.1.10 A2 ownership-glue.
+// ---------------------------------------------------------------------------
+
+/// Whether a native return type is a `Set`/`Map` payload or a concrete nested
+/// non-string `List<List<X>>` whose ownership the current transfer path cannot
+/// move (the BUG P hole). Used by the top-level fatal gate in `compile_checked`.
+pub(crate) fn native_return_owns_unclaimed_heap(
+    _program: &crate::core::CheckedProgram,
+    ty: &crate::ast::Type,
+) -> bool {
+    match ty.unlocated() {
+        crate::ast::Type::Name(n, args) => match n.as_str() {
+            "Set" | "Map" => true,
+            "List" => match args.first() {
+                Some(elem) => list_elem_owns_unclaimed_heap(elem),
+                None => false,
+            },
+            "Option" | "Result" => args
+                .iter()
+                .any(|a| native_return_owns_unclaimed_heap(_program, a)),
+            _ => false,
+        },
+        crate::ast::Type::Tuple(items) => items
+            .iter()
+            .any(|t| native_return_owns_unclaimed_heap(_program, t)),
+        _ => false,
+    }
+}
+
+/// Whether a `List<elem>` element type owns heap the generic-list return claim
+/// cannot transfer (the `List<X>` outer data array is claimed, but the element
+/// payload is not).
+/// Whether a `List<elem>` element type owns heap the generic-list return claim
+/// cannot transfer (the outer `List` data array is claimed, but a nested
+/// `List`/`Set`/`Map` element payload is not).
+fn list_elem_owns_unclaimed_heap(elem: &crate::ast::Type) -> bool {
+    match elem.unlocated() {
+        crate::ast::Type::Name(n, args) => match n.as_str() {
+            // Nested `List<List<X>>`: the inner list's data array is not claimed,
+            // so this aliases freed heap. The hole is decided by the inner list's
+            // element `X` (see `nested_inner_owns_unclaimed`).
+            "List" => match args.first() {
+                Some(inner) => nested_inner_owns_unclaimed(inner),
+                None => false,
+            },
+            "Set" | "Map" => true, // `List<Set>` / `List<Map>`.
+            "Option" | "Result" => args.iter().any(list_elem_owns_unclaimed_heap),
+            _ => false, // scalar / string / tuple / record / generic-param element: single-level list is handled.
+        },
+        _ => false,
+    }
+}
+
+/// The inner list's element `X` in `List<List<X>>`. A concrete non-string `X`
+/// makes the inner list a genuine ownership hole; `string` and `record` are
+/// handled (or intentionally not flagged to avoid regressions), and a generic
+/// parameter `T` is excluded so `chunks`/`group_by`/`wrap` (`List<List<T>>`) keep
+/// compiling. Deeper nesting recurses (`List<List<List<T>>>` is safe).
+fn nested_inner_owns_unclaimed(inner: &crate::ast::Type) -> bool {
+    match inner.unlocated() {
+        // Recurse for 3+ levels BEFORE any "concrete" scalar match, so that a
+        // generic innermost (`List<List<List<T>>>`) is not flagged.
+        crate::ast::Type::Name(s, args) if s.as_str() == "List" => match args.first() {
+            Some(y) => nested_inner_owns_unclaimed(y),
+            None => false,
+        },
+        crate::ast::Type::Name(s, _) if s.as_str() == "string" => false, // handled shape.
+        crate::ast::Type::Name(s, _) if is_concrete_non_string_head(s) => true, // scalar / Set / Map.
+        crate::ast::Type::Tuple(_) => true, // `List<List<(a, b)>>` inner buffer unclaimed.
+        _ => false,                         // generic parameter `T` or record: not flagged.
+    }
+}
+
+/// Concrete, non-string type heads whose presence as the inner element of a
+/// nested `List<List<X>>` makes the inner list a genuine ownership hole.
+fn is_concrete_non_string_head(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "Int"
+            | "Float"
+            | "Bool"
+            | "Set"
+            | "Map"
+    )
+}
+
 impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ctx> {
     fn compile_program(&mut self) -> Result<(), CompileError> {
         let mut functions: Vec<_> = self
@@ -896,6 +1015,10 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .program
             .callable(&callable.owner)
             .map(|c| c.signature.result.clone());
+        // NOTE (0.40.1.3, A3): the Set/Map return ownership fail-closed is
+        // enforced as a fatal top-level gate in `compile_checked` (native
+        // backend) before any emission, so it cannot be silently downgraded to
+        // the legacy emitter. See `native_return_owns_unclaimed_heap`.
         let value = self.ensure_returned_heap_strings_owned(value, result_type, return_type_id)?;
         // Deep-eval 2026-08-09 (demos/07 custom Res segv): same claim for
         // custom-enum-shaped returns ({i32 tag, i64 payload}): the payload
@@ -1731,6 +1854,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     .program
                     .callable(&frame.owner)
                     .map(|c| c.signature.result.clone());
+                // NOTE (0.40.1.3, A3): the Set/Map return ownership fail-closed
+                // is enforced as a fatal top-level gate in `compile_checked`
+                // (native backend) before any emission.
                 let value = if let Some(value) = value {
                     Some(self.ensure_returned_heap_strings_owned(
                         value,
@@ -3574,14 +3700,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 // only the Nominal form was previously accepted.)
                                 match resolved_result_ty {
                                     ResolvedType::Option(inner) => inner,
-                                    ResolvedType::Nominal { arguments: ta, .. } => ta
-                                        .first()
-                                        .cloned()
-                                        .ok_or_else(|| {
+                                    ResolvedType::Nominal { arguments: ta, .. } => {
+                                        ta.first().cloned().ok_or_else(|| {
                                             CompileError::Unsupported(
                                                 "Option map: missing type argument".into(),
                                             )
-                                        })?,
+                                        })?
+                                    }
                                     _ => {
                                         return Err(CompileError::Unsupported(
                                             "Option map: result type not an Option".into(),
@@ -3606,9 +3731,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .generator
                                 .builder
                                 .build_extract_value(f_sv, 1, "opt_map_env_ptr")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("opt map env: {e}"))
-                                })?
+                                .map_err(|e| CompileError::LlvmError(format!("opt map env: {e}")))?
                                 .into_pointer_value();
                             let arg_meta: BasicMetadataTypeEnum = match ret_slot_llvm {
                                 BasicTypeEnum::IntType(t) => t.into(),
@@ -3621,99 +3744,92 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // directly; NON-scalar payloads are stored as a HEAP
                             // POINTER truncated into the i64 slot. The closure
                             // expects the real value, so rebuild it per type.
-                            let materialize_slot =
-                                |slot: BasicValueEnum<'ctx>,
-                                 target: BasicTypeEnum<'ctx>|
-                                 -> Result<BasicValueEnum<'ctx>, CompileError> {
-                                    let b = &self.generator.builder;
-                                    let raw_i64 = match slot {
-                                        BasicValueEnum::IntValue(iv) => iv,
-                                        _ => self.generator.context.i64_type().const_zero(),
-                                    };
-                                    match target {
-                                        BasicTypeEnum::IntType(t) => {
-                                            if raw_i64.get_type().get_bit_width()
-                                                > t.get_bit_width()
-                                            {
-                                                Ok(b.build_int_truncate(
-                                                    raw_i64,
-                                                    t,
-                                                    "slot_trunc",
-                                                )
+                            let materialize_slot = |slot: BasicValueEnum<'ctx>,
+                                                    target: BasicTypeEnum<'ctx>|
+                             -> Result<
+                                BasicValueEnum<'ctx>,
+                                CompileError,
+                            > {
+                                let b = &self.generator.builder;
+                                let raw_i64 = match slot {
+                                    BasicValueEnum::IntValue(iv) => iv,
+                                    _ => self.generator.context.i64_type().const_zero(),
+                                };
+                                match target {
+                                    BasicTypeEnum::IntType(t) => {
+                                        if raw_i64.get_type().get_bit_width() > t.get_bit_width() {
+                                            Ok(b.build_int_truncate(raw_i64, t, "slot_trunc")
                                                 .map_err(|e| {
                                                     CompileError::LlvmError(format!(
                                                         "slot trunc: {e}"
                                                     ))
                                                 })?
                                                 .into())
-                                            } else if raw_i64.get_type().get_bit_width()
-                                                < t.get_bit_width()
-                                            {
-                                                Ok(b.build_int_z_extend(
-                                                    raw_i64,
-                                                    t,
-                                                    "slot_zext",
-                                                )
+                                        } else if raw_i64.get_type().get_bit_width()
+                                            < t.get_bit_width()
+                                        {
+                                            Ok(b.build_int_z_extend(raw_i64, t, "slot_zext")
                                                 .map_err(|e| {
                                                     CompileError::LlvmError(format!(
                                                         "slot zext: {e}"
                                                     ))
                                                 })?
                                                 .into())
-                                            } else {
-                                                Ok(BasicValueEnum::IntValue(raw_i64))
-                                            }
+                                        } else {
+                                            Ok(BasicValueEnum::IntValue(raw_i64))
                                         }
-                                        BasicTypeEnum::PointerType(t) => {
-                                            // Inline pointer slot: pass through.
-                                            // Otherwise the slot is a boxed i64 pointer.
-                                            if let BasicValueEnum::PointerValue(pv) = slot {
-                                                Ok(pv.into())
-                                            } else {
-                                                Ok(b
-                                                    .build_int_to_ptr(raw_i64, t, "slot_int2ptr")
-                                                    .map_err(|e| {
-                                                        CompileError::LlvmError(format!(
-                                                            "slot i2p: {e}"
-                                                        ))
-                                                    })?
-                                                    .into())
-                                            }
-                                        }
-                                        BasicTypeEnum::StructType(t) => {
-                                            // Resolved stores non-scalar slots two ways:
-                                            // inline (the slot already is the {ptr,len}
-                                            // struct) or boxed (slot = ptrtoint(box)).
-                                            // Pass an inline struct through; otherwise
-                                            // reconstruct it from the box.
-                                            if let BasicValueEnum::StructValue(sv) = slot {
-                                                Ok(sv.into())
-                                            } else {
-                                                let raw_ptr = self
-                                                    .generator
-                                                    .context
-                                                    .ptr_type(inkwell::AddressSpace::default());
-                                                let ptr = b
-                                                    .build_int_to_ptr(
-                                                        raw_i64,
-                                                        raw_ptr,
-                                                        "slot_boxed_ptr",
-                                                    )
-                                                    .map_err(|e| {
-                                                        CompileError::LlvmError(format!(
-                                                            "slot box ptr: {e}"
-                                                        ))
-                                                    })?;
-                                                Ok(self
-                                                    .generator
-                                                    .build_load(t, ptr, "slot_boxed_load")?)
-                                            }
-                                        }
-                                        _ => Err(CompileError::Unsupported(
-                                            "Option map on float-typed slot".into(),
-                                        )),
                                     }
-                                };
+                                    BasicTypeEnum::PointerType(t) => {
+                                        // Inline pointer slot: pass through.
+                                        // Otherwise the slot is a boxed i64 pointer.
+                                        if let BasicValueEnum::PointerValue(pv) = slot {
+                                            Ok(pv.into())
+                                        } else {
+                                            Ok(b.build_int_to_ptr(raw_i64, t, "slot_int2ptr")
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "slot i2p: {e}"
+                                                    ))
+                                                })?
+                                                .into())
+                                        }
+                                    }
+                                    BasicTypeEnum::StructType(t) => {
+                                        // Resolved stores non-scalar slots two ways:
+                                        // inline (the slot already is the {ptr,len}
+                                        // struct) or boxed (slot = ptrtoint(box)).
+                                        // Pass an inline struct through; otherwise
+                                        // reconstruct it from the box.
+                                        if let BasicValueEnum::StructValue(sv) = slot {
+                                            Ok(sv.into())
+                                        } else {
+                                            let raw_ptr = self
+                                                .generator
+                                                .context
+                                                .ptr_type(inkwell::AddressSpace::default());
+                                            let ptr = b
+                                                .build_int_to_ptr(
+                                                    raw_i64,
+                                                    raw_ptr,
+                                                    "slot_boxed_ptr",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "slot box ptr: {e}"
+                                                    ))
+                                                })?;
+                                            Ok(self.generator.build_load(
+                                                t,
+                                                ptr,
+                                                "slot_boxed_load",
+                                            )?)
+                                        }
+                                    }
+                                    _ => Err(CompileError::Unsupported(
+                                        "Option map on float-typed slot".into(),
+                                    )),
+                                }
+                            };
                             let indirect_fn_ty = match ret_slot_llvm {
                                 BasicTypeEnum::IntType(t) => {
                                     t.fn_type(&[ptr_ty.into(), arg_meta], false)
@@ -3814,9 +3930,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.generator
                                 .builder
                                 .build_unconditional_branch(cont_bb)
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("opt map br: {e}"))
-                                })?;
+                                .map_err(|e| CompileError::LlvmError(format!("opt map br: {e}")))?;
                             // Passthrough branch: keep the original payload.
                             self.generator.builder.position_at_end(passthrough_bb);
                             self.generator
@@ -3938,32 +4052,26 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // the correct direction (Ok->U for map, E->F for
                             // map_err), so we read them directly.
                             let closure_ty_id = call.arguments[1].value.ty.clone();
-                            let (arg_ty, ret_ty) = match self
-                                .program
-                                .resolved_types()
-                                .get(&closure_ty_id)
-                            {
-                                Some(ResolvedType::Function {
-                                    parameters,
-                                    result,
-                                    ..
-                                }) => {
-                                    let arg = parameters
-                                        .first()
-                                        .cloned()
-                                        .ok_or_else(|| {
+                            let (arg_ty, ret_ty) =
+                                match self.program.resolved_types().get(&closure_ty_id) {
+                                    Some(ResolvedType::Function {
+                                        parameters, result, ..
+                                    }) => {
+                                        let arg = parameters.first().cloned().ok_or_else(|| {
                                             CompileError::Unsupported(
-                                                "Result map/map_err closure has no parameter".into(),
+                                                "Result map/map_err closure has no parameter"
+                                                    .into(),
                                             )
                                         })?;
-                                    (arg, result.clone())
-                                }
-                                _ => {
-                                    return Err(CompileError::Unsupported(
-                                        "Result map/map_err closure type is not a Function".into(),
-                                    ))
-                                }
-                            };
+                                        (arg, result.clone())
+                                    }
+                                    _ => {
+                                        return Err(CompileError::Unsupported(
+                                            "Result map/map_err closure type is not a Function"
+                                                .into(),
+                                        ))
+                                    }
+                                };
                             let arg_slot_llvm = self.lower_type(&arg_ty)?;
                             // The closure's *return* LLVM type is the true result of
                             // the transform: for `map` it is `U` (which may differ from
@@ -4046,10 +4154,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         if let BasicValueEnum::PointerValue(pv) = slot {
                                             Ok(pv.into())
                                         } else {
-                                            Ok(b
-                                                .build_int_to_ptr(raw_i64, t, "slot_int2ptr")
+                                            Ok(b.build_int_to_ptr(raw_i64, t, "slot_int2ptr")
                                                 .map_err(|e| {
-                                                    CompileError::LlvmError(format!("slot i2p: {e}"))
+                                                    CompileError::LlvmError(format!(
+                                                        "slot i2p: {e}"
+                                                    ))
                                                 })?
                                                 .into())
                                         }
@@ -4068,13 +4177,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                                 .context
                                                 .ptr_type(inkwell::AddressSpace::default());
                                             let ptr = b
-                                                .build_int_to_ptr(raw_i64, raw_ptr, "slot_boxed_ptr")
+                                                .build_int_to_ptr(
+                                                    raw_i64,
+                                                    raw_ptr,
+                                                    "slot_boxed_ptr",
+                                                )
                                                 .map_err(|e| {
                                                     CompileError::LlvmError(format!(
                                                         "slot box ptr: {e}"
                                                     ))
                                                 })?;
-                                            Ok(self.generator.build_load(t, ptr, "slot_boxed_load")?)
+                                            Ok(self.generator.build_load(
+                                                t,
+                                                ptr,
+                                                "slot_boxed_load",
+                                            )?)
                                         }
                                     }
                                     _ => Err(CompileError::Unsupported(
@@ -4211,11 +4328,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // phi (incoming block is not a predecessor of `cont_bb`)
                             // and the whole function silently falls back to the
                             // legacy emitter (which mis-decodes string errors).
-                            let transformed_bb = self
-                                .generator
-                                .builder
-                                .get_insert_block()
-                                .ok_or_else(|| {
+                            let transformed_bb =
+                                self.generator.builder.get_insert_block().ok_or_else(|| {
                                     CompileError::LlvmError(
                                         "map_err: missing insert block after transform".into(),
                                     )
@@ -4240,7 +4354,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // failed and the whole function fell back to the legacy emitter
                             // (which mis-decodes string errors) — BUG O. The call's result
                             // type carries the correct layout.
-                            let struct_ty_basic: BasicTypeEnum<'ctx> = self.lower_type(&call.result)?;
+                            let struct_ty_basic: BasicTypeEnum<'ctx> =
+                                self.lower_type(&call.result)?;
                             let struct_ty: StructType<'ctx> = match struct_ty_basic {
                                 BasicTypeEnum::StructType(st) => st,
                                 _ => {
@@ -13583,6 +13698,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(())
     }
 
+    // NOTE (0.40.1.3, A3): the deep-copy ownership fail-closed logic lives in the
+    // module-level free functions `native_return_owns_unclaimed_heap` /
+    // `native_list_elem_owns_unclaimed_heap` / `native_record_owns_heap_by_fields`
+    // below, so it can be shared by both the per-emission defense in this emitter
+    // and the top-level fatal gate in `compile_checked` (native backend).
+
     fn emit_spawn(
         &mut self,
         value: &ResolvedExpr,
@@ -13730,24 +13851,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         frame: &mut ResolvedFrame<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Determine parameter and return LLVM types from the expression type.
-        let (param_tys, ret_ty) =
-            match self.program.resolved_types().get(expr_ty) {
-                Some(ResolvedType::Function {
-                    parameters, result, ..
-                }) => {
-                    let mut ptys = Vec::with_capacity(parameters.len());
-                    for p in parameters {
-                        ptys.push(self.lower_type(p)?);
-                    }
-                    let rt = self.lower_type(result)?;
-                    (ptys, rt)
+        let (param_tys, ret_ty) = match self.program.resolved_types().get(expr_ty) {
+            Some(ResolvedType::Function {
+                parameters, result, ..
+            }) => {
+                let mut ptys = Vec::with_capacity(parameters.len());
+                for p in parameters {
+                    ptys.push(self.lower_type(p)?);
                 }
-                _ => {
-                    return Err(CompileError::Unsupported(
-                        "lambda expression type is not a Function type".into(),
-                    ))
-                }
-            };
+                let rt = self.lower_type(result)?;
+                (ptys, rt)
+            }
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "lambda expression type is not a Function type".into(),
+                ))
+            }
+        };
 
         // Build the LLVM function type: (ptr env, params...) -> ret.
         let ptr_ty = self

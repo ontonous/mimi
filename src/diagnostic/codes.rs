@@ -208,6 +208,7 @@ pub const E0710: &str = "E0710"; // extern function not declared
 pub const E0713: &str = "E0713"; // LLVM IR generation error
 pub const E0721: &str = "E0721"; // unsupported binary operator
 pub const E0722: &str = "E0722"; // unsupported expression in codegen
+pub const E0723: &str = "E0723"; // unsupported return of heap-owning aggregate (Set/Map payload, or concrete nested non-string list) from native backend
 
 /// File/resource error codes (E07xx)
 pub const E0750: &str = "E0750"; // requires libc or I/O error
@@ -423,6 +424,7 @@ pub fn describe(code: &str) -> &'static str {
         E0713 => "LLVM IR generation error",
         E0721 => "unsupported binary operator",
         E0722 => "unsupported expression in codegen",
+        E0723 => "unsupported return of heap-owning aggregate (Set/Map payload, or concrete nested non-string list) from native backend",
 
         E0750 => "requires libc or I/O error",
         E0751 => "assertion failed",
@@ -654,6 +656,7 @@ mod tests {
             super::E0713,
             super::E0721,
             super::E0722,
+            super::E0723,
             // FFI errors
             super::E0741,
             super::E0742,

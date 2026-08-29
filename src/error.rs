@@ -58,6 +58,8 @@ pub enum CompileError {
     UnsupportedStmt(String),
     #[error("unsupported in LLVM codegen: {0}")]
     Unsupported(String),
+    #[error("unsupported return from native backend: {0}")]
+    UnsupportedReturn(String),
     #[error("cannot call {0}: expected a function or closure")]
     NotCallable(String),
 
@@ -149,6 +151,7 @@ impl CompileError {
             Self::UnsupportedExpr(_) => E0722,
             Self::UnsupportedStmt(_) => E0702,
             Self::Unsupported(_) => E0722,
+            Self::UnsupportedReturn(_) => E0723,
             Self::NotCallable(_) => E0742,
             Self::ContractCondition(_) => E0500,
             Self::BreakOutsideLoop => E0404,

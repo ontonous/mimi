@@ -198,6 +198,7 @@
 | E0713 | LLVM IR generation error |
 | E0721 | unsupported binary operator |
 | E0722 | unsupported expression in codegen |
+| E0723 | unsupported return of heap-owning aggregate (Set/Map payload, or concrete nested non-string list) from native backend — fail-closed until A2 ownership-glue (records and `List<List<string>>` are transferred safely by the resolved emitter and are not flagged) |
 | E0741 | FFI wrapper error |
 | E0742 | value is not callable |
 | E0750 | requires libc or I/O error |

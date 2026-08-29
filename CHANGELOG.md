@@ -27,6 +27,29 @@
 > `default = []`，`inkwell`/`z3` 改为 `optional`，新增 `llvm`/`verify` feature，
 > `mimi build`/`mimi verify` 仅在对应 feature 下可用。本轮回溯到此，待 0.1.10 内实施。
 
+### 0.40.1.3 — 深拷贝盲区 fail-closed（E0723）
+
+Sprint 0.40.1（A3 在途 WIP 收口）微 sprint：原生（LLVM）后端对深拷贝/所有权移交
+盲区由静默透传改为 fail-closed，新增编译错误 `E0723`
+（`src/diagnostic/codes.rs` + `docs/error-codes.md` 已登记）。
+
+盲区来源：`devdocs/v0.40/blind-spots-evaluation-2026-08-29.md` §1.3-3/4 指出，遗留
+`func.rs` `deep_copy_returned_value` / `type_owns_heap` 路径对 `Set<_>` / `Map<_,_>` 返回
+载荷返回 `false`，不触发深拷贝/所有权移交，返回句柄别名已释放堆。此外 `List<List<X>>`
+（X 为具体非 string 类型）内层 list 数据数组同样未被认领。
+
+实施（`src/codegen/compile.rs` `compile_checked` 顶层致命门禁，先于任何发射、对所有函数
+生效，仅 native 后端；`mimi run`/VM 不受影响）：
+
+- 触发：`Set` / `Map` 顶层返回；`List<List<X>>` 且 X 为具体非 string 类型（`i32`/嵌套
+  `List`/`Set`/`Map`/`tuple` 等）。
+- 不触发（避免回退）：顶层 record 返回与 `List<List<string>>` 已由 resolved emitter
+  安全移交（已验证 `make_outer`/`LogEntry` 双后端正确）；泛型 `List<List<T>>`
+  （`chunks`/`group_by`/`wrap`）按泛型参数视为未定，不拦；`List<Record{heap}>` 不拦。
+- 回归测试：`src/tests/audit_fix_codegen_expr1.rs`
+  `audit_expr1_native_heap_aggregate_return_fails_closed_e0723`（native 触发 E0723，
+  VM 路径同程序仍正常运行，证明 fail-closed 仅限 native）。
+
 ### L1 双后端等价性修复（flow-state `match` 原生后端崩溃）
 
 双后端差异实测发现一处真实 L1 分裂：原生后端对 flow 状态机/转移结果的
