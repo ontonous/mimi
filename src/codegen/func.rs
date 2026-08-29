@@ -2711,6 +2711,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .insert(name.clone(), format!("List<{}>", elem_type));
                                 }
                             }
+                        } else if let Expr::Comprehension { expr, .. } = init.unlocated() {
+                            // 0.40.1.12 (F-008): register the comprehension result
+                            // as `List<elem_type>` so `ps[0].a` resolves. The element
+                            // type comes from `infer_object_type` of the comprehension's
+                            // element expression — the same single source the `Expr::List`
+                            // branch below uses and that `emit_comprehension_store`
+                            // (record.rs) heap-packs via `coerce_to_list_storage`. Without
+                            // this registration `ps` stays untyped, `ps[0]` falls through to
+                            // "i64", and `ps[0].a` failed E0700 on native while the VM
+                            // accepted it (L1 divergence, sibling of F-006/F-007). Pure
+                            // reuse of `infer_object_type` — no new heuristic / type
+                            // whitelist / shape enum, so no S2/S3 and no 0.40.1 deep-copy
+                            // / claim freeze break.
+                            let elem_type = self.infer_object_type(expr, vars);
+                            if !elem_type.is_empty() {
+                                self.var_type_names
+                                    .insert(name.clone(), format!("List<{}>", elem_type));
+                            }
                         } else if let Expr::Tuple(_) = init.unlocated() {
                             // 0.40.1.11 (F-007): infer (A, B, …) tuple type from
                             // element types so `t.0`/field access on a tuple element

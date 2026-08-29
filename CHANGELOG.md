@@ -138,15 +138,45 @@ native 在 `t.0.a` 报 `E0707 type 'any' is not a struct`，VM 正常返回 `5`
 测试: `src/tests/dual_backend.rs::dual_tuple_of_record_literals`、
 `dual_tuple_of_closure_returned_records`（均双后端 run+build+exec MATCH）
 
-> 本轮同扫发现 **F-008（待下一轮 MODE-2）**：**推导式（comprehension）产出
-> record/tuple 元素** 在 native 仍 `E0707 must produce i64-compatible value`
-> （`src/codegen/expr/record.rs:952` `emit_comprehension_store`），而 VM 接受
-> （`[P { a: x, b: x } for x in xs]` / `[(x, x) for x in xs]` 双后端分歧；标量
-> 推导式正常）。根因：`emit_comprehension_loop`/`allocate_comprehension_output`
-> 把输出写死成 `i64` 槽（`list_len * 8` 字节），不支持 struct 元素堆打包
-> （list 字面量经 `coerce_to_list_storage` 已支持）。非一行补丁，需让推导式
-> 产出 `List<P>`（复用 `coerce_to_list_storage` 堆打包）；或若过大则降级为
-> 带 E 码的 fail-closed（两端一致拒绝）。排入队列，下一轮 MODE-2 处理。
+### 0.40.1.12 — F-008：推导式（comprehension）产出 record/tuple 元素 native 元素未堆打包 / 结果类型名未登记（L1 分歧，E0707 / E0700）
+
+F-005/F-006/F-007 同胞缺陷的终项：同一「容器元素类型未登记 / 不支持 struct 元素」家族在
+**推导式** 上的变体。`type P { a: i32, b: i32 }` 后 `let ps = [P { a: x, b: x } for x in xs];`，
+native 在 `ps[0].a` 先报 `E0707 must produce i64-compatible value`（`emit_comprehension_store`
+的 `_ =>` 臂拒收 StructValue）；即使补上 StructValue 分支，又因 `ps` 未登记类型名而报
+`E0700 field access requires a struct or actor type, got "i64"`；tuple 元素 `[(x, x) for x in xs]`
+同样分歧。VM 双端均接受并返回正确值（L1 分歧，VM 接受 / native 拒绝或给出错误值的「一方更好」违例）。
+
+根因（两处）：
+1. `src/codegen/expr/record.rs::emit_comprehension_store`：元素存储臂只处理 Int/Float/Pointer，
+   `_ =>` 拒收 StructValue（record/tuple）；且对以 **stack-allocated struct 指针**（PointerValue）
+   到达的 record 字面量直接 `ptrtoint` 存裸地址——推导式循环复用同一 alloca，裸地址令所有槽位
+   别名、读出末轮迭代值（native `ps[*]=={2,2}`，VM 正确），构成第二层 L1 分歧。
+2. `src/codegen/func.rs` let 绑定类型名登记 else-if 链（F-006/F-007 已补 `Expr::List`/
+   `Expr::Tuple`）**没有 `Expr::Comprehension` 分支**，`ps` 的类型名空缺，`ps[0]` 落入 `"i64"`，
+   `ps[0].a` → E0700。
+
+修复（双点，均纯复用既有单源，无新启发式 / 类型白名单 / 形状枚举，不触 0.40.1 红线）：
+- `emit_comprehension_store`：
+  - StructValue 元素复用 `coerce_to_list_storage`（record → malloc + 拷贝 struct + ptr_to_int；
+    `(string, i64)` 这类形似 string 的 tuple 经同一路径不透明堆打包）——原 `_ =>` 臂的 E0707 不再触发。
+  - PointerValue record 元素（stack-allocated struct 指针）在**推导式路径内**局域堆打包：经
+    `infer_object_type` 取元素类型名 + `llvm_type_for` 取 canonical struct 类型，`build_load` 后
+    malloc+拷贝，使每个槽位持有独立稳定存储（消除 alloca 别名）。该堆打包**仅限推导式路径**，不改动
+    全局 `coerce_to_list_storage`——后者被 list 字面量与 actor 返回值 list 共用，全局改动会回归
+    broadcast actor-return record list 双后端测试。
+  - string 元素仍走 `coerce_to_list_storage` 的 box、nested list 走 header copy，无行为变化。
+- `func.rs` else-if 链补 `Expr::Comprehension { expr, .. }` 分支，登记
+  `var_type_names[name] = format!("List<{}>", infer_object_type(expr, vars))`（`infer_object_type`
+  已正确渲染 record/tuple 元素类型名），与 `Expr::List` 分支对称，`ps[0].a` 解析恢复。
+
+分类: 一次性缺陷（推导式元素存储 / 类型名登记缺口；复用 `coerce_to_list_storage` + `infer_object_type`，
+无新 deep-copy/claim 启发式 → 无 S2/S3）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_record`、
+`dual_comprehension_tuple`、`dual_comprehension_scalar_still_ok`、
+`dual_comprehension_record_three_elements`（均双后端 run+build+exec MATCH；scalar 对照维持旧行为）
 
 ### Pain-point 修复（PAIN_LOG P1–P3）
 

@@ -948,7 +948,63 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .builder
                 .build_float_to_signed_int(fv, i64_ty, "f_to_i")
                 .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?,
-            BasicValueEnum::PointerValue(pv) => self.build_ptr_to_int(pv, i64_ty, "p_to_i")?,
+            BasicValueEnum::PointerValue(pv) => {
+                // 0.40.1.12 (F-008): a comprehension element produced as a
+                // stack-allocated struct POINTER (a record literal `P{..}` in the
+                // loop body) must be heap-packed into a stable i64 slot so each
+                // slot owns its own copy — storing the bare stack address would
+                // alias the loop's reused alloca and every slot would read the
+                // LAST iteration's value (native gave `ps[*]=={2,2}` for
+                // `[P{a:x,b:x} for x in ..]`, the VM gave the correct per-element
+                // values → L1 divergence, sibling of F-006/F-007). The fix is
+                // SCOPED to the comprehension path: it does NOT touch the global
+                // `coerce_to_list_storage` (shared by list literals and
+                // actor-return lists — making that change globally regressed the
+                // broadcast actor-return record-list dual test). Detection uses the
+                // inferred object type name plus the canonical struct type; strings
+                // keep their box and nested lists their header copy via
+                // `coerce_to_list_storage`. No new heuristic / type whitelist /
+                // shape enum → no S2/S3, no 0.40.1 deep-copy/claim freeze break.
+                let elem_name = self.infer_object_type(expr, comp_vars);
+                if elem_name != "string" && !elem_name.starts_with("List") {
+                    if let Some(BasicTypeEnum::StructType(st)) =
+                        self.llvm_type_for(&crate::ast::Type::Name(elem_name.clone(), vec![]))
+                    {
+                        let loaded =
+                            self.build_load(BasicTypeEnum::StructType(st), pv, "comp_rec_load")?;
+                        let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(st));
+                        let size_val = self.context.i64_type().const_int(size, false);
+                        let hdr_ptr = self.malloc_or_abort(size_val, "struct_to_i64")?;
+                        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let typed_ptr = self
+                            .build_bit_cast(
+                                hdr_ptr.into(),
+                                BasicTypeEnum::PointerType(i8_ptr_ty),
+                                "struct_ptr",
+                            )?
+                            .into_pointer_value();
+                        self.build_store(typed_ptr, loaded)?;
+                        self.build_ptr_to_int(typed_ptr, i64_ty, "p_to_i")?
+                    } else {
+                        self.coerce_to_list_storage(result, expr, comp_vars)?
+                    }
+                } else {
+                    self.coerce_to_list_storage(result, expr, comp_vars)?
+                }
+            }
+            // 0.40.1.12 (F-008): record/tuple elements compile to a struct VALUE
+            // (returned by value). Heap-pack them into an i64 slot exactly like
+            // list literals do via `coerce_to_list_storage` (record → malloc +
+            // store struct + ptr_to_int; string-shaped-but-not-string structs
+            // such as `(string, i64)` are packed opaquely by the same path).
+            // Without this the `_ =>` arm rejected them with "must produce
+            // i64-compatible value" while the VM accepted the comprehension
+            // (L1 divergence, sibling of F-006/F-007). Reuses the single
+            // `coerce_to_list_storage` path — no new heuristic / type whitelist /
+            // shape enum, so no S2/S3 and no 0.40.1 deep-copy/claim freeze break.
+            BasicValueEnum::StructValue(_) => {
+                self.coerce_to_list_storage(result, expr, comp_vars)?
+            }
             _ => return Err("comprehension expression must produce i64-compatible value".into()),
         };
         self.build_store(out_elem_ptr, result_i64)?;

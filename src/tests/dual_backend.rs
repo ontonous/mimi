@@ -3074,6 +3074,91 @@ fn dual_tuple_of_closure_returned_records() {
     );
 }
 
+// ─── 0.40.1.12 (F-008): comprehension producing record/tuple elements ──
+// Sibling of F-006/F-007: a comprehension element that is a record compiled to
+// a stack-allocated struct POINTER had its bare address stored in the list slot,
+// aliasing the loop's reused alloca so every slot read the LAST iteration's
+// value (native gave `ps[*]=={2,2}` while the VM gave the correct per-element
+// values → L1 divergence). Fix: route comprehension elements through
+// `coerce_to_list_storage`, which heap-packs record/tuple pointers into stable
+// i64 slots (and register `List<elem>` as the result var's type name so
+// `ps[0].a` resolves). Tuples arrive by value and were already handled.
+// Reuses the single `coerce_to_list_storage` path — no new heuristic/whitelist.
+
+#[test]
+fn dual_comprehension_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func main() -> i32 {
+            let xs = [1, 2];
+            let ps = [P { a: x, b: x } for x in xs];
+            println(ps[0].a + ps[1].b);
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_comprehension_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2];
+            let ts = [(x, x) for x in xs];
+            println(ts[0].0 + ts[1].1);
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_comprehension_scalar_still_ok() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 2, 3];
+            let ys = [x * 2 for x in xs];
+            println(ys[0] + ys[1] + ys[2]);
+            0
+        }
+        "#,
+        "12"
+    );
+}
+
+#[test]
+fn dual_comprehension_record_three_elements() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func main() -> i32 {
+            let xs = [10, 20, 30];
+            let ps = [P { a: x, b: x / 2 } for x in xs];
+            println(ps[0].a + ps[1].b + ps[2].a + ps[2].b);
+            0
+        }
+        "#,
+        "65"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]
