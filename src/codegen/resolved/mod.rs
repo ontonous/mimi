@@ -389,11 +389,146 @@ pub(crate) fn native_return_owns_unclaimed_heap(
             "Option" | "Result" => args
                 .iter()
                 .any(|a| native_return_owns_unclaimed_heap(_program, a)),
-            _ => false,
+            // Records (and any other nominal type): a record field that owns
+            // unclaimed heap (a `Set`/`Map`, or a concrete nested non-string
+            // `List<List<X>>`) cannot be transferred natively across the return
+            // boundary either — the inner buffer is not claimed (see 0.40.1.3).
+            // Fail-closed it the same way so the gate is not defeated by
+            // wrapping the hole in a record. Field types live in the resolved
+            // type table (not in the flat `Type::Name`), so resolve them there.
+            _ => record_owns_unclaimed_heap(_program, n),
         },
         crate::ast::Type::Tuple(items) => items
             .iter()
             .any(|t| native_return_owns_unclaimed_heap(_program, t)),
+        _ => false,
+    }
+}
+
+/// Whether a record (or any nominal) return type owns unclaimed heap through
+/// one of its fields. The flat `Type::Name` of a record carries no field types,
+/// so we resolve the nominal in the resolved type table and walk each field's
+/// `ResolvedType` (which preserves the full nested structure).
+fn record_owns_unclaimed_heap(program: &crate::core::CheckedProgram, record_name: &str) -> bool {
+    // A record's field types live in the type catalog (not in the flat
+    // `Type::Name`), keyed by each field's `NodeId`. Resolve them through the
+    // catalog rather than guessing from the `ResolvedType` table.
+    let def = {
+        if let Some(d) = program.type_def(record_name) {
+            d
+        } else {
+            // Fall back to a qualified-name suffix match (records may carry a
+            // module/type prefix in their qualified name).
+            match program.type_defs().values().find(|d| {
+                d.qualified_name == record_name
+                    || d.qualified_name.ends_with(&format!(".{}", record_name))
+            }) {
+                Some(d) => d,
+                None => return false,
+            }
+        }
+    };
+    let field_types = program.resolved_field_types();
+    let table = program.resolved_types();
+    for (field_name, _disp) in &def.fields {
+        let rt_id = match def
+            .field_ids
+            .get(field_name)
+            .and_then(|id| field_types.get(id))
+        {
+            Some(id) => id,
+            None => continue,
+        };
+        if let Some(rt) = table.get(rt_id) {
+            if owns_unclaimed_heap_rt(program, rt, table) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Same ownership check as `native_return_owns_unclaimed_heap`, but over the
+/// structured `ResolvedType` tree (so record/container fields are visible).
+///
+/// Builtin container/scalar names arrive qualified as `builtin:type:List` etc.,
+/// so strip that prefix before matching the bare container names.
+fn owns_unclaimed_heap_rt(
+    program: &crate::core::CheckedProgram,
+    rt: &crate::core::ResolvedType,
+    table: &crate::core::ResolvedTypeTable,
+) -> bool {
+    match rt {
+        crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        } => {
+            let name = item
+                .as_str()
+                .strip_prefix("builtin:type:")
+                .unwrap_or(item.as_str());
+            match name {
+                "Set" | "Map" => true,
+                "List" => match arguments.first() {
+                    Some(elem_id) => match table.get(elem_id) {
+                        Some(elem_rt) => nested_list_rt_owns(elem_rt, table),
+                        None => false,
+                    },
+                    None => false,
+                },
+                "Option" | "Result" => arguments.iter().any(|a| {
+                    table
+                        .get(a)
+                        .map_or(false, |r| owns_unclaimed_heap_rt(program, r, table))
+                }),
+                // Nested record / other user nominal: recurse into its fields.
+                // Builtin scalars fall through to `record_owns_unclaimed_heap`,
+                // which finds no type def and returns false (they own no heap).
+                _ => record_owns_unclaimed_heap(program, item.as_str()),
+            }
+        }
+        crate::core::ResolvedType::Tuple(elements) => elements.iter().any(|e| {
+            table
+                .get(e)
+                .map_or(false, |r| owns_unclaimed_heap_rt(program, r, table))
+        }),
+        _ => false,
+    }
+}
+
+/// The inner element `X` of a nested `List<List<X>>`. A concrete non-string `X`
+/// makes the inner list a genuine ownership hole; `string`/`record`/generic are
+/// excluded (handled or not-yet-known), and deeper nesting recurses.
+fn nested_list_rt_owns(
+    elem_rt: &crate::core::ResolvedType,
+    table: &crate::core::ResolvedTypeTable,
+) -> bool {
+    match elem_rt {
+        crate::core::ResolvedType::Primitive(_) => true, // i32 / f64 / bool / ...
+        crate::core::ResolvedType::Tuple(_) => true,     // `List<List<(a, b)>>`.
+        crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        } => {
+            let raw = item.as_str();
+            let name = raw.strip_prefix("builtin:type:").unwrap_or(raw);
+            match name {
+                // Recurse for 3+ levels BEFORE any "concrete" match, so a generic
+                // innermost (`List<List<List<T>>>`) is not flagged.
+                "List" => match arguments.first() {
+                    Some(y) => match table.get(y) {
+                        Some(y_rt) => nested_list_rt_owns(y_rt, table),
+                        None => false,
+                    },
+                    None => false,
+                },
+                "string" => false, // handled shape.
+                "Set" | "Map" => true,
+                // A builtin scalar (`i32`/`f64`/...) element makes the inner list
+                // a genuine hole; a user record/enum element is transferred as a
+                // value and is not flagged here.
+                _ if raw.starts_with("builtin:type:") => true,
+                _ => false,
+            }
+        }
         _ => false,
     }
 }

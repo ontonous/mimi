@@ -535,3 +535,36 @@ fn audit_expr1_native_heap_aggregate_return_fails_closed_e0723() {
     let (_val, vm_out) = checked_run_source_with_stdout(src);
     assert_eq!(vm_out, "", "VM path must run the heap-aggregate return");
 }
+
+/// Regression for F-001: a record *field* of a concrete nested non-string list
+/// (`List<List<i32>>`) is the same BUG P silent pass-through hole as the
+/// top-level case, just wrapped in a record. The native gate must not be
+/// defeated by the record wrapper — returning such a record fails closed
+/// (E0723) while the VM backend keeps running it.
+#[test]
+fn audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723() {
+    let src = r#"
+        type Wrap { mats: List<List<i32>> }
+        func nested() -> Wrap {
+            Wrap { mats: [[1, 2], [3, 4]] }
+        }
+        func main() -> i32 {
+            let _ = nested();
+            0
+        }
+    "#;
+    check_source(src).expect("checker must accept the record-with-nested-list return");
+
+    // Native (LLVM) codegen must fail closed.
+    let cg_err = checked_codegen_compile_and_run(src)
+        .expect_err("native codegen must fail closed (E0723) on a record field owning heap");
+    assert!(
+        cg_err.contains("E0723"),
+        "fail-closed record-field heap return must cite E0723: {}",
+        cg_err
+    );
+
+    // The VM backend (`mimi run`) must still accept and run the same program.
+    let (_val, vm_out) = checked_run_source_with_stdout(src);
+    assert_eq!(vm_out, "", "VM path must run the record-field heap return");
+}

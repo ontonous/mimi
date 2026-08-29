@@ -50,6 +50,36 @@ Sprint 0.40.1（A3 在途 WIP 收口）微 sprint：原生（LLVM）后端对深
   `audit_expr1_native_heap_aggregate_return_fails_closed_e0723`（native 触发 E0723，
   VM 路径同程序仍正常运行，证明 fail-closed 仅限 native）。
 
+### 0.40.1.5 — F-001：record 字段深拷贝盲区 fail-closed（同一 E0723 门禁扩展）
+
+MODE-1 排查（5 步）复现评估 §1.3-3/4 的 record 返回 UAF 洞的变体：顶层 record 返回
+本身由 resolved emitter 安全移交（已验证 `make_outer`/`LogEntry`/`p_rec_list` 等双后端
+正确），但 **record 字段** 含具体嵌套非 string 列表（`List<List<X>>`）/ `Set` / `Map`
+时，内层堆载荷未被认领，原生（LLVM）后端读出悬垂数据，而 VM 正确 —— 真实 L1 分歧
+（P0）。最小复现 `type Wrap { mats: List<List<i32>> }`：VM `2 2 1 4` vs native
+`2 2 38834 1480490477`。
+
+根因：0.40.1.3 的顶层 E0723 门禁只查 `function.ret` 顶层；record 返回名（`Type::Name`
+无字段参数）被排除，故「把洞包进 record 字段」即绕过 fail-closed。record 字段类型不在
+扁平 `Type::Name` 中，而存于 resolved 类型目录（`CheckedProgram::resolved_field_types`
+按字段 `NodeId` 索引 + `resolved_types()` 的 `ResolvedType` 树）。
+
+修复（沿用 0.40.1.3 的 fail-closed _gate，不新增 deep-copy 启发式）：将
+`native_return_owns_unclaimed_heap` 的 nominal catch-all 改为经 `program.type_def` +
+`field_ids` + `resolved_field_types` 解析字段 `ResolvedType` 并递归判定
+（`owns_unclaimed_heap_rt` / `nested_list_rt_owns` 遍历 `ResolvedType` 树，处理
+`builtin:type:` 限定名前缀与 `ResolvedType::Primitive` 非 `Nominal` 标量表示）。
+
+- 触发：record 任意字段为 `Set`/`Map`，或具体嵌套非 string `List<List<X>>`（X 为
+  `i32`/嵌套 `List`/`Set`/`Map`/`tuple` 等 concrete 非 string）；record-in-record
+  递归穿透。
+- 不触发（避免回退）：`List<List<string>>`、record 字段为 `string`/标量/`List<Record>`、
+  泛型 `List<List<T>>`、顶层 record 返回（已验证安全移交）。
+- 回归测试：`src/tests/audit_fix_codegen_expr1.rs`
+  `audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723`。
+- 门禁全绿：`dual_` 1056 / `typecheck::` 112 / `codegen_e2e` 206 均 0 failed；
+  `cargo fmt --check` 与 `cargo clippy` 本文件无新增告警。
+
 ### L1 双后端等价性修复（flow-state `match` 原生后端崩溃）
 
 双后端差异实测发现一处真实 L1 分裂：原生后端对 flow 状态机/转移结果的
