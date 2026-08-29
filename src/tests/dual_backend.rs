@@ -3549,6 +3549,51 @@ fn dual_comprehension_tuple_index_loopvar_nested() {
     );
 }
 
+// F-015 (0.40.1.19): nested comprehension whose inner element references the
+// *outer* loop variable. `emit_comprehension_store` must route every `Comprehension`
+// element to the nested-list header-copy branch (a comprehension always yields a
+// `List`), not just when `comprehension_result_type` resolves the element type —
+// otherwise the bare inner result alloca address is stored and all outer slots alias
+// the last inner iteration (silent L1 wrong-value divergence).
+#[test]
+fn dual_comprehension_nested_outer_var_in_elem() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [1, 3];
+            let es = [10, 20];
+            let out = [[x + e for e in es] for x in xs];
+            println(out[0][0] + out[1][1]);
+            0
+        }
+        "#,
+        "34"
+    );
+}
+
+#[test]
+fn dual_comprehension_nested_outer_var_record_elem() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32, b: i32 }
+        func main() -> i32 {
+            let xs = [1, 3];
+            let es = [10, 20];
+            let out = [[R { a: x, b: x + 1 } for e in es] for x in xs];
+            println(out[0][0].a + out[1][1].b);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

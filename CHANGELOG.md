@@ -374,6 +374,47 @@ F-013 把 tuple 循环变量在绑定站点归一为 `PointerValue`（tuple 句�
 （均双后端 run+build+exec MATCH）；repro `/tmp/f20_i.mimi`=21、`/tmp/f20_m.mimi`=9、
 `/tmp/f20_k.mimi`=3、`/tmp/f20_j.mimi`=2（均 ≡ VM）
 
+### 0.40.1.19 — F-015：嵌套推导式内层元素引用外层循环变量 → 结果列表别名（静默 L1 错值）
+
+F-014 收尾后继续扫 comprehension 家族，发现更深的静默分歧：`[[x + 1 for e in es] for x in xs]`
+native 给出 `8`、VM 给出 `6`（应为 `6`）——外层每个槽都指向**最后一个**内层迭代的结果，
+**静默错值**（比 fail-closed 更糟的 L1 分歧）。对照：`[[x for e in es] for x in xs]`（内层元素是
+裸外层变量 `x`）双后端 `4` MATCH；`[[e for e in es] for t in ts]`（内层不引用外层变量）双后端
+`30` MATCH；仅「内层元素为**引用外层变量的复合表达式**」时破裂。F-010 的
+`[[y for y in x] for x in xs]`（内层遍历外层 list 变量）仍 MATCH——因该例内层元素 `y` 的类型
+在 `emit` 时可由内层循环变量解析，单测 `out[0][1]+out[1][0]=5` 绿。
+
+根因：`emit_comprehension_store` 的 `PointerValue` 臂对嵌套 comprehension 结果走
+`elem_name.starts_with("List")` 分支做 header 堆拷贝（F-010 修别名）；`elem_name` 来自
+`comprehension_result_type(expr)`。`comprehension_result_type` 需解析内层元素类型，而内层元素
+`x + 1` 引用外层变量 `x`——但外层 `compile_comprehension_expr` 在返回前**已还原** `var_type_names`
+里 `x` 的绑定，故 `emit_comprehension_store` 调用时已查不到 `x` 的类型 → `comprehension_result_type`
+回退为非 `List` 名 → 落到「存裸 alloca 指针」路径（IR 实证：`%ptr_to_i64 = ptrtoint ptr
+%comp_result to i64` 把**唯一复用的内层结果 alloca 地址**直接存进外层 data 数组）→ 每个外层槽别名到
+最后一次内层迭代（native `out[0][0]` 读到 `out[1][0]` 的值）。
+
+修复（S2 合规：用「comprehension ⇒ 必然产出 `List`」这一**结构性单一事实**作主门控，未新增启发式 /
+类型白名单 / 形状枚举；复用 F-010 既有 nested-list header 拷贝原语与 `claim_nested_list_slot`）：
+- `src/codegen/expr/record.rs` `emit_comprehension_store`：将嵌套-list 判定由
+  `elem_name.starts_with("List")` 扩为 `matches!(expr, Expr::Comprehension { .. }) ||
+  elem_name.starts_with("List")`——**任何 `Comprehension` 元素无条件走 header 堆拷贝分支**（其元素
+  类型对拷贝无关紧要：内层 data 数组已含正确 i64 编码的元素，拷贝 `{len,data}` 头即可），从而
+  无论 `comprehension_result_type` 能否解析外层变量引用，外层槽都拷贝出稳定的 `{len,data}` 头、
+  各自拥有独立存储，消除别名。`string` 分支仍优先（list-of-string 不会落入，因
+  `comprehension_result_type` 返回 `List<string>` ≠ `"string"` 且 `expr_is_string` 对 comprehension 为 false）。
+
+内存语义：header 拷贝走既有 `claim_nested_list_slot` + malloc 头，内层 data 数组所有权转移给外层槽，
+无新增泄漏/UB；与 F-010 同原语，未触 deep-copy/claim 冻结红线。
+
+分类: 一次性缺陷（嵌套 comprehension 结果在外层 data 数组的存储主门控补全，F-010 同根收敛，
+未触 S2/S3）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_comprehension_nested_outer_var_in_elem`（`34`）、
+`dual_comprehension_nested_outer_var_record_elem`（record 元素，`5`）（均双后端 run+build/exec MATCH）；
+repro `/tmp/r21_h.mimi`=6、`/tmp/r21_e.mimi`=34、`/tmp/r21_b.mimi`=34、`/tmp/r21_i.mimi`=5、
+`/tmp/r21_k.mimi`=9（均 ≡ VM）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

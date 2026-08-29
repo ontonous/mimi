@@ -1136,7 +1136,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 if elem_name == "string" || self.expr_is_string(expr) {
                     // string elements keep their box (existing behavior)
                     self.coerce_to_list_storage(result, expr, comp_vars)?
-                } else if elem_name.starts_with("List") {
+                } else if matches!(expr.unlocated(), crate::ast::Expr::Comprehension { .. })
+                    || elem_name.starts_with("List")
+                {
                     // 0.40.1.14 (F-010): a nested-comprehension result is a list
                     // value built on a *reused* stack alloca (build_comprehension_result).
                     // Storing the bare stack address aliases the loop's reused alloca
@@ -1150,6 +1152,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // claim primitive (claim_nested_list_slot) — no new heuristic /
                     // type whitelist / shape enum, no S2/S3, no 0.40.1 deep-copy /
                     // claim freeze break.
+                    // 0.40.1.19 (F-015): route **every** `Comprehension` element here
+                    // unconditionally — a comprehension ALWAYS yields a `List`, so the
+                    // element type is irrelevant to the header copy. `comprehension_result_type`
+                    // only resolves when the inner element type is available at emit time;
+                    // when the inner element references the *outer* loop variable (e.g.
+                    // `[[x + 1 for e in es] for x in xs]`), the outer var binding has been
+                    // restored before `emit_comprehension_store` runs, so `comprehension_result_type`
+                    // falls back to a non-`List` name and the bare alloca address was stored
+                    // (silent L1 aliasing: every outer slot read the last inner iteration).
+                    // Gating on `Expr::Comprehension` instead of the resolved name closes
+                    // that gap without a new heuristic — the structural fact "comprehension ⇒
+                    // list" is the single source.
                     self.claim_nested_list_slot(pv);
                     let lst = self.list_struct_type();
                     let header =
