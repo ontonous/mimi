@@ -45,7 +45,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     crate::diagnostic::codes::E0723,
                     format!(
-                        "returning a value of type `{}` from a native (LLVM) function is not yet supported: its heap ownership (Set/Map payload) cannot be transferred safely across the return boundary. Use `mimi run` (VM backend), or restructure to avoid returning this type. Tracked as 0.1.10 A2 ownership-glue work (E0723).",
+                        "returning a value of type `{}` from a native (LLVM) function is not yet supported: its heap ownership (Set/Map, or a nested non-string `List` payload) cannot be transferred safely across the return boundary. Use `mimi run` (VM backend), or restructure to avoid returning this type. Tracked as 0.1.10 A2 ownership-glue work (E0723).",
                         crate::core::fmt_type(&function.ret)
                     ),
                     crate::span::Span::UNKNOWN,

@@ -568,3 +568,38 @@ fn audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723() {
     let (_val, vm_out) = checked_run_source_with_stdout(src);
     assert_eq!(vm_out, "", "VM path must run the record-field heap return");
 }
+
+/// F-003：0.40.1.6 的 E0723 门禁（record 字段递归判定）误将「包裹普通 `List<X>`
+/// 的 record 返回」与「裸 `List<X>` 返回」不一致地处理——裸 `List<X>` 一直放行，
+/// 而 record 字段路径却把 `List<i32>` 当成所有权空洞 fail-closed。本测试锁定收窄
+/// 后的正确行为：record 字段为普通 `List<X>`（scalar / string / tuple / record /
+/// 泛型参数元素）时，native（LLVM）codegen 须与裸 `List<X>` 返回一致地放行。
+#[test]
+fn audit_expr1_record_list_field_return_native_allowed() {
+    let src = r#"
+        type Wrap { items: List<i32> }
+        func make() -> Wrap {
+            Wrap { items: [10, 20, 30] }
+        }
+        func main() -> i32 {
+            let w = make();
+            println(w.items.len());
+            println(w.items[0]);
+            println(w.items[2]);
+            0
+        }
+    "#;
+    check_source(src).expect("checker must accept the record-with-plain-list return");
+
+    // Native (LLVM) codegen must now SUCCEED (no E0723) — mirroring a bare
+    // `List<i32>` return, which was always allowed.
+    let out = checked_codegen_compile_and_run(src)
+        .expect("native codegen must allow a record field that is a plain List<X>");
+    assert!(out.contains("3"), "record-list-field len must be 3: {}", out);
+    assert!(out.contains("10"), "record-list-field[0] must be 10: {}", out);
+    assert!(out.contains("30"), "record-list-field[2] must be 30: {}", out);
+
+    // The VM backend must agree.
+    let (_val, vm_out) = checked_run_source_with_stdout(src);
+    assert_eq!(vm_out, out, "VM and native must agree on a record-with-plain-list return");
+}

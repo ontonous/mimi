@@ -470,7 +470,7 @@ fn owns_unclaimed_heap_rt(
                 "Set" | "Map" => true,
                 "List" => match arguments.first() {
                     Some(elem_id) => match table.get(elem_id) {
-                        Some(elem_rt) => nested_list_rt_owns(elem_rt, table),
+                        Some(elem_rt) => list_elem_owns_unclaimed_rt(elem_rt, table),
                         None => false,
                     },
                     None => false,
@@ -495,41 +495,103 @@ fn owns_unclaimed_heap_rt(
     }
 }
 
-/// The inner element `X` of a nested `List<List<X>>`. A concrete non-string `X`
-/// makes the inner list a genuine ownership hole; `string`/`record`/generic are
-/// excluded (handled or not-yet-known), and deeper nesting recurses.
-fn nested_list_rt_owns(
+/// ResolvedType mirror of `list_elem_owns_unclaimed_heap` (the proven top-level /
+/// surface-type policy). Decides whether a `List<elem>` field return owns heap the
+/// generic-list return claim cannot transfer. A single-level `List<X>` where `X`
+/// is a scalar / `string` / tuple / record / generic-param is claimed and safe
+/// (so it is NOT a hole — matching how a bare `List<X>` return is handled); only a
+/// nested `List<List<X>>` (or `List<Set>` / `List<Map>`) is a genuine hole.
+fn list_elem_owns_unclaimed_rt(
     elem_rt: &crate::core::ResolvedType,
     table: &crate::core::ResolvedTypeTable,
 ) -> bool {
     match elem_rt {
-        crate::core::ResolvedType::Primitive(_) => true, // i32 / f64 / bool / ...
-        crate::core::ResolvedType::Tuple(_) => true,     // `List<List<(a, b)>>`.
-        crate::core::ResolvedType::Nominal {
-            item, arguments, ..
-        } => {
-            let raw = item.as_str();
-            let name = raw.strip_prefix("builtin:type:").unwrap_or(raw);
+        crate::core::ResolvedType::Nominal { item, arguments, .. } => {
+            let name = item
+                .as_str()
+                .strip_prefix("builtin:type:")
+                .unwrap_or(item.as_str());
             match name {
-                // Recurse for 3+ levels BEFORE any "concrete" match, so a generic
-                // innermost (`List<List<List<T>>>`) is not flagged.
+                // Nested `List<List<X>>`: the inner list's data array is not
+                // claimed, so this aliases freed heap. The hole is decided by the
+                // inner list's element `X` (mirrors `list_elem_owns_unclaimed_heap`).
                 "List" => match arguments.first() {
-                    Some(y) => match table.get(y) {
-                        Some(y_rt) => nested_list_rt_owns(y_rt, table),
+                    Some(inner) => match table.get(inner) {
+                        Some(inner_rt) => nested_inner_owns_rt(inner_rt, table),
                         None => false,
                     },
                     None => false,
                 },
-                "string" => false, // handled shape.
-                "Set" | "Map" => true,
-                // A builtin scalar (`i32`/`f64`/...) element makes the inner list
-                // a genuine hole; a user record/enum element is transferred as a
-                // value and is not flagged here.
-                _ if raw.starts_with("builtin:type:") => true,
+                "Set" | "Map" => true, // `List<Set>` / `List<Map>`.
+                "Option" | "Result" => arguments.iter().any(|a| {
+                    table
+                        .get(a)
+                        .map_or(false, |r| list_elem_owns_unclaimed_rt(r, table))
+                }),
+                // scalar / `string` / tuple / record / generic-param element: a
+                // single-level `List<X>` return is claimed and safe, so the field
+                // is NOT a hole. Mirrors `list_elem_owns_unclaimed_heap`'s `_ => false`.
                 _ => false,
             }
         }
+        // Primitive scalar / tuple-of-scalars element: single-level list is
+        // claimed and safe; not a hole (matches the top-level policy).
         _ => false,
+    }
+}
+
+/// ResolvedType mirror of `nested_inner_owns_unclaimed`. The inner element `X` of
+/// a nested `List<List<X>>`: a concrete non-string `X` (scalar / `Set` / `Map` /
+/// tuple) makes the inner list a genuine ownership hole; `string` and user-record /
+/// generic-param elements are handled (or intentionally not flagged to avoid
+/// regressions). Deeper nesting recurses (`List<List<List<T>>>` is safe).
+fn nested_inner_owns_rt(
+    inner_rt: &crate::core::ResolvedType,
+    table: &crate::core::ResolvedTypeTable,
+) -> bool {
+    match inner_rt {
+        // Recurse for 3+ levels BEFORE any "concrete" match, so a generic
+        // innermost (`List<List<List<T>>>`) is not flagged.
+        crate::core::ResolvedType::Nominal { item, arguments, .. }
+            if item
+                .as_str()
+                .strip_prefix("builtin:type:")
+                .unwrap_or(item.as_str())
+                == "List" =>
+        {
+            match arguments.first() {
+                Some(y) => match table.get(y) {
+                    Some(y_rt) => nested_inner_owns_rt(y_rt, table),
+                    None => false,
+                },
+                None => false,
+            }
+        }
+        crate::core::ResolvedType::Nominal { item, .. }
+            if item
+                .as_str()
+                .strip_prefix("builtin:type:")
+                .unwrap_or(item.as_str())
+                == "string" =>
+        {
+            false // handled shape.
+        }
+        // Concrete non-string head (`i32` / `f64` / ...), `Set` / `Map`, or tuple
+        // inner buffer — a genuine ownership hole.
+        crate::core::ResolvedType::Primitive(_) => true,
+        crate::core::ResolvedType::Tuple(_) => true,
+        crate::core::ResolvedType::Nominal { item, .. }
+            if {
+                let n = item
+                    .as_str()
+                    .strip_prefix("builtin:type:")
+                    .unwrap_or(item.as_str());
+                n == "Set" || n == "Map"
+            } =>
+        {
+            true
+        }
+        _ => false, // generic parameter `T` / user record element: not flagged.
     }
 }
 

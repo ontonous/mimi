@@ -1,0 +1,16 @@
+// F-003 回归：record 字段为普通 List<X> 时，返回该 record 在 native（LLVM）后端
+// 须与 VM 等价（0.40.1.6 的 E0723 门禁误将包裹普通 List 的 record 一并 fail-closed，
+// 而裸 List<X> 返回本就被放行；此夹具验证收窄后 native 不再误拒且不发生 UAF）。
+type Wrap { items: List<i32> }
+
+func make() -> Wrap {
+    Wrap { items: [10, 20, 30] }
+}
+
+func main() -> i32 {
+    let w = make()
+    println(w.items.len())
+    println(w.items[0])
+    println(w.items[2])
+    0
+}

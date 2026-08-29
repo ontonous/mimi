@@ -2,6 +2,30 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### 0.40.1.7 — F-003：E0723 门禁对 record 包裹普通 List 的过度 fail-closed 收窄
+
+0.40.1.6（F-002）把 E0723 门禁延伸到 record 字段递归判定，但引入**过度拒绝（over-reach）**：
+record 字段路径用独立的 `nested_list_rt_owns` 把 `List<i32>` 当成所有权空洞 fail-closed，
+而同一门禁的顶层/表层路径（`list_elem_owns_unclaimed_heap` → `nested_inner_owns_unclaimed`）
+对裸 `List<i32>` 返回一直放行。两者不一致 —— 返回 `Wrap { items: List<i32> }` 被 native 拒绝，
+但返回裸 `[1,2,3]` 却正常。
+
+根因（`src/codegen/resolved/mod.rs`）：`owns_unclaimed_heap_rt` 的 `List` 臂调用了与表层策略
+**不一致**的 `nested_list_rt_owns`（`Primitive`/`Tuple`/`builtin:type:*` 元素一律判为空洞），
+而顶层策略对单层级 `List<X>`（X 为 scalar / `string` / tuple / record / 泛型参数）是「外层数据
+数组被认领、单层安全」、仅 `List<List<X>>` / `List<Set>` / `List<Map>` 才是真空洞。
+
+修复：删除 `nested_list_rt_owns`，改为在 record 字段路径复用与顶层**完全一致**的判定——
+新增 `list_elem_owns_unclaimed_rt` / `nested_inner_owns_rt`（ResolvedType 镜像），使
+「包裹普通 `List<X>` 的 record 返回」与「裸 `List<X>` 返回」等价放行。同时修正 E0723 诊断文案
+（旧文案只提 "Set/Map payload"，实际触发还含嵌套非 string `List`）。
+
+不变量类别: L1（双后端等价，移除误导性 fail-closed 分歧）/ L2（类型系统健全性）
+测试: `tests/real_world/regression_record_list_field_return_native_allowed.mimi`、
+`src/tests/audit_fix_codegen_expr1.rs::audit_expr1_record_list_field_return_native_allowed`
+（负向仍由 `audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723` 覆盖：
+`List<List<i32>>` 字段 record 返回依旧 E0723 fail-closed）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
