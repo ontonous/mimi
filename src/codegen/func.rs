@@ -2715,28 +2715,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             expr, var, iter, ..
                         } = init.unlocated()
                         {
-                            // 0.40.1.12 (F-008) + 0.40.1.13 (F-009): register the
-                            // comprehension result as `List<elem_type>` so `out[0].a` /
-                            // `out[0]` resolve. The element type comes from
-                            // `infer_object_type` of the comprehension's element
-                            // expression — the same single source the `Expr::List`
-                            // branch uses. For self-describing elements (record
-                            // literal / list literal / tuple) this resolves directly;
-                            // for a BARE LOOP VARIABLE element (e.g. `[s for s in
-                            // strs]` where `s` is the comprehension-local loop var)
-                            // `infer_object_type` would otherwise return the variable
-                            // *name* (the loop var is out of scope at this outer
-                            // let-binding registration), mis-registering `out` as
-                            // `List<s>` and sending native down the i64-slot path
-                            // (storing the raw string pointer, printing a number) —
-                            // F-009, L1 divergence, sibling of F-006/F-007/F-008.
-                            // Fix: bind the loop var to the iterable's element type
-                            // (derived from `infer_object_type(iter)` by stripping the
-                            // `List<…>` wrapper) for the duration of the element-type
-                            // inference, then restore. Pure reuse of `infer_object_type`
-                            // + the iterable's element type — no new heuristic / type
-                            // whitelist / shape enum, so no S2/S3 and no 0.40.1
-                            // deep-copy / claim freeze break.
+                            // 0.40.1.14 (F-010): register the comprehension result as
+                            // `List<elem_type>` so `out[0]` / `out[0][1]` resolve. Bind
+                            // the loop var to the iterable's element type first (the
+                            // 0.40.1.13 / F-009 fix): a BARE LOOP VARIABLE element (e.g.
+                            // `[s for s in strs]`) would otherwise resolve to the bare
+                            // variable *name* and mis-register `out` as `List<s>` (native
+                            // would print the raw handle instead of the string). If the
+                            // element is itself a comprehension (nested comprehension such
+                            // as `[[y for y in x] for x in xs]`), recurse via
+                            // `comprehension_result_type` so the outer result type is
+                            // `List<List<…>>` (previously mis-registered `List<>` → E0700
+                            // / mis-indexed `out[0][1]` while the VM accepted it — L1
+                            // divergence, sibling of F-006/F-007/F-008/F-009). Pure reuse
+                            // of `infer_object_type` + the iterable element type; no new
+                            // heuristic / type whitelist / shape enum, so no S2/S3 and no
+                            // 0.40.1 deep-copy / claim freeze break.
                             let iter_ty = self.infer_object_type(iter, vars);
                             let iter_elem = iter_ty
                                 .strip_prefix("List<")
@@ -2744,12 +2738,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 .unwrap_or_else(|| iter_ty.clone());
                             let prev = self.var_type_names.get(var).cloned();
                             if !iter_elem.is_empty() {
-                                self.var_type_names.insert(var.clone(), iter_elem);
+                                self.var_type_names.insert(var.to_string(), iter_elem);
                             }
-                            let elem_type = self.infer_object_type(expr, vars);
+                            let elem_type =
+                                if let crate::ast::Expr::Comprehension { .. } = expr.unlocated() {
+                                    self.comprehension_result_type(expr.unlocated(), vars)
+                                } else {
+                                    self.infer_object_type(expr, vars)
+                                };
                             match prev {
                                 Some(p) => {
-                                    self.var_type_names.insert(var.clone(), p);
+                                    self.var_type_names.insert(var.to_string(), p);
                                 }
                                 None => {
                                     self.var_type_names.remove(var);

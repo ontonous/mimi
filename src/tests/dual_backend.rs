@@ -3197,6 +3197,63 @@ fn dual_comprehension_scalar_var() {
     );
 }
 
+#[test]
+fn dual_comprehension_nested_list() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [[1, 2], [3, 4]];
+            let out = [[y for y in x] for x in xs];
+            println(out[0][1] + out[1][0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_nested_list_bare_elem() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = [[1, 2], [3, 4]];
+            let out = [x for x in xs];
+            println(out[0][1] + out[1][0]);
+            0
+        }
+        "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_comprehension_nested_list_fn_iter() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func head(xs: List<List<i32>>) -> List<i32> {
+            return xs[0];
+        }
+        func main() -> i32 {
+            let xs = [[1, 2], [3, 4]];
+            let out = [y for y in head(xs)];
+            println(out[0] + out[1]);
+            0
+        }
+        "#,
+        "3"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

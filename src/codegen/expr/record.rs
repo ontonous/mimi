@@ -732,17 +732,47 @@ impl<'ctx> CodeGenerator<'ctx> {
         guard: &Option<Box<Expr>>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let (list_ptr, list_len, data_ptr) = self.load_comprehension_input(iter, vars)?;
-        let (out_i64, out_ptr) = self.allocate_comprehension_output(list_len)?;
-        let (_idx_alloca, wi_alloca) = self.emit_comprehension_loop(
-            expr, var, guard, list_ptr, list_len, data_ptr, out_i64, vars,
-        )?;
-        let result_len = self.build_load(
-            BasicTypeEnum::IntType(self.context.i64_type()),
-            wi_alloca,
-            "result_len",
-        )?;
-        self.build_comprehension_result(result_len.into_int_value(), out_ptr)
+        // 0.40.1.14 (F-010): register the comprehension loop variable's type
+        // (the iterable's element type) so that nested comprehensions / element
+        // expressions referencing the loop var resolve it to its real type
+        // instead of the bare name or the i64-handle LLVM type. Without this,
+        // `[[y for y in x] for x in xs]` (where `x: List<i32>`) fails native with
+        // E0700 "comprehension iter must be a list pointer" while the VM accepts
+        // it (L1 divergence, sibling of F-006/F-007/F-008/F-009). Pure reuse of
+        // `infer_object_type` + the iterable element type; no new heuristic / type
+        // whitelist / shape enum, so no S2/S3 and no 0.40.1 deep-copy / claim
+        // freeze break.
+        let iter_ty = self.infer_object_type(iter, vars);
+        let iter_elem = iter_ty
+            .strip_prefix("List<")
+            .map(|s| s.strip_suffix('>').unwrap_or(s).to_string())
+            .unwrap_or_else(|| iter_ty.clone());
+        let prev_var = self.var_type_names.get(var).cloned();
+        if !iter_elem.is_empty() {
+            self.var_type_names.insert(var.to_string(), iter_elem);
+        }
+        let result = (|| -> Result<BasicValueEnum<'ctx>, CompileError> {
+            let (list_ptr, list_len, data_ptr) = self.load_comprehension_input(iter, vars)?;
+            let (out_i64, out_ptr) = self.allocate_comprehension_output(list_len)?;
+            let (_idx_alloca, wi_alloca) = self.emit_comprehension_loop(
+                expr, var, guard, list_ptr, list_len, data_ptr, out_i64, vars,
+            )?;
+            let result_len = self.build_load(
+                BasicTypeEnum::IntType(self.context.i64_type()),
+                wi_alloca,
+                "result_len",
+            )?;
+            self.build_comprehension_result(result_len.into_int_value(), out_ptr)
+        })();
+        match prev_var {
+            Some(p) => {
+                self.var_type_names.insert(var.to_string(), p);
+            }
+            None => {
+                self.var_type_names.remove(var);
+            }
+        }
+        result
     }
 
     fn load_comprehension_input(
@@ -760,6 +790,46 @@ impl<'ctx> CodeGenerator<'ctx> {
         let iter_val = self.compile_expr(iter, vars)?;
         let list_ptr = match iter_val {
             BasicValueEnum::PointerValue(pv) => pv,
+            BasicValueEnum::IntValue(iv) => {
+                // 0.40.1.14 (F-010): the iter compiled to an i64 handle (a boxed
+                // list) — e.g. a comprehension loop variable of list type (stored as
+                // i64 in the parent list's data array) or a function returning a
+                // `List<…>`. The handle is the list struct pointer cast to i64 (same
+                // convention used when lists are stored as list elements, e.g.
+                // `[[1,2],[3,4]][0][1]` round-trips correctly), so a bitcast
+                // recovers the list pointer and the comprehension proceeds. The iter
+                // type is recovered via `infer_object_type`; only genuine lists take
+                // this path, anything else still errors.
+                let iter_ty = self.infer_object_type(iter, vars);
+                if iter_ty.starts_with("List") {
+                    self.build_bit_cast(
+                        iv.into(),
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .into(),
+                        "list_ptr_from_handle",
+                    )?
+                    .into_pointer_value()
+                } else {
+                    return Err("comprehension iter must be a list pointer".into());
+                }
+            }
+            BasicValueEnum::StructValue(sv) => {
+                // 0.40.1.14 (F-010): the iter compiled to a list struct BY VALUE
+                // (e.g. a function returning `List<…>` whose ABI lowers the result
+                // to a {len, data} struct). Materialize it on the stack and take its
+                // pointer — that is the list pointer the comprehension loop reads.
+                // Only genuine lists take this path; verify via the inferred object
+                // type.
+                let iter_ty = self.infer_object_type(iter, vars);
+                if iter_ty.starts_with("List") {
+                    let alloca = self.build_alloca(sv.get_type(), "list_val_alloca")?;
+                    self.build_store(alloca, sv)?;
+                    alloca
+                } else {
+                    return Err("comprehension iter must be a list pointer".into());
+                }
+            }
             _ => return Err("comprehension iter must be a list pointer".into()),
         };
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -949,27 +1019,69 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_float_to_signed_int(fv, i64_ty, "f_to_i")
                 .map_err(|e| CompileError::LlvmError(format!("fptosi error: {}", e)))?,
             BasicValueEnum::PointerValue(pv) => {
-                // 0.40.1.12 (F-008): a comprehension element produced as a
-                // stack-allocated struct POINTER (a record literal `P{..}` in the
-                // loop body) must be heap-packed into a stable i64 slot so each
-                // slot owns its own copy — storing the bare stack address would
-                // alias the loop's reused alloca and every slot would read the
-                // LAST iteration's value (native gave `ps[*]=={2,2}` for
-                // `[P{a:x,b:x} for x in ..]`, the VM gave the correct per-element
-                // values → L1 divergence, sibling of F-006/F-007). The fix is
-                // SCOPED to the comprehension path: it does NOT touch the global
-                // `coerce_to_list_storage` (shared by list literals and
-                // actor-return lists — making that change globally regressed the
-                // broadcast actor-return record-list dual test). Detection uses the
-                // inferred object type name plus the canonical struct type; strings
-                // keep their box and nested lists their header copy via
-                // `coerce_to_list_storage`. No new heuristic / type whitelist /
-                // shape enum → no S2/S3, no 0.40.1 deep-copy/claim freeze break.
-                let elem_name = self.infer_object_type(expr, comp_vars);
-                if elem_name != "string" && !elem_name.starts_with("List") {
+                // 0.40.1.12 (F-008) + 0.40.1.14 (F-010): resolve the element's
+                // object type. A comprehension used as the comprehension ELEMENT (a
+                // nested comprehension, e.g. `[[y for y in x] for x in xs]`) has no
+                // `infer_object_type` arm, so use `comprehension_result_type` which
+                // returns `List<…>` and routes it through the nested-list claim path
+                // below (the same primitive `coerce_to_list_storage` uses for list
+                // literals) instead of escaping the reused stack struct pointer.
+                let elem_name = if let crate::ast::Expr::Comprehension { .. } = expr.unlocated() {
+                    self.comprehension_result_type(expr, comp_vars)
+                } else {
+                    self.infer_object_type(expr, comp_vars)
+                };
+                if elem_name == "string" || self.expr_is_string(expr) {
+                    // string elements keep their box (existing behavior)
+                    self.coerce_to_list_storage(result, expr, comp_vars)?
+                } else if elem_name.starts_with("List") {
+                    // 0.40.1.14 (F-010): a nested-comprehension result is a list
+                    // value built on a *reused* stack alloca (build_comprehension_result).
+                    // Storing the bare stack address aliases the loop's reused alloca
+                    // so every outer slot reads the LAST inner iteration's list (native
+                    // gave `out==[[3,4],[3,4]]`, the VM gave `[[1,2],[3,4]]` → L1
+                    // divergence, sibling of F-006/F-007/F-008/F-009). Mirror the
+                    // nested-list-literal claim used by `coerce_to_list_storage`:
+                    // transfer the inner list's heap-data ownership to a stable
+                    // heap-packed {len,data} header so the outer slot owns its own
+                    // storage. Scoped to the comprehension path; reuses the existing
+                    // claim primitive (claim_nested_list_slot) — no new heuristic /
+                    // type whitelist / shape enum, no S2/S3, no 0.40.1 deep-copy /
+                    // claim freeze break.
+                    self.claim_nested_list_slot(pv);
+                    let lst = self.list_struct_type();
+                    let header =
+                        self.build_load(BasicTypeEnum::StructType(lst), pv, "nested_list_hdr")?;
+                    let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(lst));
+                    let size_val = self.context.i64_type().const_int(size, false);
+                    let hdr_ptr = self.malloc_or_abort(size_val, "nested_list_hdr_heap")?;
+                    let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                    let typed_ptr = self
+                        .build_bit_cast(
+                            hdr_ptr.into(),
+                            BasicTypeEnum::PointerType(i8_ptr_ty),
+                            "nested_list_hdr_i8",
+                        )?
+                        .into_pointer_value();
+                    self.build_store(typed_ptr, header)?;
+                    self.build_ptr_to_int(typed_ptr, self.context.i64_type(), "ptr_to_i64")?
+                } else if !elem_name.is_empty() {
                     if let Some(BasicTypeEnum::StructType(st)) =
                         self.llvm_type_for(&crate::ast::Type::Name(elem_name.clone(), vec![]))
                     {
+                        // 0.40.1.12 (F-008): a comprehension element produced as a
+                        // stack-allocated struct POINTER (a record literal `P{..}` in
+                        // the loop body) must be heap-packed into a stable i64 slot so
+                        // each slot owns its own copy — storing the bare stack address
+                        // would alias the loop's reused alloca and every slot would
+                        // read the LAST iteration's value (native gave `ps[*]=={2,2}`
+                        // for `[P{a:x,b:x} for x in ..]`, the VM gave the correct
+                        // per-element values → L1 divergence, sibling of F-006/F-007).
+                        // Detection uses the inferred object type name plus the
+                        // canonical struct type; strings keep their box and nested
+                        // lists their header copy via `coerce_to_list_storage`. No new
+                        // heuristic / type whitelist / shape enum → no S2/S3, no 0.40.1
+                        // deep-copy / claim freeze break.
                         let loaded =
                             self.build_load(BasicTypeEnum::StructType(st), pv, "comp_rec_load")?;
                         let size = self.llvm_type_size_bytes(BasicTypeEnum::StructType(st));

@@ -1175,6 +1175,61 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// 0.40.1.14 (F-010): compute the result type of a comprehension expression
+    /// `[body for var in iter]` → `List<elem>`, where `elem` is the type of
+    /// `body`. Handles a comprehension used as the body of another (nested
+    /// comprehension) by recursing with the inner loop variable bound to the
+    /// iterable's element type. `infer_object_type` intentionally has no
+    /// `Comprehension` arm (it is `&self` and cannot bind loop vars), so this
+    /// `&mut self` sibling fills the gap. This subsumes the 0.40.1.13 (F-009)
+    /// bare-loop-variable binding (a comprehension whose body is a bare loop var
+    /// now resolves correctly) and extends it to nested comprehensions such as
+    /// `[[y for y in x] for x in xs]`, which previously registered the outer
+    /// result as `List<>` and failed native (E0700 / mis-indexed `out[0][1]`)
+    /// while the VM accepted it (L1 divergence, sibling of F-006/F-007/F-008/
+    /// F-009). Pure reuse of `infer_object_type` + the iterable element type;
+    /// no new heuristic / type whitelist / shape enum, so no S2/S3 and no
+    /// 0.40.1 deep-copy / claim freeze break.
+    pub(super) fn comprehension_result_type(
+        &mut self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> String {
+        if let Expr::Comprehension {
+            expr: body,
+            var,
+            iter,
+            ..
+        } = expr.unlocated()
+        {
+            let iter_ty = self.infer_object_type(iter.unlocated(), vars);
+            let iter_elem = iter_ty
+                .strip_prefix("List<")
+                .map(|s| s.strip_suffix('>').unwrap_or(s).to_string())
+                .unwrap_or_else(|| iter_ty.clone());
+            let prev = self.var_type_names.get(var).cloned();
+            if !iter_elem.is_empty() {
+                self.var_type_names.insert(var.to_string(), iter_elem);
+            }
+            let elem = self.comprehension_result_type(body.unlocated(), vars);
+            match prev {
+                Some(p) => {
+                    self.var_type_names.insert(var.to_string(), p);
+                }
+                None => {
+                    self.var_type_names.remove(var);
+                }
+            }
+            if elem.is_empty() {
+                String::new()
+            } else {
+                format!("List<{}>", elem)
+            }
+        } else {
+            self.infer_object_type(expr, vars)
+        }
+    }
+
     /// 0.35.11-fix: display-type inference for list-returning builtins that
     /// carry no declared signature on the legacy path. Shared by
     /// `infer_object_type` (inline print args) and the let-binding trackers

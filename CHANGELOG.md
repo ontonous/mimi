@@ -191,6 +191,30 @@ F-006/F-007/F-008 同胞缺陷的延续：同一「容器元素类型未登记�
 不变量类别: L1（双后端等价）
 测试: `src/tests/dual_backend.rs::dual_comprehension_string`、`dual_comprehension_scalar_var`（均双后端 run+build+exec MATCH）；repro `/tmp/f009_str.mimi` native `a/bb/ccc` ≡ VM `a/bb/ccc`
 
+### 0.40.1.14 — F-010：嵌套推导式（comprehension 作为另一 comprehension 的元素 / 迭代器为装箱 list）native 失败 E0700 或值错误（L1 分歧，`out` 误登记 `List<>` / 全部槽读末次迭代 / 迭代器非 list 指针）
+
+ F-006/F-007/F-008/F-009 同胞缺陷的延续：同一「容器元素类型未登记到 `var_type_names`」家族在 **嵌套推导式** 上的变体，叠加一处迭代器表示契约缺口。三个相邻暴露面：
+
+ 1. `let xs = [[1,2],[3,4]]; let out = [[y for y in x] for x in xs];`（外层元素是内层 comprehension）。`out` 被登记成 `List<>`（`infer_object_type` 无 `Expr::Comprehension` 臂 → 落到 `_ => String::new()`），`out[0][1]` 因元素类型名缺失而按 i64 读错；VM 给出 `5`（= `out[0][1]+out[1][0]`）。
+ 2. 内层迭代器 `x: List<i32>`（推导式局部循环变量，存为 i64 句柄）进入 `load_comprehension_input` 时编译为 `IntValue`，旧代码仅接受 `PointerValue` → `error[E0700] comprehension iter must be a list pointer`（VM 接受）。同类：`let out = [y for y in head(xs)];`（`head` 返回 `List<i32>`，ABI 把 list 返回为 i64 句柄或 `{len,data}` 值结构）native 同样 E0700。
+ 3. 即便迭代器被接纳，内层 comprehension 结果（`build_comprehension_result` 返回的 **栈上复用 alloca** `{len,data}`）若以裸栈指针存入外层 data 数组，会因 alloca 复用而让每个外层槽都读到**末次内层迭代**的列表——native 给出 `out==[[3,4],[3,4]]`（VM 给出 `[[1,2],[3,4]]`）。
+
+ 根因（family 共性 + 1 处表示缺口）：
+ - `src/codegen/expr.rs` `infer_object_type` 无 `Expr::Comprehension` 臂（方法为 `&self`，不能绑定循环变量），故 comprehension 作为值（元素 / 嵌套迭代器）解析为 `""`。
+ - `src/codegen/func.rs` `Expr::Comprehension` 登记分支 + `src/codegen/expr/record.rs` `compile_comprehension_expr` 未在 codegen 期把循环变量绑定到「可迭代对象元素类型」，导致内层迭代器 `x` 经 `infer_object_type` 只落回 `i64`/变量名。
+ - `src/codegen/expr/record.rs` `load_comprehension_input` 只接受 `PointerValue` 迭代器；`emit_comprehension_store` 对 comprehension 元素走 `coerce_to_list_storage`，但其 `elem_is_list` 检测靠 `infer_object_type`/`Expr::List`，认不出 comprehension 结果（按指针逃逸栈帧 → 别名）。
+
+ 修复（纯复用既有单源与既有 claim 原语，无新启发式 / 类型白名单 / 形状枚举，不触 0.40.1 deep-copy/claim 冻结红线）：
+ - 新增 `src/codegen/expr.rs` `comprehension_result_type`（`&mut self` helper）：递归穿过嵌套 comprehension，把每个循环变量临时绑定到「可迭代对象元素类型」（由 `infer_object_type(iter)` 剥 `List<…>` 得到），返回 `List<elem>`；外层 `func.rs` 登记分支复用它（其裸循环变量绑定逻辑即 F-009 修复，现由该 helper 统一承担，并延伸至 `List<List<…>>`）。
+ - `compile_comprehension_expr` 在 codegen 期把循环变量 `var` 临时绑定到「可迭代对象元素类型」（save/restore），使内层迭代器 `x` 经 `infer_object_type` 落到 `List<i32>`，迭代器表示契约接通。
+ - `load_comprehension_input` 接受 i64 句柄（`IntValue`，list 句柄 = list 结构指针 cast 为 i64，与 list 元素存储同一约定）与 `{len,data}` 值结构（`StructValue`）迭代器：前者 `build_bit_cast` 回 list 指针，后者落栈后取指针；均以 `infer_object_type(iter).starts_with("List")` 守门，非 list 仍报错。
+ - `emit_comprehension_store` 对 comprehension 元素（其 `infer_object_type` 经 `comprehension_result_type` 得 `List<…>`）复用与 list 字面量相同的 `claim_nested_list_slot` + 堆打包 `{len,data}` 头，使外层槽拥有稳定存储——与 `coerce_to_list_storage` 既有 nested-list-literal 路径同一原语，scoped 到推导式路径，不改动全局 `coerce_to_list_storage`。
+
+ 分类: 一次性缺陷（嵌套 comprehension 元素 / 装箱 list 迭代器类型名登记 + 迭代器表示缺口；复用 `infer_object_type` + 可迭代元素类型 + 既有 claim 原语，无新 deep-copy/claim 启发式 → 无 S2/S3）。
+
+ 不变量类别: L1（双后端等价）
+ 测试: `src/tests/dual_backend.rs::dual_comprehension_nested_list`、`dual_comprehension_nested_list_fn_iter`、`dual_comprehension_nested_list_bare_elem`（均双后端 run+build+exec MATCH）；repro `/tmp/f16_p3.mimi`（5）≡ VM、`/tmp/f16_p3b.mimi`（3）≡ VM、`/tmp/f16_p3d.mimi`（1/2/3/4）≡ VM
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
