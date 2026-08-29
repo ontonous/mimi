@@ -1,0 +1,11 @@
+func concat_all(xs: List<string>) -> string {
+    let mut acc = ""
+    for x in xs { acc = acc + x }
+    return acc
+}
+func main() -> i32 {
+    let t = spawn concat_all(["abc", "def"])
+    let r = await t
+    println(r)
+    if r == "abcdef" { 0 } else { 1 }
+}
