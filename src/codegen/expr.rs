@@ -858,6 +858,25 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Record { ty: Some(name), .. } => name.clone(),
             Expr::Call(callee, args) => {
                 if let Expr::Ident(name) = callee.unlocated() {
+                    // 0.40.1.10 (F-006): a closure-typed local variable called
+                    // inline (e.g. `f()` inside a list literal `[f(), g()]`) must
+                    // resolve its object type from the closure's return type, not
+                    // fall through to the named-function path (which only knows
+                    // `func_defs` and would return the variable name). Without
+                    // this, `[f(), g()]` where `f`/`g` return a record lowers the
+                    // list element type to i64 and `ps[0].a` triggers E0700 on
+                    // native while the VM accepts it (L1 divergence, sibling of
+                    // F-005 which fixed the direct `let p = f()` call-site ABI).
+                    // Functions live in `func_defs`, never in `var_types`, so this
+                    // check is a no-op for named-function calls.
+                    if let Some(ty) = self.var_types.get(name) {
+                        match ty.unlocated() {
+                            Type::Func(_, ret) | Type::ExternFunc(_, ret) => {
+                                return crate::core::fmt_type(ret);
+                            }
+                            _ => {}
+                        }
+                    }
                     // Try to strip _new suffix used by our codegen constructors
                     if let Some(stripped) = name.strip_suffix("_new") {
                         return stripped.to_string();

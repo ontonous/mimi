@@ -2926,6 +2926,105 @@ fn dual_closure_returns_composite() {
     );
 }
 
+// ─── 0.40.1.10 (F-006): inline closure calls as list-literal elements ─────
+// Sibling of F-005: `infer_object_type` (used by list-literal element typing)
+// resolved a closure-typed local CALL `f()` to the variable name instead of the
+// closure's return type, so `[f(), g()]` (where f/g return a record) lowered the
+// list element type to i64 on native and `ps[0].a` hit E0700 while the VM accepted
+// it (L1 divergence). Fix consults `var_types` for closure-typed locals.
+
+#[test]
+fn dual_closure_in_list_literal_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func mk(a: i32, b: i32) -> func() -> P {
+            return fn() -> P { P { a: a, b: b } };
+        }
+        func main() -> i32 {
+            let f = mk(1, 2);
+            let g = mk(3, 4);
+            let ps = [f(), g()];
+            println(ps[0].a + ps[1].b);
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_closure_in_list_literal_tuple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func tup() -> func() -> (i32, i32) {
+            return fn() -> (i32, i32) { (3, 4) };
+        }
+        func main() -> i32 {
+            let f = tup();
+            let g = tup();
+            let ts = [f(), g()];
+            println(ts[0].0 + ts[1].1);
+            0
+        }
+    "#,
+        "7"
+    );
+}
+
+#[test]
+fn dual_closure_in_list_literal_option() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func opt() -> func() -> Option<i32> {
+            return fn() -> Option<i32> { Some(5) };
+        }
+        func main() -> i32 {
+            let f = opt();
+            let g = opt();
+            let os = [f(), g()];
+            match os[0] {
+                Some(v) => println(v),
+                None => println(0),
+            }
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_closure_in_list_literal_scalar() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func sq() -> func() -> i32 {
+            return fn() -> i32 { 7 };
+        }
+        func main() -> i32 {
+            let f = sq();
+            let g = sq();
+            let xs = [f(), g()];
+            println(xs[0] + xs[1]);
+            0
+        }
+    "#,
+        "14"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

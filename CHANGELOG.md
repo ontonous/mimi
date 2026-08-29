@@ -88,6 +88,30 @@ LLVM 类型 → `emit_closure_call`（`src/codegen/expr/call/closure.rs:91`）�
 `dual_closure_returns_record_captured`、`dual_closure_returns_record_param`、
 `dual_closure_returns_composite`（均双后端 run+build+exec MATCH）
 
+### 0.40.1.10 — F-006：inline 闭包调用作为列表字面量元素时 native 元素类型误降级 i64（L1 分歧，E0700）
+
+F-005 (0.40.1.9) 的同胞缺陷：同一「闭包返回类型未传播到使用 `infer_object_type` 的上下文」家族。
+`func mk(a,b) -> func() -> P { ... }` 后 `let f = mk(1,2); let g = mk(3,4); let ps = [f(), g()];`
+native 在 `ps[0].a` 报 `E0700 field access requires a struct or actor type, got "i64"`，VM 正常返回 `5`
+（L1 分歧，VM 接受 / native 拒绝的「一方更好」违例）。
+
+根因（`src/codegen/expr.rs:859` `infer_object_type` 的 `Expr::Call(Ident(name), args)` 臂）：该臂只处理
+**具名函数调用**（`func_defs` / `infer_call_return_type_name`）、内建与 `Some`/`None`/`Ok`/`Err` 构造器，
+**从不查 `var_types[name]` 的闭包局部变量**。对 `f()`（局部闭包变量调用）它落到末尾 `name.clone()`
+返回变量名 `"f"` → 列表字面量元素类型推断为 `i64`，`ps: List<i64>`，`ps[0]` 读成 `i64` → `.a` E0700。
+（注：`let p = f(); [p, ...]` 因 `p` 是 `let`-绑定、其 `var_types` 已由 F-005 填为 `P` 而正常；命名函数
+inline 调用 `[mk(1), mk(2)]` 走 `func_defs` 正常 —— 唯独「inline 闭包调用」中招，精确定位此臂。）
+
+修复：在该臂**最前**加查 `self.var_types.get(name)`，`Type::Func(_, ret)` / `Type::ExternFunc(_, ret)`
+直接 `return crate::core::fmt_type(ret)`（闭包返回类型名）。函数只在 `func_defs`、从不在 `var_types`，
+故对具名函数调用为零副作用；纯复用既有 `var_types` 单源，非新增启发式 / 类型白名单 / 形状枚举，
+不触 0.40.1 红线（deep-copy/claim 冻结）。分歧直接消除（非 fail-closed，无新增 E 码）。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_closure_in_list_literal_record`、
+`dual_closure_in_list_literal_tuple`、`dual_closure_in_list_literal_option`、
+`dual_closure_in_list_literal_scalar`（均双后端 run+build+exec MATCH）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
