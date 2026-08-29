@@ -8538,6 +8538,37 @@ fn dual_spawn_await_simple() {
 /// method form did not — only spawn/await results exposed it. Both backends
 /// must agree. Uses parse_prod-backed harness helpers so the Str trait (needed
 /// for the `.len()` method) resolves.
+/// BUG J regression: native `println`/`print` used `puts`/`printf("%s")`, which
+/// stop at the first embedded NUL byte. Mimi strings are fat-ABI boxes that carry
+/// a true byte length, so a string containing NUL bytes was truncated on output
+/// (the value was correct, only display diverged — this is what made
+/// `truncate("a\0b\0c", 3)` appear as VM=6 / NAT=4). Now the native emitters write
+/// the boxed length via `mimi_print_bytes`/`mimi_eprint_bytes`. Asserting raw
+/// *bytes* (not a UTF-8 string compare) is what catches the truncation.
+#[test]
+fn dual_print_embedded_nul_parity() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        func main() -> i32 {
+            let n = "a\0b\0c"
+            println(n)
+            println("x=", n, " end")
+            print(n)
+            print("\n")
+            0
+        }
+    "#;
+    let (_v, vm) = run_source_with_stdout(src);
+    let native = compile_and_run(src).expect("print embedded nul native");
+    assert_eq!(
+        vm.as_bytes(),
+        native.as_bytes(),
+        "vm/native print embedded-NUL parity"
+    );
+}
+
 #[test]
 fn dual_spawn_string_method_len() {
     if !can_link() {

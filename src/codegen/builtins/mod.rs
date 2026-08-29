@@ -2099,6 +2099,33 @@ fn register_string_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // mimi_print_bytes(ptr, len) → void: length-aware stdout writer that does NOT
+    // stop at an embedded NUL (unlike puts/printf("%s")). Used by the native
+    // print/println emitters so a string value with embedded NUL bytes is
+    // written verbatim, matching the VM. See runtime/mod.rs for the impl.
+    module.add_function(
+        "mimi_print_bytes",
+        _void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    // mimi_eprint_bytes(ptr, len) → void: stderr counterpart for `eprintln`.
+    module.add_function(
+        "mimi_eprint_bytes",
+        _void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // str_replace(s, from, to) → i8* (heap-allocated string)
     module.add_function(
         "mimi_str_replace",

@@ -730,6 +730,118 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(buf)
     }
 
+    /// Length-aware write of `len` bytes from `ptr` to a stream. Uses the
+    /// runtime `mimi_print_bytes` / `mimi_eprint_bytes` helpers, which write
+    /// exactly `len` bytes and therefore preserve embedded NUL bytes (unlike
+    /// `puts` / `printf("%s")`, which stop at the first NUL).
+    fn emit_bytes(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+        to_stderr: bool,
+    ) -> MimiResult<()> {
+        let name = if to_stderr {
+            "mimi_eprint_bytes"
+        } else {
+            "mimi_print_bytes"
+        };
+        let f = self.get_runtime_fn(name)?;
+        self.build_call(
+            f,
+            &[
+                BasicMetadataValueEnum::PointerValue(ptr),
+                BasicMetadataValueEnum::IntValue(len),
+            ],
+            &format!("{}_call", name),
+        )?;
+        Ok(())
+    }
+
+    /// Emit a single ASCII byte (space separator or newline) to a stream.
+    fn emit_output_byte(&self, ch: u8, to_stderr: bool) -> MimiResult<()> {
+        let s: String = if ch == b'\n' {
+            "\n".to_string()
+        } else {
+            (ch as char).to_string()
+        };
+        let g = self
+            .builder
+            .build_global_string_ptr(&s, "out_byte")
+            .map_err(|e| CompileError::LlvmError(format!("byte error: {}", e)))?;
+        let len = self.context.i64_type().const_int(1, false);
+        self.emit_bytes(g.as_pointer_value(), len, to_stderr)
+    }
+
+    /// If `arg` is a boxed Mimi string (`{ i8*, i64 }`), write its true byte
+    /// length verbatim (embedded NUL preserved) and return `true`. Otherwise
+    /// return `false` so the caller falls back to `extract_print_arg`.
+    fn try_emit_boxed_string(
+        &self,
+        arg: &BasicMetadataValueEnum<'ctx>,
+        to_stderr: bool,
+    ) -> MimiResult<bool> {
+        if let BasicMetadataValueEnum::StructValue(sv) = arg {
+            let fields = sv.get_type().get_field_types();
+            if fields.len() == 2
+                && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                && matches!(
+                    fields[1],
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
+                )
+            {
+                let ptr = self
+                    .build_extract_value((*sv).into(), 0, "str_ptr")?
+                    .into_pointer_value();
+                let len = self
+                    .build_extract_value((*sv).into(), 1, "str_len")?
+                    .into_int_value();
+                self.emit_bytes(ptr, len, to_stderr)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Emit one already-formatted (non-string) argument via printf/fprintf.
+    fn emit_printf_arg(
+        &self,
+        spec: &str,
+        val: BasicMetadataValueEnum<'ctx>,
+        to_stderr: bool,
+    ) -> MimiResult<()> {
+        let fg = self
+            .builder
+            .build_global_string_ptr(spec, "pfmt")
+            .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
+        if to_stderr {
+            let stderr_stream = self.get_stream_global("stderr")?;
+            let fprintf = self
+                .module
+                .get_function("fprintf")
+                .ok_or_else(|| "fprintf not declared".to_string())?;
+            self.build_call(
+                fprintf,
+                &[
+                    BasicMetadataValueEnum::PointerValue(stderr_stream),
+                    BasicMetadataValueEnum::PointerValue(fg.as_pointer_value()),
+                    val,
+                ],
+                "fprintf_call",
+            )?;
+        } else {
+            let printf = self.get_runtime_fn("printf")?;
+            self.build_call(
+                printf,
+                &[
+                    BasicMetadataValueEnum::PointerValue(fg.as_pointer_value()),
+                    val,
+                ],
+                "printf_call",
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_println(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -751,8 +863,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?;
             return Ok(i64_ty.const_int(0, false).into());
         }
-        // Single string pointer: use puts (which appends newline automatically).
-        // Skip this fast path for list/record pointers, which need formatting.
+        // Single bare char* (e.g. a record/enum display string already reduced
+        // to a C string): use puts (which appends the newline automatically).
+        // Skip this fast path for boxed strings (handled below, length-aware)
+        // and list/record pointers, which need formatting.
         if args.len() == 1 {
             if let BasicMetadataValueEnum::PointerValue(_) = args[0] {
                 let ty = arg_types.first().map(|s| s.as_str()).unwrap_or("");
@@ -762,6 +876,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .type_defs
                         .get(ty)
                         .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Record(_)));
+                // boxed strings arrive as StructValue, not PointerValue, so they
+                // fall through to the per-argument length-aware path below.
                 if !is_list && !is_record {
                     let puts = self.get_runtime_fn("puts")?;
                     self.build_call(puts, args, "puts_call")?;
@@ -772,32 +888,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        // Build format and arg list, handling struct/enum values by extracting the payload
-        let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-        let mut fmt_str = String::new();
+        // Per-argument emit. Boxed Mimi strings are written length-aware (NUL
+        // preserved, matching the VM); everything else uses printf/fprintf with
+        // its spec. A single space separates arguments and a newline terminates,
+        // exactly mirroring the interpreter's `parts.join(" ") + "\n"`.
         for (i, arg) in args.iter().enumerate() {
-            // P0-3: insert a single space between adjacent args, matching
-            // the interpreter's `parts.join(" ")` semantics.
             if i > 0 {
-                fmt_str.push(' ');
+                self.emit_output_byte(b' ', false)?;
+            }
+            if self.try_emit_boxed_string(arg, false)? {
+                continue;
             }
             let arg_type = arg_types.get(i).cloned().unwrap_or_default();
-            let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
-            print_args.push(print_arg);
-            fmt_str.push_str(&spec);
+            let (val, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
+            self.emit_printf_arg(&spec, val, false)?;
         }
-        fmt_str.push('\n');
-        let fmt_global = self
-            .builder
-            .build_global_string_ptr(&fmt_str, "println_fmt")
-            .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        let mut printf_args = vec![BasicMetadataValueEnum::PointerValue(
-            fmt_global.as_pointer_value(),
-        )];
-        printf_args.extend(print_args);
-        let printf = self.get_runtime_fn("printf")?;
-        self.build_call(printf, &printf_args, "printf_call")?;
-        // Q2: release display buffers consumed by this printf call.
+        self.emit_output_byte(b'\n', false)?;
+        // Q2: release display buffers consumed by this call.
         self.flush_display_frees()?;
         Ok(i64_ty.const_int(0, false).into())
     }
@@ -8666,27 +8773,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(i64_ty.const_int(0, false).into());
         }
         let arg_types: Vec<String> = self.pending_print_arg_types.clone();
-        let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-        let mut fmt_str = String::new();
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
-                fmt_str.push(' ');
+                self.emit_output_byte(b' ', false)?;
+            }
+            if self.try_emit_boxed_string(arg, false)? {
+                continue;
             }
             let arg_type = arg_types.get(i).cloned().unwrap_or_default();
-            let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
-            print_args.push(print_arg);
-            fmt_str.push_str(&spec);
+            let (val, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
+            self.emit_printf_arg(&spec, val, false)?;
         }
-        let fmt_global = self
-            .builder
-            .build_global_string_ptr(&fmt_str, "print_fmt")
-            .map_err(|e| CompileError::LlvmError(format!("fmt error: {}", e)))?;
-        let mut printf_args = vec![BasicMetadataValueEnum::PointerValue(
-            fmt_global.as_pointer_value(),
-        )];
-        printf_args.extend(print_args);
-        let printf = self.get_runtime_fn("printf")?;
-        self.build_call(printf, &printf_args, "print_call")?;
         self.flush_display_frees()?;
         Ok(i64_ty.const_int(0, false).into())
     }
@@ -8698,37 +8795,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         // VM parity: eprintln() prints a newline to stderr; eprintln(a, b, ...)
         // prints all arguments separated by a single space plus a newline.
         let i64_ty = self.context.i64_type();
-        let mut fmt_str = String::new();
-        let mut print_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
         if !args.is_empty() {
             let arg_types: Vec<String> = self.pending_print_arg_types.clone();
             for (i, arg) in args.iter().enumerate() {
                 if i > 0 {
-                    fmt_str.push(' ');
+                    self.emit_output_byte(b' ', true)?;
+                }
+                if self.try_emit_boxed_string(arg, true)? {
+                    continue;
                 }
                 let arg_type = arg_types.get(i).cloned().unwrap_or_default();
-                let (print_arg, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
-                print_args.push(print_arg);
-                fmt_str.push_str(&spec);
+                let (val, spec) = self.extract_print_arg(arg, i64_ty, &arg_type)?;
+                self.emit_printf_arg(&spec, val, true)?;
             }
         }
-        fmt_str.push('\n');
-        let fmt_global = self
-            .builder
-            .build_global_string_ptr(&fmt_str, "efmt")
-            .map_err(|e| CompileError::LlvmError(format!("efmt error: {}", e)))?;
-        // stderr, not stdout (Wave-1 audit fix §8).
-        let stderr_stream = self.get_stream_global("stderr")?;
-        let fprintf = self
-            .module
-            .get_function("fprintf")
-            .ok_or_else(|| "fprintf not declared".to_string())?;
-        let mut fprintf_args = vec![
-            BasicMetadataValueEnum::PointerValue(stderr_stream),
-            BasicMetadataValueEnum::PointerValue(fmt_global.as_pointer_value()),
-        ];
-        fprintf_args.extend(print_args);
-        self.build_call(fprintf, &fprintf_args, "eprintf_call")?;
+        self.emit_output_byte(b'\n', true)?;
         self.flush_display_frees()?;
         Ok(i64_ty.const_int(0, false).into())
     }

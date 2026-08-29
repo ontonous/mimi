@@ -1205,6 +1205,60 @@ pub unsafe extern "C" fn mimi_string_free(ptr: *mut std::ffi::c_char) {
     }
 }
 
+// Length-aware stdout/stderr writers used by the native print/println/eprintln
+// emitters. Declared locally (not via libc, whose stdio symbols are not exposed
+// in this toolchain) so we can reach the C `FILE*` buffers that `printf`/`puts`
+// write into — preserving interleaved left-to-right order between string and
+// non-string arguments.
+extern "C" {
+    fn fwrite(
+        ptr: *const std::ffi::c_void,
+        size: usize,
+        nmemb: usize,
+        stream: *mut std::ffi::c_void,
+    ) -> usize;
+    static mut stdout: *mut std::ffi::c_void;
+    static mut stderr: *mut std::ffi::c_void;
+}
+
+/// Length-aware stdout writer used by the native `print`/`println` codegen.
+///
+/// Unlike `puts` / `printf("%s")`, this writes exactly `len` bytes from `ptr`
+/// and does NOT stop at an embedded NUL. Mimi strings are fat-ABI boxes that
+/// carry a true byte length, so a string containing NUL bytes must round-trip
+/// through output unchanged — this is what makes the native backend agree with
+/// the VM (which already preserves embedded NULs).
+///
+/// Writes through the C `stdout` `FILE*` (via `fwrite`) deliberately: that is
+/// the SAME buffer `printf`/`puts` write into, so interleaving a string (this
+/// fn) with non-string arguments (printf) preserves left-to-right order.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_print_bytes(ptr: *const std::ffi::c_char, len: i64) {
+    if ptr.is_null() || len <= 0 {
+        return;
+    }
+    fwrite(
+        ptr as *const std::ffi::c_void,
+        1,
+        len as usize,
+        stdout,
+    );
+}
+
+/// stderr counterpart of `mimi_print_bytes`, used by the native `eprintln`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_eprint_bytes(ptr: *const std::ffi::c_char, len: i64) {
+    if ptr.is_null() || len <= 0 {
+        return;
+    }
+    fwrite(
+        ptr as *const std::ffi::c_void,
+        1,
+        len as usize,
+        stderr,
+    );
+}
+
 /// Free a MimiList and optionally its C string elements.
 /// The MimiList struct itself is always heap-allocated via Box in this runtime,
 /// so we use Box::from_raw to free it (NOT libc::free, which would be allocator mismatch).
