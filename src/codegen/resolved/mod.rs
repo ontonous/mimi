@@ -3068,6 +3068,26 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 return Ok(value);
                             }
                         }
+                        // 0.1.10 (BUG K): resolved List METHOD calls arrive as
+                        // `builtin.method.list.len` — `resolve_builtin_method`
+                        // registers ONLY `len` for the list family (every other
+                        // List method is trait-dispatched via `ListExt` and
+                        // already works in the resolved path). The resolved
+                        // emitter previously had no mapping for it and hard-
+                        // errored E0722, which fired the moment a `List` method
+                        // was called inside a resolved-forced context: spawn/
+                        // await results, or any program containing a `fails`
+                        // flow transition (the `?` operator forces the resolved
+                        // emitter for the whole program, so even a plain
+                        // `xs.len()` in `main` broke). `len` is the polymorphic
+                        // builtin (it already unboxes fat-ABI strings and
+                        // handles List/Map/Set/string), so route `list.len` to
+                        // it exactly like `string.len` (BUG G).
+                        if let Some(method) = name.strip_prefix("builtin.method.list.") {
+                            if method == "len" {
+                                name = "len";
+                            }
+                        }
                         // 2026-08-06 (audit 1g): str_contains List haystack →
                         // compile_contains (VM polymorphism parity); the guard
                         // below keeps rejecting Set/other receivers.

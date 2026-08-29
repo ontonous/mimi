@@ -8531,6 +8531,87 @@ fn dual_spawn_await_simple() {
     );
 }
 
+/// BUG K regression: resolved List method `list.len()` used to hard-error
+/// E0722 ("no resolved-native emitter") on native. `resolve_builtin_method`
+/// registers ONLY `len` for the list family as a builtin method
+/// (`builtin.method.list.len`); every other List method is trait-dispatched
+/// via `ListExt` and already worked. The resolved emitter had no mapping for
+/// `builtin.method.list.len`, so it errored the moment a `List.len()` call
+/// appeared in a resolved-forced context — a `fails` flow transition (the `?`
+/// operator forces the resolved emitter for the whole program) or a
+/// spawn/await result. VM was always fine. Route `list.len` to the polymorphic
+/// `len` builtin (mirrors BUG G's `string.len` fix). This is the exact repro:
+/// a `fails` transition whose error payload is a `List`, then `.len()` on it.
+///
+/// Uses the CHECKED native path (`checked_compile_and_run`) to mirror
+/// `mimi build` (which compiles through CheckedProgram). The raw codegen
+/// `compile_file` path has a separate, unrelated bug extracting a `List`
+/// payload from a `Result`/`Err` aggregate ("Aggregate extract index out of
+/// range") that does not affect `mimi build`; this test pins the path that
+/// real programs exercise.
+#[test]
+fn dual_list_len_fails_payload() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        func check(n: i32) -> Result<i32, List<i32>> {
+            if n < 0 { return Err([1, 2, 3]) }
+            Ok(n)
+        }
+        flow F {
+            state A { n: i32 }
+            state B { n: i32 }
+            transition go(A) -> B fails List<i32> {
+                let v = check(self.n)?
+                return B { n: v }
+            }
+        }
+        func main() -> i32 {
+            let bad = F::go(A { n: -1 })
+            match bad {
+                Ok(B { n }) => println(n),
+                Err((s, e)) => println(e.len()),
+            }
+            0
+        }
+    "#;
+    let (_v, vm) = run_source_with_stdout(src);
+    let native = checked_codegen_compile_and_run(src).expect("list len fails payload native");
+    assert_eq!(
+        vm.as_bytes(),
+        native.as_bytes(),
+        "vm/native list.len on fails error payload"
+    );
+}
+
+/// BUG K (spawn variant): `list.len()` on a spawn/await result also forces the
+/// resolved emitter and used to E0722 on native.
+#[test]
+fn dual_list_len_spawn() {
+    if !can_link() {
+        return;
+    }
+    let src = r#"
+        func make_list() -> List<i32> { return [10, 20, 30] }
+        func main() -> i32 {
+            let f = spawn make_list()
+            let xs = await f
+            println(xs.len())
+            let ys = [1, 2, 3, 4, 5]
+            println(ys.len())
+            0
+        }
+    "#;
+    let (_v, vm) = run_source_with_stdout(src);
+    let native = checked_codegen_compile_and_run(src).expect("list len spawn native");
+    assert_eq!(
+        vm.as_bytes(),
+        native.as_bytes(),
+        "vm/native list.len in spawn/await resolved path"
+    );
+}
+
 /// BUG G regression: `.len()` (string method) on a value obtained from
 /// `await` used to hard-error E0722 ("no resolved-native emitter") on native,
 /// because spawn/await force the resolved codegen path and the resolved method
