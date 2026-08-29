@@ -112,6 +112,42 @@ inline 调用 `[mk(1), mk(2)]` 走 `func_defs` 正常 —— 唯独「inline 闭
 `dual_closure_in_list_literal_tuple`、`dual_closure_in_list_literal_option`、
 `dual_closure_in_list_literal_scalar`（均双后端 run+build+exec MATCH）
 
+### 0.40.1.11 — F-007：元组字面量含 record/tuple 元素时 native 元素类型误判 `any`（L1 分歧，E0707）
+
+F-005 (0.40.1.9) / F-006 (0.40.1.10) 的同胞缺陷：同一「容器元素类型未登记到
+`var_type_names`」家族在 **元组字面量** 上的变体。
+`type P { a: i32, b: i32 }` 后 `let t = (P { a: 1, b: 2 }, P { a: 3, b: 4 });`
+native 在 `t.0.a` 报 `E0707 type 'any' is not a struct`，VM 正常返回 `5`
+（L1 分歧，VM 接受 / native 拒绝的「一方更好」违例）。
+
+根因（`src/codegen/func.rs` let 绑定类型名登记 else-if 链，约 line 2705 一带）：
+该链有 `List`/`Index`/`Slice`/`Record`/`Set`/`Lambda`/`String` 分支，但**没有
+`Expr::Tuple` 分支**。对推断型 `let t = (...)`（pattern `ty` 为 `None`，不进
+`ty` 分支的 `get_full_type_name` 路径），`var_type_names["t"]` 始终空缺。
+`infer_object_type` 的 `Expr::TupleIndex` 臂（expr.rs:1129）会解析 `"(A, B)"` 取
+元素类型——但前提是元组变量的类型名已登记；否则 `obj_ty` 为空、落入
+`"any".to_string()`（expr.rs:1172），`t.0` 认成 `any` → `t.0.a` E0707。
+
+修复：在 else-if 链补 `Expr::Tuple(_)` 分支，登记
+`var_type_names[name] = self.infer_object_type(init, vars)`（即 `"(A, B,…)"`，
+`infer_object_type` 的 `Expr::Tuple` 臂已正确渲染，纯复用、无新启发式 /
+类型白名单 / 形状枚举，不触 0.40.1 红线）。分歧直接消除（非 fail-closed，无新增 E 码）。
+`let t = (f(), g())`（inline 闭包调用作元组元素，F-006 同族）一并修复。
+
+不变量类别: L1（双后端等价）
+测试: `src/tests/dual_backend.rs::dual_tuple_of_record_literals`、
+`dual_tuple_of_closure_returned_records`（均双后端 run+build+exec MATCH）
+
+> 本轮同扫发现 **F-008（待下一轮 MODE-2）**：**推导式（comprehension）产出
+> record/tuple 元素** 在 native 仍 `E0707 must produce i64-compatible value`
+> （`src/codegen/expr/record.rs:952` `emit_comprehension_store`），而 VM 接受
+> （`[P { a: x, b: x } for x in xs]` / `[(x, x) for x in xs]` 双后端分歧；标量
+> 推导式正常）。根因：`emit_comprehension_loop`/`allocate_comprehension_output`
+> 把输出写死成 `i64` 槽（`list_len * 8` 字节），不支持 struct 元素堆打包
+> （list 字面量经 `coerce_to_list_storage` 已支持）。非一行补丁，需让推导式
+> 产出 `List<P>`（复用 `coerce_to_list_storage` 堆打包）；或若过大则降级为
+> 带 E 码的 fail-closed（两端一致拒绝）。排入队列，下一轮 MODE-2 处理。
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

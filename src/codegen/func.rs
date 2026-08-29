@@ -2711,6 +2711,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         .insert(name.clone(), format!("List<{}>", elem_type));
                                 }
                             }
+                        } else if let Expr::Tuple(_) = init.unlocated() {
+                            // 0.40.1.11 (F-007): infer (A, B, …) tuple type from
+                            // element types so `t.0`/field access on a tuple element
+                            // resolves. The TupleIndex arm of `infer_object_type`
+                            // parses "(A, B)" — but only if the tuple variable's
+                            // type name was registered here; without it `t` stays
+                            // untyped, `t.0` falls through to "any", and `t.0.a`
+                            // fails E0707 on native while the VM accepts it (L1
+                            // divergence, sibling of F-006). `infer_object_type`
+                            // already renders the tuple as "(A, B,…)" via its
+                            // `Expr::Tuple` arm, so reuse it (no new heuristic).
+                            let tuple_ty = self.infer_object_type(init, vars);
+                            if !tuple_ty.is_empty() {
+                                self.var_type_names.insert(name.clone(), tuple_ty);
+                            }
                         } else if let Expr::Index(_, _) = init.unlocated() {
                             // D1: infer element type via infer_object_type (handles List<T> stripping)
                             let elem_type = self.infer_object_type(init, vars);

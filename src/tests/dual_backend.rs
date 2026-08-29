@@ -3025,6 +3025,55 @@ fn dual_closure_in_list_literal_scalar() {
     );
 }
 
+// ─── 0.40.1.11 (F-007): tuple literal of records / closure-returned records ──
+// Sibling of F-005/F-006: `let t = (P{..}, P{..})` left the tuple variable's
+// type name unregistered (no `Expr::Tuple` branch in the let-binding type-name
+// registration), so `t.0` resolved to "any" and `t.0.a` failed E0707 on native
+// while the VM accepted it (L1 divergence). Fix registers the "(A, B)" tuple type
+// via `infer_object_type` (which already renders it), mirroring the existing
+// `List`/`Index`/`Slice` branches.
+
+#[test]
+fn dual_tuple_of_record_literals() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func main() -> i32 {
+            let t = (P { a: 1, b: 2 }, P { a: 3, b: 4 });
+            println(t.0.a + t.1.b);
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
+#[test]
+fn dual_tuple_of_closure_returned_records() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func mk(a: i32, b: i32) -> func() -> P {
+            return fn() -> P { P { a: a, b: b } };
+        }
+        func main() -> i32 {
+            let f = mk(1, 2);
+            let g = mk(3, 4);
+            let t = (f(), g());
+            println(t.0.a + t.1.b);
+            0
+        }
+    "#,
+        "5"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]
