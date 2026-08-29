@@ -2827,6 +2827,105 @@ fn dual_first_class_function() {
     );
 }
 
+// ─── 0.40.1.9 (F-005): closures returning composite types ───────────────
+// A closure returned from a named function (let f = make()) must record f's
+// `func() -> R` type so the call site derives the concrete return LLVM type.
+// Before the fix the Func return type fell through the let-binding return-type
+// tracker and f's var_types entry stayed absent, so emit_closure_call defaulted
+// the indirect call to i64 — record returns broke at field access (E0700) and
+// tuple/Option returns were silently truncated to i64.
+
+#[test]
+fn dual_closure_returns_record() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func make() -> func() -> P {
+            let v = P { a: 1, b: 2 };
+            return fn() -> P { v };
+        }
+        func main() -> i32 {
+            let f = make();
+            let p = f();
+            println(p.a + p.b);
+            0
+        }
+    "#,
+        "3"
+    );
+}
+
+#[test]
+fn dual_closure_returns_record_captured() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func make(x: i32) -> func() -> P {
+            let v = P { a: x, b: x + 1 };
+            return fn() -> P { v };
+        }
+        func main() -> i32 {
+            let f = make(10);
+            let p = f();
+            println(p.a * 100 + p.b);
+            0
+        }
+    "#,
+        "1011"
+    );
+}
+
+#[test]
+fn dual_closure_returns_record_param() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type P { a: i32, b: i32 }
+        func build() -> func(i32, i32) -> P {
+            return fn(x: i32, y: i32) -> P { P { a: x, b: y } };
+        }
+        func main() -> i32 {
+            let f = build();
+            let p = f(7, 8);
+            println(p.a + p.b);
+            0
+        }
+    "#,
+        "15"
+    );
+}
+
+#[test]
+fn dual_closure_returns_composite() {
+    if !can_link() {
+        return;
+    }
+    // Tuple results from a closure-returning function must keep their LLVM
+    // struct layout on native (now routed through var_types like records).
+    dual_assert!(
+        r#"
+        func tup() -> func() -> (i32, i32) {
+            return fn() -> (i32, i32) { (3, 4) };
+        }
+        func main() -> i32 {
+            let tf = tup();
+            let t = tf();
+            println(t.0 + t.1);
+            0
+        }
+    "#,
+        "7"
+    );
+}
+
 // ─── 28.  Comptime (4 tests) ────────────────────────────
 
 #[test]

@@ -3046,6 +3046,29 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                             name, &resolved,
                                                         );
                                                     }
+                                                    // 0.40.1.9 (F-005): `let f = make()`
+                                                    // where make returns a closure
+                                                    // (func() -> R / extern func() -> R).
+                                                    // Record f's Func type so the
+                                                    // closure-call site can derive the
+                                                    // concrete return LLVM type via
+                                                    // closure_return_llvm_type. Without
+                                                    // this the Func return type fell
+                                                    // through to `_ => {}` and f's
+                                                    // var_types entry stayed absent, so
+                                                    // emit_closure_call defaulted the
+                                                    // indirect call to i64 — clobbering
+                                                    // record/tuple/enum returns (E0700 at
+                                                    // field access) and silently widening
+                                                    // scalar/string returns.
+                                                    Type::Func(_, _) | Type::ExternFunc(_, _) => {
+                                                        self.var_type_names.insert(
+                                                            name.clone(),
+                                                            crate::core::fmt_type(&ret_ty),
+                                                        );
+                                                        self.var_types
+                                                            .insert(name.clone(), ret_ty.clone());
+                                                    }
                                                     _ => {}
                                                 }
                                             }

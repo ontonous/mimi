@@ -61,6 +61,33 @@ record 字段路径用独立的 `nested_list_rt_owns` 把 `List<i32>` 当成所�
 测试: `src/tests/audit_fix_codegen_expr1.rs::audit_expr1_closure_capture_heap_return_fails_closed_e0723`
 （负向回归：返回捕获标量/字面量 string 的闭包仍双后端 MATCH，不误伤）
 
+### 0.40.1.9 — F-005：闭包返回 record/nominal 的 native ABI 误降级 i64 → 正确 struct ABI（双后端等价）
+
+所有权移交盲区一 §1.3 第 4 边界的独立衍生项（与 F-004 闭包捕获堆值 UAF 无关）：
+`func make() -> func() -> P { ... }` 后 `main` 调 `let f = make(); f()` —— native 把闭包返回值
+静默降级为 i64，致 `f().a` 字段访问在 native 报 `E0700 field access requires a struct or actor
+type, got "i64"`，而 VM 正常返回 `3`（L1 分歧，VM 接受 / native 拒绝的「一方更好」违例，内核卡 §5
+禁止放行）。
+
+根因（`src/codegen/func.rs`）：`let name = func_name(args)` 的返回类型登记
+`match ret_ty.unlocated()` 只处理 `Type::ImplTrait` 与 `Type::Name`，`func() -> P` 属 `Type::Func`，
+落入 `_ => {}` 被**静默丢弃** —— `f` 的 `var_types` 条目始终空缺。闭包调用点
+（`src/codegen/expr/call/simple.rs:6361`）经 `closure_return_llvm_type(var_types["f"])` 取不到返回
+LLVM 类型 → `emit_closure_call`（`src/codegen/expr/call/closure.rs:91`）把间接调用默认成 i64。
+标量/string 闭包仅靠值巧合过关（小整数塞得进 i64、string 结构同槽），tuple/Option/Result 闭包则被
+静默截断到 i64（此前无编译错误、仅值错）。
+
+修复：在 `func.rs` 的 `let`-绑定返回类型登记补 `Type::Func` / `Type::ExternFunc` 分支，把 `f` 的
+`func() -> R` 类型写入 `var_types` / `var_type_names`，使调用点经既有单源 `closure_return_llvm_type`
+推导出正确的返回 LLVM 类型（record→struct、tuple/Option/Result→对应 struct、scalar/string→原类型）。
+非新增启发式 / 类型白名单 / 形状枚举（仅补全既有 `match` 的穷尽性，复用既有单源类型 lowering），
+不触 0.40.1 红线（deep-copy/claim 冻结）。
+
+不变量类别: L1（双后端等价，消除「一方更好」分歧；closure 返回 record/tuple/Option/Result 现 VM≡native）
+测试: `src/tests/dual_backend.rs::dual_closure_returns_record`、
+`dual_closure_returns_record_captured`、`dual_closure_returns_record_param`、
+`dual_closure_returns_composite`（均双后端 run+build+exec MATCH）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
