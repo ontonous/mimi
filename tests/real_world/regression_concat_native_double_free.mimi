@@ -1,0 +1,14 @@
+// Regression for F-002: `List.concat` (stdlib `ListExt` method) double-freed
+// on the native (LLVM) backend. The original method bound `ct_result = self`,
+// aliasing the receiver's heap buffer; native `push` performs an exact realloc
+// (§6.1) that frees the shared buffer, then the method epilogue frees `self`
+// again → `free(): double free detected in tcache 2`. The VM backend was
+// unaffected (copy / GC). Fixed by copying from an empty list — the same
+// pattern used by sibling `dedup`/`remove_at`. Native must run and print `4`;
+// a regression reopens the double-free and aborts the process.
+use std::collections
+func main() -> i32 {
+    let r = concat([1, 2], [3, 4])
+    println(r.len())
+    0
+}

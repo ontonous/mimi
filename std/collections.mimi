@@ -73,7 +73,10 @@ impl<T> ListExt<T> for List<T> {
         dd_result
     }
     func concat(ys: List<T>) -> List<T> {
-        let mut ct_result: List<T> = self
+        let mut ct_result: List<T> = []
+        for ct_x in self {
+            push(ct_result, ct_x)
+        }
         for ct_x in ys {
             push(ct_result, ct_x)
         }

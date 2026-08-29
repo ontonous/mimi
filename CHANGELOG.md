@@ -80,6 +80,30 @@ MODE-1 排查（5 步）复现评估 §1.3-3/4 的 record 返回 UAF 洞的变�
 - 门禁全绿：`dual_` 1056 / `typecheck::` 112 / `codegen_e2e` 206 均 0 failed；
   `cargo fmt --check` 与 `cargo clippy` 本文件无新增告警。
 
+### 0.40.1.6 — F-002：`List.concat` 原生双释放修复（stdlib `ListExt` 方法）
+
+MODE-1 排查（5 步）复现评估 §6.3 的 stdlib 同名双实现/原生回路隐患的更严重变体：
+原生（LLVM）后端对 `concat` **双释放**（glibc `free(): double free detected in
+tcache 2`，rc=134），VM 正常返回。最小复现 `use std::collections; concat([1,2],[3,4])`：
+VM 打印 `4`；native 双释放崩溃。
+
+根因：`std/collections.mimi` 的 `ListExt::concat` 方法原实现
+`let mut ct_result: List<T> = self`，把接收者 `self` 的堆缓冲**别名**进局部
+`ct_result`；原生 `push` 按 §6.1 做精确 realloc，释放该共享缓冲，而方法 epilogue
+仍对 `self` 调用 free → **二次释放**。相邻形状对拍：`concat([1,2,3],[])`、
+`concat(["a","b"],["c"])`、普通 `let b = a`（非 receiver）均正常，唯非空 `List<i32>`
+的 `self`-别名路径触发 —— 即方法 receiver 别名后被 realloc 释放、epilogue 再释放。
+
+修复（不新增任何 deep-copy/claim 启发式，遵循 A2 落地前的过渡冻结红线）：改为从空
+列表复制（与同文件 sibling `dedup`/`remove_at` 完全一致的模式），`self` 与 `ys` 各
+自由各自 scope epilogue 释放，`ct_result` 拥有独立缓冲被返回 —— 消除别名与双释放。
+
+- 触发形态：`concat(xs, ys)` 当 xs、ys 均为非空 `List<i32>`（或其他非 string 元素）。
+- 不触发（已对拍）：空尾参、`string` 元素、`let b = a` 普通别名。
+- 回归夹具：`tests/real_world/regression_concat_native_double_free.mimi`（双后端
+  run+build+exec 均输出 `4`，native 不再双释放；由 `tests/real_world_cli.rs` 自动发现）。
+- 不变量类别：L3（内存安全）/ L1（双后端等价）。
+
 ### L1 双后端等价性修复（flow-state `match` 原生后端崩溃）
 
 双后端差异实测发现一处真实 L1 分裂：原生后端对 flow 状态机/转移结果的

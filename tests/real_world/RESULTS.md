@@ -144,6 +144,7 @@
 | meta_comptime_quote.mimi | ✅ | ✅ | ✅ | comptime 函数求值 |
 | meta_contracts.mimi | ✅ | ✅ | ✅ | requires / ensures |
 | std_collections.mimi | ✅ | ✅ | ✅ | map_list/filter_list/reduce_list + 内置 reduce/map/filter lambda |
+| regression_concat_native_double_free.mimi | ✅ | ✅ | ✅ | F-002 回归：`List.concat` 原生双释放修复（concat([1,2],[3,4]) → 4，VM≡native 均不崩溃） |
 | std_crypto.mimi | ✅ | ✅ | ✅ | hex 验证 |
 | std_csv.mimi | ✅ | ✅ | ✅ | CSV parse/get |
 | std_datetime.mimi | ✅ | ✅ | ✅ | datetime 工具 |
