@@ -311,6 +311,58 @@ fn real_world_map_builtins() {
     );
 }
 
+// ===================== BUG O: Result/Option map with string closures =====================
+// 0.36.x (BUG O): `result.map` / `option.map` / `result.map_err` with a closure that
+// returns (or takes) a string/aggregate used to SEGFAULT in the native backend. Inline
+// struct slots were coerced to `i64`, corrupting the layout. `materialize_slot` now
+// passes inline struct/pointer slots through unchanged, fixing the crash. These `map`
+// cases are the verified, deterministic half of BUG O (the dual backends agree). The
+// `map_err` string-closure case is tracked separately as a non-deterministic closure
+// type-inference defect (see devdocs/bug-hunt-suspected-2026-08.md, BUG O string err).
+
+#[test]
+fn real_world_result_option_map_string_closure() {
+    run_both(
+        r#"
+        func wrap(s: string) -> Result<string, string> { Ok(s) }
+        func main() {
+            let w = wrap("hi")
+            let a = w.map(fn(x: string) -> string { x })
+            match a { Ok(v) => println(v), Err(e) => println("?") }
+            let b = w.map(fn(x: string) -> string { "X" })
+            match b { Ok(v) => println(v), Err(e) => println("?") }
+        }
+    "#,
+        "hi\nX",
+    );
+    run_both(
+        r#"
+        func main() {
+            let o = Some(42)
+            let mapped = o.map(fn(x: i32) -> string { "hi" })
+            match mapped {
+                Some(s) => println(s),
+                None => println("none"),
+            }
+        }
+    "#,
+        "hi",
+    );
+    run_both(
+        r#"
+        func main() {
+            let r: Result<i32, string> = Ok(5);
+            let mapped = r.map(fn(x: i32) -> string { "X" });
+            match mapped {
+                Ok(s) => println(s),
+                Err(e) => println(e),
+            }
+        }
+    "#,
+        "X",
+    );
+}
+
 // ===================== Standard library: mymath =====================
 
 #[test]

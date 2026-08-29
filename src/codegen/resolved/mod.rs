@@ -3500,6 +3500,375 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             let target_ty = self.lower_type(&expression.ty)?;
                             return Ok(self.coerce_to(payload, target_ty)?);
                         }
+                        // 0.39.x / BUG N: `Option.map` / `Option.map_err` in
+                        // resolved-forced contexts (spawn/await results, Flow
+                        // payloads) had no resolved-native emitter and
+                        // hard-errored E0722 ("has no resolved-native emitter").
+                        // VM semantics (src/interp/bytecode/vm.rs ~3140):
+                        //   Some.map(f) → Some(f(payload)); None.map(_) → None
+                        //   Option.map_err(_) → receiver unchanged (Option has no
+                        //   err slot, so there is nothing to transform).
+                        // Layout: Option = {i1 disc, i64 payload}. Mirrors the
+                        // Result.map handler below.
+                        if matches!(
+                            name,
+                            "builtin.method.option.map" | "builtin.method.option.map_err"
+                        ) {
+                            let is_map = name.ends_with(".map");
+                            let recv = self.emit_expr(&call.arguments[0].value, frame)?;
+                            let sv = match recv {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                BasicValueEnum::PointerValue(pv) => {
+                                    let sty = self.lower_type(&call.arguments[0].value.ty)?;
+                                    self.generator
+                                        .build_load(sty, pv, "opt_map_recv")?
+                                        .into_struct_value()
+                                }
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "Option map on non-struct receiver".into(),
+                                    ))
+                                }
+                            };
+                            // Option.map_err on an Option is a no-op pass-through.
+                            if !is_map {
+                                return Ok(BasicValueEnum::StructValue(sv));
+                            }
+                            let f_val = self.emit_expr(&call.arguments[1].value, frame)?;
+                            let f_sv = match f_val {
+                                BasicValueEnum::StructValue(sv) => sv,
+                                _ => {
+                                    return Err(CompileError::Unsupported(
+                                        "Option map closure must be a closure struct".into(),
+                                    ))
+                                }
+                            };
+                            let disc = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 0, "opt_map_disc")
+                                .map_err(|e| CompileError::LlvmError(format!("opt map disc: {e}")))?
+                                .into_int_value();
+                            let payload = self
+                                .generator
+                                .builder
+                                .build_extract_value(sv, 1, "opt_map_payload")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map payload: {e}"))
+                                })?;
+                            let ret_slot_ty = {
+                                let resolved_result_ty = self
+                                    .program
+                                    .resolved_types()
+                                    .get(&call.result)
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        CompileError::Unsupported(
+                                            "Option map: missing result type".into(),
+                                        )
+                                    })?;
+                                // Option is represented as `ResolvedType::Option(
+                                // inner)` (canonical after resolved lowering, e.g.
+                                // for spawn/await results) or `ResolvedType::
+                                // Nominal` with one type argument. (BUG M sibling:
+                                // only the Nominal form was previously accepted.)
+                                match resolved_result_ty {
+                                    ResolvedType::Option(inner) => inner,
+                                    ResolvedType::Nominal { arguments: ta, .. } => ta
+                                        .first()
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            CompileError::Unsupported(
+                                                "Option map: missing type argument".into(),
+                                            )
+                                        })?,
+                                    _ => {
+                                        return Err(CompileError::Unsupported(
+                                            "Option map: result type not an Option".into(),
+                                        ))
+                                    }
+                                }
+                            };
+                            let ret_slot_llvm = self.lower_type(&ret_slot_ty)?;
+                            let ptr_ty = self
+                                .generator
+                                .context
+                                .ptr_type(inkwell::AddressSpace::default());
+                            let fn_ptr = self
+                                .generator
+                                .builder
+                                .build_extract_value(f_sv, 0, "opt_map_fn_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map fn ptr: {e}"))
+                                })?
+                                .into_pointer_value();
+                            let env_ptr = self
+                                .generator
+                                .builder
+                                .build_extract_value(f_sv, 1, "opt_map_env_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map env: {e}"))
+                                })?
+                                .into_pointer_value();
+                            let arg_meta: BasicMetadataTypeEnum = match ret_slot_llvm {
+                                BasicTypeEnum::IntType(t) => t.into(),
+                                BasicTypeEnum::FloatType(t) => t.into(),
+                                BasicTypeEnum::PointerType(t) => t.into(),
+                                BasicTypeEnum::StructType(t) => t.into(),
+                                _ => self.generator.context.i64_type().into(),
+                            };
+                            // Slot materialization: scalars sit in the i64 slot
+                            // directly; NON-scalar payloads are stored as a HEAP
+                            // POINTER truncated into the i64 slot. The closure
+                            // expects the real value, so rebuild it per type.
+                            let materialize_slot =
+                                |slot: BasicValueEnum<'ctx>,
+                                 target: BasicTypeEnum<'ctx>|
+                                 -> Result<BasicValueEnum<'ctx>, CompileError> {
+                                    let b = &self.generator.builder;
+                                    let raw_i64 = match slot {
+                                        BasicValueEnum::IntValue(iv) => iv,
+                                        _ => self.generator.context.i64_type().const_zero(),
+                                    };
+                                    match target {
+                                        BasicTypeEnum::IntType(t) => {
+                                            if raw_i64.get_type().get_bit_width()
+                                                > t.get_bit_width()
+                                            {
+                                                Ok(b.build_int_truncate(
+                                                    raw_i64,
+                                                    t,
+                                                    "slot_trunc",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "slot trunc: {e}"
+                                                    ))
+                                                })?
+                                                .into())
+                                            } else if raw_i64.get_type().get_bit_width()
+                                                < t.get_bit_width()
+                                            {
+                                                Ok(b.build_int_z_extend(
+                                                    raw_i64,
+                                                    t,
+                                                    "slot_zext",
+                                                )
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "slot zext: {e}"
+                                                    ))
+                                                })?
+                                                .into())
+                                            } else {
+                                                Ok(BasicValueEnum::IntValue(raw_i64))
+                                            }
+                                        }
+                                        BasicTypeEnum::PointerType(t) => {
+                                            // Inline pointer slot: pass through.
+                                            // Otherwise the slot is a boxed i64 pointer.
+                                            if let BasicValueEnum::PointerValue(pv) = slot {
+                                                Ok(pv.into())
+                                            } else {
+                                                Ok(b
+                                                    .build_int_to_ptr(raw_i64, t, "slot_int2ptr")
+                                                    .map_err(|e| {
+                                                        CompileError::LlvmError(format!(
+                                                            "slot i2p: {e}"
+                                                        ))
+                                                    })?
+                                                    .into())
+                                            }
+                                        }
+                                        BasicTypeEnum::StructType(t) => {
+                                            // Resolved stores non-scalar slots two ways:
+                                            // inline (the slot already is the {ptr,len}
+                                            // struct) or boxed (slot = ptrtoint(box)).
+                                            // Pass an inline struct through; otherwise
+                                            // reconstruct it from the box.
+                                            if let BasicValueEnum::StructValue(sv) = slot {
+                                                Ok(sv.into())
+                                            } else {
+                                                let raw_ptr = self
+                                                    .generator
+                                                    .context
+                                                    .ptr_type(inkwell::AddressSpace::default());
+                                                let ptr = b
+                                                    .build_int_to_ptr(
+                                                        raw_i64,
+                                                        raw_ptr,
+                                                        "slot_boxed_ptr",
+                                                    )
+                                                    .map_err(|e| {
+                                                        CompileError::LlvmError(format!(
+                                                            "slot box ptr: {e}"
+                                                        ))
+                                                    })?;
+                                                Ok(self
+                                                    .generator
+                                                    .build_load(t, ptr, "slot_boxed_load")?)
+                                            }
+                                        }
+                                        _ => Err(CompileError::Unsupported(
+                                            "Option map on float-typed slot".into(),
+                                        )),
+                                    }
+                                };
+                            let indirect_fn_ty = match ret_slot_llvm {
+                                BasicTypeEnum::IntType(t) => {
+                                    t.fn_type(&[ptr_ty.into(), arg_meta], false)
+                                }
+                                BasicTypeEnum::FloatType(t) => {
+                                    t.fn_type(&[ptr_ty.into(), arg_meta], false)
+                                }
+                                BasicTypeEnum::PointerType(t) => {
+                                    t.fn_type(&[ptr_ty.into(), arg_meta], false)
+                                }
+                                BasicTypeEnum::StructType(t) => {
+                                    t.fn_type(&[ptr_ty.into(), arg_meta], false)
+                                }
+                                _ => self
+                                    .generator
+                                    .context
+                                    .i64_type()
+                                    .fn_type(&[ptr_ty.into(), arg_meta], false),
+                            };
+                            let function = self.current_function()?;
+                            let has_bb = self
+                                .generator
+                                .context
+                                .append_basic_block(function, "opt_map_has");
+                            let passthrough_bb = self
+                                .generator
+                                .context
+                                .append_basic_block(function, "opt_map_passthrough");
+                            let cont_bb = self
+                                .generator
+                                .context
+                                .append_basic_block(function, "opt_map_cont");
+                            let zero = disc.get_type().const_int(0, false);
+                            let has_val = self
+                                .generator
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::NE,
+                                    disc,
+                                    zero,
+                                    "opt_map_has_val",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map cmp: {e}"))
+                                })?;
+                            self.generator
+                                .build_cond_br(has_val, has_bb, passthrough_bb)?;
+                            // Transform branch: new_slot = f(env, src_slot).
+                            self.generator.builder.position_at_end(has_bb);
+                            let materialized = materialize_slot(payload, ret_slot_llvm)?;
+                            let call_args: Vec<BasicMetadataValueEnum> = vec![
+                                BasicMetadataValueEnum::PointerValue(env_ptr),
+                                match materialized {
+                                    BasicValueEnum::IntValue(iv) => {
+                                        BasicMetadataValueEnum::IntValue(iv)
+                                    }
+                                    BasicValueEnum::FloatValue(fv) => {
+                                        BasicMetadataValueEnum::FloatValue(fv)
+                                    }
+                                    BasicValueEnum::PointerValue(pv) => {
+                                        BasicMetadataValueEnum::PointerValue(pv)
+                                    }
+                                    BasicValueEnum::StructValue(svs) => {
+                                        BasicMetadataValueEnum::StructValue(svs)
+                                    }
+                                    other => other.into(),
+                                },
+                            ];
+                            let transformed = self
+                                .generator
+                                .builder
+                                .build_indirect_call(
+                                    indirect_fn_ty,
+                                    fn_ptr,
+                                    &call_args,
+                                    "opt_map_closure_call",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map closure call: {e}"))
+                                })?
+                                .try_as_basic_value_opt()
+                                .ok_or_else(|| {
+                                    CompileError::Unsupported(
+                                        "closure in option map returned void".into(),
+                                    )
+                                })?;
+                            let transformed = self.coerce_to(transformed, ret_slot_llvm)?;
+                            // Coerce the native closure return into the i64 slot
+                            // type (mirrors BUG M fix for Result): the Option
+                            // struct stores payload as i64 regardless of the
+                            // native Ok shape.
+                            let slot_llvm_ty = payload.get_type();
+                            // Option payload is stored inline in its natural lowered
+                            // type; the closure already produced that type, so coerce
+                            // (a no-op for matching shapes; widens scalar i32 -> i64).
+                            let transformed_slot: BasicValueEnum<'ctx> =
+                                self.coerce_to(transformed, slot_llvm_ty)?;
+                            self.generator
+                                .builder
+                                .build_unconditional_branch(cont_bb)
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map br: {e}"))
+                                })?;
+                            // Passthrough branch: keep the original payload.
+                            self.generator.builder.position_at_end(passthrough_bb);
+                            self.generator
+                                .builder
+                                .build_unconditional_branch(cont_bb)
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map br2: {e}"))
+                                })?;
+                            // Merge: rebuild the Option struct.
+                            self.generator.builder.position_at_end(cont_bb);
+                            let struct_ty = sv.get_type();
+                            let phi_slot = self
+                                .generator
+                                .builder
+                                .build_phi(slot_llvm_ty, "opt_map_slot_phi")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map phi: {e}"))
+                                })?;
+                            let transformed_basic: BasicValueEnum<'ctx> = transformed_slot;
+                            phi_slot.add_incoming(&[
+                                (&transformed_basic, has_bb),
+                                (&payload, passthrough_bb),
+                            ]);
+                            let mut rebuilt = struct_ty.get_undef();
+                            rebuilt = self
+                                .generator
+                                .builder
+                                .build_insert_value(
+                                    rebuilt,
+                                    disc.get_type().const_int(1, false),
+                                    0,
+                                    "opt_map_disc_out",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map disc out: {e}"))
+                                })?
+                                .into_struct_value();
+                            rebuilt = self
+                                .generator
+                                .builder
+                                .build_insert_value(
+                                    rebuilt,
+                                    phi_slot.as_basic_value(),
+                                    1,
+                                    "opt_map_payload_out",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("opt map payload out: {e}"))
+                                })?
+                                .into_struct_value();
+                            return Ok(BasicValueEnum::StructValue(rebuilt));
+                        }
                         // 0.39.x matrix sweep: `map` / `map_err` on builtin
                         // Result — the stdlib impl bodies delegate by calling
                         // these faces (`self.map(f)`), so once lowering routed
@@ -3559,34 +3928,57 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // transformed slot type comes from the call's
                             // result type arguments: map → U = args[0],
                             // map_err → F = args[1] of Result<T, E>.
-                            let ret_slot_ty = {
-                                let ResolvedType::Nominal {
-                                    item,
-                                    arguments: ta,
+                            // The closure `f` carries its own true parameter and
+                            // result types. Derive the call ABI from THERE, not
+                            // from the Result's error type argument: the latter
+                            // is stored as `i64` (the err-slot representation), so
+                            // using it would force a wrong i64 ABI onto a
+                            // `{ptr, i64}` string closure and corrupt the call
+                            // (BUG O). The closure param/result already encode
+                            // the correct direction (Ok->U for map, E->F for
+                            // map_err), so we read them directly.
+                            let closure_ty_id = call.arguments[1].value.ty.clone();
+                            let (arg_ty, ret_ty) = match self
+                                .program
+                                .resolved_types()
+                                .get(&closure_ty_id)
+                            {
+                                Some(ResolvedType::Function {
+                                    parameters,
+                                    result,
                                     ..
-                                } = self
-                                    .program
-                                    .resolved_types()
-                                    .get(&call.result)
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        CompileError::Unsupported(
-                                            "Result map/map_err: missing result type".into(),
-                                        )
-                                    })?
-                                else {
+                                }) => {
+                                    let arg = parameters
+                                        .first()
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            CompileError::Unsupported(
+                                                "Result map/map_err closure has no parameter".into(),
+                                            )
+                                        })?;
+                                    (arg, result.clone())
+                                }
+                                _ => {
                                     return Err(CompileError::Unsupported(
-                                        "Result map/map_err: result type not nominal".into(),
-                                    ));
-                                };
-                                let slot_index = if is_map { 0 } else { 1 };
-                                ta.get(slot_index).cloned().ok_or_else(|| {
-                                    CompileError::Unsupported(
-                                        "Result map/map_err: missing type argument".into(),
-                                    )
-                                })?
+                                        "Result map/map_err closure type is not a Function".into(),
+                                    ))
+                                }
                             };
-                            let ret_slot_llvm = self.lower_type(&ret_slot_ty)?;
+                            let arg_slot_llvm = self.lower_type(&arg_ty)?;
+                            // BUG O (closure ABI, part 2): the closure's *effective*
+                            // return LLVM type is, at this call site, sometimes
+                            // represented as the boxed `i64` (the err-slot
+                            // representation) and sometimes as the real value type
+                            // (`{ptr, i64}` for a string), and the same literal can
+                            // be emitted with either the resolved ABI or the legacy
+                            // `i64` string ABI non-deterministically. The actual
+                            // compiled function's return representation always
+                            // coincides with its parameter representation for these
+                            // `map`/`map_err` transforms (both are the same value
+                            // type, or both boxed identically), so deriving the call
+                            // *return* type from the *parameter* type makes the
+                            // indirect call match the real callee in every case.
+                            let ret_slot_llvm = arg_slot_llvm;
                             let ptr_ty = self
                                 .generator
                                 .context
@@ -3604,7 +3996,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .map_err(|e| CompileError::LlvmError(format!("map env: {e}")))?
                                 .into_pointer_value();
                             let src_slot = if is_map { &payload } else { &err_slot };
-                            let arg_meta: BasicMetadataTypeEnum = match ret_slot_llvm {
+                            let arg_meta: BasicMetadataTypeEnum = match arg_slot_llvm {
                                 BasicTypeEnum::IntType(t) => t.into(),
                                 BasicTypeEnum::FloatType(t) => t.into(),
                                 BasicTypeEnum::PointerType(t) => t.into(),
@@ -3652,27 +4044,42 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                             Ok(BasicValueEnum::IntValue(raw_i64))
                                         }
                                     }
-                                    BasicTypeEnum::PointerType(t) => Ok(b
-                                        .build_int_to_ptr(raw_i64, t, "slot_int2ptr")
-                                        .map_err(|e| {
-                                            CompileError::LlvmError(format!("slot i2p: {e}"))
-                                        })?
-                                        .into()),
+                                    BasicTypeEnum::PointerType(t) => {
+                                        // Inline pointer slot: pass through.
+                                        // Otherwise the slot is a boxed i64 pointer.
+                                        if let BasicValueEnum::PointerValue(pv) = slot {
+                                            Ok(pv.into())
+                                        } else {
+                                            Ok(b
+                                                .build_int_to_ptr(raw_i64, t, "slot_int2ptr")
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!("slot i2p: {e}"))
+                                                })?
+                                                .into())
+                                        }
+                                    }
                                     BasicTypeEnum::StructType(t) => {
-                                        // Heap-boxed aggregate: the slot holds
-                                        // a pointer to the real value.
-                                        let raw_ptr = self
-                                            .generator
-                                            .context
-                                            .ptr_type(inkwell::AddressSpace::default());
-                                        let ptr = b
-                                            .build_int_to_ptr(raw_i64, raw_ptr, "slot_boxed_ptr")
-                                            .map_err(|e| {
-                                                CompileError::LlvmError(format!(
-                                                    "slot box ptr: {e}"
-                                                ))
-                                            })?;
-                                        Ok(self.generator.build_load(t, ptr, "slot_boxed_load")?)
+                                        // Resolved stores non-scalar slots two ways:
+                                        // inline (the slot already is the {ptr,len}
+                                        // struct) or boxed (slot = ptrtoint(box)).
+                                        // Pass an inline struct through; otherwise
+                                        // reconstruct it from the box.
+                                        if let BasicValueEnum::StructValue(sv) = slot {
+                                            Ok(sv.into())
+                                        } else {
+                                            let raw_ptr = self
+                                                .generator
+                                                .context
+                                                .ptr_type(inkwell::AddressSpace::default());
+                                            let ptr = b
+                                                .build_int_to_ptr(raw_i64, raw_ptr, "slot_boxed_ptr")
+                                                .map_err(|e| {
+                                                    CompileError::LlvmError(format!(
+                                                        "slot box ptr: {e}"
+                                                    ))
+                                                })?;
+                                            Ok(self.generator.build_load(t, ptr, "slot_boxed_load")?)
+                                        }
                                     }
                                     _ => Err(CompileError::Unsupported(
                                         "Result map/map_err on float-typed slot".into(),
@@ -3727,7 +4134,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .build_cond_br(applies, has_bb, passthrough_bb)?;
                             // Transform branch: new_slot = f(env, src_slot).
                             self.generator.builder.position_at_end(has_bb);
-                            let materialized = materialize_slot(*src_slot, ret_slot_llvm)?;
+                            let materialized = materialize_slot(*src_slot, arg_slot_llvm)?;
                             let call_args: Vec<BasicMetadataValueEnum> = vec![
                                 BasicMetadataValueEnum::PointerValue(env_ptr),
                                 match materialized {
@@ -3765,6 +4172,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     )
                                 })?;
                             let transformed = self.coerce_to(transformed, ret_slot_llvm)?;
+                            // BUG M (cont.): the Result struct stores its
+                            // payload/error slots as i64 regardless of the native
+                            // `ret_slot_llvm` shape (Result<i32, _> has an i32 Ok
+                            // materialized from an i64 slot; Result<string, _>
+                            // stores a pointer as i64). Coerce the closure's native
+                            // return value into the i64 slot type so the merge phi
+                            // and `insertvalue` stay type-consistent with the
+                            // {…, i64, i64} struct — otherwise LLVM verification
+                            // fails with a type-mismatched insertvalue. The original
+                            // handler only worked when ret_slot_llvm already lowered
+                            // to i64 (e.g. Result<i64, _>).
+                            let slot_llvm_ty = src_slot.get_type();
+                            let transformed_slot: BasicValueEnum<'ctx> = if is_map {
+                                // Ok/payload slot is stored inline in its natural
+                                // lowered type; the closure already produced that
+                                // type, so coerce (a no-op for matching shapes).
+                                self.coerce_to(transformed, slot_llvm_ty)?
+                            } else {
+                                // Err slot is always an i64 handle: scalars widen,
+                                // aggregates (e.g. string) heap-box via the shared
+                                // err->handle helper used by `Err(..)` and `?`.
+                                self.resolved_err_to_handle(transformed)?
+                            };
                             self.generator
                                 .builder
                                 .build_unconditional_branch(cont_bb)
@@ -3781,9 +4211,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             let phi_slot = self
                                 .generator
                                 .builder
-                                .build_phi(ret_slot_llvm, "map_slot_phi")
+                                .build_phi(slot_llvm_ty, "map_slot_phi")
                                 .map_err(|e| CompileError::LlvmError(format!("map phi: {e}")))?;
-                            let transformed_basic: BasicValueEnum<'ctx> = transformed;
+                            let transformed_basic: BasicValueEnum<'ctx> = transformed_slot;
                             phi_slot.add_incoming(&[
                                 (&transformed_basic, has_bb),
                                 (&(if is_map { payload } else { err_slot }), passthrough_bb),
