@@ -950,6 +950,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         expr: Option<&Expr>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        // F-004 (0.40.1.8): fail-closed returning a closure that captures a heap
+        // value on the native backend. Such a closure escapes the enclosing scope,
+        // but its captured data array is freed when that scope exits (closure
+        // captures have no escape-set-null like direct returns do) → use-after-free
+        // when the escaped closure is later called. Mirror the E0723 ownership gate
+        // instead of silently corrupting memory (mimi run / VM backend is unaffected).
+        if self.returned_closure_captures_heap(expr, vars)? {
+            return Err(CompileError::UnsupportedReturn(
+                "returning a closure that captures a heap collection (List/Set/Map, or a \
+                 container such as Option/Result/Tuple holding one) from a native (LLVM) \
+                 function is not yet supported: the captured data array is freed when the \
+                 enclosing scope exits, leaving the returned closure with a dangling pointer \
+                 (use-after-free). Use `mimi run` (VM backend), or restructure so the closure \
+                 does not escape with captured heap data. Tracked as 0.1.10 A2 \
+                 ownership-glue work (E0723)."
+                    .to_string(),
+            ));
+        }
         // Closures are not strings; claim env ownership first when applicable.
         let mut val = self.claim_returned_closure_env(val, ret_type)?;
         // 0.35.23 deep-eval (mimi-make native UAF): aggregate returns that

@@ -63,6 +63,53 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.build_closure_struct(lambda_fn, &free_vars)
     }
 
+    /// F-004 (0.40.1.8): does the returned `expr` name a `Lambda` that captures a
+    /// heap-collection-typed free variable (List/Set/Map, possibly nested inside
+    /// Option/Result/Tuple)? Used to fail-closed returning such a closure on the
+    /// native backend — the captured data array is freed when the enclosing scope
+    /// exits (closure captures have no escape-set-null like direct returns do), so
+    /// the escaped closure is left with a dangling pointer (use-after-free when
+    /// later called). The check uses the precise Mimi type name of each captured
+    /// variable (from `var_type_names`); it deliberately does NOT inspect the LLVM
+    /// layout, which under LLVM 18 opaque pointers cannot distinguish a `List`
+    /// handle from a scalar local's alloca, nor a captured closure struct.
+    pub(in crate::codegen) fn returned_closure_captures_heap(
+        &self,
+        expr: Option<&Expr>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<bool, CompileError> {
+        let (params, body) = match expr.and_then(|e| match e.unlocated() {
+            Expr::Lambda { params, body, .. } => Some((params, body)),
+            _ => None,
+        }) {
+            Some(pb) => pb,
+            None => return Ok(false),
+        };
+        let param_names: std::collections::HashSet<String> =
+            params.iter().map(|p| p.name.clone()).collect();
+        let mut free_vars = BTreeMap::new();
+        self.collect_free_vars(body, &param_names, vars, &mut free_vars);
+        Ok(free_vars.keys().any(|name| {
+            self.var_type_names
+                .get(name)
+                .map_or(false, |tn| Self::mime_type_name_owns_heap_collection(tn))
+        }))
+    }
+
+    /// F-004 (0.40.1.8): does a Mimi type-name string denote a heap collection
+    /// (List/Set/Map) or a container that transitively owns one? Matching on the
+    /// surface syntax `<Name><…` (the angle bracket after the builtin name) avoids
+    /// confusing `List` with a user type that merely contains the substring "List",
+    /// and avoids flagging closures/strings/records (which are handled elsewhere /
+    /// F-005). It is an over-approximation only in the safe direction (it may reject
+    /// a user-defined `MyList<…>`, which is fail-closed, never a UAF).
+    fn mime_type_name_owns_heap_collection(tn: &str) -> bool {
+        tn.contains("List<") || tn.contains("Set<") || tn.contains("Map<")
+            || tn.trim() == "List"
+            || tn.trim() == "Set"
+            || tn.trim() == "Map"
+    }
+
     /// I-H13: compile a nested `func` statement.
     /// - No free vars: standalone LLVM function (existing dual_nested_func path).
     /// - With free vars: lambda-style closure bound as a local of type `Func`.

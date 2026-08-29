@@ -789,6 +789,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     count += 1;
                 }
                 Err(e) => {
+                    // F-004 (0.40.1.8) / A3 E0723: a fail-closed ownership error
+                    // (code E0723 — e.g. returning a closure that captures a heap
+                    // value) must NOT be silently downgraded to the legacy emitter;
+                    // that would re-emit broken IR that aliases freed heap. Escalate
+                    // it as a hard error instead of falling back.
+                    if e.code() == "E0723" {
+                        return Err(e);
+                    }
                     // Function failed to emit through resolved path.
                     // Record in failed set — the legacy emitter's skip check
                     // will handle it by deleting the partial body and
@@ -1760,6 +1768,76 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(last)
     }
 
+    /// F-004 (0.40.1.8): does a resolved `Lambda` capture any heap-typed local?
+    /// Used to fail-closed returning such a closure on the native backend — its
+    /// captured data array is freed when the enclosing scope exits, leaving the
+    /// escaped closure with a dangling pointer (use-after-free).
+    /// F-004 (0.40.1.8): does the returned `lambda` capture a heap-collection-typed
+    /// free variable (List/Set/Map, possibly nested inside Option/Result/Tuple)?
+    /// Used to fail-closed returning such a closure on the native backend — the
+    /// captured data array is freed when the enclosing scope exits, leaving the
+    /// escaped closure with a dangling pointer. The check uses the precise Mimi
+    /// type of each captured local (not the LLVM layout, which cannot distinguish a
+    /// `List` handle from a scalar local's alloca / a captured closure struct under
+    /// LLVM 18 opaque pointers).
+    fn lambda_captures_heap_resolved(
+        &self,
+        lambda: &crate::core::ir::ResolvedLambda,
+        body: &crate::core::ir::ResolvedBody,
+    ) -> Result<bool, CompileError> {
+        for cap in &lambda.captures {
+            if let Some(local) = body.locals.get(cap) {
+                if self.resolved_type_owns_heap_collection(&local.ty) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// F-004 (0.40.1.8): precise Mimi-type test for whether a type transitively
+    /// owns a heap collection (List/Set/Map). Recurses through Option/Result/Tuple/
+    /// Newtype/Array/Slice/CBuffer so `Option<List<…>>`, `List<List<…>>`, tuples of
+    /// collections, etc. are all caught; scalars, strings, closures and records are
+    /// not (records-with-heap are the separate F-005 / E0700 boundary).
+    fn resolved_type_owns_heap_collection(&self, id: &crate::core::ir::ResolvedTypeId) -> bool {
+        let Some(ty) = self.program.resolved_types().get(id) else {
+            return false;
+        };
+        match ty {
+            crate::core::ir::ResolvedType::Nominal { item, arguments, .. } => {
+                let s = item.as_str();
+                if s == "builtin:type:List" || s == "builtin:type:Set" || s == "builtin:type:Map" {
+                    return true;
+                }
+                arguments
+                    .iter()
+                    .any(|a| self.resolved_type_owns_heap_collection(a))
+            }
+            crate::core::ir::ResolvedType::Option(inner) => {
+                self.resolved_type_owns_heap_collection(inner)
+            }
+            crate::core::ir::ResolvedType::Result { ok, error } => {
+                self.resolved_type_owns_heap_collection(ok)
+                    || self.resolved_type_owns_heap_collection(error)
+            }
+            crate::core::ir::ResolvedType::Tuple(items) => items
+                .iter()
+                .any(|a| self.resolved_type_owns_heap_collection(a)),
+            crate::core::ir::ResolvedType::Newtype { inner, .. } => {
+                self.resolved_type_owns_heap_collection(inner)
+            }
+            crate::core::ir::ResolvedType::Array { element, .. } => {
+                self.resolved_type_owns_heap_collection(element)
+            }
+            crate::core::ir::ResolvedType::Slice(inner)
+            | crate::core::ir::ResolvedType::CBuffer(inner) => {
+                self.resolved_type_owns_heap_collection(inner)
+            }
+            _ => false,
+        }
+    }
+
     fn emit_statement(
         &mut self,
         body: &ResolvedBody,
@@ -1988,6 +2066,27 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 Ok(None)
             }
             ResolvedStmtKind::Return { value, conversion } => {
+                // F-004 (0.40.1.8): fail-closed returning a closure that captures a
+                // heap value on the native backend — the captured data array is freed
+                // when the enclosing scope exits, leaving the escaped closure with a
+                // dangling pointer (use-after-free). Mirror the E0723 ownership gate
+                // instead of silently corrupting memory (mimi run / VM backend is unaffected).
+                if let Some(ret_expr) = value.as_ref() {
+                    if let ResolvedExprKind::Lambda(lambda) = &ret_expr.kind {
+                        if self.lambda_captures_heap_resolved(lambda, body)? {
+                            return Err(CompileError::UnsupportedReturn(
+                                "returning a closure that captures a heap collection (List/Set/Map, or a \
+                                 container such as Option/Result/Tuple holding one) from a native (LLVM) \
+                                 function is not yet supported: the captured data array is freed when the \
+                                 enclosing scope exits, leaving the returned closure with a dangling pointer \
+                                 (use-after-free). Use `mimi run` (VM backend), or restructure so the closure \
+                                 does not escape with captured heap data. Tracked as 0.1.10 A2 \
+                                 ownership-glue work (E0723)."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
                 let value = value
                     .as_ref()
                     .map(|value| self.emit_expr(value, frame))

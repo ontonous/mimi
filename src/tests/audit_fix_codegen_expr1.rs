@@ -569,6 +569,40 @@ fn audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723() {
     assert_eq!(vm_out, "", "VM path must run the record-field heap return");
 }
 
+/// F-004（0.40.1.8）：闭包捕获堆值（`List`/string/Set/Map/含 heap 字段 record）逃逸后
+/// native 静默 UAF（L3/L1，最危险形态——编译通过、运行读脏数据）。本测试锁定 fail-closed：
+/// 返回捕获堆值的闭包时，native（LLVM）codegen 须以 E0723 拒绝（不静默损坏），而 VM
+/// 后端仍正常接受运行。根因：`allocate_closure_env` 按值复制捕获变量进 env struct，enclosing
+/// scope 退出释放数据数组，env 持悬垂指针；direct-return 路径无 escape-set-null。
+#[test]
+fn audit_expr1_closure_capture_heap_return_fails_closed_e0723() {
+    let src = r#"
+        func make() -> func() -> List<i32> {
+            let v = [1, 2, 3]
+            return fn() -> List<i32> { v }
+        }
+        func main() -> i32 {
+            let _ = make();
+            0
+        }
+    "#;
+    check_source(src).expect("checker must accept the closure-returning-heap-capture program");
+
+    // Native (LLVM) codegen must fail closed (E0723), not silently corrupt memory.
+    let cg_err = checked_codegen_compile_and_run(src).expect_err(
+        "native codegen must fail closed (E0723) on a closure capturing a heap List",
+    );
+    assert!(
+        cg_err.contains("E0723"),
+        "fail-closed closure heap capture must cite E0723: {}",
+        cg_err
+    );
+
+    // The VM backend (`mimi run`) must still accept and run the same program.
+    let (_val, vm_out) = checked_run_source_with_stdout(src);
+    assert_eq!(vm_out, "", "VM path must run the closure-returning-heap-capture program");
+}
+
 /// F-003：0.40.1.6 的 E0723 门禁（record 字段递归判定）误将「包裹普通 `List<X>`
 /// 的 record 返回」与「裸 `List<X>` 返回」不一致地处理——裸 `List<X>` 一直放行，
 /// 而 record 字段路径却把 `List<i32>` 当成所有权空洞 fail-closed。本测试锁定收窄

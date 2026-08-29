@@ -26,6 +26,41 @@ record 字段路径用独立的 `nested_list_rt_owns` 把 `List<i32>` 当成所�
 （负向仍由 `audit_expr1_native_heap_aggregate_record_field_return_fails_closed_e0723` 覆盖：
 `List<List<i32>>` 字段 record 返回依旧 E0723 fail-closed）
 
+### 0.40.1.8 — F-004：闭包捕获堆集合逃逸 native 静默 UAF → fail-closed（E0723）
+
+所有权移交第 4 边界（§1.3）漏网：闭包捕获堆值（`List`/含 heap record）逃逸后 native
+静默 UAF（VM 读到原值、native 读脏数据/悬垂指针，编译通过、L3/L1 最危险静默形态）。
+根因：`allocate_closure_env`（lambda.rs）按值复制捕获变量进 env struct，enclosing scope
+退出 `free_heap_allocs` 释放数据数组 → env 悬垂指针；direct-return 有「逃逸置 NULL」但
+闭包捕获无等价认领。
+
+0.40.1 采用 **fail-closed**（返回捕获堆值的闭包报 `E0723`），与 F-001/F-003 哲学一致；
+正确 move 所有权转移属 A2 glue（0.40.3），不在本轮引入新 deep-copy/claim 启发式。
+
+修复要点（双后端返回站点均用**精确 Mimi 类型**判定，弃用 LLVM 布局启发式）：
+
+- **resolved native emitter**：`ResolvedStmtKind::Return` 臂对返回 `ResolvedLambda` 的每个
+  `captures` local 取 `body.locals[cap].ty`（ResolvedTypeId），经
+  `resolved_type_owns_heap_collection` 递归判定是否 transitively 拥有堆集合
+  （`builtin:type:List` / `Set` / `Map`，并递归 `Option`/`Result`/`Tuple`/`Newtype`/
+  `Array`/`Slice`/`CBuffer`）。标量/string/闭包/record 不命中（record-含-list 走 F-005
+  E0700）。
+- **legacy native emitter**：`claim_string_return_value`（func.rs）调用
+  `returned_closure_captures_heap`（lambda.rs），对返回 lambda 的 free var 取
+  `self.var_type_names[name]` 的 Mimi 类型名串，经 `mime_type_name_owns_heap_collection`
+  （`contains("List<"/"Set<"/"Map<")`）判定。
+- **关键根因修复**：`compile_subset`（resolved/mod.rs:791 `Err(e)` 臂）原本**吞掉所有
+  per-function 错误**并静默回退 legacy，导致 resolved 路径的 E0723 被吞 → 重新 emit 坏 IR。
+  改为 `if e.code() == "E0723" { return Err(e); }` 让该错误上抛、被 `compile.rs` 的 E0723
+  升级逻辑捕获为硬错误，**不再被 fallback 绕过**。
+
+诊断文案同步收窄：`E0723` 现仅针对 `List`/`Set`/`Map`（及 transitively 持有的容器），不再
+误提 string/record（二者属 F-005 E0700 边界，非 F-004）。
+
+不变量类别: L1（双后端等价，移除误导性的静默 UAF 分歧）/ L3（内存安全，消除逃逸闭包悬垂读）
+测试: `src/tests/audit_fix_codegen_expr1.rs::audit_expr1_closure_capture_heap_return_fails_closed_e0723`
+（负向回归：返回捕获标量/字面量 string 的闭包仍双后端 MATCH，不误伤）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
