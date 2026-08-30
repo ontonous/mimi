@@ -405,6 +405,10 @@ pub struct CodeGenerator<'ctx> {
     /// Cached result of MIMI_OPT env var check at codegen construction time.
     /// Avoids repeated env var queries within a single compile_to_object call.
     optimize: bool,
+    /// A2 opt-in: derive native return clone/drop glue from OwnershipClass.
+    /// Kept off until the BUG B-P matrix and memory gates cover each adopted
+    /// shape; programmatic override supports race-free tests/tool embedding.
+    value_glue_enabled: bool,
     /// Names of variables holding first-class function pointer values.
     fn_ptr_var_names: std::collections::HashSet<String>,
     /// 0.35.14 (DX backlog #18): per tuple-literal binding, the element
@@ -751,6 +755,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             optimize: std::env::var("MIMI_OPT")
                 .map(|v| !(v == "0" || v == "false"))
                 .unwrap_or(true),
+            value_glue_enabled: std::env::var("MIMI_VALUE_GLUE")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             contract_bb_counter: 0,
             fn_ptr_var_names: std::collections::HashSet::new(),
             tuple_fn_elems: HashMap::new(),
@@ -841,6 +848,15 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// still inspect this to prove a core Flow program stayed resolved.
     pub fn resolved_failed_functions(&self) -> &std::collections::HashSet<String> {
         &self.resolved_failed_functions
+    }
+
+    /// Enable or disable the A2 value-glue path for this generator instance.
+    pub fn set_value_glue_enabled(&mut self, enabled: bool) {
+        self.value_glue_enabled = enabled;
+    }
+
+    pub(in crate::codegen) fn value_glue_enabled(&self) -> bool {
+        self.value_glue_enabled
     }
 
     pub(crate) fn resolved_method_signature(&self, key: &str) -> Option<(usize, String)> {

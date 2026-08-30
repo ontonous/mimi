@@ -119,6 +119,90 @@ macro_rules! dual_assert_prod {
     }};
 }
 
+#[test]
+fn dual_a2_value_glue_string_return_opt_in() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+func literal() -> string { "hello" }
+func local() -> string {
+    let value = "world"
+    value
+}
+func temporary() -> string { "a" + "b" }
+func legacy_path() -> string {
+    let marker = Some(1)
+    if let Some(value) = marker {
+        let _seen = value
+    }
+    "legacy"
+}
+func legacy_temporary() -> string {
+    let marker = Some(1)
+    if let Some(value) = marker {
+        let _seen = value
+    }
+    "c" + "d"
+}
+func main() -> i32 {
+    println(literal())
+    println(local())
+    println(temporary())
+    println(legacy_path())
+    println(legacy_temporary())
+    0
+}
+"#;
+    check_source(source).expect("A2 value-glue source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let baseline = checked_codegen_compile_and_run(source)
+        .expect("existing return path must handle the A2 control program");
+    let native = checked_codegen_compile_and_run_with_value_glue(source)
+        .expect("A2 opt-in StringBox glue must compile and run");
+    assert_eq!(vm.trim(), "hello\nworld\nab\nlegacy\ncd");
+    assert_eq!(baseline.trim(), vm.trim());
+    assert_eq!(native.trim(), vm.trim());
+}
+
+#[test]
+fn a2_value_glue_string_ir_is_called_and_deduplicated() {
+    let source = r#"
+func first() -> string { "one" }
+func second() -> string { "two" }
+func main() -> i32 {
+    println(first())
+    println(second())
+    0
+}
+"#;
+    let ir = checked_codegen_ir_with_value_glue(source)
+        .expect("A2 opt-in StringBox glue module must compile");
+    let clone_name = "@mimi_value_clone_glue__string(";
+    let drop_name = "@mimi_value_drop_glue__string(";
+    let clone_definitions = ir
+        .lines()
+        .filter(|line| line.starts_with("define internal") && line.contains(clone_name))
+        .count();
+    let drop_definitions = ir
+        .lines()
+        .filter(|line| line.starts_with("define internal") && line.contains(drop_name))
+        .count();
+    let clone_calls = ir
+        .lines()
+        .filter(|line| line.contains(" call ") && line.contains(clone_name))
+        .count();
+    assert_eq!(
+        clone_definitions, 1,
+        "clone glue must be module-deduplicated"
+    );
+    assert_eq!(drop_definitions, 1, "drop glue must be module-deduplicated");
+    assert!(
+        clone_calls >= 2,
+        "both StringBox return sites must call derived clone glue; IR:\n{ir}"
+    );
+}
+
 /// Soft-typecheck variant of `dual_assert!` for tests that exercise features
 /// the checker does not yet support (0.31.29 止血线 §7: tests that bypass
 /// CheckedProgram must be explicitly marked, not silently counted as stable

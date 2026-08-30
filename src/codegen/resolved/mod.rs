@@ -946,12 +946,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // inner string's data out from under the caller. Recurse into
         // nested struct fields: any transitively-reachable pointer means the
         // return owns heap data.
-        let return_owns_heap = crate::codegen::abi::ownership::classify_resolved(
+        let ownership = crate::codegen::abi::ownership::classify_resolved(
             self.program,
             &callable.signature.result,
-        )
-        .requires_scope_drain();
-        if return_owns_heap {
+        );
+        let return_owns_heap = ownership.requires_scope_drain();
+        let glue_return_is_independent = self
+            .generator
+            .value_glue_makes_return_independent(&ownership);
+        if return_owns_heap && !glue_return_is_independent {
             self.generator.drain_heap_scope();
         } else {
             self.generator.free_heap_allocs()?;
@@ -13181,7 +13184,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                     ) =>
             {
-                self.generator.claim_resolved_string_return(sv.into())
+                // The return funnel has already normalized the top-level
+                // StringBox immediately before entering this recursive
+                // aggregate pass.  With A2 glue enabled that normalization is
+                // an unconditional clone; cloning it again would orphan the
+                // first fresh buffer.  Composite fields still recurse below
+                // and receive exactly one clone apiece.
+                if self.generator.value_glue_enabled() {
+                    Ok(sv.into())
+                } else {
+                    self.generator.claim_resolved_string_return(sv.into())
+                }
             }
             (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
                 let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {

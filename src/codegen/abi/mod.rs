@@ -5,5 +5,6 @@
 //! checker-owned types into these facts, but must not grow parallel policy
 //! tables at individual expression sites.
 
+pub(in crate::codegen) mod glue;
 pub(in crate::codegen) mod layout;
 pub(in crate::codegen) mod ownership;

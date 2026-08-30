@@ -1935,6 +1935,48 @@ fn e2e_valgrind_string_ops() {
 }
 
 #[test]
+fn e2e_valgrind_a2_value_glue_string_returns() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_with_value_glue_valgrind(
+        r#"
+        func literal() -> string { "hello" }
+        func local() -> string {
+            let value = "world"
+            value
+        }
+        func temporary() -> string { "a" + "b" }
+        func legacy_temporary() -> string {
+            let marker = Some(1)
+            if let Some(value) = marker {
+                let _seen = value
+            }
+            "c" + "d"
+        }
+        func main() -> i32 {
+            let mut i = 0
+            while i < 16 {
+                println(literal())
+                println(local())
+                println(temporary())
+                println(legacy_temporary())
+                i = i + 1
+            }
+            0
+        }
+        "#,
+    )
+    .expect("A2 StringBox glue must be Valgrind-clean");
+    assert_eq!(stdout.lines().count(), 64);
+}
+
+#[test]
 fn e2e_valgrind_list_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

@@ -2,6 +2,32 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### 0.40.3.1 — A2：派生 StringBox value glue 并 opt-in 收养返回路径
+
+A1 的 canonical `OwnershipClass` 首次驱动可执行的 per-type glue。新增
+`src/codegen/abi/glue.rs`：从所有权形状机械规划 scalar/string/list/Option/Result/
+tuple/record/array/opaque glue，linear/generic/unknown 直接 fail-closed；当前窄纵切只发射
+StringBox 的 internal clone/drop 函数，其余形状尚不开放。
+
+- LLVM module 以确定性 symbol 作为去重 registry；同名但非 internal/ABI 不匹配的 symbol
+  硬拒绝，避免用户符号碰撞被误当 glue；null StringBox clone 原样保留，drop 保持
+  `free(null)` 安全。
+- `MIMI_VALUE_GLUE=1|true` 与实例级测试开关启用新路径，默认仍关闭。legacy 与 resolved
+  顶层 string 返回均通过 `clone_glue(StringBox)` 取得独立返回值；resolved 随后释放原作用域，
+  不再为顶层 StringBox wholesale drain。
+- 首次 Valgrind 复验发现 resolved 的旧“顶层 string probe + 递归 string ownership”两漏斗
+  会重复克隆、每次拼接返回泄漏 8 字节；现顶层仅归一化一次，复合字段仍递归处理。
+  literal/local/concat 与强制 legacy concat 返回各循环 16 次均无 invalid access/definite leak。
+- 默认关闭时旧路径与门禁不变；Map/Set、嵌套列表 E0723 未放宽，未新增 `deep_copy_*`
+  或表达式形状 claim 特判。独立发现的 `Option<string>` if-let 返回 native 崩溃已登记为
+  后续修复单，不混入本纵切。
+
+不变量类别：L1（VM ≡ opt-out native ≡ opt-in native）/ L2（glue 仅由 canonical
+`OwnershipClass` 派生）/ L3（Valgrind 返回循环零错误）
+
+测试：ABI/ownership/glue 单测 10/10；A2 IR 断言锁定 clone 调用与 clone/drop symbol
+各一次定义；StringBox 双后端/双 native 模式对拍；A2 Valgrind 64 次返回零错误。
+
 ### 0.40.2 — A1：原生 ABI / 所有权元数据单源化
 
 0.40.1 的 BUG P 与 F-001–F-025 证明，native 后端对同一 Mimi 类型同时维护

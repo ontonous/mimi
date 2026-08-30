@@ -970,6 +970,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         // Closures are not strings; claim env ownership first when applicable.
         let mut val = self.claim_returned_closure_env(val, ret_type)?;
+        // A2 (0.40.3.1): the first opt-in adoption slice clones canonical
+        // StringBox returns through derived module glue. The returned copy is
+        // deliberately not registered in the callee scope; ordinary cleanup
+        // frees the original while caller-side lifetime tracking owns the copy.
+        if self.value_glue_enabled()
+            && Self::is_string_llvm_type(ret_type)
+            && matches!(val, BasicValueEnum::StructValue(_))
+        {
+            return self.clone_value_with_derived_glue(
+                &crate::codegen::abi::ownership::OwnershipClass::StringBox,
+                val,
+            );
+        }
         // 0.35.23 deep-eval (mimi-make native UAF): aggregate returns that
         // CARRY string fields — `(string, string)` tuples and records —
         // leave the element heap buffers registered in this function's heap
@@ -1235,6 +1248,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             && matches!(fields[1], BasicTypeEnum::IntType(_));
         if !is_string_struct {
             return Ok(val);
+        }
+        if self.value_glue_enabled() {
+            return self.clone_value_with_derived_glue(
+                &crate::codegen::abi::ownership::OwnershipClass::StringBox,
+                val,
+            );
         }
         let data_pv = match self.build_extract_value(sv.into(), 0, "res_ret_data")? {
             BasicValueEnum::PointerValue(pv) => pv,

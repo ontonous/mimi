@@ -936,6 +936,68 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
     link_and_run_module(&codegen, &E2EConfig::default(), counter)
 }
 
+/// A2 opt-in production path. Uses an instance-local switch so parallel tests
+/// never race through the process-wide `MIMI_VALUE_GLUE` environment variable.
+pub(crate) fn checked_codegen_compile_and_run_with_value_glue(src: &str) -> Result<String, String> {
+    checked_codegen_compile_and_run_with_value_glue_config(src, &E2EConfig::default())
+}
+
+fn checked_codegen_compile_and_run_with_value_glue_config(
+    src: &str,
+    config: &E2EConfig,
+) -> Result<String, String> {
+    let file = parse_prod(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|diagnostic| format!("{}", diagnostic))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_value_glue_test");
+    codegen.set_value_glue_enabled(true);
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|error| format!("{:?}", error))?;
+    link_and_run_module(&codegen, config, counter)
+}
+
+/// A2 opt-in production path under Valgrind's leak and invalid-access gate.
+pub(crate) fn checked_codegen_compile_and_run_with_value_glue_valgrind(
+    src: &str,
+) -> Result<String, String> {
+    checked_codegen_compile_and_run_with_value_glue_config(
+        src,
+        &E2EConfig {
+            use_valgrind: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Compile the production path with A2 glue enabled and expose the resulting
+/// module text for registry/call-site assertions.  Like the execution helper,
+/// this uses only an instance-local switch.
+pub(crate) fn checked_codegen_ir_with_value_glue(src: &str) -> Result<String, String> {
+    let file = parse_prod(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|diagnostic| format!("{}", diagnostic))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "value_glue_ir_test");
+    codegen.set_value_glue_enabled(true);
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|error| format!("{:?}", error))?;
+    Ok(codegen.emit_ir())
+}
+
 /// Production interp path: typecheck + install CheckedProgram + VM stdout.
 /// Used by Phase 0 dual tests so spawn/Flow evidence is not green only via
 /// the legacy `compile_file` harness.
