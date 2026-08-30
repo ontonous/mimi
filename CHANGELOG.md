@@ -713,6 +713,25 @@ record），所以 F-020 单级机制天然触达不到 `r`。
  测试: `src/tests/dual_backend.rs::dual_for_loop_option_record_field`、
 `src/tests/dual_backend.rs::dual_for_loop_option_record_field_expr`（双后端对拍 8 / 34）
 
+### 0.40.1.29 — legacy 发射器列表索引赋值 `xs[i]=v`（非标量元素）原生静默错值 → L1 等价
+
+ F-016（0.40.1.20，commit `5c71aa40`）已闭合 **resolved 发射器** 路径 `ss[i]="z"` 的静默丢写，但
+ legacy 发射器（ineligible 函数）的 `compile_index_assign` 仍把 RHS 原样 `build_store` 进 `i64[]` data 槽——
+ string/嵌套 list 元素存的是裸指针/未打包结构而非 `mimi_str_box` 产生的 i64 句柄，原生静默保留旧元素
+ （VM 正确赋值），属于内核卡 §5 的 P0 静默错值分歧（fix-ledger `TODO(#F-010-legacy-list-elem-field-mut)`）。
+
+ 修复（S2 合规：复用 F-016 同一单源 `coerce_to_list_storage`，无新启发式/类型白名单/形状枚举，不触
+ deep-copy/claim 冻结红线）：`compile_index_assign` 新增 `value_expr: &Expr` 参数，把 RHS 经
+ `coerce_to_list_storage` 归一化后再 store；`coerce_to_list_storage` 可见性放宽到 `pub(in crate::codegen)`
+ 供 legacy 路径调用。lambda.rs `mime_type_name_owns_heap_collection` 补裸 `List`/`Set`/`Map` 类型名判定
+ （与 F-016 族堆集合所有权判定一致）。scalar 元素无影响（走原 i64 GEP）。
+
+ 分类: 一次性缺陷（legacy 路径 list 元素 write 存储主门控补全，F-015/F-016/F-017 同族；未触 S2/S3）。
+
+ 不变量类别: L1（双后端等价——闭合 legacy 路径 `xs[i]=v` 非标量元素静默错值分歧）
+ 测试: `src/tests/dual_backend.rs::dual_index_assign_string_elem`（[Z, b, Y]）、
+`src/tests/dual_backend.rs::dual_index_assign_nested_list_elem`（[[1, 2], [9, 9], [5, 6]]）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

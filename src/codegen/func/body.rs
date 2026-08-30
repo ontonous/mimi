@@ -379,7 +379,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Expr::Index(obj, idx) => {
                 let val = self.compile_expr(value, vars)?;
-                self.compile_index_assign(obj, idx, val, vars)?;
+                self.compile_index_assign(obj, idx, val, value, vars)?;
             }
             Expr::Unary(crate::ast::UnOp::Deref, inner) => {
                 let val = self.compile_expr(value, vars)?;
@@ -611,6 +611,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         obj: &Expr,
         idx: &Expr,
         val: BasicValueEnum<'ctx>,
+        value_expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<()> {
         // v0.34.13: `mutate` borrow params (vars entry = (param_ptr_as_alloca,
@@ -672,7 +673,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .build_in_bounds_gep(self.context.i64_type(), data_ptr_i64, &[idx_iv], "elem")
         }
         .map_err(|e| CompileError::LlvmError(format!("gep error: {}", e)))?;
-        self.build_store(elem_ptr, val)?;
+        // legacy 路径索引赋值 RHS 归一化（F-016 的 resolved 路径同族补全；
+        // TODO(#F-010-legacy-list-elem-field-mut)）：把 RHS 走与列表字面量同一的
+        // 元素存储归一化原语 `coerce_to_list_storage`。raw `val` 对 *string* 元素是
+        // 裸指针/string-struct，对嵌套 list 是未打包结构，均非 `i64[]` data 数组存的
+        // i64 句柄——直接 store 会原生静默保留旧元素（VM 正确赋值）→ L1 静默错值分歧。
+        // `coerce_to_list_storage` 装箱 string（mimi_str_box）、堆打包嵌套 list、标量符号
+        // 扩展为 i64，与列表字面量语义完全一致（单一事实源，无新启发式/类型白名单/形状枚举）。
+        let iv = self.coerce_to_list_storage(val, value_expr, vars)?;
+        self.build_store(elem_ptr, iv)?;
         Ok(())
     }
 

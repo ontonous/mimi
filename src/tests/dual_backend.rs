@@ -13810,6 +13810,47 @@ fn dual_for_loop_option_record_field_expr() {
     );
 }
 
+/// 0.40.1.20 (F-016)：列表索引赋值 `xs[i] = v` 的 RHS 必须走与列表字面量同一的
+/// 元素存储归一化（`coerce_to_list_storage`）——string/嵌套列表元素存的是 i64 句柄而非
+/// 裸指针/结构，否则原生静默保留旧元素（VM 正确赋值）→ L1 静默错值分歧。L1（双后端等价）。
+#[test]
+fn dual_index_assign_string_elem() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let xs = ["a", "b", "c"];
+            xs[0] = "Z";
+            xs[2] = "Y";
+            println(xs);
+            0
+        }
+        "#,
+        "[Z, b, Y]"
+    );
+}
+
+/// 0.40.1.20 (F-016) 相邻形状：嵌套列表索引赋值（堆打包头一致性）。
+#[test]
+fn dual_index_assign_nested_list_elem() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        func main() -> i32 {
+            let ys = [[1, 2], [3, 4], [5, 6]];
+            ys[1] = [9, 9];
+            println(ys);
+            0
+        }
+        "#,
+        "[[1, 2], [9, 9], [5, 6]]"
+    );
+}
+
 /// List of Option println.
 #[test]
 fn dual_list_option_println() {

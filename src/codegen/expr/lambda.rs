@@ -104,7 +104,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// F-005). It is an over-approximation only in the safe direction (it may reject
     /// a user-defined `MyList<…>`, which is fail-closed, never a UAF).
     fn mime_type_name_owns_heap_collection(tn: &str) -> bool {
-        tn.contains("List<") || tn.contains("Set<") || tn.contains("Map<")
+        tn.contains("List<")
+            || tn.contains("Set<")
+            || tn.contains("Map<")
             || tn.trim() == "List"
             || tn.trim() == "Set"
             || tn.trim() == "Map"

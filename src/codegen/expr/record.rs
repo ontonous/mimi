@@ -464,7 +464,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    fn coerce_to_list_storage(
+    pub(in crate::codegen) fn coerce_to_list_storage(
         &mut self,
         val: BasicValueEnum<'ctx>,
         elem_expr: &Expr,
