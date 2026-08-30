@@ -2,6 +2,37 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### 0.40.2 — A1：原生 ABI / 所有权元数据单源化
+
+0.40.1 的 BUG P 与 F-001–F-025 证明，native 后端对同一 Mimi 类型同时维护
+surface AST 递归、ResolvedType 递归、LLVM 指针形状检查和类型名 substring 猜测；
+return scope、E0723 与闭包逃逸因而可能对同一值作出不同裁决。A2 若直接建立在这些
+分叉上，只会把既有启发式固化成新的 glue 特判。
+
+本切片新增 `src/codegen/abi/ownership.rs` 的 canonical `OwnershipClass`：
+
+- surface AST 与 checker-owned `ResolvedTypeId` 仅作为适配入口；所有策略均消费同一
+  `Scalar/StringBox/List/Option/Result/Tuple/Record/Array/Slice/Shared/Closure/
+  OpaqueHandle/Linear/Generic/Unknown` 形状树；
+- A3 E0723、resolved return scope drain、resolved/legacy closure capture 判定统一迁移；
+- capability、Flow state 和 `linear T` 保留 `Linear(kind)`，为 A2 的“绝不生成普通
+  clone/drop glue”提供结构性门禁；
+- 删除约 286 行重复递归和 legacy `List<`/`Map<`/`Set<` substring 猜测。
+
+同时新增 `src/codegen/abi/layout.rs`，集中 Option/Result payload 与 tuple product field
+的整数 widening 规则；`mimi_type_to_llvm`、legacy `llvm_type_for` 和 resolved lowering
+不再各自维护副本。A3 已验证行为保持：`List<List<i32>>` 与 Map/Set 仍 E0723，
+`List<List<string>>`、普通 record/List 返回与 tuple ABI 均无回归。
+
+不变量类别：L1（VM ≡ native）/ L2（canonical checker type 驱动策略）/ L3（所有权
+边界不再由 LLVM 形状或字符串猜测）
+
+测试：ABI/ownership 单测 5/5；`dual_` 1112/0；`typecheck::`、`codegen_e2e`、
+`v1_2_verification` 30/0；dispatch 200/200、fallback_rate=0；`cargo fmt --check`。
+`cargo clippy --all-targets -- -D warnings` 仍被仓库既有 109 warnings 阻断，本切片无新增
+warning。全量测试的 string-slice/Set/golden 25 个既有失败已在 detached HEAD
+`52e5ca6c` 原样复现；21 份实际 golden IR 与 HEAD byte-for-byte 相同，A1 无 IR 漂移。
+
 ### 0.40.1.7 — F-003：E0723 门禁对 record 包裹普通 List 的过度 fail-closed 收窄
 
 0.40.1.6（F-002）把 E0723 门禁延伸到 record 字段递归判定，但引入**过度拒绝（over-reach）**：

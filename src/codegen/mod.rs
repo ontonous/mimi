@@ -1,3 +1,4 @@
+mod abi;
 mod actors;
 mod block;
 pub mod builtins;
@@ -4082,31 +4083,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let inner_llvm = self.llvm_type_for(inner).or_else(|| {
                     crate::codegen::types::container_payload_llvm(self.context, inner)
                 })?;
-                // Only widen scalar ints and product-tuple int fields — never
-                // named records (all-i32 records must keep i32 field layout).
-                let widened = match (inner.unlocated(), inner_llvm) {
-                    (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
-                        BasicTypeEnum::IntType(self.context.i64_type())
-                    }
-                    (Type::Tuple(_), BasicTypeEnum::StructType(sty)) => {
-                        // Widen i32..i63 fields only — keep i1 bool as i1.
-                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-                        let widened_fields: Vec<_> = sty
-                            .get_field_types()
-                            .iter()
-                            .map(|f| match f {
-                                BasicTypeEnum::IntType(it)
-                                    if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
-                                {
-                                    i64_ty
-                                }
-                                other => *other,
-                            })
-                            .collect();
-                        BasicTypeEnum::StructType(self.context.struct_type(&widened_fields, false))
-                    }
-                    (_, other) => other,
-                };
+                // Single-source ABI rule: scalar integer payloads widen to
+                // i64; product tuples widen non-bool integer fields; named
+                // records retain their declared field widths.
+                let widened = crate::codegen::abi::layout::widen_surface_container_payload(
+                    self.context,
+                    inner,
+                    inner_llvm,
+                );
                 Some(BasicTypeEnum::StructType(self.context.struct_type(
                     &[BasicTypeEnum::IntType(self.context.bool_type()), widened],
                     false,
@@ -4122,31 +4106,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let ok_llvm = self
                     .llvm_type_for(ok)
                     .or_else(|| crate::codegen::types::container_payload_llvm(self.context, ok))?;
-                // Widen integer Ok slots and product-tuple i32 fields to i64
-                // so they match Ok((1,2)) literal ABI. Do not widen named records
-                // or i1 bool fields.
-                let widened = match (ok.unlocated(), ok_llvm) {
-                    (_, BasicTypeEnum::IntType(it)) if it.get_bit_width() < 64 => {
-                        BasicTypeEnum::IntType(self.context.i64_type())
-                    }
-                    (Type::Tuple(_), BasicTypeEnum::StructType(sty)) => {
-                        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-                        let widened_fields: Vec<_> = sty
-                            .get_field_types()
-                            .iter()
-                            .map(|f| match f {
-                                BasicTypeEnum::IntType(it)
-                                    if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
-                                {
-                                    i64_ty
-                                }
-                                other => *other,
-                            })
-                            .collect();
-                        BasicTypeEnum::StructType(self.context.struct_type(&widened_fields, false))
-                    }
-                    (_, other) => other,
-                };
+                let widened = crate::codegen::abi::layout::widen_surface_container_payload(
+                    self.context,
+                    ok,
+                    ok_llvm,
+                );
                 Some(BasicTypeEnum::StructType(self.context.struct_type(
                     &[
                         BasicTypeEnum::IntType(self.context.bool_type()),

@@ -4,25 +4,6 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::AddressSpace;
 
-/// Widen integer BasicTypeEnums to i64. Non-integer types pass through.
-/// This ensures Result<i32,E> and Option<i32> use i64 for the payload slot,
-/// matching the Ok/Some constructors which receive i64 literal values.
-pub(super) fn widen_int_to_i64<'ctx>(
-    ctx: &'ctx Context,
-    ty: BasicTypeEnum<'ctx>,
-) -> BasicTypeEnum<'ctx> {
-    match ty {
-        BasicTypeEnum::IntType(it) => {
-            if it.get_bit_width() == 64 {
-                ty
-            } else {
-                BasicTypeEnum::IntType(ctx.i64_type())
-            }
-        }
-        _ => ty,
-    }
-}
-
 /// 0.39.136: lower an Option/Result PAYLOAD slot type. A `unit` payload has no
 /// standalone LLVM type (`mimi_type_to_llvm(unit)` is None), which previously
 /// made the WHOLE `Result<(), E>` / `Option<()>` lowering fail — declare_func
@@ -115,14 +96,7 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             let mut llvm_elems = Vec::new();
             for e in elems {
                 let el = mimi_type_to_llvm(ctx, e)?;
-                let el = match el {
-                    BasicTypeEnum::IntType(it)
-                        if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
-                    {
-                        BasicTypeEnum::IntType(ctx.i64_type())
-                    }
-                    other => other,
-                };
+                let el = crate::codegen::abi::layout::widen_product_field(ctx, el);
                 llvm_elems.push(el);
             }
             Some(BasicTypeEnum::StructType(
@@ -176,7 +150,10 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // Integer payloads are widened to i64 so that constructor (Some(42))
             // and method (unwrap) agree on the slot width. Non-integer payloads
             // (strings, structs) use their natural LLVM type.
-            let inner_llvm = widen_int_to_i64(ctx, container_payload_llvm(ctx, inner)?);
+            let inner_llvm = crate::codegen::abi::layout::widen_container_payload(
+                ctx,
+                container_payload_llvm(ctx, inner)?,
+            );
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             Some(BasicTypeEnum::StructType(
                 ctx.struct_type(&[disc, inner_llvm], false),
@@ -188,7 +165,10 @@ pub fn mimi_type_to_llvm<'ctx>(ctx: &'ctx Context, ty: &Type) -> Option<BasicTyp
             // is i64) and the type map agree on slot width. Non-integer payloads
             // (strings, structs) use their natural LLVM type. Error payload is
             // always i64 (see compile_err_constructor).
-            let ok_llvm = widen_int_to_i64(ctx, container_payload_llvm(ctx, ok)?);
+            let ok_llvm = crate::codegen::abi::layout::widen_container_payload(
+                ctx,
+                container_payload_llvm(ctx, ok)?,
+            );
             let disc = BasicTypeEnum::IntType(ctx.bool_type());
             let err_llvm = BasicTypeEnum::IntType(ctx.i64_type());
             Some(BasicTypeEnum::StructType(

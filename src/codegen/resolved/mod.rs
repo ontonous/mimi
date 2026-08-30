@@ -349,323 +349,17 @@ pub(super) fn resolved_type_to_ast(
     }
 }
 
-// ---------------------------------------------------------------------------
-// 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): deep-copy
-// ownership fail-closed for the native (LLVM) backend.
-//
-// The documented silent pass-through blind spots in the legacy `func.rs`
-// `deep_copy_returned_value` / `type_owns_heap` path (BUG P) are return types
-// whose heap ownership the current transfer path cannot move across the return
-// boundary, so the returned handle aliases freed heap:
-//   - `Set<_>` / `Map<_,_>` payloads (`type_owns_heap` returns `false` for them),
-//   - `List<List<X>>` where `X` is a concrete non-string head (the outer list's
-//     data array is claimed but the inner list's is not — a UAF hole).
-// These are fail-closed with E0723.
-//
-// Scoping note: top-level user RECORD returns and `List<List<string>>` are
-// already transferred safely by `claim_returned_heap_pointers` in the resolved
-// emitter (verified: `make_outer() -> Outer{inner: Inner{items: List<i32>}}`
-// builds and runs correctly), so they are intentionally NOT flagged. Generic
-// `List<List<T>>` (e.g. stdlib `chunks`/`group_by`) is excluded by treating
-// bare unknown type names as generic parameters, and `List<Record{heap}>`
-// (e.g. `List<LogEntry>`) is left unflagged to avoid regressing working code;
-// their residual ownership gaps are tracked for 0.1.10 A2 ownership-glue.
-// ---------------------------------------------------------------------------
-
-/// Whether a native return type is a `Set`/`Map` payload or a concrete nested
-/// non-string `List<List<X>>` whose ownership the current transfer path cannot
-/// move (the BUG P hole). Used by the top-level fatal gate in `compile_checked`.
-pub(crate) fn native_return_owns_unclaimed_heap(
-    _program: &crate::core::CheckedProgram,
-    ty: &crate::ast::Type,
-) -> bool {
-    match ty.unlocated() {
-        crate::ast::Type::Name(n, args) => match n.as_str() {
-            "Set" | "Map" => true,
-            "List" => match args.first() {
-                Some(elem) => list_elem_owns_unclaimed_heap(elem),
-                None => false,
-            },
-            "Option" | "Result" => args
-                .iter()
-                .any(|a| native_return_owns_unclaimed_heap(_program, a)),
-            // Records (and any other nominal type): a record field that owns
-            // unclaimed heap (a `Set`/`Map`, or a concrete nested non-string
-            // `List<List<X>>`) cannot be transferred natively across the return
-            // boundary either — the inner buffer is not claimed (see 0.40.1.3).
-            // Fail-closed it the same way so the gate is not defeated by
-            // wrapping the hole in a record. Field types live in the resolved
-            // type table (not in the flat `Type::Name`), so resolve them there.
-            _ => record_owns_unclaimed_heap(_program, n),
-        },
-        crate::ast::Type::Tuple(items) => items
-            .iter()
-            .any(|t| native_return_owns_unclaimed_heap(_program, t)),
-        _ => false,
-    }
-}
-
-/// Whether a record (or any nominal) return type owns unclaimed heap through
-/// one of its fields. The flat `Type::Name` of a record carries no field types,
-/// so we resolve the nominal in the resolved type table and walk each field's
-/// `ResolvedType` (which preserves the full nested structure).
-fn record_owns_unclaimed_heap(program: &crate::core::CheckedProgram, record_name: &str) -> bool {
-    // A record's field types live in the type catalog (not in the flat
-    // `Type::Name`), keyed by each field's `NodeId`. Resolve them through the
-    // catalog rather than guessing from the `ResolvedType` table.
-    let def = {
-        if let Some(d) = program.type_def(record_name) {
-            d
-        } else {
-            // Fall back to a qualified-name suffix match (records may carry a
-            // module/type prefix in their qualified name).
-            match program.type_defs().values().find(|d| {
-                d.qualified_name == record_name
-                    || d.qualified_name.ends_with(&format!(".{}", record_name))
-            }) {
-                Some(d) => d,
-                None => return false,
-            }
-        }
-    };
-    let field_types = program.resolved_field_types();
-    let table = program.resolved_types();
-    for (field_name, _disp) in &def.fields {
-        let rt_id = match def
-            .field_ids
-            .get(field_name)
-            .and_then(|id| field_types.get(id))
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        if let Some(rt) = table.get(rt_id) {
-            if owns_unclaimed_heap_rt(program, rt, table) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Same ownership check as `native_return_owns_unclaimed_heap`, but over the
-/// structured `ResolvedType` tree (so record/container fields are visible).
+/// A3 compatibility gate over the A1 canonical ownership shape.
 ///
-/// Builtin container/scalar names arrive qualified as `builtin:type:List` etc.,
-/// so strip that prefix before matching the bare container names.
-fn owns_unclaimed_heap_rt(
+/// `Set`/`Map` and the proven unsafe nested-list shapes remain fail-closed with
+/// E0723 until A2 can derive their return-transfer glue.  Keeping this thin
+/// wrapper lets the top-level native gate name the policy without rebuilding a
+/// parallel AST or LLVM-layout classifier.
+pub(crate) fn native_return_owns_unclaimed_heap(
     program: &crate::core::CheckedProgram,
-    rt: &crate::core::ResolvedType,
-    table: &crate::core::ResolvedTypeTable,
+    ty: &crate::core::ResolvedTypeId,
 ) -> bool {
-    match rt {
-        crate::core::ResolvedType::Nominal {
-            item, arguments, ..
-        } => {
-            let name = item
-                .as_str()
-                .strip_prefix("builtin:type:")
-                .unwrap_or(item.as_str());
-            match name {
-                "Set" | "Map" => true,
-                "List" => match arguments.first() {
-                    Some(elem_id) => match table.get(elem_id) {
-                        Some(elem_rt) => list_elem_owns_unclaimed_rt(elem_rt, table),
-                        None => false,
-                    },
-                    None => false,
-                },
-                "Option" | "Result" => arguments.iter().any(|a| {
-                    table
-                        .get(a)
-                        .map_or(false, |r| owns_unclaimed_heap_rt(program, r, table))
-                }),
-                // Nested record / other user nominal: recurse into its fields.
-                // Builtin scalars fall through to `record_owns_unclaimed_heap`,
-                // which finds no type def and returns false (they own no heap).
-                _ => record_owns_unclaimed_heap(program, item.as_str()),
-            }
-        }
-        crate::core::ResolvedType::Tuple(elements) => elements.iter().any(|e| {
-            table
-                .get(e)
-                .map_or(false, |r| owns_unclaimed_heap_rt(program, r, table))
-        }),
-        _ => false,
-    }
-}
-
-/// ResolvedType mirror of `list_elem_owns_unclaimed_heap` (the proven top-level /
-/// surface-type policy). Decides whether a `List<elem>` field return owns heap the
-/// generic-list return claim cannot transfer. A single-level `List<X>` where `X`
-/// is a scalar / `string` / tuple / record / generic-param is claimed and safe
-/// (so it is NOT a hole — matching how a bare `List<X>` return is handled); only a
-/// nested `List<List<X>>` (or `List<Set>` / `List<Map>`) is a genuine hole.
-fn list_elem_owns_unclaimed_rt(
-    elem_rt: &crate::core::ResolvedType,
-    table: &crate::core::ResolvedTypeTable,
-) -> bool {
-    match elem_rt {
-        crate::core::ResolvedType::Nominal {
-            item, arguments, ..
-        } => {
-            let name = item
-                .as_str()
-                .strip_prefix("builtin:type:")
-                .unwrap_or(item.as_str());
-            match name {
-                // Nested `List<List<X>>`: the inner list's data array is not
-                // claimed, so this aliases freed heap. The hole is decided by the
-                // inner list's element `X` (mirrors `list_elem_owns_unclaimed_heap`).
-                "List" => match arguments.first() {
-                    Some(inner) => match table.get(inner) {
-                        Some(inner_rt) => nested_inner_owns_rt(inner_rt, table),
-                        None => false,
-                    },
-                    None => false,
-                },
-                "Set" | "Map" => true, // `List<Set>` / `List<Map>`.
-                "Option" | "Result" => arguments.iter().any(|a| {
-                    table
-                        .get(a)
-                        .map_or(false, |r| list_elem_owns_unclaimed_rt(r, table))
-                }),
-                // scalar / `string` / tuple / record / generic-param element: a
-                // single-level `List<X>` return is claimed and safe, so the field
-                // is NOT a hole. Mirrors `list_elem_owns_unclaimed_heap`'s `_ => false`.
-                _ => false,
-            }
-        }
-        // Primitive scalar / tuple-of-scalars element: single-level list is
-        // claimed and safe; not a hole (matches the top-level policy).
-        _ => false,
-    }
-}
-
-/// ResolvedType mirror of `nested_inner_owns_unclaimed`. The inner element `X` of
-/// a nested `List<List<X>>`: a concrete non-string `X` (scalar / `Set` / `Map` /
-/// tuple) makes the inner list a genuine ownership hole; `string` and user-record /
-/// generic-param elements are handled (or intentionally not flagged to avoid
-/// regressions). Deeper nesting recurses (`List<List<List<T>>>` is safe).
-fn nested_inner_owns_rt(
-    inner_rt: &crate::core::ResolvedType,
-    table: &crate::core::ResolvedTypeTable,
-) -> bool {
-    match inner_rt {
-        // Recurse for 3+ levels BEFORE any "concrete" match, so a generic
-        // innermost (`List<List<List<T>>>`) is not flagged.
-        crate::core::ResolvedType::Nominal {
-            item, arguments, ..
-        } if item
-            .as_str()
-            .strip_prefix("builtin:type:")
-            .unwrap_or(item.as_str())
-            == "List" =>
-        {
-            match arguments.first() {
-                Some(y) => match table.get(y) {
-                    Some(y_rt) => nested_inner_owns_rt(y_rt, table),
-                    None => false,
-                },
-                None => false,
-            }
-        }
-        crate::core::ResolvedType::Nominal { item, .. }
-            if item
-                .as_str()
-                .strip_prefix("builtin:type:")
-                .unwrap_or(item.as_str())
-                == "string" =>
-        {
-            false // handled shape.
-        }
-        // Concrete non-string head (`i32` / `f64` / ...), `Set` / `Map`, or tuple
-        // inner buffer — a genuine ownership hole.
-        crate::core::ResolvedType::Primitive(_) => true,
-        crate::core::ResolvedType::Tuple(_) => true,
-        crate::core::ResolvedType::Nominal { item, .. }
-            if {
-                let n = item
-                    .as_str()
-                    .strip_prefix("builtin:type:")
-                    .unwrap_or(item.as_str());
-                n == "Set" || n == "Map"
-            } =>
-        {
-            true
-        }
-        _ => false, // generic parameter `T` / user record element: not flagged.
-    }
-}
-
-/// Whether a `List<elem>` element type owns heap the generic-list return claim
-/// cannot transfer (the `List<X>` outer data array is claimed, but the element
-/// payload is not).
-/// Whether a `List<elem>` element type owns heap the generic-list return claim
-/// cannot transfer (the outer `List` data array is claimed, but a nested
-/// `List`/`Set`/`Map` element payload is not).
-fn list_elem_owns_unclaimed_heap(elem: &crate::ast::Type) -> bool {
-    match elem.unlocated() {
-        crate::ast::Type::Name(n, args) => match n.as_str() {
-            // Nested `List<List<X>>`: the inner list's data array is not claimed,
-            // so this aliases freed heap. The hole is decided by the inner list's
-            // element `X` (see `nested_inner_owns_unclaimed`).
-            "List" => match args.first() {
-                Some(inner) => nested_inner_owns_unclaimed(inner),
-                None => false,
-            },
-            "Set" | "Map" => true, // `List<Set>` / `List<Map>`.
-            "Option" | "Result" => args.iter().any(list_elem_owns_unclaimed_heap),
-            _ => false, // scalar / string / tuple / record / generic-param element: single-level list is handled.
-        },
-        _ => false,
-    }
-}
-
-/// The inner list's element `X` in `List<List<X>>`. A concrete non-string `X`
-/// makes the inner list a genuine ownership hole; `string` and `record` are
-/// handled (or intentionally not flagged to avoid regressions), and a generic
-/// parameter `T` is excluded so `chunks`/`group_by`/`wrap` (`List<List<T>>`) keep
-/// compiling. Deeper nesting recurses (`List<List<List<T>>>` is safe).
-fn nested_inner_owns_unclaimed(inner: &crate::ast::Type) -> bool {
-    match inner.unlocated() {
-        // Recurse for 3+ levels BEFORE any "concrete" scalar match, so that a
-        // generic innermost (`List<List<List<T>>>`) is not flagged.
-        crate::ast::Type::Name(s, args) if s.as_str() == "List" => match args.first() {
-            Some(y) => nested_inner_owns_unclaimed(y),
-            None => false,
-        },
-        crate::ast::Type::Name(s, _) if s.as_str() == "string" => false, // handled shape.
-        crate::ast::Type::Name(s, _) if is_concrete_non_string_head(s) => true, // scalar / Set / Map.
-        crate::ast::Type::Tuple(_) => true, // `List<List<(a, b)>>` inner buffer unclaimed.
-        _ => false,                         // generic parameter `T` or record: not flagged.
-    }
-}
-
-/// Concrete, non-string type heads whose presence as the inner element of a
-/// nested `List<List<X>>` makes the inner list a genuine ownership hole.
-fn is_concrete_non_string_head(name: &str) -> bool {
-    matches!(
-        name,
-        "i8" | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "f32"
-            | "f64"
-            | "bool"
-            | "char"
-            | "Int"
-            | "Float"
-            | "Bool"
-            | "Set"
-            | "Map"
-    )
+    crate::codegen::abi::ownership::classify_resolved(program, ty).has_unclaimed_return_heap()
 }
 
 impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ctx> {
@@ -1252,18 +946,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // inner string's data out from under the caller. Recurse into
         // nested struct fields: any transitively-reachable pointer means the
         // return owns heap data.
-        let return_owns_heap = matches!(result_type, BasicTypeEnum::StructType(st) if {
-            fn type_owns_heap(t: &BasicTypeEnum<'_>) -> bool {
-                match t {
-                    BasicTypeEnum::PointerType(_) => true,
-                    BasicTypeEnum::StructType(s) => {
-                        s.get_field_types().iter().any(type_owns_heap)
-                    }
-                    _ => false,
-                }
-            }
-            st.get_field_types().iter().any(type_owns_heap)
-        });
+        let return_owns_heap = crate::codegen::abi::ownership::classify_resolved(
+            self.program,
+            &callable.signature.result,
+        )
+        .requires_scope_drain();
         if return_owns_heap {
             self.generator.drain_heap_scope();
         } else {
@@ -1804,43 +1491,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     /// collections, etc. are all caught; scalars, strings, closures and records are
     /// not (records-with-heap are the separate F-005 / E0700 boundary).
     fn resolved_type_owns_heap_collection(&self, id: &crate::core::ir::ResolvedTypeId) -> bool {
-        let Some(ty) = self.program.resolved_types().get(id) else {
-            return false;
-        };
-        match ty {
-            crate::core::ir::ResolvedType::Nominal {
-                item, arguments, ..
-            } => {
-                let s = item.as_str();
-                if s == "builtin:type:List" || s == "builtin:type:Set" || s == "builtin:type:Map" {
-                    return true;
-                }
-                arguments
-                    .iter()
-                    .any(|a| self.resolved_type_owns_heap_collection(a))
-            }
-            crate::core::ir::ResolvedType::Option(inner) => {
-                self.resolved_type_owns_heap_collection(inner)
-            }
-            crate::core::ir::ResolvedType::Result { ok, error } => {
-                self.resolved_type_owns_heap_collection(ok)
-                    || self.resolved_type_owns_heap_collection(error)
-            }
-            crate::core::ir::ResolvedType::Tuple(items) => items
-                .iter()
-                .any(|a| self.resolved_type_owns_heap_collection(a)),
-            crate::core::ir::ResolvedType::Newtype { inner, .. } => {
-                self.resolved_type_owns_heap_collection(inner)
-            }
-            crate::core::ir::ResolvedType::Array { element, .. } => {
-                self.resolved_type_owns_heap_collection(element)
-            }
-            crate::core::ir::ResolvedType::Slice(inner)
-            | crate::core::ir::ResolvedType::CBuffer(inner) => {
-                self.resolved_type_owns_heap_collection(inner)
-            }
-            _ => false,
-        }
+        crate::codegen::abi::ownership::classify_resolved(self.program, id)
+            .contains_heap_collection()
     }
 
     fn emit_statement(
@@ -14141,11 +13793,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         Ok(())
     }
 
-    // NOTE (0.40.1.3, A3): the deep-copy ownership fail-closed logic lives in the
-    // module-level free functions `native_return_owns_unclaimed_heap` /
-    // `native_list_elem_owns_unclaimed_heap` / `native_record_owns_heap_by_fields`
-    // below, so it can be shared by both the per-emission defense in this emitter
-    // and the top-level fatal gate in `compile_checked` (native backend).
+    // NOTE (0.40.2, A1): return and capture ownership policy is derived from
+    // `abi::ownership::OwnershipClass`; this emitter no longer maintains a
+    // parallel AST/LLVM-shape ownership table.
 
     fn emit_spawn(
         &mut self,

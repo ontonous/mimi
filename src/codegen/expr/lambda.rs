@@ -90,26 +90,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut free_vars = BTreeMap::new();
         self.collect_free_vars(body, &param_names, vars, &mut free_vars);
         Ok(free_vars.keys().any(|name| {
-            self.var_type_names
+            self.var_types
                 .get(name)
-                .map_or(false, |tn| Self::mime_type_name_owns_heap_collection(tn))
+                .cloned()
+                .or_else(|| {
+                    self.var_type_names
+                        .get(name)
+                        .map(|display| crate::codegen::parse_inner_type(display))
+                })
+                .is_some_and(|ty| {
+                    crate::codegen::abi::ownership::classify_surface(&ty, &self.type_defs)
+                        .contains_heap_collection()
+                })
         }))
-    }
-
-    /// F-004 (0.40.1.8): does a Mimi type-name string denote a heap collection
-    /// (List/Set/Map) or a container that transitively owns one? Matching on the
-    /// surface syntax `<Name><…` (the angle bracket after the builtin name) avoids
-    /// confusing `List` with a user type that merely contains the substring "List",
-    /// and avoids flagging closures/strings/records (which are handled elsewhere /
-    /// F-005). It is an over-approximation only in the safe direction (it may reject
-    /// a user-defined `MyList<…>`, which is fail-closed, never a UAF).
-    fn mime_type_name_owns_heap_collection(tn: &str) -> bool {
-        tn.contains("List<")
-            || tn.contains("Set<")
-            || tn.contains("Map<")
-            || tn.trim() == "List"
-            || tn.trim() == "Set"
-            || tn.trim() == "Map"
     }
 
     /// I-H13: compile a nested `func` statement.

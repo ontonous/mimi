@@ -524,15 +524,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.llvm_type_for(opt_inner)
                         {
                             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                            let rec_ptr = self.build_int_to_ptr(iv, ptr_ty, "some_rec_ptr").map_err(
-                                |e| CompileError::LlvmError(format!("some rec inttoptr: {}", e)),
-                            )?;
+                            let rec_ptr = self
+                                .build_int_to_ptr(iv, ptr_ty, "some_rec_ptr")
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("some rec inttoptr: {}", e))
+                                })?;
                             let rec_val = self
-                                .build_load(
-                                    BasicTypeEnum::StructType(rec_sty),
-                                    rec_ptr,
-                                    "some_rec",
-                                )
+                                .build_load(BasicTypeEnum::StructType(rec_sty), rec_ptr, "some_rec")
                                 .map_err(|e| {
                                     CompileError::LlvmError(format!("some rec load: {}", e))
                                 })?;

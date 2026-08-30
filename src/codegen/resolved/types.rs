@@ -75,7 +75,7 @@ fn lower_resolved_type<'ctx>(
             // This ensures Option<i32> uses {i1, i64} layout, matching
             // mimi_type_to_llvm's Type::Option lowering. Per-function dispatch
             // (cross-emitter) depends on this ABI compatibility.
-            let payload = crate::codegen::types::widen_int_to_i64(context, payload);
+            let payload = crate::codegen::abi::layout::widen_container_payload(context, payload);
             Ok(BasicTypeEnum::StructType(context.struct_type(
                 &[BasicTypeEnum::IntType(context.bool_type()), payload],
                 false,
@@ -86,7 +86,7 @@ fn lower_resolved_type<'ctx>(
             // Match legacy ABI: widen sub-64-bit integer ok-payload to i64,
             // and ALWAYS use i64 for the error slot regardless of E type.
             // Per-function dispatch (cross-emitter) depends on this compatibility.
-            let ok = crate::codegen::types::widen_int_to_i64(context, ok);
+            let ok = crate::codegen::abi::layout::widen_container_payload(context, ok);
             let err_llvm = BasicTypeEnum::IntType(context.i64_type());
             Ok(BasicTypeEnum::StructType(context.struct_type(
                 &[BasicTypeEnum::IntType(context.bool_type()), ok, err_llvm],
@@ -103,14 +103,9 @@ fn lower_resolved_type<'ctx>(
                     // i1/bool) to i64 in tuple layout. This ensures per-function
                     // dispatch compatibility between resolved and legacy emitters
                     // (legacy mimi_type_to_llvm applies the same widening).
-                    Ok(match lowered {
-                        BasicTypeEnum::IntType(it)
-                            if it.get_bit_width() > 1 && it.get_bit_width() < 64 =>
-                        {
-                            BasicTypeEnum::IntType(context.i64_type())
-                        }
-                        other => other,
-                    })
+                    Ok(crate::codegen::abi::layout::widen_product_field(
+                        context, lowered,
+                    ))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(BasicTypeEnum::StructType(

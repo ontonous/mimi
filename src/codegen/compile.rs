@@ -41,7 +41,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             if function.is_comptime {
                 continue;
             }
-            if crate::codegen::resolved::native_return_owns_unclaimed_heap(program, &function.ret) {
+            let owns_unclaimed_heap = program
+                .callable(&function.node_id)
+                .map(|callable| {
+                    crate::codegen::resolved::native_return_owns_unclaimed_heap(
+                        program,
+                        &callable.signature.result,
+                    )
+                })
+                .unwrap_or(false);
+            if owns_unclaimed_heap {
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     crate::diagnostic::codes::E0723,
                     format!(
