@@ -685,6 +685,34 @@ record），所以 F-020 单级机制天然触达不到 `r`。
 测试: `src/tests/dual_backend.rs::dual_nested_option_record_field`、
 `src/tests/dual_backend.rs::dual_nested_option_record_field_expr`（双后端对拍 7 / 37）
 
+### 0.40.1.28 — F-025：`for x in List<Option<R>> { if let Some(r) = x }` 绑定 `r` 字段静默错值（L1 分歧 native 0 vs VM 8）→ 双后端等价
+
+ MODE-1 续扫盲区（L1 双后端等价）：`for x in [Some(R{a:3}), None, Some(R{a:5})] { if let Some(r) = x { total += r.a } }`
+ bytecode-VM 正确给出 `8`，但 native（LLVM）给出 `0`——真实 L1 **静默错值**分歧（native 不报错、输出错误值，
+ 比 F-024 的 fail-closed 更危险，内核卡 §5 明确 P0 静默分歧须零容忍）。
+
+ 根因（`src/codegen/func/body.rs` `try_convert_loop_elem`）：`List<Option<R>>` 的元素经
+ `coerce_to_list_storage`/`inflate_variant_struct` 以**堆膨胀的 `{i1, i64}` 结构**存储（field 1 =
+ ptrtoint 的堆 `R`）。但 for 循环把元素重建为 `llvm_type_for(Option<R>)` = `{i1, inline-R}`（即 `{i1, {i32}}`），
+ 从 `{i1, i64}` 堆结构按错误偏移读取：field 1 落在该结构的填充字节（offset 4..8，i64 字段在 offset 8）→ `a = 0`。
+ 顶层 `xs[0]` + `if let` 路径用独立的重建逻辑（直接 inttoptr 堆 `R`），故不暴露；唯 for 循环走 `try_convert_loop_elem`
+ 的泛型 struct-load 分支踩中布局错位。注意 `Option<R>` 在 Mimi 中是 `Type::Name("Option", [R])`（非 `Type::Option`），
+ 旧的 `Type::Option(_)` 守卫永不命中，故重建从未特化。
+
+ 修复（`src/codegen/func/body.rs` `try_convert_loop_elem`，S2 合规：复用既有 `coerce_to_list_storage` 膨胀布局
+ 为单一事实源，无新启发式 / 类型白名单 / 形状枚举；与 `bind_pattern_variables` 既有 i64→记录解码单源一致）：
+ 当 `concrete_ty` 为 `Name("Option", _)` 时，按堆膨胀布局 `{i1, i64}` 重建元素（inttoptr 槽位 i64 → load `{i1, i64}`），
+ 交还 `bind_pattern_variables` 走既有 `option_inner_ty` 门控把 i64 载荷解码回记录（与 F-020/F-024 同一单源）。
+ 解析发射器（`resolved/mod.rs` `convert_list_elem_i64`）因 `IfLet`/`match` 语句不在其 native slice（`MIMI_VERBOSE`
+ 可见 `resolved skip 'main': statement IfLet`），含 `if let Some(r)` 的函数恒走 legacy，故 `Option<R>` 绑定路径不触
+ resolved 重建，本单只改 legacy 单点即闭合。
+
+ 分类: 一次性缺陷（列表元素重建布局错位；与 F-008/F-010/F-016 同属容器元素重建家族，未触 S2/S3，复用既有单源）。
+
+ 不变量类别: L1（双后端等价——闭合 for 循环 `Some(r)` 绑定静默错值分歧）
+ 测试: `src/tests/dual_backend.rs::dual_for_loop_option_record_field`、
+`src/tests/dual_backend.rs::dual_for_loop_option_record_field_expr`（双后端对拍 8 / 34）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

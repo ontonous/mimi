@@ -510,6 +510,42 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                     _ => return Err("constructor pattern requires enum struct value".into()),
                 };
+                // F-025 (0.40.1.28): when `Some(r)` binds a record `r` and the
+                // `Option<R>` payload is an i64 handle (the list-storage inflation
+                // produced by `inflate_variant_struct`, {i1, ptr} → {i1, i64}), the
+                // raw i64 must be recovered into the R struct so field access (`r.a`)
+                // matches the VM. A top-level `Some(R)` keeps a pointer payload, so
+                // its `payload` is not an `IntValue` and this branch is skipped —
+                // behaviour there is unchanged. The reconstruction mirrors the
+                // resolved emitter's `convert_list_elem_i64` struct round-trip.
+                let (payload, payload_ty) = if let Some(ref opt_inner) = option_inner_ty {
+                    if let BasicValueEnum::IntValue(iv) = payload {
+                        if let Some(BasicTypeEnum::StructType(rec_sty)) =
+                            self.llvm_type_for(opt_inner)
+                        {
+                            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                            let rec_ptr = self.build_int_to_ptr(iv, ptr_ty, "some_rec_ptr").map_err(
+                                |e| CompileError::LlvmError(format!("some rec inttoptr: {}", e)),
+                            )?;
+                            let rec_val = self
+                                .build_load(
+                                    BasicTypeEnum::StructType(rec_sty),
+                                    rec_ptr,
+                                    "some_rec",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!("some rec load: {}", e))
+                                })?;
+                            (rec_val, BasicTypeEnum::StructType(rec_sty))
+                        } else {
+                            (payload, payload_ty)
+                        }
+                    } else {
+                        (payload, payload_ty)
+                    }
+                } else {
+                    (payload, payload_ty)
+                };
                 if let Some(arg_tys) = variant_arg_tys {
                     // P0-2: Multi-arg variant — the constructor packed the
                     // args into a struct on the heap and stored the ptrtoint

@@ -1080,6 +1080,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                 _ => {}
             }
         }
+        // F-025: `List<Option<T>>` stores each element as a heap-inflated
+        // `{i1, i64}` struct (field 1 = ptrtoint of the inner heap value) via
+        // `coerce_to_list_storage`/`inflate_variant_struct`. The generic struct
+        // load below uses `llvm_type_for(Option<T>)` which is `{i1, inline-T}`
+        // and reads the wrong offset (field 1 lands on padding → 0). Reconstruct
+        // the canonical inflated `{i1, i64}` shape and let `bind_pattern_variables`
+        // decode the i64 payload back to the inner value (records via inttoptr,
+        // lists/scalars via the same handle). This mirrors the resolved emitter's
+        // `convert_list_elem_i64` for the same list element.
+        if let Type::Name(opt_name, _) = concrete_ty.unlocated() {
+            if opt_name == "Option" {
+                let i1_ty = self.context.bool_type();
+                let i64_ty = self.context.i64_type();
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let heap_opt_ty = self.context.struct_type(
+                    &[
+                        BasicTypeEnum::IntType(i1_ty),
+                        BasicTypeEnum::IntType(i64_ty),
+                    ],
+                    false,
+                );
+                let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "loop_elem_ptr")?;
+                let heap_opt =
+                    self.build_load(BasicTypeEnum::StructType(heap_opt_ty), elem_ptr, "opt_heap")?;
+                return Ok(Some(heap_opt));
+            }
+        }
         if let Some(BasicTypeEnum::StructType(sty)) = self.llvm_type_for(&concrete_ty) {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "loop_elem_ptr")?;

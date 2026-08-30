@@ -13748,6 +13748,68 @@ fn dual_nested_option_record_field_expr() {
     );
 }
 
+/// 0.40.1.28 (F-025): iterating `List<Option<R>>` in a for-loop must reconstruct
+/// each `Option<R>` element from list storage (the heap-inflated `{i1, i64}` layout
+/// produced by `coerce_to_list_storage`/`inflate_variant_struct`) so `if let Some(r)
+/// = x` binds a correct `r` whose field access (`r.a`) matches the VM. The legacy
+/// for-loop previously loaded `llvm_type_for(Option<R>)` = `{i1, inline-R}` from the
+/// `{i1, i64}` heap struct, so field 1 landed on padding and `r.a` was silently 0 —
+/// an L1 silent wrong-value divergence (native 0 vs VM 8). Fix:
+/// `try_convert_loop_elem` reconstructs the canonical inflated `{i1, i64}` shape and
+/// lets `bind_pattern_variables` decode the i64 payload back to the inner record (the
+/// same single source of truth already used for top-level/index `Option<R>`). L1
+/// (dual backend equivalence).
+#[test]
+fn dual_for_loop_option_record_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32 }
+        func main() -> i32 {
+            let xs = [Some(R { a: 3 }), None, Some(R { a: 5 })];
+            let mut total = 0;
+            for x in xs {
+                if let Some(r) = x {
+                    total = total + r.a;
+                }
+            }
+            println(total);
+            0
+        }
+        "#,
+        "8"
+    );
+}
+
+/// 0.40.1.28 (F-025) adjacent shape: for-loop `Some(r)` binding used inside a
+/// larger arithmetic expression (`r.a * r.a`), confirming the reconstructed
+/// record survives beyond a bare `r.a` read. L1 (dual backend equivalence).
+#[test]
+fn dual_for_loop_option_record_field_expr() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32 }
+        func main() -> i32 {
+            let xs = [Some(R { a: 3 }), None, Some(R { a: 5 })];
+            let mut total = 0;
+            for x in xs {
+                if let Some(r) = x {
+                    total = total + r.a * r.a;
+                }
+            }
+            println(total);
+            0
+        }
+        "#,
+        "34"
+    );
+}
+
 /// List of Option println.
 #[test]
 fn dual_list_option_println() {
