@@ -88,3 +88,41 @@ fn coh2_lowering_error_uses_language_type_names() {
         );
     }
 }
+
+/// CO-H2 / §5.2-2 diagnostic self-healing: a call to a bytecode-VM-only
+/// reflection builtin (`type_fields`) must surface as a structured `E0830`
+/// diagnostic that names the failing callable and anchors the call site —
+/// not as an internal `TOOL-RESOLUTION-001` jargon leak with no actionable
+/// information (the pre-fix message was
+/// `typed body lowering does not yet support closed Unknown call target`).
+#[test]
+fn coh2_reflection_builtin_type_fields_is_e0830_not_jargon() {
+    let src = "type R { a: i32 }\nfunc main() -> i32 {\n    let r = R { a: 1 };\n    println(type_fields(r));\n    0\n}\n";
+    let diagnostics = check_source(src).expect_err("type_fields must fail resolved body lowering");
+    let e0830: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.code.as_deref() == Some("E0830"))
+        .collect();
+    assert_eq!(
+        e0830.len(),
+        1,
+        "expected exactly one E0830, got: {:?}",
+        diagnostics
+    );
+    assert!(
+        e0830[0].message.contains("type_fields"),
+        "E0830 must name the failing builtin: {}",
+        e0830[0].message
+    );
+    assert!(
+        !e0830[0].message.contains("TOOL-RESOLUTION-001"),
+        "internal jargon leaked: {}",
+        e0830[0].message
+    );
+    // The span must point at the call (line 4), not the function root.
+    assert_eq!(
+        e0830[0].span.start_line, 4,
+        "E0830 must anchor the call, got {:?}",
+        e0830[0].span
+    );
+}

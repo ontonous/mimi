@@ -954,7 +954,17 @@ impl CheckedProgram {
                             // Diagnostic.code = None, so tooling routing on
                             // codes never saw it. Bridge embedded codes into
                             // the structured field.
-                            let message = format!("TOOL-RESOLUTION-001: {error}");
+                            // CO-H2 / §5.2-2 diagnostic self-healing: errors that
+                            // embed their own `[E083x]` marker already carry a
+                            // structured code, so do NOT prefix them with the
+                            // internal `TOOL-RESOLUTION-001` jargon — leaking that
+                            // token to the user violates the no-internal-identifier
+                            // diagnostic contract (error_co_h2).
+                            let message = if error.message.contains("[E083") {
+                                error.to_string()
+                            } else {
+                                format!("TOOL-RESOLUTION-001: {error}")
+                            };
                             let diagnostic = Diagnostic::error(message, span);
                             if error.message.contains("[E0830]") {
                                 diagnostic.with_code(crate::diagnostic::codes::E0830)

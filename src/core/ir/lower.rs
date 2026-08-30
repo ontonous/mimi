@@ -2815,7 +2815,19 @@ impl BodyLowerer<'_> {
             return self.lower_method_call(node_id, callee, arguments, role);
         }
         if site.kind != ResolvedCallKind::Function {
-            return self.unsupported(node_id, &format!("closed {:?} call target", site.kind));
+            // CO-H2 / §5.2-2 diagnostic self-healing: name the failing callable
+            // instead of leaking the opaque `closed Unknown call target` jargon.
+            // The `[E0830]` marker is the established bridge (see
+            // src/core/resolved/mod.rs) that lifts this body-lowering failure to
+            // a structured error code, so the user gets an actionable diagnostic
+            // (and tooling can route on the code) rather than an internal token.
+            return self.unsupported(
+                node_id,
+                &format!(
+                    "[E0830] call to '{}' (resolved call kind {:?}) — if '{}' is a builtin it may be bytecode-VM-only; use `mimi run`",
+                    site.callee, site.kind, site.callee
+                ),
+            );
         }
         let mut candidates = self
             .functions

@@ -627,6 +627,34 @@ direct-index 以 fail-closed 回退 legacy 维持正确输出，无静默错值 
 repro `/tmp/r27_return_mut_list.mimi`=9、`/tmp/r27_return_mut_list_str.mimi`=z、
 `/tmp/r27_return_mut_rec.mimi`=9（legacy 回退正确）均 ≡ VM
 
+### 0.40.1.26 — F-023：反射内建 `type_fields` 调用泄漏内部 `TOOL-RESOLUTION-001` 行话 → 结构化 `E0830` 诊断（诊断自愈，§5.2-2）
+
+MODE-1 续扫盲区（诊断质量）：`type_fields(r)`（bytecode-VM-only 反射内建）在双后端均经
+resolved body lowering 失败，但旧报错为内部行话
+`TOOL-RESOLUTION-001: resolved body node '…': typed body lowering does not yet support closed Unknown call target`
+—— 无错误码、不点名失败内建、无用户可执行指引（违反内核卡 §5 与 CO-H2 诊断契约
+`error_co_h2.rs` 的「不向用户泄漏内部标识符」）。`Ok("hi")` 同形态（§5.2-2）已在前序收口为
+`E0215`，本次闭合同族残余。
+
+根因（`src/core/ir/lower.rs` `unsupported()` 调用点）：非 `Function` 解析种类的调用目标
+（如 VM-only 反射内建）被一律报为不透明 `closed {:?} call target`，且 `src/core/resolved/mod.rs`
+对 body-lowering 错误**无条件**前缀 `TOOL-RESOLUTION-001:`，仅当消息内嵌 `[E0830]` 桥标记时才
+提升到结构化码（wave1-review §5.16）。
+
+修复（S2 合规：复用既有 `[E0830]` 桥约定，无新启发式 / 类型白名单 / 形状枚举；单点真相源为
+调用解析种类，不新增调用点手工镜像）：
+- `lower.rs` 该调用目标失败路径改为**点名失败可调用**（`site.callee`）并内嵌 `[E0830]` 桥标记 +
+  可执行指引（`若内建则可能仅 bytecode-VM 支持，用 mimi run`）。
+- `resolved/mod.rs` body-lowering 错误渲染：消息内嵌 `[E0830]` 桥标记者**不再前缀**
+  `TOOL-RESOLUTION-001` 行话（其余仍保留，零回归），使结构化码 `E0830` 直接对用户可见、
+  工具可按码路由。
+
+分类: 一次性缺陷（诊断渲染补全，未触 S2/S3；属诊断自愈专项，非 L1 分歧——双后端同败）。
+
+不变量类别: L2（类型系统健全性 —— 失败归属代数：内部标识符不得泄漏给用户；CO-H2 诊断契约）
+测试: `src/tests/error_co_h2.rs::coh2_reflection_builtin_type_fields_is_e0830_not_jargon`
+（断言恰好一个 `E0830`、消息含 `type_fields`、不含 `TOOL-RESOLUTION-001`、span 锚定调用点 line 4）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
