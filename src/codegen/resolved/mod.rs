@@ -2851,16 +2851,31 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 "index projection on non-struct (list) value".into(),
                             ));
                         };
-                        // Extract len (field 0) and data pointer (field 1).
-                        let len_val = struct_val
-                            .get_field_at_index(0)
-                            .ok_or_else(|| CompileError::LlvmError("list len field absent".into()))?
+                        // F-018 (0.40.1.22): extract len (field 0) and data pointer
+                        // (field 1) with the *builder* (`build_extract_value`), not
+                        // `StructValue::get_field_at_index`. The latter is a const-
+                        // only helper that returns garbage for runtime SSA
+                        // aggregates — the 0.39.136 note on the Tuple arm above
+                        // records exactly this trap (`str_parse_int(s).0` yielded a
+                        // bogus pointer). For a `List<T>` returned from a function
+                        // the projected value is a call result (`%resolved_call`),
+                        // an SSA aggregate: `get_field_at_index(0)` handed back the
+                        // callee function pointer, and `.into_int_value()` then
+                        // panicked — a codegen panic, forbidden by kernel §13.15.
+                        // `build_extract_value` is correct for both const and SSA
+                        // struct values, so the index read now mirrors the Tuple
+                        // arm and the panic is gone.
+                        let len_val = self
+                            .generator
+                            .builder
+                            .build_extract_value(struct_val, 0, "list_len")
+                            .map_err(|e| CompileError::LlvmError(format!("list len field: {e}")))?
                             .into_int_value();
-                        let data_ptr = struct_val
-                            .get_field_at_index(1)
-                            .ok_or_else(|| {
-                                CompileError::LlvmError("list data field absent".into())
-                            })?
+                        let data_ptr = self
+                            .generator
+                            .builder
+                            .build_extract_value(struct_val, 1, "list_data")
+                            .map_err(|e| CompileError::LlvmError(format!("list data field: {e}")))?
                             .into_pointer_value();
                         // Evaluate index.
                         let idx_val = self.emit_expr(index_expr, frame)?.into_int_value();
@@ -2884,6 +2899,35 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // The element type = expression.ty (e.g. List<string> for
                         // xs[0] where xs: List<List<string>>).
                         let result_llvm_ty = self.lower_type(&expression.ty)?;
+                        // F-018 (0.40.1.22): a record (non-string struct) element
+                        // taken directly from a *call result* list is not yet
+                        // ownership-safe in the resolved native slice — the
+                        // element heap box is not claimed for the caller's scope,
+                        // so reading it yields a use-after-free (silent wrong
+                        // value, the worst L1 class; kernel §13.15 forbids it).
+                        // Fail closed with an actionable error; the equivalent
+                        // local-binding form (`let out = f(); out[0]`) is fully
+                        // supported. Scalar and string elements are ownership-safe
+                        // and fall through to convert_list_elem_i64.
+                        if let BasicTypeEnum::StructType(sty) = result_llvm_ty {
+                            let fields = sty.get_field_types();
+                            let is_string = fields.len() == 2
+                                && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                                && matches!(
+                                    &fields[1],
+                                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                                );
+                            if !is_string {
+                                return Err(CompileError::Unsupported(
+                                    "indexing a record element directly from a list returned by a \
+                                     function call is not yet supported by the resolved native \
+                                     slice (ownership of the element heap box is not claimed). Bind \
+                                     the list to a local first, e.g. `let out = f(); out[0]`. \
+                                     Tracked as F-018."
+                                        .into(),
+                                ));
+                            }
+                        }
                         self.convert_list_elem_i64(elem_int, result_llvm_ty)
                     }
                     // 0.32.5: Field value projection for record rvalue access.
@@ -3239,9 +3283,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                             }
                         }
-                        self.generator
+                        let call_result = self
+                            .generator
                             .build_call(callee, &arguments, "resolved_call")?
-                            .try_as_basic_value_opt()
+                            .try_as_basic_value_opt();
+                        call_result
                             .ok_or_else(|| {
                                 CompileError::LlvmError(format!(
                                     "resolved callee '{symbol}' returned void"

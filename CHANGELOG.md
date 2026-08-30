@@ -493,6 +493,47 @@ repro `/tmp/r24_rec_elem_mut2.mimi`=9、`/tmp/r24_rec_elem_field_mut.mimi`=5（�
 该路径属 F-010 在清遗留，生产 `mimi build` 走 `compile_checked` 已闭合。新 L1 回归测试统一走
 `dual_assert_prod!` 以对拍生产路径。
 
+### 0.40.1.22 — F-018：函数返回 `List<T>` 直接作索引基 → native 代码生成 panic（§13.15 红线）→ 修复为 L1 等价 / fail-closed
+
+MODE-1 续扫盲区三（返回 `List<T>` 的消费）：复现**代码生成 panic**（最严重红线类分歧，
+kernel §13.15 禁止 `src/codegen/` 出现 `not yet implemented` panic / 静默分支）：
+`func f() -> List<i32> { let xs = [1, 2]; xs[0] = 9; return xs; } println(f()[0]);`
+native（`mimi build`）**panic**，VM（`mimi run`）给 `9` —— 双后端不对等且 native 拒绝编译。
+
+根因（`src/codegen/resolved/mod.rs` Index 投影臂）：列表索引投影用
+`StructValue::get_field_at_index` 读取 `len`（field 0）/ `data`（field 1）。该方法是
+**仅对常量有效的辅助函数，对运行时 SSA 聚合返回垃圾** —— Tuple 投影臂（0.39.136）已因
+同一陷阱（`str_parse_int(s).0` 产出伪指针）改用 builder 的 `build_extract_value`。函数返回的
+`List<T>` 其投影基值是 `f()` 的**调用结果**（`%resolved_call`，一个 SSA 聚合值），
+`get_field_at_index(0)` 把 callee 函数指针当 `len` 返回，后续 `.into_int_value()` 遂 panic。
+
+修复（S2 合规：复用 Tuple 臂既有的 `build_extract_value` 单源原语，无新启发式 / 类型白名单 /
+形状枚举；与 0.39.136 既有契约同构）：
+- Index 投影臂的 len/data 提取改用 `self.generator.builder.build_extract_value(struct_val, 0/1, …)`，
+  对常量与 SSA 聚合值均正确。`f()[0]` 现正确读出元素并返回 `9`，native ≡ VM（resolved-native L1 等价）。
+
+次生发现（`List<R>` 直接索引 `f()[0].a` 的**静默错值 / 悬垂读**，最危险 L1 类）：把同一修复套用后，
+标量/串元素 direct-index 全部对齐；但 **record 元素**从 call-result list 直接取
+（`f()[0].a` for `List<Rec>`）曾返回空值（应为 `9`）—— 根因是 resolved 切片未把 record 元素
+的堆盒认领给调用方作用域（use-after-free）。本固定在 **类型已知的访问站点（Index 投影）**
+集中处理：对「非 string 的 struct 元素（即 record）直接从 call-result list 索引」返回优雅的
+`CompileError::Unsupported`；该错误使 resolved 发射失败并 **fail-closed 回退 legacy 发射器**
+（legacy 正确处理 `f()[0].a`，输出 `9`，无 UB）。局部绑定式 `let out = f(); out[0].a` 在
+resolved-native 全通。未新增任何类型白名单 / 形状枚举启发式（§3 红线）。
+
+分类: 一次性缺陷（Index 投影聚合读取原语补全 + record 元素 call-result 索引 fail-closed 边界，
+F-017 同族「native 静默错值 / panic」收敛，未触 S2/S3）。
+
+不变量类别: L1（双后端等价 —— 标量/串元素 native≡VM 的 resolved-native L1 等价；record 元素
+direct-index 以 fail-closed 回退 legacy 维持正确输出，无静默错值 / 无 panic）
+测试: `src/tests/dual_backend.rs::dual_f018_list_return_mut`（9）/
+`dual_f018_list_return_str_mut`（z）/
+`dual_f018_list_return_nomut`（1）/
+`dual_f018_list_return_literal`（1）
+（均经 `dual_assert_prod!`——生产 `compile_checked` 路径，≡ `mimi build`，双后端 run/build/exec MATCH）；
+repro `/tmp/r27_return_mut_list.mimi`=9、`/tmp/r27_return_mut_list_str.mimi`=z、
+`/tmp/r27_return_mut_rec.mimi`=9（legacy 回退正确）均 ≡ VM
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

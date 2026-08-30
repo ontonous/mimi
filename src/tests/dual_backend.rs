@@ -21386,6 +21386,92 @@ fn dual_field_assign_keeps_rhs_list_alive() {
     );
 }
 
+// ─── F-018 (0.40.1.22): function returning a List<T> used as an index base ──
+// A regular function returning a List<T> consumed directly as an index base
+// (`f()[0]`) used to PANIC the resolved native emitter: the Index projection
+// read len/data via StructValue::get_field_at_index, which returns garbage for
+// runtime SSA aggregates (the same trap the Tuple arm already avoided via
+// build_extract_value). The garbage field was a pointer, so `.into_int_value()`
+// panicked — a codegen panic, forbidden by kernel §13.15. The projection now
+// uses build_extract_value, so native matches the VM (resolved-native L1
+// parity). Record-element direct-index (`f()[0].a` for List<Rec>) instead
+// returns a graceful Unsupported from the resolved slice, which fails closed to
+// the legacy emitter (correct output, no UB) — tracked in devdocs/v0.40/fix-
+// ledger.md. These tests cover the resolved-native-handled scalar/string cases.
+
+#[test]
+fn dual_f018_list_return_mut() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func f() -> List<i32> {
+            let xs = [1, 2];
+            xs[0] = 9;
+            return xs;
+        }
+        func main() -> i64 {
+            println(f()[0]);
+            0
+        }",
+        "9"
+    );
+}
+
+#[test]
+fn dual_f018_list_return_str_mut() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func f() -> List<string> {
+            let xs = [\"a\", \"b\"];
+            xs[1] = \"z\";
+            return xs;
+        }
+        func main() -> i64 {
+            println(f()[1]);
+            0
+        }",
+        "z"
+    );
+}
+
+#[test]
+fn dual_f018_list_return_nomut() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func f() -> List<i32> {
+            let xs = [1, 2];
+            return xs;
+        }
+        func main() -> i64 {
+            println(f()[0]);
+            0
+        }",
+        "1"
+    );
+}
+
+#[test]
+fn dual_f018_list_return_literal() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func f() -> List<i32> {
+            return [1, 2];
+        }
+        func main() -> i64 {
+            println(f()[0]);
+            0
+        }",
+        "1"
+    );
+}
+
 // ─── 0.35.21 (#8) inferred-width i32 overflow guards ──────────
 // CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
 // un-annotated bindings silently wrapped in the i64 register domain while
