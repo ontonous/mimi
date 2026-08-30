@@ -493,6 +493,39 @@ repro `/tmp/r24_rec_elem_mut2.mimi`=9、`/tmp/r24_rec_elem_field_mut.mimi`=5（�
 该路径属 F-010 在清遗留，生产 `mimi build` 走 `compile_checked` 已闭合。新 L1 回归测试统一走
 `dual_assert_prod!` 以对拍生产路径。
 
+### 0.40.1.25 — F-021：`sort_list` 对整数 `List` native E0700 fail-closed → 路由至 `sort` 内建（L1 等价）；其余元素类型诚实 fail-closed
+
+MODE-1 续扫 fail-closed 能力族：`let xs = [3, 1, 2]; sort_list(xs)`（`collections.mimi`
+的 `sort_list` 泛型内建）native（`mimi build`）**E0700 `no builtin or function named
+'sort_list'`**，VM（`mimi run`）给 `1/2/3`。双后端不对等（native 编译期拒绝、VM 排序）——
+kernel §5 判定 P0 fail-closed 分歧（无错值、可接受），但属真实能力缺口，应闭合。
+
+根因（`src/codegen/builtins/mod.rs` `compile_builtin_call`）：native 只接了元素专用内建
+`sort`（整数 i64-slot 冒泡排序）/ `sort_f64` / `sort_str`，`sort_list` 本身从未进分发表 →
+E0700。`sort_list` 是泛型，排序顺序由元素类型决定（VM 的 `builtin_sort_list` 按值种类
+Int/Float/String 排序）。
+
+修复（`src/codegen/expr/call/simple.rs` `compile_call`）：仅将**整数元素家族**
+（`i8/i16/i32/i64/int/u8/u16/u32/u64`）路由到已就绪的 `sort` 内建。整数在 data buffer
+中存为 i64，i64-slot 冒泡排序与 VM 的 Int 值排序给出**完全一致的值顺序与打印值**（L1 等价，
+无静默错排）。检测用 `infer_object_type` 取源类型名 `List<X>` 的元素部分——对正数字面量
+绑定与带类型注解的绑定可靠（均给出 `List<i64>`/`List<i32>`）；仅「推断型负数字面量列表」
+绑定 `let xs = [-3, 10, -1, 0, 5]` 因 `var_type_names` 未登记而取不到元素名（但 `xs[0]`/
+`len(xs)` 仍正常，属登记侧 quirk），属安全 fail-closed 而非静默错值。
+
+诚实边界（kernel §5 最坏类=静默错值，必 fail-closed）：`compile_call` 旧路径**无法可靠区分
+`List<i32>` 与 `List<bool>`/`List<string>`**（二者在 legacy 类型图里都塌缩为 i64 槽，
+`var_types`/`var_type_names` 又条件性为空），若把它们也塞进 i64-slot 排序会**静默错序
+（f64/string）或静默错打印（bool/char）——正是 §5 最坏类**。故 f64/string/bool/char/聚合
+元素类型一律诚实 fail-closed（清晰报错：native 暂不支持该元素类型的 `sort_list`，f64/string
+请用 `sort_f64`/`sort_str`）。它们是**已登记能力缺口**（VM 支持、native 拒绝）而非静默错值，
+留待后续轮次经 **resolved emitter**（携带可靠元素类型信息）统一路由，不在本微冲刺引入新
+启发式/类型白名单/形状枚举/调用点镜像（§3 升级规避）。
+
+不变量类别: L1（双后端等价，闭合整数 `List` 排序；其余元素类型 fail-closed 诚实拒绝，无静默错值）
+测试: `src/tests/dual_backend.rs::dual_f021_sort_list_int_native`、
+`src/tests/dual_backend.rs::dual_f021_sort_list_int_negative_annotated_native`
+
 ### 0.40.1.24 — F-020：match 绑定 record 后改字段（`Some(r) => { r.a = 5 }`）native E0713 fail-closed → 注册内层 record 类型（受 `type_llvm` 门控），L1 等价
 
 MODE-1 续扫 fail-closed 能力族：`match Some(r) { Some(r) => { r.a = 5; println(r.a); } }`

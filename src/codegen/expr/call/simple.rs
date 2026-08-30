@@ -6994,6 +6994,43 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
             }
+            // 0.40.1.25 (F-021): `sort_list` is a generic builtin whose element
+            // type decides the sort order (the VM's builtin_sort_list orders by
+            // value kind: Int/Float/String). Native codegen only wired the
+            // element-specific builtins `sort` (int i64-slot bubble sort),
+            // `sort_f64`, `sort_str` — `sort_list` itself was never routed and
+            // failed closed with E0700. Route only the integer element family to
+            // the already-working `sort` builtin. Integers live as i64 in the
+            // data buffer, so i64-slot bubble sort yields identical value-ordering
+            // AND identical printed values to the VM (L1 parity, no silent
+            // mis-sort). Floating-point, string, bool, char and aggregate element
+            // types are intentionally left fail-closed: the legacy `compile_call`
+            // path cannot distinguish `List<i32>` from `List<bool>`/`List<string>`
+            // (both collapse to i64 slots; `var_types`/`var_type_names` are
+            // conditionally empty), and routing them to the i64-slot sort would
+            // silently mis-order (f64/string) or mis-print (bool/char) — the
+            // kernel §5 worst class. They remain a documented capability gap (VM
+            // supports them; native declines) for a later round that routes
+            // `sort_list` through the resolved emitter, which carries reliable
+            // element-type info.
+            if name == "sort_list" {
+                let obj = self.infer_object_type(&args[0], vars);
+                let elem = obj
+                    .strip_prefix("List<")
+                    .and_then(|s| s.strip_suffix('>'));
+                let routed = match elem {
+                    Some("i32") | Some("i64") | Some("int") | Some("u8") | Some("u16")
+                    | Some("u32") | Some("u64") | Some("i8") | Some("i16") => "sort",
+                    _ => {
+                        return Err(CompileError::Generic(format!(
+                            "sort_list: element type '{obj}' is not supported by the native backend for sort_list (use sort_f64/sort_str for floating-point/string lists; integer lists are supported)"
+                        )));
+                    }
+                };
+                return self
+                    .compile_builtin_call(routed, &metadata_args)
+                    .map_err(|e| CompileError::Generic(e.to_string()));
+            }
             return self
                 .compile_builtin_call(name, &metadata_args)
                 .map_err(|e| CompileError::Generic(e.to_string()));

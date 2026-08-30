@@ -21523,6 +21523,55 @@ fn dual_f020_match_bound_record_mut() {
     );
 }
 
+// F-021 (0.40.1.25): `sort_list` for integer lists was never routed in the
+// native codegen (only the element-specific `sort`/`sort_f64`/`sort_str`
+// builtins were), so native failed closed with E0700 while the VM sorted. The
+// legacy `compile_call` path cannot reliably distinguish `List<i32>` from
+// `List<bool>`/`List<string>` (both collapse to i64 slots and `var_types`/
+// `var_type_names` are conditionally empty), so only the integer element family
+// is routed to the already-working `sort` builtin — integers live as i64 in the
+// data buffer, giving identical value-ordering AND printed values to the VM (L1
+// parity). f64/string/bool/char/aggregate element types stay fail-closed (a
+// documented capability gap; the VM supports them but native declines rather
+// than silently mis-sort/mis-print — the kernel §5 worst class).
+#[test]
+fn dual_f021_sort_list_int_native() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func main() -> i32 {
+            let xs = [3, 1, 2];
+            let s = sort_list(xs);
+            println(s[0]);
+            println(s[1]);
+            println(s[2]);
+            0
+        }",
+        "1\n2\n3"
+    );
+}
+
+#[test]
+fn dual_f021_sort_list_int_negative_annotated_native() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func main() -> i32 {
+            let xs: List<i32> = [-3, 10, -1, 0, 5];
+            let s = sort_list(xs);
+            println(s[0]);
+            println(s[1]);
+            println(s[2]);
+            println(s[3]);
+            println(s[4]);
+            0
+        }",
+        "-3\n-1\n0\n5\n10"
+    );
+}
+
 // CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
 // un-annotated bindings silently wrapped in the i64 register domain while
 // codegen's checked i32 addition trapped (E0802). The inference path now
