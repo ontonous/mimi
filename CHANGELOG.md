@@ -493,6 +493,41 @@ repro `/tmp/r24_rec_elem_mut2.mimi`=9、`/tmp/r24_rec_elem_field_mut.mimi`=5（�
 该路径属 F-010 在清遗留，生产 `mimi build` 走 `compile_checked` 已闭合。新 L1 回归测试统一走
 `dual_assert_prod!` 以对拍生产路径。
 
+### 0.40.1.24 — F-020：match 绑定 record 后改字段（`Some(r) => { r.a = 5 }`）native E0713 fail-closed → 注册内层 record 类型（受 `type_llvm` 门控），L1 等价
+
+MODE-1 续扫 fail-closed 能力族：`match Some(r) { Some(r) => { r.a = 5; println(r.a); } }`
+native（`mimi build`）**E0713 `type 'Option<R>' is not a struct`**，VM（`mimi run`）给 `5`。
+双后端不对等（native 编译期拒绝、VM 运行）—— kernel §5 判定 P0 fail-closed 分歧（无错值、
+可接受），但属真实能力缺口，应闭合。
+
+根因（`src/codegen/expr/match.rs` `bind_pattern_variables` 的 `Constructor` 臂）：内建 `Option<T>`
+不在 `type_defs` 中，故 `Some(r)` 匹配时 `variant_owner = None` → `payload_ast = None`，绑定变量
+`r` 从未登记内层 `R` 的 AST 类型；后续 `r.a` 字段访问把 `r` 解析为 `Option<R>` 而报错。注意
+`cap_match` 走 **legacy** 发射器（`match` 含臂内 mutation，resolved 不收），故错误来自 legacy
+`access.rs::expect_struct_type`。
+
+修复（S2 合规：复用既有 `type_llvm` 注册表为唯一真相源、无新启发式 / 类型白名单 / 形状枚举）：
+新增独立 `option_inner_ty`（`ok_expected_ty` 维持 `Result`/`Ok` 原状，不改动既有泛型 `Result`
+行为），**仅当** `Some` 内层类型是 `type_llvm` 中已登记的**具体 record**（concrete record）时才
+登记绑定变量类型。`Some(r)` 现把 `r` 登记为 `R`，`r.a` 读写经既有 i64-handle 记录逻辑正确解析
+（inttoptr + GEP）。
+
+为何必须门控（避免回退）：初版把 `derive` 闭包扩展为对 `Option<T>` 一律产出内层类型，但泛型
+`func flip<linear T>(o: Option<T>) -> Option<T> { match o { Some(x) => Some(attach(x)), ... } }`
+（dual_generic_linear_option_flip_cap_ok / dual_session_option_extract_roundtrip）在 native 单态
+化时 match 臂值类型无法 unify（`{i1,i64}` vs `{i1,{i1,i64}}` PANIC），回归 2 项测试。根因：泛型
+`Option<T>` 内层是类型变量占位（lowering 成 struct 占位），一律登记会破坏单态化臂值 unify。
+门控到 `type_llvm` 已登记的具体 record 后：泛型 `Option<T>` 与线性 `Option<cap>`（i64 handle，
+非 struct）一律落到既有 legacy LLVM-type fallback，回归消失。
+
+分类: 一次性缺陷（legacy match 绑定内层类型登记补全，与既有 `ok_expected_ty`/`err_expected_ty`
+同族，未触 S2/S3）。
+不变量类别: L1（双后端等价 —— `Some(r)` 绑定 record 后 `r.a=5` native≡VM 给 5；相邻形状零回归；
+  泛型 `Option<T>` / `Option<cap>` 单态化回退测试绿）
+测试: `src/tests/dual_backend.rs::dual_f020_match_bound_record_mut`（5）
+（经 `dual_assert_prod!`——生产 `compile_checked` 路径，≡ `mimi build`，双后端 run/build/exec MATCH）；
+repro `/tmp/cap_match.mimi`=5 双后端一致
+
 ### 0.40.1.23 — F-019：`char_at` 内建在 native 代码生成未被路由（E0700 fail-closed）→ 路由至 `str_char_at` 实现，L1 等价
 
 MODE-1 续扫 fail-closed 能力族（F-018 已闭合 panic 红线，本族为低优先 fail-closed 分歧）：

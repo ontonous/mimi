@@ -21494,6 +21494,35 @@ fn dual_f019_char_at_builtin_native() {
         "e"
     );
 }
+
+// ─── 0.40.1.24 (F-020) match-bound record mutation (`Some(r) => { r.a = 5 }`) ──
+// Built-in `Option<T>` is not in `type_defs`, so for `match Some(x) { Some(r) =>
+// { r.a = 5 } }` the legacy match binding left `variant_owner = None` and never
+// registered the bound variable's inner record type. Field access on `r` then
+// resolved `r` as `Option<R>` and failed closed with E0713 "type 'Option<R>' is
+// not a struct" (VM ran, gave 5). The single-payload derivation in
+// bind_pattern_variables now also yields `Option`'s inner type (mirroring the
+// existing `Result`/`Ok` handling), so `r` is bound as `R` and `r.a` works.
+
+#[test]
+fn dual_f020_match_bound_record_mut() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "type R { a: i32 }
+        func main() -> i64 {
+            let r = Some(R { a: 1 });
+            match r {
+                Some(r) => { r.a = 5; println(r.a); }
+                None => { println(0); }
+            }
+            0
+        }",
+        "5"
+    );
+}
+
 // CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
 // un-annotated bindings silently wrapped in the i64 register domain while
 // codegen's checked i32 addition trapped (E0802). The inference path now

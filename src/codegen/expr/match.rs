@@ -333,6 +333,47 @@ impl<'ctx> CodeGenerator<'ctx> {
                     } else {
                         None
                     };
+                // 0.40.1.24 (F-020): built-in `Option<T>` single-payload variant
+                // (`Some`) is not in `type_defs`, so for `match Some(x) {
+                // Some(r) => ... }` `variant_owner` is None and `payload_ast`
+                // stays None — the inner record type was never registered, so
+                // `r.a` field access resolved `r` as `Option<R>` and failed
+                // closed (E0713 "type 'Option<R>' is not a struct") while the VM
+                // ran (gave 5). Register the inner type ONLY when it is a
+                // concrete record already present in `type_llvm` (the single
+                // source of truth for user record structs) — this deliberately
+                // excludes linear-cap and generic `Option<T>` payloads, which
+                // are already handled by the legacy fallback path. A naive
+                // blanket registration of every `Option` inner type broke
+                // generic `Option<T>` monomorphization (match-arm value
+                // unification) for dual_generic_linear_option_flip_cap_ok /
+                // dual_session_option_extract_roundtrip, so the gate is the
+                // `type_llvm` registry, not a new whitelist.
+                let option_inner_ty: Option<crate::ast::Type> = if payload_idx == 1
+                    && variant_owner.is_none()
+                {
+                    scrutinee_type.and_then(|st| match st.unlocated() {
+                        crate::ast::Type::Option(inner) => {
+                            let full = self.get_full_type_name(inner)?;
+                            if self.type_llvm.contains_key(&full) {
+                                Some(inner.as_ref().clone())
+                            } else {
+                                None
+                            }
+                        }
+                        crate::ast::Type::Name(n, args) if n == "Option" && !args.is_empty() => {
+                            let full = self.get_full_type_name(&args[0])?;
+                            if self.type_llvm.contains_key(&full) {
+                                Some(args[0].clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
                 let err_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
                     if payload_idx == 2 && variant_owner.is_none() {
                         let derive =
@@ -657,6 +698,21 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     if let Some(full) = self.get_full_type_name(err_ast) {
                                         self.var_type_names.insert(bind_name.clone(), full);
                                     }
+                                } else if let Some(ref opt_inner) = option_inner_ty {
+                                    // 0.40.1.24 (F-020): built-in `Some` payload whose
+                                    // inner type is a concrete record (already in
+                                    // `type_llvm`). Register the AST type so `r.a`
+                                    // field access recovers the struct, matching the
+                                    // VM. Gated to concrete records only — generic
+                                    // `Option<T>` and linear-cap payloads fall through
+                                    // to the legacy LLVM-type fallback (preserving
+                                    // dual_generic_linear_option_flip_cap_ok /
+                                    // dual_session_option_extract_roundtrip).
+                                    self.var_types.insert(bind_name.clone(), opt_inner.clone());
+                                    if let Some(full) = self.get_full_type_name(opt_inner) {
+                                        self.var_type_names.insert(bind_name.clone(), full);
+                                    }
+                                    self.register_list_elem_type(bind_name, opt_inner);
                                 } else {
                                     // Built-in constructor (Ok/Err/Some/None) from
                                     // Result/Option. The AST type is not in type_defs,
