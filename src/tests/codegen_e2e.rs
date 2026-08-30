@@ -1952,6 +1952,10 @@ fn e2e_valgrind_a2_value_glue_string_returns() {
             value
         }
         func temporary() -> string { "a" + "b" }
+        func early(flag: bool) -> string {
+            if flag { return "early" }
+            "late"
+        }
         func legacy_temporary() -> string {
             let marker = Some(1)
             if let Some(value) = marker {
@@ -1965,6 +1969,7 @@ fn e2e_valgrind_a2_value_glue_string_returns() {
                 println(literal())
                 println(local())
                 println(temporary())
+                println(early(true))
                 println(legacy_temporary())
                 i = i + 1
             }
@@ -1973,7 +1978,113 @@ fn e2e_valgrind_a2_value_glue_string_returns() {
         "#,
     )
     .expect("A2 StringBox glue must be Valgrind-clean");
-    assert_eq!(stdout.lines().count(), 64);
+    assert_eq!(stdout.lines().count(), 80);
+}
+
+#[test]
+fn e2e_valgrind_a2_value_glue_product_returns() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run_with_value_glue_valgrind(
+        r#"
+        type Pair {
+            left: string,
+            right: string,
+            number: i32,
+        }
+        type Outer {
+            pair: Pair,
+            tail: string,
+        }
+        func make_tuple() -> (string, string, i32) {
+            let left = "tuple-left"
+            let right = "tuple-right"
+            (left, right, 7)
+        }
+        func make_pair() -> Pair {
+            let left = "record-left"
+            let right = "record-right"
+            Pair { left: left, right: right, number: 9 }
+        }
+        func make_pair_explicit() -> Pair {
+            return Pair { left: "explicit-left", right: "explicit-right", number: 10 }
+        }
+        func make_outer() -> Outer {
+            let pair = make_pair()
+            let tail = "outer-tail"
+            Outer { pair: pair, tail: tail }
+        }
+        func main() -> i32 {
+            let mut i = 0
+            while i < 8 {
+                let tuple = make_tuple()
+                println(tuple.0)
+                println(tuple.1)
+                let pair = make_pair()
+                println(pair.left)
+                let explicit = make_pair_explicit()
+                println(explicit.right)
+                let outer = make_outer()
+                println(outer.pair.right)
+                println(outer.tail)
+                i = i + 1
+            }
+            0
+        }
+        "#,
+    )
+    .expect("A2 product glue must be Valgrind-clean");
+    assert_eq!(stdout.lines().count(), 48);
+}
+
+#[test]
+fn e2e_valgrind_a2_value_glue_product_returns_legacy_caller() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let stdout = legacy_codegen_compile_and_run_with_value_glue_valgrind(
+        r#"
+        type Pair { left: string, right: string, number: i32 }
+        type Outer { pair: Pair, tail: string }
+        func make_pair() -> Pair {
+            Pair { left: "legacy-left", right: "legacy-right", number: 11 }
+        }
+        func make_pair_explicit() -> Pair {
+            return Pair { left: "legacy-explicit-left", right: "legacy-explicit-right", number: 12 }
+        }
+        func make_outer() -> Outer {
+            Outer { pair: make_pair(), tail: "legacy-tail" }
+        }
+        func main() -> i32 {
+            let mut i = 0
+            while i < 8 {
+                let pair = make_pair()
+                println(pair.left)
+                println(pair.right)
+                let explicit = make_pair_explicit()
+                println(explicit.left)
+                let outer = make_outer()
+                println(outer.pair.left)
+                println(outer.tail)
+                i = i + 1
+            }
+            0
+        }
+        "#,
+    )
+    .expect("legacy caller A2 product glue must be Valgrind-clean");
+    assert_eq!(stdout.lines().count(), 40);
 }
 
 #[test]

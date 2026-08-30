@@ -71,6 +71,9 @@ impl GluePlan {
                     .map(Self::derive)
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+            OwnershipClass::Union(_) => {
+                return Err(GlueDeriveError::Unsupported("union"));
+            }
             OwnershipClass::Array(element) => Self::Array(Box::new(Self::derive(element)?)),
             OwnershipClass::OpaqueHandle(_) => Self::OpaqueNoop,
             OwnershipClass::Linear { kind, .. } => return Err(GlueDeriveError::Linear(*kind)),
@@ -100,6 +103,37 @@ impl GluePlan {
             Self::OpaqueNoop => "opaque".into(),
         }
     }
+
+    /// Whether this slice has an emitter for the entire shape.  Lists,
+    /// variants, arrays, and opaque handles already have plans, but remain
+    /// closed until their element/tag/runtime-handle contracts land with
+    /// dedicated memory tests.
+    fn is_emitted(&self) -> bool {
+        match self {
+            Self::Trivial | Self::StringBox => true,
+            Self::Tuple(fields) | Self::Record(fields) => fields.iter().all(Self::is_emitted),
+            Self::List(_)
+            | Self::Option(_)
+            | Self::Result { .. }
+            | Self::Array(_)
+            | Self::OpaqueNoop => false,
+        }
+    }
+
+    fn owns_heap(&self) -> bool {
+        match self {
+            Self::StringBox => true,
+            Self::Tuple(fields) | Self::Record(fields) => fields.iter().any(Self::owns_heap),
+            Self::List(_) | Self::Option(_) | Self::Result { .. } | Self::Array(_) => true,
+            Self::Trivial | Self::OpaqueNoop => false,
+        }
+    }
+
+    fn is_adoptable_return(&self) -> bool {
+        self.is_emitted()
+            && self.owns_heap()
+            && matches!(self, Self::StringBox | Self::Tuple(_) | Self::Record(_))
+    }
 }
 
 fn product_suffix(prefix: &str, fields: &[GluePlan]) -> String {
@@ -121,10 +155,96 @@ struct GluePair<'ctx> {
     drop: FunctionValue<'ctx>,
 }
 
+fn llvm_type_symbol_suffix(ty: BasicTypeEnum<'_>) -> String {
+    // LLVM's own textual type is canonical within a module and captures every
+    // ABI-relevant scalar width, packing bit, array length, and nested field.
+    // Hex encoding makes it a collision-free symbol component without relying
+    // on randomized Rust hashes or source-level type names.
+    ty.print_to_string()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn glue_shape_error(plan: &GluePlan, ty: BasicTypeEnum<'_>, detail: &str) -> CompileError {
+    CompileError::Unsupported(format!(
+        "derived value glue `{}` does not match LLVM type `{}`: {detail}",
+        plan.symbol_suffix(),
+        ty.print_to_string()
+    ))
+}
+
+fn validate_plan_type(plan: &GluePlan, ty: BasicTypeEnum<'_>) -> Result<(), CompileError> {
+    match plan {
+        GluePlan::Trivial => match ty {
+            BasicTypeEnum::IntType(_)
+            | BasicTypeEnum::FloatType(_)
+            | BasicTypeEnum::PointerType(_)
+            | BasicTypeEnum::VectorType(_)
+            | BasicTypeEnum::ScalableVectorType(_) => Ok(()),
+            _ => Err(glue_shape_error(
+                plan,
+                ty,
+                "a trivial ownership leaf must use a scalar LLVM ABI",
+            )),
+        },
+        GluePlan::StringBox => {
+            let BasicTypeEnum::StructType(string) = ty else {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "StringBox requires a struct ABI",
+                ));
+            };
+            let fields = string.get_field_types();
+            if fields.len() == 2
+                && matches!(fields[0], BasicTypeEnum::PointerType(_))
+                && matches!(fields[1], BasicTypeEnum::IntType(integer) if integer.get_bit_width() == 64)
+            {
+                Ok(())
+            } else {
+                Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "StringBox requires the canonical {ptr, i64} ABI",
+                ))
+            }
+        }
+        GluePlan::Tuple(fields) | GluePlan::Record(fields) => {
+            let BasicTypeEnum::StructType(product) = ty else {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "product glue requires a by-value struct ABI",
+                ));
+            };
+            let llvm_fields = product.get_field_types();
+            if fields.len() != llvm_fields.len() {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "ownership and LLVM product arities differ",
+                ));
+            }
+            for (field, llvm_field) in fields.iter().zip(llvm_fields) {
+                validate_plan_type(field, llvm_field)?;
+            }
+            Ok(())
+        }
+        _ => Err(glue_shape_error(
+            plan,
+            ty,
+            "this ownership shape has no emitter in the current slice",
+        )),
+    }
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
-    /// Clone a value through derived glue.  Slice 0.40.3.1 intentionally emits
-    /// only StringBox; every broader plan remains fail-closed until its emitter
-    /// and caller-side adoption are landed together.
+    /// Clone a value through glue derived from the canonical ownership class
+    /// and the concrete LLVM ABI as a pair.  The ABI half is essential for
+    /// products: `(i32, string)` and `(i64, string)` have the same ownership
+    /// shape but require different function signatures.
     pub(in crate::codegen) fn clone_value_with_derived_glue(
         &self,
         class: &OwnershipClass,
@@ -133,42 +253,152 @@ impl<'ctx> CodeGenerator<'ctx> {
         let plan = GluePlan::derive(class).map_err(|error| {
             CompileError::Unsupported(format!("cannot derive value glue: {error}"))
         })?;
-        let pair = self.ensure_value_glue(&plan)?;
-        let BasicValueEnum::StructValue(value) = value else {
-            return Err(CompileError::Unsupported(
-                "StringBox clone glue requires the canonical {ptr, i64} value ABI".into(),
-            ));
-        };
+        let ty = value.get_type();
+        let pair = self.ensure_value_glue(&plan, ty)?;
         let call = self.build_call(
             pair.clone,
-            &[BasicMetadataValueEnum::StructValue(value)],
+            &[BasicMetadataValueEnum::from(value)],
             "value_clone_glue",
         )?;
         call_try_basic_value(&call)
             .ok_or_else(|| CompileError::LlvmError("value clone glue returned void".into()))
     }
 
-    /// The first return-adoption slice produces a fresh, untracked StringBox.
-    /// Its callee may therefore free the original heap scope instead of
-    /// draining it wholesale.  Composite plans keep the old transfer path.
-    pub(in crate::codegen) fn value_glue_makes_return_independent(
+    /// Check whether this exact ownership/ABI pair is covered by the adopted
+    /// return slice. Unsupported categories return false so their old,
+    /// separately-gated path remains intact. A covered category with a shape
+    /// mismatch is a hard error rather than a silent fallback.
+    pub(in crate::codegen) fn value_glue_can_adopt_return(
         &self,
         class: &OwnershipClass,
-    ) -> bool {
-        self.value_glue_enabled() && matches!(GluePlan::derive(class), Ok(GluePlan::StringBox))
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<bool, CompileError> {
+        if !self.value_glue_enabled() {
+            return Ok(false);
+        }
+        let Ok(plan) = GluePlan::derive(class) else {
+            return Ok(false);
+        };
+        if !plan.is_adoptable_return() {
+            return Ok(false);
+        }
+        validate_plan_type(&plan, ty)?;
+        Ok(true)
     }
 
-    fn ensure_value_glue(&self, plan: &GluePlan) -> Result<GluePair<'ctx>, CompileError> {
+    /// Clone an adopted return, yielding `None` when the category intentionally
+    /// stays on the legacy ownership path.
+    pub(in crate::codegen) fn clone_return_with_derived_glue(
+        &self,
+        class: &OwnershipClass,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        if !self.value_glue_can_adopt_return(class, value.get_type())? {
+            return Ok(None);
+        }
+        self.clone_value_with_derived_glue(class, value).map(Some)
+    }
+
+    /// Register the heap leaves of a freshly-cloned return in the caller's
+    /// active scope. This mirrors clone derivation from the same plan, so the
+    /// caller cannot accidentally free a different set of fields.
+    pub(in crate::codegen) fn register_returned_value_with_derived_glue(
+        &self,
+        class: &OwnershipClass,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<bool, CompileError> {
+        if !self.value_glue_can_adopt_return(class, value.get_type())? {
+            return Ok(false);
+        }
+        let plan = GluePlan::derive(class).map_err(|error| {
+            CompileError::Unsupported(format!("cannot derive returned-value tracking: {error}"))
+        })?;
+        self.register_returned_plan(&plan, value, value.get_type())?;
+        Ok(true)
+    }
+
+    fn register_returned_plan(
+        &self,
+        plan: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        validate_plan_type(plan, ty)?;
         match plan {
-            GluePlan::StringBox => self.ensure_string_glue_pair(plan),
+            GluePlan::Trivial => Ok(()),
+            GluePlan::StringBox => {
+                let BasicValueEnum::StructValue(value) = value else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned StringBox tracking requires a struct",
+                    ));
+                };
+                let data = self
+                    .build_extract_value(value.into(), 0, "returned_glue_string_data")?
+                    .into_pointer_value();
+                self.register_heap_alloc(data);
+                Ok(())
+            }
+            GluePlan::Tuple(fields) | GluePlan::Record(fields) => {
+                let BasicTypeEnum::StructType(product) = ty else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned product tracking requires a struct",
+                    ));
+                };
+                let BasicValueEnum::StructValue(product_value) = value else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned product tracking requires a struct value",
+                    ));
+                };
+                for (index, (field, field_ty)) in
+                    fields.iter().zip(product.get_field_types()).enumerate()
+                {
+                    let field_value = self.build_extract_value(
+                        product_value.into(),
+                        index as u32,
+                        "returned_glue_product_field",
+                    )?;
+                    self.register_returned_plan(field, field_value, field_ty)?;
+                }
+                Ok(())
+            }
+            _ => Err(glue_shape_error(
+                plan,
+                ty,
+                "returned-value tracking is not emitted for this shape",
+            )),
+        }
+    }
+
+    fn ensure_value_glue(
+        &self,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<GluePair<'ctx>, CompileError> {
+        validate_plan_type(plan, ty)?;
+        match plan {
+            GluePlan::StringBox => self.ensure_string_glue_pair(plan, ty),
+            GluePlan::Tuple(_) | GluePlan::Record(_) if plan.is_emitted() => {
+                self.ensure_product_glue_pair(plan, ty)
+            }
             _ => Err(CompileError::Unsupported(format!(
-                "value glue plan `{}` is derived but not emitted in 0.40.3.1",
+                "value glue plan `{}` is derived but not emitted in the current slice",
                 plan.symbol_suffix()
             ))),
         }
     }
 
-    fn ensure_string_glue_pair(&self, plan: &GluePlan) -> Result<GluePair<'ctx>, CompileError> {
+    fn ensure_string_glue_pair(
+        &self,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<GluePair<'ctx>, CompileError> {
+        validate_plan_type(plan, ty)?;
         let suffix = plan.symbol_suffix();
         let clone_name = format!("mimi_value_clone_glue__{suffix}");
         let drop_name = format!("mimi_value_drop_glue__{suffix}");
@@ -208,6 +438,178 @@ impl<'ctx> CodeGenerator<'ctx> {
             None => self.emit_string_drop_glue(&drop_name)?,
         };
         Ok(GluePair { clone, drop })
+    }
+
+    fn ensure_product_glue_pair(
+        &self,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<GluePair<'ctx>, CompileError> {
+        validate_plan_type(plan, ty)?;
+        let BasicTypeEnum::StructType(product) = ty else {
+            return Err(glue_shape_error(
+                plan,
+                ty,
+                "product glue requires a struct ABI",
+            ));
+        };
+        let suffix = format!(
+            "{}__llvm_{}",
+            plan.symbol_suffix(),
+            llvm_type_symbol_suffix(ty)
+        );
+        let clone_name = format!("mimi_value_clone_glue__{suffix}");
+        let drop_name = format!("mimi_value_drop_glue__{suffix}");
+        let clone_type = product.fn_type(&[BasicMetadataTypeEnum::StructType(product)], false);
+        let drop_type = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::StructType(product)], false);
+
+        let clone = match self.module.get_function(&clone_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == clone_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{clone_name}`"
+                )))
+            }
+            None => self.emit_product_clone_glue(plan, product, &clone_name)?,
+        };
+        let drop = match self.module.get_function(&drop_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == drop_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{drop_name}`"
+                )))
+            }
+            None => self.emit_product_drop_glue(plan, product, &drop_name)?,
+        };
+        Ok(GluePair { clone, drop })
+    }
+
+    fn product_plan_fields<'plan>(
+        plan: &'plan GluePlan,
+    ) -> Result<&'plan [GluePlan], CompileError> {
+        match plan {
+            GluePlan::Tuple(fields) | GluePlan::Record(fields) => Ok(fields),
+            _ => Err(CompileError::Unsupported(format!(
+                "value glue `{}` is not a product",
+                plan.symbol_suffix()
+            ))),
+        }
+    }
+
+    fn emit_product_clone_glue(
+        &self,
+        plan: &GluePlan,
+        product: inkwell::types::StructType<'ctx>,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let function = self.module.add_function(
+            name,
+            product.fn_type(&[BasicMetadataTypeEnum::StructType(product)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let source = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("product clone glue parameter missing".into())
+                })?
+                .into_struct_value();
+            let fields = Self::product_plan_fields(plan)?;
+            let llvm_fields = product.get_field_types();
+            let mut cloned = source;
+            for (index, (field, field_ty)) in fields.iter().zip(llvm_fields).enumerate() {
+                if matches!(field, GluePlan::Trivial) {
+                    continue;
+                }
+                let pair = self.ensure_value_glue(field, field_ty)?;
+                let value =
+                    self.build_extract_value(source.into(), index as u32, "clone_product_field")?;
+                let call = self.build_call(
+                    pair.clone,
+                    &[BasicMetadataValueEnum::from(value)],
+                    "clone_product_child",
+                )?;
+                let child = call_try_basic_value(&call).ok_or_else(|| {
+                    CompileError::LlvmError("product child clone returned void".into())
+                })?;
+                cloned = self
+                    .builder
+                    .build_insert_value(cloned, child, index as u32, "clone_product_insert")
+                    .map_err(|error| {
+                        CompileError::LlvmError(format!("product clone insert: {error}"))
+                    })?
+                    .into_struct_value();
+            }
+            self.build_return(Some(&cloned))
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
+    fn emit_product_drop_glue(
+        &self,
+        plan: &GluePlan,
+        product: inkwell::types::StructType<'ctx>,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let function = self.module.add_function(
+            name,
+            self.context
+                .void_type()
+                .fn_type(&[BasicMetadataTypeEnum::StructType(product)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let source = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("product drop glue parameter missing".into())
+                })?
+                .into_struct_value();
+            let fields = Self::product_plan_fields(plan)?;
+            let llvm_fields = product.get_field_types();
+            for (index, (field, field_ty)) in fields.iter().zip(llvm_fields).enumerate() {
+                if matches!(field, GluePlan::Trivial) {
+                    continue;
+                }
+                let pair = self.ensure_value_glue(field, field_ty)?;
+                let value =
+                    self.build_extract_value(source.into(), index as u32, "drop_product_field")?;
+                self.build_call(
+                    pair.drop,
+                    &[BasicMetadataValueEnum::from(value)],
+                    "drop_product_child",
+                )?;
+            }
+            self.build_return(None)
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
     }
 
     fn string_box_type(&self) -> inkwell::types::StructType<'ctx> {
@@ -383,14 +785,64 @@ mod tests {
         let context = inkwell::context::Context::create();
         let generator = CodeGenerator::new(&context, "value_glue_test");
         let plan = GluePlan::derive(&OwnershipClass::StringBox).unwrap();
-        let first = generator.ensure_value_glue(&plan).unwrap();
-        let second = generator.ensure_value_glue(&plan).unwrap();
+        let string = generator.string_box_type();
+        let first = generator.ensure_value_glue(&plan, string.into()).unwrap();
+        let second = generator.ensure_value_glue(&plan, string.into()).unwrap();
         assert_eq!(first.clone, second.clone);
         assert_eq!(first.drop, second.drop);
         assert_eq!(first.clone.get_linkage(), Linkage::Internal);
         assert_eq!(first.drop.get_linkage(), Linkage::Internal);
         generator.module.verify().unwrap();
         assert!(generator.emit_ir().contains("clone_string_is_null"));
+    }
+
+    #[test]
+    fn product_glue_is_recursive_abi_keyed_and_idempotent() {
+        let context = inkwell::context::Context::create();
+        let generator = CodeGenerator::new(&context, "value_product_glue_test");
+        let string = generator.string_box_type();
+        let product = context.struct_type(
+            &[
+                BasicTypeEnum::StructType(string),
+                BasicTypeEnum::IntType(context.i64_type()),
+            ],
+            false,
+        );
+        let class = OwnershipClass::Tuple(vec![OwnershipClass::StringBox, OwnershipClass::Scalar]);
+        let plan = GluePlan::derive(&class).unwrap();
+        let first = generator.ensure_value_glue(&plan, product.into()).unwrap();
+        let second = generator.ensure_value_glue(&plan, product.into()).unwrap();
+        assert_eq!(first.clone, second.clone);
+        assert_eq!(first.drop, second.drop);
+        assert_eq!(first.clone.get_linkage(), Linkage::Internal);
+        assert_eq!(first.drop.get_linkage(), Linkage::Internal);
+
+        // Ownership shape alone is insufficient as an ABI key: the narrow
+        // integer width must produce a distinct product symbol.
+        let narrow_product = context.struct_type(
+            &[
+                BasicTypeEnum::StructType(string),
+                BasicTypeEnum::IntType(context.i32_type()),
+            ],
+            false,
+        );
+        let narrow = generator
+            .ensure_value_glue(&plan, narrow_product.into())
+            .unwrap();
+        assert_ne!(first.clone, narrow.clone);
+        assert_ne!(first.drop, narrow.drop);
+        generator.module.verify().unwrap();
+        let ir = generator.emit_ir();
+        assert!(ir.contains("mimi_value_clone_glue__tuple"));
+        assert!(ir.contains("mimi_value_drop_glue__tuple"));
+    }
+
+    #[test]
+    fn union_glue_is_fail_closed() {
+        assert_eq!(
+            GluePlan::derive(&OwnershipClass::Union(vec![OwnershipClass::StringBox])),
+            Err(GlueDeriveError::Unsupported("union"))
+        );
     }
 
     #[test]
@@ -403,7 +855,8 @@ mod tests {
             None,
         );
         let plan = GluePlan::derive(&OwnershipClass::StringBox).unwrap();
-        let error = match generator.ensure_value_glue(&plan) {
+        let string = generator.string_box_type();
+        let error = match generator.ensure_value_glue(&plan, string.into()) {
             Err(error) => error,
             Ok(_) => panic!("reserved glue symbol must not be reused"),
         };

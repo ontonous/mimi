@@ -7563,6 +7563,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // data pointer is heap-owned (via `claim_string_return_value`), so
         // the registered pointer is always safe to free.
         let result = self.track_string_return_lifetime(name, result)?;
+        // A2 product adoption: tuple/record returns are cloned as one
+        // canonical ownership value in the callee. Register each fresh string
+        // leaf in the caller using the same OwnershipClass + LLVM ABI pair;
+        // do not rediscover fields from expression spelling or pointer shape.
+        let result = self.track_derived_product_return_lifetime(name, result)?;
         // B9 (audit): same ownership transfer for closures — when the callee
         // returns a `func(...) -> ...` value, register its env so the
         // caller's scope exit releases it (the callee claimed it on return).
@@ -7617,6 +7622,36 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         let loaded = self.build_load(sty, slot, "call_str_load")?;
         Ok(loaded.into_struct_value().into())
+    }
+
+    fn track_derived_product_return_lifetime(
+        &self,
+        callee_name: &str,
+        result: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if !self.value_glue_enabled() {
+            return Ok(result);
+        }
+        let Some(ret_ty) = self
+            .func_defs
+            .get(callee_name)
+            .and_then(|definition| definition.ret.as_ref())
+        else {
+            // Generic instances are resolved through their concrete caller
+            // path; an absent surface definition is not evidence that a
+            // product is safe to track, so remain fail-closed here.
+            return Ok(result);
+        };
+        let ownership = self.surface_ownership_class(ret_ty);
+        if !matches!(
+            ownership,
+            crate::codegen::abi::ownership::OwnershipClass::Tuple(_)
+                | crate::codegen::abi::ownership::OwnershipClass::Record(_)
+        ) {
+            return Ok(result);
+        }
+        self.register_returned_value_with_derived_glue(&ownership, result)?;
+        Ok(result)
     }
 
     /// B9 (audit): when the callee returns a closure (`func(...) -> ...`),

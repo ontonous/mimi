@@ -42,6 +42,11 @@ pub(in crate::codegen) enum OwnershipClass {
     },
     Tuple(Vec<OwnershipClass>),
     Record(Vec<OwnershipClass>),
+    /// C-style/overlapping storage.  Field ownership is useful to the coarse
+    /// legacy gates, but ordinary product glue must never visit every field:
+    /// only one union member is live and the active member is not encoded in
+    /// this class.
+    Union(Vec<OwnershipClass>),
     Array(Box<OwnershipClass>),
     Slice(Box<OwnershipClass>),
     Shared(Box<OwnershipClass>),
@@ -71,7 +76,7 @@ impl OwnershipClass {
             Self::Option(inner) => inner.requires_scope_drain(),
             Self::Shared(inner) => inner.requires_scope_drain(),
             Self::Result { ok, error } => ok.requires_scope_drain() || error.requires_scope_drain(),
-            Self::Tuple(fields) | Self::Record(fields) => {
+            Self::Tuple(fields) | Self::Record(fields) | Self::Union(fields) => {
                 fields.iter().any(Self::requires_scope_drain)
             }
             Self::Linear {
@@ -98,7 +103,7 @@ impl OwnershipClass {
             Self::Result { ok, error } => {
                 ok.contains_heap_collection() || error.contains_heap_collection()
             }
-            Self::Tuple(fields) | Self::Record(fields) => {
+            Self::Tuple(fields) | Self::Record(fields) | Self::Union(fields) => {
                 fields.iter().any(Self::contains_heap_collection)
             }
             Self::Linear {
@@ -119,7 +124,7 @@ impl OwnershipClass {
             Self::Result { ok, error } => {
                 ok.has_unclaimed_return_heap() || error.has_unclaimed_return_heap()
             }
-            Self::Tuple(fields) | Self::Record(fields) => {
+            Self::Tuple(fields) | Self::Record(fields) | Self::Union(fields) => {
                 fields.iter().any(Self::has_unclaimed_return_heap)
             }
             Self::Linear {
@@ -148,7 +153,7 @@ impl OwnershipClass {
             // while List<List<string>> and generic/user-record heads remain
             // admitted until the A2 glue matrix can decide them uniformly.
             Self::List(inner) => inner.nested_list_inner_is_unclaimed(),
-            Self::StringBox | Self::Generic | Self::Record(_) => false,
+            Self::StringBox | Self::Generic | Self::Record(_) | Self::Union(_) => false,
             Self::Scalar
             | Self::Tuple(_)
             | Self::OpaqueHandle(OpaqueHandleKind::ManagedCollection) => true,
@@ -232,14 +237,18 @@ fn classify_surface_inner(
                     TypeDefKind::Alias(inner) | TypeDefKind::Newtype(inner) => {
                         classify_surface_inner(inner, type_defs, active)
                     }
-                    TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {
-                        OwnershipClass::Record(
-                            fields
-                                .iter()
-                                .map(|field| classify_surface_inner(&field.ty, type_defs, active))
-                                .collect(),
-                        )
-                    }
+                    TypeDefKind::Record(fields) => OwnershipClass::Record(
+                        fields
+                            .iter()
+                            .map(|field| classify_surface_inner(&field.ty, type_defs, active))
+                            .collect(),
+                    ),
+                    TypeDefKind::Union(fields) => OwnershipClass::Union(
+                        fields
+                            .iter()
+                            .map(|field| classify_surface_inner(&field.ty, type_defs, active))
+                            .collect(),
+                    ),
                     TypeDefKind::Enum(_) => OwnershipClass::OpaqueHandle(OpaqueHandleKind::Runtime),
                 };
                 active.remove(&definition.name);
@@ -447,13 +456,11 @@ fn classify_nominal_fields(
                     || definition.qualified_name.ends_with(&format!(".{short}"))
             })
         })?;
-    if !matches!(
-        definition.kind,
-        crate::core::resolved::ResolvedTypeKind::Record
-            | crate::core::resolved::ResolvedTypeKind::Union
-    ) {
-        return None;
-    }
+    let is_union = match definition.kind {
+        crate::core::resolved::ResolvedTypeKind::Record => false,
+        crate::core::resolved::ResolvedTypeKind::Union => true,
+        _ => return None,
+    };
     let fields = definition
         .fields
         .iter()
@@ -461,7 +468,11 @@ fn classify_nominal_fields(
         .filter_map(|field| program.resolved_field_types().get(field))
         .map(|field| classify_resolved_inner(program, field, active))
         .collect();
-    Some(OwnershipClass::Record(fields))
+    Some(if is_union {
+        OwnershipClass::Union(fields)
+    } else {
+        OwnershipClass::Record(fields)
+    })
 }
 
 #[cfg(test)]
@@ -548,5 +559,54 @@ mod tests {
             result_class(&program, "pass"),
             OwnershipClass::Linear { .. }
         ));
+    }
+
+    #[test]
+    fn surface_union_remains_distinct_from_record() {
+        let tokens = crate::lexer::Lexer::new(
+            r#"
+            #[repr(C)]
+            type Cell = union { narrow: i32, wide: i64 }
+            func main() -> i32 { 0 }
+            "#,
+        )
+        .tokenize()
+        .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let type_defs = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                crate::ast::Item::Type(definition) => {
+                    Some((definition.name.clone(), definition.clone()))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            classify_surface(
+                &crate::ast::Type::Name("Cell".into(), Vec::new()),
+                &type_defs,
+            ),
+            OwnershipClass::Union(vec![OwnershipClass::Scalar, OwnershipClass::Scalar])
+        );
+    }
+
+    #[test]
+    fn checked_union_remains_distinct_from_record() {
+        let program = checked_program(
+            r#"
+            #[repr(C)]
+            type Cell = union { narrow: i32, wide: i64 }
+            func pass(value: Cell) -> Cell { value }
+            func main() -> i32 { 0 }
+            "#,
+        );
+
+        assert_eq!(
+            result_class(&program, "pass"),
+            OwnershipClass::Union(vec![OwnershipClass::Scalar, OwnershipClass::Scalar])
+        );
     }
 }

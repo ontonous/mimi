@@ -905,23 +905,38 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // 0.34.41 第二档: ensures guards before any return cleanup (legacy
         // emit_return checks ensures before heap teardown).
         self.emit_ensures_checks(callable, Some(value), &mut frame)?;
-        // Deep-eval 2026-08-09: enforce the string-return ownership contract.
-        // The caller-side track_string_return_lifetime frees the returned
-        // data pointer; resolved returns may hand back `.rodata` literals, so
-        // probe live heap registrations and heap-copy anything not owned.
-        let value = self.generator.claim_resolved_string_return(value)?;
-        // Heap-field records may contain String leaves pointing at .rodata
-        // literals. Transform those leaves to owned heap copies so the
-        // caller's scope-exit free is always safe.
-        let return_type_id = self
-            .program
-            .callable(&callable.owner)
-            .map(|c| c.signature.result.clone());
-        // NOTE (0.40.1.3, A3): the Set/Map return ownership fail-closed is
-        // enforced as a fatal top-level gate in `compile_checked` (native
-        // backend) before any emission, so it cannot be silently downgraded to
-        // the legacy emitter. See `native_return_owns_unclaimed_heap`.
-        let value = self.ensure_returned_heap_strings_owned(value, result_type, return_type_id)?;
+        let ownership = crate::codegen::abi::ownership::classify_resolved(
+            self.program,
+            &callable.signature.result,
+        );
+        // A2 (0.40.3.2): an adopted StringBox/tuple/record return is cloned as
+        // one canonical ownership value.  This replaces both the top-level
+        // string probe and the record-field recursion for that return, so no
+        // fresh child can be cloned twice and orphaned. Unsupported shapes
+        // keep the proven old path without widening the acceptance surface.
+        let glue_value = self
+            .generator
+            .clone_return_with_derived_glue(&ownership, value)?;
+        let glue_return_is_independent = glue_value.is_some();
+        let value = if let Some(value) = glue_value {
+            value
+        } else {
+            // Deep-eval 2026-08-09: enforce the string-return ownership
+            // contract. Resolved returns may hand back `.rodata` literals, so
+            // probe live heap registrations and heap-copy anything not owned.
+            let value = self.generator.claim_resolved_string_return(value)?;
+            // Heap-field records may contain String leaves pointing at .rodata
+            // literals. Transform those leaves to owned heap copies so the
+            // caller's scope-exit free is always safe.
+            let return_type_id = self
+                .program
+                .callable(&callable.owner)
+                .map(|c| c.signature.result.clone());
+            // NOTE (0.40.1.3, A3): the Set/Map return ownership fail-closed is
+            // enforced as a fatal top-level gate in `compile_checked` before
+            // any emission, so it cannot be downgraded to the legacy emitter.
+            self.ensure_returned_heap_strings_owned(value, result_type, return_type_id)?
+        };
         // Deep-eval 2026-08-09 (demos/07 custom Res segv): same claim for
         // custom-enum-shaped returns ({i32 tag, i64 payload}): the payload
         // box of boxed variants must survive the callee's scope-exit free —
@@ -946,14 +961,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         // inner string's data out from under the caller. Recurse into
         // nested struct fields: any transitively-reachable pointer means the
         // return owns heap data.
-        let ownership = crate::codegen::abi::ownership::classify_resolved(
-            self.program,
-            &callable.signature.result,
-        );
         let return_owns_heap = ownership.requires_scope_drain();
-        let glue_return_is_independent = self
-            .generator
-            .value_glue_makes_return_independent(&ownership);
         if return_owns_heap && !glue_return_is_independent {
             self.generator.drain_heap_scope();
         } else {
@@ -1820,11 +1828,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     Some(value) => Some(value),
                     None => Some(self.generator.zero_value_for(result_type)),
                 };
-                // Deep-eval 2026-08-09: same string-return ownership probe on
-                // early-return paths (see the implicit-return funnel).
-                let value = value
-                    .map(|value| self.generator.claim_resolved_string_return(value))
-                    .transpose()?;
                 // 0.36.15 L1: deferred blocks run LIFO before every return
                 // (legacy: pop_defer_scope before emit_return); pending
                 // on-failure compensations are discarded — normal exit.
@@ -1841,34 +1844,51 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     value,
                     frame,
                 )?;
-                // Heap-field records may contain String leaves pointing at
-                // .rodata literals. Make them owned before claiming pointer
-                // leaves for the deterministic drop.
                 let return_type_id = self
                     .program
                     .callable(&frame.owner)
                     .map(|c| c.signature.result.clone());
-                // NOTE (0.40.1.3, A3): the Set/Map return ownership fail-closed
-                // is enforced as a fatal top-level gate in `compile_checked`
-                // (native backend) before any emission.
-                let value = if let Some(value) = value {
-                    Some(self.ensure_returned_heap_strings_owned(
-                        value,
-                        result_type,
-                        return_type_id.clone(),
-                    )?)
+                let ownership = return_type_id
+                    .as_ref()
+                    .map(|type_id| {
+                        crate::codegen::abi::ownership::classify_resolved(self.program, type_id)
+                    })
+                    .unwrap_or(crate::codegen::abi::ownership::OwnershipClass::Unknown);
+                // A2 (0.40.3.2): early and implicit returns share the same
+                // adoption contract. Clone an admitted StringBox/product once
+                // after semantic guards, then let the callee flush every
+                // original allocation. Unsupported shapes retain the proven
+                // probe/recursive-claim path without widening the matrix.
+                let (value, glue_return_is_independent) = if let Some(value) = value {
+                    if let Some(cloned) = self
+                        .generator
+                        .clone_return_with_derived_glue(&ownership, value)?
+                    {
+                        (Some(cloned), true)
+                    } else {
+                        let value = self.generator.claim_resolved_string_return(value)?;
+                        // Heap-field records may contain String leaves pointing
+                        // at .rodata literals. Make them owned before claiming
+                        // pointer leaves for the deterministic drop.
+                        // NOTE (0.40.1.3, A3): the Set/Map return ownership
+                        // fail-closed is enforced before native emission.
+                        (
+                            Some(self.ensure_returned_heap_strings_owned(
+                                value,
+                                result_type,
+                                return_type_id.clone(),
+                            )?),
+                            false,
+                        )
+                    }
                 } else {
-                    None
+                    (None, false)
                 };
                 // Claim the heap pointers embedded in the returned value so
                 // the deterministic drop below frees only non-escaping local
                 // allocations. This prevents freeing a list/string data
                 // buffer that the caller is about to read.
-                if let Some(value) = value {
-                    let return_type_id = self
-                        .program
-                        .callable(&frame.owner)
-                        .map(|c| c.signature.result.clone());
+                if let (false, Some(value)) = (glue_return_is_independent, value) {
                     self.claim_returned_heap_pointers(value, result_type, return_type_id)?;
                 }
                 // Deterministic drop on every early return: emit path-specific
@@ -13184,17 +13204,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         BasicTypeEnum::IntType(t) if t.get_bit_width() == 64
                     ) =>
             {
-                // The return funnel has already normalized the top-level
-                // StringBox immediately before entering this recursive
-                // aggregate pass.  With A2 glue enabled that normalization is
-                // an unconditional clone; cloning it again would orphan the
-                // first fresh buffer.  Composite fields still recurse below
-                // and receive exactly one clone apiece.
-                if self.generator.value_glue_enabled() {
-                    Ok(sv.into())
-                } else {
-                    self.generator.claim_resolved_string_return(sv.into())
-                }
+                // Adopted StringBox/product returns bypass this legacy
+                // recursive pass entirely. Reaching this branch therefore
+                // means the enclosing shape is still on the old path (for
+                // example Option/List); normalize its leaf exactly once.
+                self.generator.claim_resolved_string_return(sv.into())
             }
             (BasicValueEnum::StructValue(sv), BasicTypeEnum::StructType(st)) => {
                 let field_displays: Option<Vec<String>> = if let Some(type_id) = type_id.as_ref() {
@@ -13549,6 +13563,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         ty: BasicTypeEnum<'ctx>,
         type_id: Option<ResolvedTypeId>,
     ) -> Result<(), CompileError> {
+        if let Some(type_id) = type_id.as_ref() {
+            let ownership =
+                crate::codegen::abi::ownership::classify_resolved(self.program, type_id);
+            if self
+                .generator
+                .register_returned_value_with_derived_glue(&ownership, value)?
+            {
+                return Ok(());
+            }
+        }
         if let Some(type_id) = type_id.as_ref() {
             if let Some(ResolvedType::Nominal {
                 item, arguments, ..

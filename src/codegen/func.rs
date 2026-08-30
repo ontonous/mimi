@@ -943,6 +943,35 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(val)
     }
 
+    pub(in crate::codegen) fn surface_ownership_class(
+        &self,
+        ty: &Type,
+    ) -> crate::codegen::abi::ownership::OwnershipClass {
+        let concrete = self.resolve_type(ty);
+        crate::codegen::abi::ownership::classify_surface(&concrete, &self.type_defs)
+    }
+
+    fn clone_surface_product_return_with_glue(
+        &self,
+        ret_ty_ast: Option<&Type>,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let Some(ret_ty_ast) = ret_ty_ast else {
+            return Ok(value);
+        };
+        let ownership = self.surface_ownership_class(ret_ty_ast);
+        if !matches!(
+            ownership,
+            crate::codegen::abi::ownership::OwnershipClass::Tuple(_)
+                | crate::codegen::abi::ownership::OwnershipClass::Record(_)
+        ) {
+            return Ok(value);
+        }
+        Ok(self
+            .clone_return_with_derived_glue(&ownership, value)?
+            .unwrap_or(value))
+    }
+
     pub(in crate::codegen) fn claim_string_return_value(
         &self,
         val: BasicValueEnum<'ctx>,
@@ -982,6 +1011,23 @@ impl<'ctx> CodeGenerator<'ctx> {
                 &crate::codegen::abi::ownership::OwnershipClass::StringBox,
                 val,
             );
+        }
+        // Product returns adopted by A2 are normalized once, after the value
+        // has been loaded/coerced into a by-value struct. Skip the legacy
+        // LLVM-shape field probe here so it cannot clone/claim child strings
+        // before the product glue clones the whole ownership value.
+        if self.value_glue_enabled() {
+            if let Some(ret_ty_ast) = self.current_fn_ret_ty_ast.as_ref() {
+                let ownership = self.surface_ownership_class(ret_ty_ast);
+                if matches!(
+                    ownership,
+                    crate::codegen::abi::ownership::OwnershipClass::Tuple(_)
+                        | crate::codegen::abi::ownership::OwnershipClass::Record(_)
+                ) && self.value_glue_can_adopt_return(&ownership, ret_type)?
+                {
+                    return Ok(val);
+                }
+            }
         }
         // 0.35.23 deep-eval (mimi-make native UAF): aggregate returns that
         // CARRY string fields — `(string, string)` tuples and records —
@@ -1757,6 +1803,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(v) => {
                 let adjusted = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                 let adjusted = self.load_return_value_if_needed(adjusted)?;
+                let adjusted = self.clone_surface_product_return_with_glue(ret_ty_ast, adjusted)?;
                 // 0.35.20 (#6): claim returned List variables' data buffers —
                 // null out the variable slot's data field AFTER the return
                 // value has been loaded, so the returned struct keeps the
@@ -4098,6 +4145,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // 0.35.20 (#6): List *literals* escaping the return get a deep-copied
         // buffer (no named slot to null) — must run before the flush below.
         let last_val = self.claim_returned_list_literals(last_val, expr)?;
+        // A2 product adoption must happen before the callee flushes its heap
+        // scope. The clone owns fresh StringBox leaves; all original leaves
+        // may then be released normally.
+        let last_val = self.clone_surface_product_return_with_glue(ret_ty_ast, last_val)?;
 
         // Pop scopes (discard compensations on normal exit)
         // A function owns exactly one shared-release frame. Popping only that

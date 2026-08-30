@@ -2,6 +2,34 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### 0.40.3.2 — A2：递归 product value glue 与双发射器返回收养
+
+value glue 的可执行面由 StringBox 扩展到 tuple/record product，当前递归叶只允许
+`Scalar / StringBox / Tuple / Record`。派生仍只消费 canonical `OwnershipClass`，并将
+具体 LLVM type 纳入 ABI 契约：struct arity/字段类型逐层严格校验，LLVM textual type 的
+确定性 hex 编码进入 symbol key，避免同 ownership shape、不同整数位宽的 product 发生
+clone/drop symbol 碰撞。
+
+- 新增 module-internal、幂等的 tuple/record clone/drop 函数族；父 glue 递归调用子 glue，
+  StringBox 叶各自产生独立 heap copy。
+- resolved 与 legacy 的显式 `return` / 隐式尾返回均统一收养：返回值只 clone 一次，callee
+  随后释放原 heap scope；resolved caller 和 legacy caller 均按同一 glue plan 登记新
+  StringBox 叶，避免字段形状二次猜测或重复登记。审计同时修复 resolved 早返回仍经旧漏斗
+  二次 clone StringBox 的遗漏。
+- `OwnershipClass::Union` 从 Record 独立出来；surface AST 与 checker-owned resolved type
+  都保留 union 身份。因当前元数据不携带 active-member tag，union glue 明确 fail-closed，
+  不会错误遍历重叠字段。
+- `List / Option / Result / Array / OpaqueHandle / Union / Linear / Generic / Unknown` 仍未开放；
+  默认开关保持关闭，E0723 与既有回退边界不变。
+
+不变量类别：L1（VM ≡ opt-out native ≡ opt-in native；resolved ≡ legacy caller）/
+L2（ownership + LLVM ABI 成对单源、union fail-closed）/ L3（递归 product 恰一次释放）
+
+测试：ownership 单测 6/6、A2 定向 8/8；三组 Valgrind 返回循环零 invalid access/definite
+leak；`dual_` 1117/0、`typecheck::` 112/0、`codegen_e2e` 209/0（5 ignored）、
+`v1_2_verification` 30/0；dispatch 200 成功/10 跳过且 fallback_rate=0；fmt/diff 绿。
+Clippy 仍被仓库既有全目标诊断债阻断，本纵切修改面无新增诊断。
+
 ### 0.40.3.1 — A2：派生 StringBox value glue 并 opt-in 收养返回路径
 
 A1 的 canonical `OwnershipClass` 首次驱动可执行的 per-type glue。新增

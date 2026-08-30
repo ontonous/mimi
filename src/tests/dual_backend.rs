@@ -131,6 +131,10 @@ func local() -> string {
     value
 }
 func temporary() -> string { "a" + "b" }
+func early(flag: bool) -> string {
+    if flag { return "early" }
+    "late"
+}
 func legacy_path() -> string {
     let marker = Some(1)
     if let Some(value) = marker {
@@ -149,6 +153,7 @@ func main() -> i32 {
     println(literal())
     println(local())
     println(temporary())
+    println(early(true))
     println(legacy_path())
     println(legacy_temporary())
     0
@@ -160,7 +165,7 @@ func main() -> i32 {
         .expect("existing return path must handle the A2 control program");
     let native = checked_codegen_compile_and_run_with_value_glue(source)
         .expect("A2 opt-in StringBox glue must compile and run");
-    assert_eq!(vm.trim(), "hello\nworld\nab\nlegacy\ncd");
+    assert_eq!(vm.trim(), "hello\nworld\nab\nearly\nlegacy\ncd");
     assert_eq!(baseline.trim(), vm.trim());
     assert_eq!(native.trim(), vm.trim());
 }
@@ -170,9 +175,11 @@ fn a2_value_glue_string_ir_is_called_and_deduplicated() {
     let source = r#"
 func first() -> string { "one" }
 func second() -> string { "two" }
+func explicit() -> string { return "three" }
 func main() -> i32 {
     println(first())
     println(second())
+    println(explicit())
     0
 }
 "#;
@@ -198,8 +205,174 @@ func main() -> i32 {
     );
     assert_eq!(drop_definitions, 1, "drop glue must be module-deduplicated");
     assert!(
-        clone_calls >= 2,
-        "both StringBox return sites must call derived clone glue; IR:\n{ir}"
+        clone_calls >= 3,
+        "all StringBox return sites must call derived clone glue; IR:\n{ir}"
+    );
+}
+
+#[test]
+fn dual_a2_value_glue_product_returns_opt_in() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+type Pair {
+    left: string,
+    right: string,
+    number: i32,
+}
+type Outer {
+    pair: Pair,
+    tail: string,
+}
+func make_tuple() -> (string, string, i32) {
+    let left = "tuple-left"
+    let right = "tuple-right"
+    (left, right, 7)
+}
+func make_pair() -> Pair {
+    let left = "record-left"
+    let right = "record-right"
+    Pair { left: left, right: right, number: 9 }
+}
+func make_pair_explicit() -> Pair {
+    return Pair { left: "explicit-left", right: "explicit-right", number: 10 }
+}
+func make_outer() -> Outer {
+    let pair = make_pair()
+    let tail = "outer-tail"
+    Outer { pair: pair, tail: tail }
+}
+func main() -> i32 {
+    let tuple = make_tuple()
+    println(tuple.0)
+    println(tuple.1)
+    println(tuple.2)
+    let pair = make_pair()
+    println(pair.left)
+    println(pair.right)
+    println(pair.number)
+    let explicit = make_pair_explicit()
+    println(explicit.left)
+    println(explicit.right)
+    println(explicit.number)
+    let outer = make_outer()
+    println(outer.pair.left)
+    println(outer.pair.right)
+    println(outer.tail)
+    0
+}
+"#;
+    check_source(source).expect("A2 product source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let baseline =
+        checked_codegen_compile_and_run(source).expect("existing product return path must compile");
+    let native = checked_codegen_compile_and_run_with_value_glue(source)
+        .expect("A2 product glue path must compile and run");
+    let expected = "tuple-left\ntuple-right\n7\nrecord-left\nrecord-right\n9\nexplicit-left\nexplicit-right\n10\nrecord-left\nrecord-right\nouter-tail";
+    assert_eq!(vm.trim(), expected);
+    assert_eq!(baseline.trim(), expected);
+    assert_eq!(native.trim(), expected);
+}
+
+#[test]
+fn dual_a2_value_glue_product_returns_legacy_caller() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+type Pair {
+    left: string,
+    right: string,
+    number: i32,
+}
+type Outer {
+    pair: Pair,
+    tail: string,
+}
+func make_pair() -> Pair {
+    Pair { left: "legacy-left", right: "legacy-right", number: 11 }
+}
+func make_pair_explicit() -> Pair {
+    return Pair { left: "legacy-explicit-left", right: "legacy-explicit-right", number: 12 }
+}
+func make_outer() -> Outer {
+    Outer { pair: make_pair(), tail: "legacy-tail" }
+}
+func main() -> i32 {
+    let pair = make_pair()
+    println(pair.left)
+    println(pair.right)
+    println(pair.number)
+    let explicit = make_pair_explicit()
+    println(explicit.left)
+    println(explicit.right)
+    println(explicit.number)
+    let outer = make_outer()
+    println(outer.pair.left)
+    println(outer.tail)
+    0
+}
+"#;
+    check_source(source).expect("legacy A2 product source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let baseline = compile_and_run(source).expect("legacy baseline product path must run");
+    let native = legacy_codegen_compile_and_run_with_value_glue(source)
+        .expect("legacy caller must adopt derived product returns");
+    let expected = "legacy-left\nlegacy-right\n11\nlegacy-explicit-left\nlegacy-explicit-right\n12\nlegacy-left\nlegacy-tail";
+    assert_eq!(vm.trim(), expected);
+    assert_eq!(baseline.trim(), expected);
+    assert_eq!(native.trim(), expected);
+}
+
+#[test]
+fn a2_value_glue_product_ir_is_recursive_and_deduplicated() {
+    let source = r#"
+type Pair { left: string, right: string, number: i32 }
+func make_pair() -> Pair {
+    let left = "left"
+    let right = "right"
+    Pair { left: left, right: right, number: 1 }
+}
+func make_pair_explicit() -> Pair {
+    return Pair { left: "explicit-left", right: "explicit-right", number: 2 }
+}
+func main() -> i32 {
+    let first = make_pair()
+    let second = make_pair()
+    let explicit = make_pair_explicit()
+    println(first.left)
+    println(second.right)
+    println(explicit.left)
+    0
+}
+"#;
+    let ir =
+        checked_codegen_ir_with_value_glue(source).expect("A2 product glue module must compile");
+    let clone_defs = ir
+        .lines()
+        .filter(|line| {
+            line.starts_with("define internal") && line.contains("mimi_value_clone_glue__")
+        })
+        .count();
+    let drop_defs = ir
+        .lines()
+        .filter(|line| {
+            line.starts_with("define internal") && line.contains("mimi_value_drop_glue__")
+        })
+        .count();
+    assert!(
+        clone_defs >= 2,
+        "record and StringBox clone glue must both be emitted once; IR:\n{ir}"
+    );
+    assert_eq!(clone_defs, drop_defs, "clone/drop glue families must pair");
+    let product_clone_calls = ir
+        .lines()
+        .filter(|line| line.contains("call") && line.contains("mimi_value_clone_glue__record"))
+        .count();
+    assert_eq!(
+        product_clone_calls, 2,
+        "implicit and explicit record returns must each call product glue"
     );
 }
 

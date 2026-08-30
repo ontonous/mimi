@@ -942,6 +942,29 @@ pub(crate) fn checked_codegen_compile_and_run_with_value_glue(src: &str) -> Resu
     checked_codegen_compile_and_run_with_value_glue_config(src, &E2EConfig::default())
 }
 
+/// A2 opt-in legacy-emitter path. This deliberately uses `compile_file`, so
+/// ownership tests can exercise legacy callees and callers without relying on
+/// an incidental resolved-emitter fallback. The switch remains instance-local
+/// and therefore safe under the parallel test runner.
+pub(crate) fn legacy_codegen_compile_and_run_with_value_glue(src: &str) -> Result<String, String> {
+    legacy_codegen_compile_and_run_with_value_glue_config(src, &E2EConfig::default())
+}
+
+fn legacy_codegen_compile_and_run_with_value_glue_config(
+    src: &str,
+    config: &E2EConfig,
+) -> Result<String, String> {
+    let file = parse_prod(src);
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_legacy_value_glue_test");
+    codegen.set_value_glue_enabled(true);
+    codegen
+        .compile_file(&file)
+        .map_err(|error| error.to_string())?;
+    link_and_run_module(&codegen, config, counter)
+}
+
 fn checked_codegen_compile_and_run_with_value_glue_config(
     src: &str,
     config: &E2EConfig,
@@ -977,6 +1000,19 @@ pub(crate) fn checked_codegen_compile_and_run_with_value_glue_valgrind(
     )
 }
 
+/// A2 opt-in legacy-emitter path under the same Valgrind ownership gate.
+pub(crate) fn legacy_codegen_compile_and_run_with_value_glue_valgrind(
+    src: &str,
+) -> Result<String, String> {
+    legacy_codegen_compile_and_run_with_value_glue_config(
+        src,
+        &E2EConfig {
+            use_valgrind: true,
+            ..Default::default()
+        },
+    )
+}
+
 /// Compile the production path with A2 glue enabled and expose the resulting
 /// module text for registry/call-site assertions.  Like the execution helper,
 /// this uses only an instance-local switch.
@@ -995,6 +1031,12 @@ pub(crate) fn checked_codegen_ir_with_value_glue(src: &str) -> Result<String, St
     codegen
         .compile_checked(&checked_program)
         .map_err(|error| format!("{:?}", error))?;
+    if !codegen.resolved_failed_functions().is_empty() {
+        return Err(format!(
+            "A2 IR fixture fell back to legacy: {:?}",
+            codegen.resolved_failed_functions()
+        ));
+    }
     Ok(codegen.emit_ir())
 }
 
