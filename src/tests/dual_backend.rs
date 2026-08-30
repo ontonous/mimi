@@ -1686,6 +1686,65 @@ fn dual_f016_int_list_element_assign_still_works() {
     );
 }
 
+// ─── F-017: field mutation of a List<record> element (native silently dropped) ───
+// `rs[i].field = v` wrote the new value into a discarded copy of the element
+// (root_place loaded the struct element into a local alloca for a non-final
+// Index write), so the data-array element was never updated — silent L1
+// divergence vs the VM. The fix keeps the element's heap-box pointer so the
+// field store mutates the real element.
+
+#[test]
+fn dual_f017_record_elem_field_mut() {
+    if !can_link() {
+        return;
+    }
+    // Production L1 gate (dual_assert_prod): routes through compile_checked, the
+    // same codegen path `mimi build` ships. The legacy compile_file harness
+    // still drops this write (see known boundary in fix-ledger.md).
+    dual_assert_prod!(
+        "type R { a: i32, b: i32 } \
+         func main() -> i32 { \
+             let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]; \
+             rs[1].b = 9; \
+             println(rs[1].b); 0 \
+         }",
+        "9"
+    );
+}
+
+#[test]
+fn dual_f017_record_elem_field_mut_first() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "type R { a: i32, b: i32 } \
+         func main() -> i32 { \
+             let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]; \
+             rs[0].a = 5; \
+             println(rs[0].a); 0 \
+         }",
+        "5"
+    );
+}
+
+#[test]
+fn dual_f017_record_whole_elem_assign_still_works() {
+    if !can_link() {
+        return;
+    }
+    // Regression guard: whole-element assignment must keep working on native.
+    dual_assert_prod!(
+        "type R { a: i32, b: i32 } \
+         func main() -> i32 { \
+             let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]; \
+             rs[0] = R { a: 9, b: 9 }; \
+             println(rs[0].a + rs[0].b); 0 \
+         }",
+        "18"
+    );
+}
+
 // ─── 16.  Closures (3 tests) ─────────────────────────────────
 
 #[test]

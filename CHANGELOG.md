@@ -455,6 +455,44 @@ IR 实证（O0）：`ss[1]="z"` 的发射块仅 `getelementptr … %list_idx_gep
 repro `/tmp/r23_str_in_list_mut.mimi`=hiworld、`/tmp/r23_str_mut2.mimi`=z、
 `/tmp/r23_str_mut_readall.mimi`=hiworld、`/tmp/r23_int_mut.mimi`=5（均 ≡ VM）
 
+### 0.40.1.21 — F-017：List<record> 元素字段赋值 native 静默丢弃（静默 L1 错值）
+
+F-016 收尾后 MODE-1 续扫盲区二（原生 list 元素写入），复现**静默错值**分歧：
+`type R { a: i32, b: i32 }; let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]; rs[1].b = 9; println(rs[1].b);`
+native 给 `4`、VM 给 `9`（应为 `9`）——`rs[i].field = v` 在 native 后端是 **no-op**，元素槽保持旧值。
+对照：`rs[0] = R { a: 9, b: 9 }; println(rs[0].a + rs[0].b);` 双后端 `18` MATCH（整体元素赋值正常），
+证明分歧**仅限 list 元素的字段级写**。`rs[0].a = 5` / 第二元素 `rs[1].b = 9` 均复现，为通用缺陷。
+
+根因（`src/codegen/resolved/mod.rs` `root_place` 的 `StructType` 投影臂）：F-016 已把
+`!read && !is_final_index`（非最终索引写，即 `rs[i].field = v`）归入「load-into-alloca」旧分支——
+该分支把 i64 槽里的元素值 `load` 进临时 `alloca`、并以该 `alloca` 为 `storage`；后续 `Field` 投影
+GEP 进 `alloca` 把新值写进**死局部**，真实（堆装箱）data-array 元素保持旧值。VM 直接改实际元素 → 静默错值。
+
+修复（S2 合规：复用读取路径既有的 `build_load` + `build_int_to_ptr` 单源原语，无新启发式 /
+类型白名单 / 形状枚举；`rs[i].field = v` 现与 `ss[i] = v`（F-016）共用同一存储主门控）：
+- `root_place` `StructType` 臂三分支化：`read`（读，维持 load-into-alloca 原行为）/
+  `is_final_index`（最终索引写，F-016 记 i64 槽）/ 其余（非最终写 `rs[i].field = v`）——
+  保留 `current_ptr` 为 i64 槽 `load` 出的**堆装箱指针**（`intto_ptr`），使后续 `Field`/`Tuple`
+  投影 GEP 进**真实元素**而非死副本。`PointerType` 臂本就对非最终写保留 raw 指针（无副本），无需改动。
+- 赋值调用点无需改动（value 已是盒装 i64 句柄 / 标量，写回 i64 槽布局不变）。
+
+内存语义：非最终写直接经堆装箱指针 `store` 进真实元素，无新增泄漏 / UB；未触 deep-copy/claim 冻结红线。
+
+分类: 一次性缺陷（list 元素 write 存储主门控补全，F-015/F-016 同族「native 静默错值」收敛，未触 S2/S3）。
+
+不变量类别: L1（双后端等价 —— 最高优先级的静默错值类分歧，必须闭合而非 fail-closed）
+测试: `src/tests/dual_backend.rs::dual_f017_record_elem_field_mut`（9）/
+`dual_f017_record_elem_field_mut_first`（5）/
+`dual_f017_record_whole_elem_assign_still_works`（18，整体元素赋值回归护栏）
+（经 `dual_assert_prod!`——生产 `compile_checked` 路径，≡ `mimi build`，双后端 run/build/exec MATCH）；
+repro `/tmp/r24_rec_elem_mut2.mimi`=9、`/tmp/r24_rec_elem_field_mut.mimi`=5（均 ≡ VM）；
+`/tmp/r24_nested_list_elem_mut.mimi` 双后端 `a`（一致值语义 no-op，非分歧）
+
+已知边界（逃生舱，TODO(#F-010-legacy-list-elem-field-mut)）：legacy `compile_file` 回退路径
+（`compile_and_run` / `dual_assert!` 旧门控）对 **ineligible 函数内**的 `rs[i].field = v` 仍静默丢写；
+该路径属 F-010 在清遗留，生产 `mimi build` 走 `compile_checked` 已闭合。新 L1 回归测试统一走
+`dual_assert_prod!` 以对拍生产路径。
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：

@@ -8774,7 +8774,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     );
                     match elem_llvm_ty {
                         BasicTypeEnum::StructType(sty) => {
-                            if read || !is_final_index {
+                            if read {
                                 let fields = sty.get_field_types();
                                 let is_string = fields.len() == 2
                                     && matches!(&fields[0], BasicTypeEnum::PointerType(_))
@@ -8832,11 +8832,41 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     current_ptr = alloca;
                                     current_type = elem_llvm_ty;
                                 }
-                            } else {
+                            } else if is_final_index {
                                 // F-016 (0.40.1.20): final-index WRITE keeps the
                                 // element GEP; the call site boxes the value into
                                 // the `i64` data-array slot.
                                 current_type = BasicTypeEnum::IntType(i64_ty);
+                            } else {
+                                // F-017 (0.40.1.21): non-final Index WRITE — the
+                                // element has further projections (`rs[i].field = v`).
+                                // The slot holds a pointer to the heap-boxed element;
+                                // keep `current_ptr` as that box pointer so the
+                                // subsequent Field/Tuple projection writes into the
+                                // *real* element, not a discarded copy. The prior code
+                                // loaded the struct into a local alloca and the store
+                                // landed in the copy — a silent L1 divergence vs the
+                                // VM (which mutates the actual element). This mirrors
+                                // the dereference the read path already performs.
+                                let loaded = self
+                                    .generator
+                                    .build_load(
+                                        BasicTypeEnum::IntType(i64_ty),
+                                        current_ptr,
+                                        "list_elem_i64",
+                                    )?
+                                    .into_int_value();
+                                let ptr_ty = self
+                                    .generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default());
+                                let box_ptr = self.generator.build_int_to_ptr(
+                                    loaded,
+                                    ptr_ty,
+                                    "elem_box_ptr",
+                                )?;
+                                current_ptr = box_ptr;
+                                current_type = elem_llvm_ty;
                             }
                         }
                         BasicTypeEnum::PointerType(_) => {
