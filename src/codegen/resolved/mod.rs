@@ -1986,6 +1986,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 // Assignment targets an index WRITE (negative indices trap,
                 // VM ListSet parity) — see emit_checked_list_index (H-15).
                 let target_is_root_local = target.projections.is_empty();
+                // Capture the place's projections before `root_place` consumes the
+                // `ResolvedPlace` (it returns a `ResolvedVarEntry` without them) —
+                // the index-write boxing at the store site needs the final
+                // projection to detect a direct List-element write (F-016).
+                let target_projections = target.projections.clone();
                 let target = self.root_place(frame, target, false)?;
                 // 0.37.x (dogfood: build string by `w = w + ch` in loops):
                 // resolved string-temp assignments must transfer ownership out
@@ -2061,7 +2066,40 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         }
                     }
                 }
-                let value = self.coerce_to(value, target.llvm_type)?;
+                // 0.40.1.20 (F-016): writing into a List element slot stores an
+                // `i64` handle (the data array is `i64[]`). Scalars widen via
+                // `coerce_to_i64`; string elements must be boxed through
+                // `mimi_str_box` (`coerce_string_to_i64`) — the exact same
+                // primitives the List-literal emitter uses (line 2358), so the
+                // written slot matches what readers/`contains`/zip expect. The
+                // resolved Index-projection place already returns the element GEP
+                // for a final-index write; here we convert the RHS to the stored
+                // handle form. Element string-ness comes from the resolved Index
+                // projection type (mirrors the literal path) — no new heuristic.
+                let is_elem_write = !target_is_root_local
+                    && matches!(
+                        target_projections.last(),
+                        Some(crate::core::ir::ResolvedProjection::Index { .. })
+                    );
+                let value = if is_elem_write {
+                    let elem_is_string = target_projections
+                        .iter()
+                        .rev()
+                        .find_map(|p| match p {
+                            crate::core::ir::ResolvedProjection::Index { ty, .. } => {
+                                Some(resolved_type_display_name(self.program, ty) == "string")
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(false);
+                    if elem_is_string {
+                        BasicValueEnum::IntValue(self.coerce_string_to_i64(value)?)
+                    } else {
+                        BasicValueEnum::IntValue(self.coerce_to_i64(value)?)
+                    }
+                } else {
+                    self.coerce_to(value, target.llvm_type)?
+                };
                 self.generator.build_store(target.storage, value)?;
                 Ok(None)
             }
@@ -8721,84 +8759,112 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // matching the legacy data layout.
                     // Only the string struct {ptr, i64} stores the raw pointer
                     // (field 0) directly; all other structs are heap-allocated.
+                    // F-016 (0.40.1.20): when this Index is the FINAL projection
+                    // and we are writing (`read == false`), the data-array slot
+                    // is an `i64` handle — keep `current_ptr` as the element GEP
+                    // and let the call site box the value into the slot. READ
+                    // (`read == true`) and deeper writes (`ss[i].field = v`)
+                    // still materialize the element value into an alloca. The
+                    // prior code always loaded into an alloca, so `ss[i] = v`
+                    // wrote the new value into a throwaway local and the data
+                    // array was never updated (silent L1 divergence vs the VM).
+                    let is_final_index = matches!(
+                        place.projections.last(),
+                        Some(crate::core::ir::ResolvedProjection::Index { .. })
+                    );
                     match elem_llvm_ty {
                         BasicTypeEnum::StructType(sty) => {
-                            let fields = sty.get_field_types();
-                            let is_string = fields.len() == 2
-                                && matches!(&fields[0], BasicTypeEnum::PointerType(_))
-                                && matches!(&fields[1], BasicTypeEnum::IntType(bit) if bit.get_bit_width() == 64);
-                            if is_string {
-                                // String: the i64 is a pointer to a fat MimiStr box.
-                                let loaded = self
-                                    .generator
-                                    .build_load(
-                                        BasicTypeEnum::IntType(i64_ty),
-                                        current_ptr,
-                                        "list_elem_i64",
-                                    )?
-                                    .into_int_value();
-                                let ptr_ty = self
-                                    .generator
-                                    .context
-                                    .ptr_type(inkwell::AddressSpace::default());
-                                let boxed = self.generator.build_int_to_ptr(
-                                    loaded,
-                                    ptr_ty,
-                                    "elem_str_ptr",
-                                )?;
-                                let str_val = self.generator.load_fat_list_string(boxed)?;
-                                let str_alloca = self.generator.build_alloca(sty, "str_struct")?;
-                                self.generator.build_store(str_alloca, str_val)?;
-                                current_ptr = str_alloca;
-                                current_type = elem_llvm_ty;
+                            if read || !is_final_index {
+                                let fields = sty.get_field_types();
+                                let is_string = fields.len() == 2
+                                    && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                                    && matches!(&fields[1], BasicTypeEnum::IntType(bit) if bit.get_bit_width() == 64);
+                                if is_string {
+                                    // String: the i64 is a pointer to a fat MimiStr box.
+                                    let loaded = self
+                                        .generator
+                                        .build_load(
+                                            BasicTypeEnum::IntType(i64_ty),
+                                            current_ptr,
+                                            "list_elem_i64",
+                                        )?
+                                        .into_int_value();
+                                    let ptr_ty = self
+                                        .generator
+                                        .context
+                                        .ptr_type(inkwell::AddressSpace::default());
+                                    let boxed = self.generator.build_int_to_ptr(
+                                        loaded,
+                                        ptr_ty,
+                                        "elem_str_ptr",
+                                    )?;
+                                    let str_val = self.generator.load_fat_list_string(boxed)?;
+                                    let str_alloca =
+                                        self.generator.build_alloca(sty, "str_struct")?;
+                                    self.generator.build_store(str_alloca, str_val)?;
+                                    current_ptr = str_alloca;
+                                    current_type = elem_llvm_ty;
+                                } else {
+                                    // Non-string struct (nested list, tuple, record, etc.):
+                                    // load i64 pointer, inttoptr, load struct, store in alloca.
+                                    let loaded = self
+                                        .generator
+                                        .build_load(
+                                            BasicTypeEnum::IntType(i64_ty),
+                                            current_ptr,
+                                            "list_elem_i64",
+                                        )?
+                                        .into_int_value();
+                                    let ptr_ty = self
+                                        .generator
+                                        .context
+                                        .ptr_type(inkwell::AddressSpace::default());
+                                    let struct_ptr = self
+                                        .generator
+                                        .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
+                                    let struct_val = self.generator.build_load(
+                                        BasicTypeEnum::StructType(sty),
+                                        struct_ptr,
+                                        "elem_struct",
+                                    )?;
+                                    let alloca = self.generator.build_alloca(sty, "elem_alloca")?;
+                                    self.generator.build_store(alloca, struct_val)?;
+                                    current_ptr = alloca;
+                                    current_type = elem_llvm_ty;
+                                }
                             } else {
-                                // Non-string struct (nested list, tuple, record, etc.):
-                                // load i64 pointer, inttoptr, load struct, store in alloca.
-                                let loaded = self
-                                    .generator
-                                    .build_load(
-                                        BasicTypeEnum::IntType(i64_ty),
-                                        current_ptr,
-                                        "list_elem_i64",
-                                    )?
-                                    .into_int_value();
-                                let ptr_ty = self
-                                    .generator
-                                    .context
-                                    .ptr_type(inkwell::AddressSpace::default());
-                                let struct_ptr = self
-                                    .generator
-                                    .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
-                                let struct_val = self.generator.build_load(
-                                    BasicTypeEnum::StructType(sty),
-                                    struct_ptr,
-                                    "elem_struct",
-                                )?;
-                                let alloca = self.generator.build_alloca(sty, "elem_alloca")?;
-                                self.generator.build_store(alloca, struct_val)?;
-                                current_ptr = alloca;
-                                current_type = elem_llvm_ty;
+                                // F-016 (0.40.1.20): final-index WRITE keeps the
+                                // element GEP; the call site boxes the value into
+                                // the `i64` data-array slot.
+                                current_type = BasicTypeEnum::IntType(i64_ty);
                             }
                         }
                         BasicTypeEnum::PointerType(_) => {
-                            // String/raw pointer: load i64, inttoptr.
-                            let loaded = self
-                                .generator
-                                .build_load(
-                                    BasicTypeEnum::IntType(i64_ty),
-                                    current_ptr,
-                                    "list_elem_i64",
-                                )?
-                                .into_int_value();
-                            let ptr_ty = self
-                                .generator
-                                .context
-                                .ptr_type(inkwell::AddressSpace::default());
-                            let raw_ptr = self
-                                .generator
-                                .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
-                            current_ptr = raw_ptr;
-                            current_type = elem_llvm_ty;
+                            if read || !is_final_index {
+                                // String/raw pointer: load i64, inttoptr.
+                                let loaded = self
+                                    .generator
+                                    .build_load(
+                                        BasicTypeEnum::IntType(i64_ty),
+                                        current_ptr,
+                                        "list_elem_i64",
+                                    )?
+                                    .into_int_value();
+                                let ptr_ty = self
+                                    .generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default());
+                                let raw_ptr = self
+                                    .generator
+                                    .build_int_to_ptr(loaded, ptr_ty, "elem_ptr")?;
+                                current_ptr = raw_ptr;
+                                current_type = elem_llvm_ty;
+                            } else {
+                                // F-016 (0.40.1.20): final-index WRITE keeps the
+                                // element GEP; the call site boxes the value into
+                                // the `i64` data-array slot.
+                                current_type = BasicTypeEnum::IntType(i64_ty);
+                            }
                         }
                         _ => {
                             // Scalar element: keep the GEP'd i64 pointer.

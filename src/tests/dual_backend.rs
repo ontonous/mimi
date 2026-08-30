@@ -1634,6 +1634,58 @@ fn dual_list_make() {
     );
 }
 
+// ─── F-016: List<string> element assignment (native silently dropped) ───
+// Native codegen stored the new element value into a throwaway alloca instead
+// of the data-array slot, so `ss[i] = v` was a silent no-op on the native
+// backend (L1 divergence vs the VM). The fix boxes string elements through
+// `mimi_str_box` (matching the List-literal emitter) and keeps the slot GEP
+// for the write.
+
+#[test]
+fn dual_f016_str_list_element_assign() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let ss = [\"hello\", \"world\"]; ss[0] = \"hi\"; println(ss[0] + ss[1]); 0 }",
+        "hiworld"
+    );
+}
+
+#[test]
+fn dual_f016_str_list_element_assign_nonzero_index() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let ss = [\"a\", \"b\"]; ss[1] = \"z\"; println(ss[1]); 0 }",
+        "z"
+    );
+}
+
+#[test]
+fn dual_f016_str_list_element_assign_multiple() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        "func main() -> i32 { let ss = [\"a\", \"b\", \"c\"]; ss[0] = \"x\"; ss[2] = \"y\"; println(ss[0] + ss[1] + ss[2]); 0 }",
+        "xby"
+    );
+}
+
+#[test]
+fn dual_f016_int_list_element_assign_still_works() {
+    if !can_link() {
+        return;
+    }
+    // Regression guard: scalar element assignment must keep working on native.
+    dual_assert!(
+        "func main() -> i32 { let ns = [1, 2]; ns[0] = 5; println(ns[0]); 0 }",
+        "5"
+    );
+}
+
 // ─── 16.  Closures (3 tests) ─────────────────────────────────
 
 #[test]

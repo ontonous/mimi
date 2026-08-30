@@ -415,6 +415,46 @@ native 给出 `8`、VM 给出 `6`（应为 `6`）——外层每个槽都指向*
 repro `/tmp/r21_h.mimi`=6、`/tmp/r21_e.mimi`=34、`/tmp/r21_b.mimi`=34、`/tmp/r21_i.mimi`=5、
 `/tmp/r21_k.mimi`=9（均 ≡ VM）
 
+### 0.40.1.20 — F-016：List<string> 元素赋值 native 静默丢弃（静默 L1 错值）
+
+F-015 收尾后转盲区二（原生 list 元素写入）排查，复现**静默错值**分歧：`let ss=["a","b"]; ss[1]="z"; println(ss[1]);`
+native 仍给 `b`、VM 给 `z`（应为 `z`）——`ss[i] = v` 在 native 后端是 **no-op**，数据数组槽从未被更新。
+对照：`let ns=[1,2]; ns[0]=5; println(ns[0]);` 双后端 `5` MATCH（标量元素赋值正常），证明分歧**仅限非标量元素**。
+
+根因（`src/codegen/resolved/mod.rs` `root_place` 的 `Index` 投影臂）：该臂对所有非标量元素
+（string / struct / pointer）**无论读写**都先把 i64 槽里的元素值 `load` 进一个临时 `alloca`，
+并以该 `alloca` 作为返回的 `storage`。赋值调用点 `build_store(target.storage, value)` 因此把新值写进
+**死局部**，真正的 data-array 槽保持旧值。`_ =>` 标量分支保留 slot GEP，所以 int 元素赋值正常。
+IR 实证（O0）：`ss[1]="z"` 的发射块仅 `getelementptr … %list_idx_gep` 后 `load i64`（读旧值），
+**无** `mimi_str_box` 调用、**无** 任何 store 回 data 数组。`compile_index_assign`（`func/body.rs`）
+经 DBG 探针证实对 `ss[i]="z"` **从未到达**——resolved emitter 已接管该路径，旧路径改动无效。
+
+修复（S2 合规：复用 List **字面量发射**既有单源原语 `coerce_string_to_i64` / `coerce_to_i64`，
+无新启发式 / 类型白名单 / 形状枚举；string 与否沿用字面量路径的
+`resolved_type_display_name(ty) == "string"` 判定）：
+- `root_place` 的 `Index` 臂：仅当 **最终投影且写（`read == false && is_final_index`）** 时，
+  保留 `current_ptr` 为元素 GEP（i64 槽）、把元素 llvm 类型记为 `i64`，**不**再 load 进 alloca；
+  读取（`read == true`）与更深投影（`ss[i].field = v`，load-into-alloca 之后再由 Field 投影 GEP）
+  维持原行为（后者为已知潜伏分歧，本轮范围外、未退化）。
+- 赋值调用点：对「索引元素写」用 `coerce_string_to_i64(value)`（string → `mimi_str_box` 装箱 i64 句柄）
+  / `coerce_to_i64(value)`（其余聚合 / 标量 i64 编码）替代普通 `coerce_to`，与列表字面量发射
+  （`src/codegen/resolved/mod.rs` ~2358）完全同构，保证写回的 slot 与 `contains`/zip/读取一致的
+  boxed-handle 布局。
+
+内存语义：写回即 store i64 句柄进既有 data 数组槽，无新增泄漏 / UB；与字面量路径同原语，
+未触 deep-copy/claim 冻结红线。
+
+分类: 一次性缺陷（list 元素 write 的 resolved 存储主门控补全，F-015 同族「native 静默错值」收敛，
+未触 S2/S3）。
+
+不变量类别: L1（双后端等价 —— 最高优先级的静默错值类分歧，必须闭合而非 fail-closed）
+测试: `src/tests/dual_backend.rs::dual_f016_str_list_element_assign`（hiworld）/
+`dual_f016_str_list_element_assign_nonzero_index`（z）/
+`dual_f016_str_list_element_assign_multiple`（xby）/
+`dual_f016_int_list_element_assign_still_works`（5，标量回归护栏）（均双后端 run+build/exec MATCH）；
+repro `/tmp/r23_str_in_list_mut.mimi`=hiworld、`/tmp/r23_str_mut2.mimi`=z、
+`/tmp/r23_str_mut_readall.mimi`=hiworld、`/tmp/r23_int_mut.mimi`=5（均 ≡ VM）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
