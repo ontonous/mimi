@@ -7015,9 +7015,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // element-type info.
             if name == "sort_list" {
                 let obj = self.infer_object_type(&args[0], vars);
-                let elem = obj
-                    .strip_prefix("List<")
-                    .and_then(|s| s.strip_suffix('>'));
+                let elem = obj.strip_prefix("List<").and_then(|s| s.strip_suffix('>'));
                 let routed = match elem {
                     Some("i32") | Some("i64") | Some("int") | Some("u8") | Some("u16")
                     | Some("u32") | Some("u64") | Some("i8") | Some("i16") => "sort",

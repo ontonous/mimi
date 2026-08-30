@@ -432,7 +432,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             ));
         }
         let (s_ptr, s_len) = self.extract_string_arg_ptr_len(&args[0], "str_count_substring")?;
-        let (sub_ptr, sub_len) = self.extract_string_arg_ptr_len(&args[1], "str_count_substring")?;
+        let (sub_ptr, sub_len) =
+            self.extract_string_arg_ptr_len(&args[1], "str_count_substring")?;
         let func = self
             .module
             .get_function("mimi_str_count_substring")

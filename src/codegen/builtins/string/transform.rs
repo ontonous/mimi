@@ -392,7 +392,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             end
         };
-        let (data_ptr, byte_len) = self.extract_string_arg_ptr_len(&args[0], "str_substring_strict")?;
+        let (data_ptr, byte_len) =
+            self.extract_string_arg_ptr_len(&args[0], "str_substring_strict")?;
         let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
         // Helper returns the result already boxed as `{ i8*, i64 }` with the
         // true byte length (embedded NUL preserved, no strlen) — BUG H fix.

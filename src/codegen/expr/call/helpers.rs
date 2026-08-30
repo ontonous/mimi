@@ -1283,8 +1283,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // pointer's low byte printed as `^D`), while `list_value_to_ptr` already
         // accepts both forms (so `len`/element access happened to work). Returning
         // the loaded struct keeps the single canonical list ABI consistent.
-        let result_val =
-            self.build_load(BasicTypeEnum::StructType(result_ty), result_alloca, "map_result_val")?;
+        let result_val = self.build_load(
+            BasicTypeEnum::StructType(result_ty),
+            result_alloca,
+            "map_result_val",
+        )?;
         Ok(result_val)
     }
 

@@ -1237,12 +1237,7 @@ pub unsafe extern "C" fn mimi_print_bytes(ptr: *const std::ffi::c_char, len: i64
     if ptr.is_null() || len <= 0 {
         return;
     }
-    fwrite(
-        ptr as *const std::ffi::c_void,
-        1,
-        len as usize,
-        stdout,
-    );
+    fwrite(ptr as *const std::ffi::c_void, 1, len as usize, stdout);
 }
 
 /// stderr counterpart of `mimi_print_bytes`, used by the native `eprintln`.
@@ -1251,12 +1246,7 @@ pub unsafe extern "C" fn mimi_eprint_bytes(ptr: *const std::ffi::c_char, len: i6
     if ptr.is_null() || len <= 0 {
         return;
     }
-    fwrite(
-        ptr as *const std::ffi::c_void,
-        1,
-        len as usize,
-        stderr,
-    );
+    fwrite(ptr as *const std::ffi::c_void, 1, len as usize, stderr);
 }
 
 /// Free a MimiList and optionally its C string elements.

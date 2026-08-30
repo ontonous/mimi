@@ -589,9 +589,8 @@ fn audit_expr1_closure_capture_heap_return_fails_closed_e0723() {
     check_source(src).expect("checker must accept the closure-returning-heap-capture program");
 
     // Native (LLVM) codegen must fail closed (E0723), not silently corrupt memory.
-    let cg_err = checked_codegen_compile_and_run(src).expect_err(
-        "native codegen must fail closed (E0723) on a closure capturing a heap List",
-    );
+    let cg_err = checked_codegen_compile_and_run(src)
+        .expect_err("native codegen must fail closed (E0723) on a closure capturing a heap List");
     assert!(
         cg_err.contains("E0723"),
         "fail-closed closure heap capture must cite E0723: {}",
@@ -600,7 +599,10 @@ fn audit_expr1_closure_capture_heap_return_fails_closed_e0723() {
 
     // The VM backend (`mimi run`) must still accept and run the same program.
     let (_val, vm_out) = checked_run_source_with_stdout(src);
-    assert_eq!(vm_out, "", "VM path must run the closure-returning-heap-capture program");
+    assert_eq!(
+        vm_out, "",
+        "VM path must run the closure-returning-heap-capture program"
+    );
 }
 
 /// F-003：0.40.1.6 的 E0723 门禁（record 字段递归判定）误将「包裹普通 `List<X>`
@@ -629,11 +631,26 @@ fn audit_expr1_record_list_field_return_native_allowed() {
     // `List<i32>` return, which was always allowed.
     let out = checked_codegen_compile_and_run(src)
         .expect("native codegen must allow a record field that is a plain List<X>");
-    assert!(out.contains("3"), "record-list-field len must be 3: {}", out);
-    assert!(out.contains("10"), "record-list-field[0] must be 10: {}", out);
-    assert!(out.contains("30"), "record-list-field[2] must be 30: {}", out);
+    assert!(
+        out.contains("3"),
+        "record-list-field len must be 3: {}",
+        out
+    );
+    assert!(
+        out.contains("10"),
+        "record-list-field[0] must be 10: {}",
+        out
+    );
+    assert!(
+        out.contains("30"),
+        "record-list-field[2] must be 30: {}",
+        out
+    );
 
     // The VM backend must agree.
     let (_val, vm_out) = checked_run_source_with_stdout(src);
-    assert_eq!(vm_out, out, "VM and native must agree on a record-with-plain-list return");
+    assert_eq!(
+        vm_out, out,
+        "VM and native must agree on a record-with-plain-list return"
+    );
 }

@@ -908,9 +908,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 derived_pushed = true;
                                 self.tuple_type_stack
                                     .last()
-                                    .ok_or_else(|| {
-                                        "tuple type stack empty (derived)".to_string()
-                                    })?
+                                    .ok_or_else(|| "tuple type stack empty (derived)".to_string())?
                             } else {
                                 self.tuple_type_stack
                                     .last()

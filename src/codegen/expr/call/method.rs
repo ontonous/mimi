@@ -577,8 +577,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if obj_type == "string" && method_name == "len" {
             self.pending_len_is_string = true;
             let obj_expr = obj.clone();
-            let call_expr =
-                Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
+            let call_expr = Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
             return self.compile_expr(&call_expr, vars);
         }
 

@@ -506,7 +506,9 @@ fn list_elem_owns_unclaimed_rt(
     table: &crate::core::ResolvedTypeTable,
 ) -> bool {
     match elem_rt {
-        crate::core::ResolvedType::Nominal { item, arguments, .. } => {
+        crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        } => {
             let name = item
                 .as_str()
                 .strip_prefix("builtin:type:")
@@ -552,12 +554,13 @@ fn nested_inner_owns_rt(
     match inner_rt {
         // Recurse for 3+ levels BEFORE any "concrete" match, so a generic
         // innermost (`List<List<List<T>>>`) is not flagged.
-        crate::core::ResolvedType::Nominal { item, arguments, .. }
-            if item
-                .as_str()
-                .strip_prefix("builtin:type:")
-                .unwrap_or(item.as_str())
-                == "List" =>
+        crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        } if item
+            .as_str()
+            .strip_prefix("builtin:type:")
+            .unwrap_or(item.as_str())
+            == "List" =>
         {
             match arguments.first() {
                 Some(y) => match table.get(y) {
@@ -1805,7 +1808,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             return false;
         };
         match ty {
-            crate::core::ir::ResolvedType::Nominal { item, arguments, .. } => {
+            crate::core::ir::ResolvedType::Nominal {
+                item, arguments, ..
+            } => {
                 let s = item.as_str();
                 if s == "builtin:type:List" || s == "builtin:type:Set" || s == "builtin:type:Map" {
                     return true;
