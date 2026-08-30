@@ -3798,6 +3798,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             "char_code" => self.compile_char_code(args),
             "chr" => self.compile_chr(args),
             "str_char_at" => self.compile_str_char_at(args),
+            // 0.40.1.23: `char_at` is the Mimi stdlib builtin name (stdlib/
+            // strings.mimi); the bytecode VM registers BOTH `char_at` and
+            // `str_char_at` as the same builtin (interp/bytecode/builtins/
+            // string.rs). Native codegen only wired `str_char_at`, so a direct
+            // `char_at(...)` call hit the catch-all and failed closed with
+            // E0700 "builtin 'char_at' not yet implemented in codegen" (VM ran
+            // fine → L1 divergence). Route it to the same impl.
+            "char_at" => self.compile_str_char_at(args),
             "str_contains" => self.compile_str_contains(args),
             "str_starts_with" => self.compile_str_starts_with(args),
             "str_ends_with" => self.compile_str_ends_with(args),

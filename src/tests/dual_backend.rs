@@ -21472,7 +21472,28 @@ fn dual_f018_list_return_literal() {
     );
 }
 
-// ─── 0.35.21 (#8) inferred-width i32 overflow guards ──────────
+// ─── 0.40.1.23 (F-019) char_at builtin dispatch in native codegen ──
+// `char_at` is the Mimi stdlib builtin name (stdlib/strings.mimi); the
+// bytecode VM registers BOTH `char_at` and `str_char_at` as the same builtin.
+// Native codegen only wired `str_char_at` into compile_builtin_call, so a
+// direct `char_at(...)` call failed closed with E0700 "builtin 'char_at' not
+// yet implemented in codegen" (VM ran → L1 divergence). Route `char_at` to the
+// same impl as `str_char_at`.
+
+#[test]
+fn dual_f019_char_at_builtin_native() {
+    if !can_link() {
+        return;
+    }
+    dual_assert_prod!(
+        "func main() -> i64 {
+            let s = \"hello\";
+            println(char_at(s, 1));
+            0
+        }",
+        "e"
+    );
+}
 // CheckI32 (0.34.34) only covered explicitly annotated `let x: i32`;
 // un-annotated bindings silently wrapped in the i64 register domain while
 // codegen's checked i32 addition trapped (E0802). The inference path now

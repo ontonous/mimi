@@ -493,6 +493,31 @@ repro `/tmp/r24_rec_elem_mut2.mimi`=9、`/tmp/r24_rec_elem_field_mut.mimi`=5（�
 该路径属 F-010 在清遗留，生产 `mimi build` 走 `compile_checked` 已闭合。新 L1 回归测试统一走
 `dual_assert_prod!` 以对拍生产路径。
 
+### 0.40.1.23 — F-019：`char_at` 内建在 native 代码生成未被路由（E0700 fail-closed）→ 路由至 `str_char_at` 实现，L1 等价
+
+MODE-1 续扫 fail-closed 能力族（F-018 已闭合 panic 红线，本族为低优先 fail-closed 分歧）：
+复现 `func main() -> i32 { let s = "hello"; println(char_at(s, 1)); 0 }` —— native（`mimi build`）
+**E0700 `builtin 'char_at' not yet implemented in codegen`**，VM（`mimi run`）给 `e`。双后端不对等
+（native 拒绝编译、VM 运行）—— kernel §5 判定为 P0 fail-closed 分歧（无错值、可接受），但属真实
+能力缺口，应闭合。
+
+根因（`src/codegen/builtins/mod.rs` `compile_builtin_call` 分发 `match`）：原 dispatched 仅认
+`"str_char_at"`（字节码内建名），未认 Mimi stdlib 名 `"char_at"`。字节码 VM 把 `char_at` 与
+`str_char_at` 注册为**同一内建**（interp/bytecode/builtins/string.rs），native 侧却只接了后者，
+故 `char_at(...)` 直达 catch-all 报 "not yet implemented"。运行时 `mimi_str_char_at_ll` 与
+`compile_str_char_at` 早已就绪——纯分发缺口，非缺失实现。S2 合规：复用既有 `compile_str_char_at`
+单源原语，无新启发式 / 类型白名单 / 形状枚举；与 VM 同构（两名字同一内建）。
+
+修复（S2 合规：集中接线于内建分发站点，无新启发式）：`compile_builtin_call` 的 `match` 增臂
+`"char_at" => self.compile_str_char_at(args)`，与 `"str_char_at"` 共用同一实现。`char_at(s, i)`
+现 native≡VM 产出 `e`（`str_char_at` 既有路径零回归）。
+
+分类: 一次性缺陷（内建名分发补全，与 0.39.x 既有内建同构；未触 S2/S3）。
+不变量类别: L1（双后端等价 —— `char_at` 在 native/VM 同产 `e`；`str_char_at` 既有路径零回归）
+测试: `src/tests/dual_backend.rs::dual_f019_char_at_builtin_native`（e）
+（经 `dual_assert_prod!`——生产 `compile_checked` 路径，≡ `mimi build`，双后端 run/build/exec MATCH）；
+repro `/tmp/cap_charat.mimi`=e 双后端一致
+
 ### 0.40.1.22 — F-018：函数返回 `List<T>` 直接作索引基 → native 代码生成 panic（§13.15 红线）→ 修复为 L1 等价 / fail-closed
 
 MODE-1 续扫盲区三（返回 `List<T>` 的消费）：复现**代码生成 panic**（最严重红线类分歧，
