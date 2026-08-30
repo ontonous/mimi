@@ -13694,6 +13694,60 @@ fn dual_nested_option_println() {
     );
 }
 
+/// 0.40.1.27 (F-024): nested built-in `Some` carrying a concrete record, with
+/// field access through the doubly-bound variable (`Some(Some(r)) => r.a`).
+/// Previously native failed `E0700` (`type 'r' is not a struct`) while the VM
+/// produced the correct value — an L1 divergence (fail-closed, not silently
+/// wrong). Fix: `bind_pattern_variables` walks nested built-in `Some`
+/// constructors in parallel with the scrutinee type and registers the leaf
+/// variable's record type via the `type_llvm` gate (same single source of truth
+/// as F-020). See `register_nested_option_vars` in src/codegen/expr/match.rs.
+/// L1 (dual backend equivalence).
+#[test]
+fn dual_nested_option_record_field() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32 }
+        func main() -> i32 {
+            let v = Some(Some(R { a: 7 }));
+            match v {
+                Some(Some(r)) => println(r.a),
+                _ => println(0),
+            }
+            0
+        }
+        "#,
+        "7"
+    );
+}
+
+/// 0.40.1.27 (F-024) adjacent shape: nested-option record variable used in a
+/// larger expression (field access + arithmetic), confirming the registered
+/// type survives beyond a bare `r.a` read. L1 (dual backend equivalence).
+#[test]
+fn dual_nested_option_record_field_expr() {
+    if !can_link() {
+        return;
+    }
+    dual_assert!(
+        r#"
+        type R { a: i32 }
+        func main() -> i32 {
+            let v = Some(Some(R { a: 6 }));
+            match v {
+                Some(Some(r)) => println(r.a * r.a + 1),
+                _ => println(0),
+            }
+            0
+        }
+        "#,
+        "37"
+    );
+}
+
 /// List of Option println.
 #[test]
 fn dual_list_option_println() {

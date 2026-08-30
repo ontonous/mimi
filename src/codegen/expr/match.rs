@@ -51,6 +51,44 @@ impl<'ctx> CodeGenerator<'ctx> {
         None
     }
 
+    /// F-024: register type names for variables bound through nested built-in
+    /// `Some` constructors such as `Some(Some(r))`, mirroring F-020's
+    /// single-level `option_inner_ty` registration. Walks `pat` and the option's
+    /// inner type in parallel: for each leaf `Variable` reached after unwrapping
+    /// N `Some` layers, register its AST type + type name when it is a concrete
+    /// record in `type_llvm` (single source of truth, identical gate to F-020).
+    /// Only populates the type-tracking maps used by field access; value binding
+    /// is performed separately by `compile_pattern_bind`.
+    fn register_nested_option_vars(
+        &mut self,
+        pat: &Pattern,
+        scrutinee_type: Option<&crate::ast::Type>,
+    ) {
+        match &pat.kind {
+            PatternKind::Variable(v) => {
+                if let Some(st) = scrutinee_type {
+                    if let Some(full) = self.get_full_type_name(st) {
+                        if self.type_llvm.contains_key(&full) {
+                            self.var_types.insert(v.clone(), st.clone());
+                            self.var_type_names.insert(v.clone(), full);
+                            self.register_list_elem_type(v, st);
+                        }
+                    }
+                }
+            }
+            PatternKind::Constructor(name, sub) if name == "Some" => {
+                if let Some(st) = scrutinee_type {
+                    if let crate::ast::Type::Option(inner) = st.unlocated() {
+                        if let Some((_, first)) = sub.first() {
+                            self.register_nested_option_vars(first, Some(inner.as_ref()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(in crate::codegen) fn bind_pattern_variables(
         &mut self,
         arm: &MatchArm,
@@ -731,6 +769,27 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 // Non-variable pattern (e.g. Tuple, Constructor).
                                 // Recursively bind inner variables from the payload.
                                 //
+                                // 0.40.1.27 (F-024): extend F-020's `option_inner_ty`
+                                // registration through nested built-in `Some`
+                                // constructors (e.g. `Some(Some(r))`). The outer
+                                // `Some`'s payload type is `Option<R>` (concrete record
+                                // R); register `r` as `R` so `r.a` field access
+                                // recovers the struct, matching the VM. Gated
+                                // identically to F-020 via `type_llvm` (single source
+                                // of truth) — generic `Option<T>` and linear-cap
+                                // payloads fall through untouched (preserving
+                                // dual_generic_linear_option_flip_cap_ok /
+                                // dual_session_option_extract_roundtrip).
+                                if name == "Some" && variant_owner.is_none() {
+                                    if let Some(crate::ast::Type::Option(outer_payload)) =
+                                        scrutinee_type.map(|t| t.unlocated())
+                                    {
+                                        self.register_nested_option_vars(
+                                            inner_pat,
+                                            Some(outer_payload.as_ref()),
+                                        );
+                                    }
+                                }
                                 // For built-in Err with i64 (ptrtoint) payload,
                                 // the heap-allocated struct is always {i64, i64}
                                 // (source and error, both ptrtoint-encoded by

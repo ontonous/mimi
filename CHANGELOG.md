@@ -655,6 +655,36 @@ resolved body lowering 失败，但旧报错为内部行话
 测试: `src/tests/error_co_h2.rs::coh2_reflection_builtin_type_fields_is_e0830_not_jargon`
 （断言恰好一个 `E0830`、消息含 `type_fields`、不含 `TOOL-RESOLUTION-001`、span 锚定调用点 line 4）
 
+### 0.40.1.27 — F-024：`Some(Some(R))` 嵌套 `Option<record>` 模式绑定变量字段访问 native E0700 fail-closed → L1 等价（复用 F-020 `type_llvm` 单源门控）
+
+MODE-1 续扫盲区（L1 双后端等价）：`match Some(Some(R{a:7})) { Some(Some(r)) => r.a }` 在
+bytecode-VM 正确给出 `7`，但 native 报 `error[E0700] type 'r' is not a struct`——真实 L1 分歧
+（native fail-closed，非静默错值，符合内核卡 §5 可接受态，但仍属未闭合等价缺口）。
+
+根因（`src/codegen/expr/match.rs` `bind_pattern_variables`）：F-020（0.40.1.24）的
+`option_inner_ty` 机制只为一层 `Some` 的直接 `Variable` 子模式登记载荷 record 类型；嵌套
+`Some(Some(r))` 的变量 `r` 位于内层 `Constructor`，`bind_pattern_variables` 把内层交给
+`compile_pattern_bind`（仅值绑定）后**不再进入类型登记路径**，故 `r` 的 record 类型未登记，
+字段访问 `r.a` 在 native 端无法解析为 struct。注意外层 `Some` 处的 `option_inner_ty` 本就
+为 `None`：其门控 `type_llvm.contains_key("Option<R>")` 失败（内层是 `Option<R>`，非具体
+record），所以 F-020 单级机制天然触达不到 `r`。
+
+修复（S2 合规：复用 F-020 的 `type_llvm` 单一事实源门控，无新启发式 / 类型白名单 / 形状枚举；
+仅新增并行游走，不引入调用点手工镜像）：新增 `register_nested_option_vars`——在 match 绑定
+的 `_ =>` 非变量分支，当外层 `Some`（built-in、`variant_owner.is_none()`）且其载荷类型为
+`Option<R>`（R 为具体 record）时，将内层 `Some` 子模式与「外层载荷类型」并行向下游走，
+对每片 `Variable` 叶子按拆 `N` 层 `Some` 所得类型登记 `var_types`/`var_type_names`
+（门控同 F-020：`get_full_type_name` + `type_llvm.contains_key`）。仅填充字段访问所需的
+类型跟踪表，值绑定仍由既有 `compile_pattern_bind` 完成（无双绑定）。泛型 `Option<T>` 与
+线性 `Option<cap>` 因 `get_full_type_name` 不在 `type_llvm` 而自然落空，受 F-020 门控保护的
+`dual_generic_linear_option_flip_cap_ok` / `dual_session_option_extract_roundtrip` 零回归。
+
+分类: 一次性缺陷（F-020 机制的纵深补全；未触 S2/S3，复用既有单源门控）。
+
+不变量类别: L1（双后端等价——闭合 `Some(Some(R))` 字段访问分歧）
+测试: `src/tests/dual_backend.rs::dual_nested_option_record_field`、
+`src/tests/dual_backend.rs::dual_nested_option_record_field_expr`（双后端对拍 7 / 37）
+
 ### Pain-point 修复（PAIN_LOG P1–P3）
 
 从 `docs/PAIN_LOG.md` 抽取的真实痛点，本轮在 0.1.10-dev 评估并修复：
