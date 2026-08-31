@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::core::ir::{
-    ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedPatternKind, ResolvedStmtKind,
-    ResolvedUnaryOp,
+    NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
+    ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedUnaryOp,
 };
 use crate::core::{
     CanonicalActionKind, CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResourceAnalysis,
@@ -18,7 +18,8 @@ use crate::core::{
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
     MirInstruction, MirInstructionId, MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind,
-    MirOwnershipSummary, MirSwitchArm, MirSwitchCase, MirTerminator, MirValue, MirValueId,
+    MirOwnershipSummary, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue,
+    MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +469,19 @@ impl<'a> Lowerer<'a> {
                     },
                 );
             }
+            ResolvedExprKind::Constant(item) if item.0.as_str() == "builtin:value:None" => {
+                self.emit(
+                    &expression.node_id,
+                    "construct_variant",
+                    MirInstructionKind::ConstructVariant {
+                        result: result.clone(),
+                        nominal: NominalTypeId::new("builtin:type:Option")
+                            .expect("static Option nominal"),
+                        variant: NodeId("builtin:variant:Option::None".into()),
+                        fields: Vec::new(),
+                    },
+                );
+            }
             ResolvedExprKind::Load(place) => {
                 if self.local_value(&place.base).is_ok() {
                     self.emit(
@@ -606,20 +620,44 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Call(call) => {
-                let arguments = call
+                let arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
                     .map(|argument| self.lower_expr(&argument.value))
                     .collect();
-                self.emit(
-                    &expression.node_id,
-                    "call",
-                    MirInstructionKind::Call {
-                        result: Some(result.clone()),
-                        callee: call.callee.clone(),
-                        arguments,
-                    },
-                );
+                if let Some((nominal, variant, field_ids)) = builtin_variant(call) {
+                    if field_ids.len() != arguments.len() {
+                        self.error(
+                            &expression.node_id,
+                            format!(
+                                "variant constructor carries {} payloads but its canonical schema expects {}",
+                                arguments.len(),
+                                field_ids.len()
+                            ),
+                        );
+                    }
+                    let fields = field_ids.into_iter().zip(arguments).collect();
+                    self.emit(
+                        &expression.node_id,
+                        "construct_variant",
+                        MirInstructionKind::ConstructVariant {
+                            result: result.clone(),
+                            nominal,
+                            variant,
+                            fields,
+                        },
+                    );
+                } else {
+                    self.emit(
+                        &expression.node_id,
+                        "call",
+                        MirInstructionKind::Call {
+                            result: Some(result.clone()),
+                            callee: call.callee.clone(),
+                            arguments,
+                        },
+                    );
+                }
             }
             ResolvedExprKind::Cast { value, .. } => {
                 let source = self.lower_expr(value);
@@ -712,11 +750,23 @@ impl<'a> Lowerer<'a> {
             let Some(join_edge) = self.edge_id("match.arm.join", &arm.node_id) else {
                 continue;
             };
-            self.add_block(block_id.clone(), Vec::new());
+            let Some(bindings) = self.lower_switch_bindings(&arm.pattern, &arm.node_id) else {
+                continue;
+            };
+            self.add_block(
+                block_id.clone(),
+                bindings
+                    .iter()
+                    .map(|binding| MirBlockParameter {
+                        value: binding.parameter.clone(),
+                    })
+                    .collect(),
+            );
             switch_arms.push(MirSwitchArm {
                 edge,
                 target: block_id.clone(),
                 arguments: Vec::new(),
+                bindings,
                 case,
             });
             arm_blocks.push((block_id, join_edge, &arm.body));
@@ -742,6 +792,53 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.switch_to(join_id);
+    }
+
+    fn lower_switch_bindings(
+        &mut self,
+        pattern: &ResolvedPattern,
+        node: &NodeId,
+    ) -> Option<Vec<MirSwitchBinding>> {
+        let ResolvedPatternKind::Constructor { fields, .. } = &pattern.kind else {
+            return Some(Vec::new());
+        };
+        let mut bindings = Vec::new();
+        for (field, payload) in fields {
+            match &payload.kind {
+                ResolvedPatternKind::Wildcard => {}
+                ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } => {
+                    let parameter = match self.local_value(local) {
+                        Ok(value) => value,
+                        Err(errors) => {
+                            self.errors.extend(errors);
+                            return None;
+                        }
+                    };
+                    bindings.push(MirSwitchBinding {
+                        parameter,
+                        field: field.clone(),
+                    });
+                }
+                ResolvedPatternKind::Binding { .. } => {
+                    self.error(
+                        node,
+                        "variant payload reference bindings require ownership lowering",
+                    );
+                    return None;
+                }
+                _ => {
+                    self.error(
+                        node,
+                        "nested variant payload patterns require destructuring MIR lowering",
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(bindings)
     }
 
     fn lower_switch_case(
@@ -1048,6 +1145,40 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<NodeId>)> {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    let (nominal, variant, fields) = match builtin.as_str() {
+        "Some" => (
+            "builtin:type:Option",
+            "builtin:variant:Option::Some",
+            vec![NodeId("builtin:variant:Option::Some/payload:0".into())],
+        ),
+        "None" => (
+            "builtin:type:Option",
+            "builtin:variant:Option::None",
+            Vec::new(),
+        ),
+        "Ok" => (
+            "builtin:type:Result",
+            "builtin:variant:Result::Ok",
+            vec![NodeId("builtin:variant:Result::Ok/payload:0".into())],
+        ),
+        "Err" => (
+            "builtin:type:Result",
+            "builtin:variant:Result::Err",
+            vec![NodeId("builtin:variant:Result::Err/payload:0".into())],
+        ),
+        _ => return None,
+    };
+    Some((
+        NominalTypeId::new(nominal).expect("static builtin nominal"),
+        NodeId(variant.into()),
+        fields,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{lower_body, lower_program};
@@ -1173,5 +1304,25 @@ mod tests {
         assert!(text.contains("construct"));
         assert!(text.contains("update_record"));
         assert!(text.contains("Field(NodeId"));
+    }
+
+    #[test]
+    fn option_match_lowers_to_variant_construction_and_payload_binding() {
+        let source =
+            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v, None => 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let callable = program
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .expect("main callable");
+        let mir = lower_body(&callable.body).expect("Option MIR lowering");
+        let text = mir.canonical_text();
+        assert!(text.contains("construct_variant"));
+        assert!(text.contains("Variant"));
+        assert!(text.contains("bind="), "{text}");
+        assert!(mir.validate().is_ok(), "{:?}", mir.validate());
     }
 }

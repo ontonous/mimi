@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-3";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
@@ -84,10 +84,12 @@ pub enum MirLayout {
     Tuple(Vec<ResolvedTypeId>),
     Option {
         inner: ResolvedTypeId,
+        variants: Vec<MirVariantDesc>,
     },
     Result {
         ok: ResolvedTypeId,
         error: ResolvedTypeId,
+        variants: Vec<MirVariantDesc>,
     },
     Array {
         element: ResolvedTypeId,
@@ -112,6 +114,17 @@ pub struct MirFieldDesc {
     pub id: NodeId,
     pub name: String,
     pub ty: ResolvedTypeId,
+}
+
+/// Canonical discriminant/payload contract for one variant. The discriminant
+/// is semantic and stable; bytecode/native encodings may choose a physical
+/// representation only after consuming this descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantDesc {
+    pub id: NodeId,
+    pub name: String,
+    pub discriminant: u16,
+    pub fields: Vec<MirFieldDesc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +171,7 @@ impl MirTypeDesc {
                 MirAbiClass::Aggregate,
                 MirLayout::Option {
                     inner: inner.clone(),
+                    variants: option_variants(inner),
                 },
             ),
             ResolvedType::Result { ok, error } => (
@@ -166,6 +180,7 @@ impl MirTypeDesc {
                 MirLayout::Result {
                     ok: ok.clone(),
                     error: error.clone(),
+                    variants: result_variants(ok, error),
                 },
             ),
             ResolvedType::Tuple(elements) => (
@@ -245,6 +260,52 @@ impl MirTypeDesc {
             needs_clone_glue: ownership.needs_clone(),
         }
     }
+}
+
+fn option_variants(inner: &ResolvedTypeId) -> Vec<MirVariantDesc> {
+    vec![
+        MirVariantDesc {
+            id: NodeId("builtin:variant:Option::None".into()),
+            name: "None".into(),
+            discriminant: 0,
+            fields: Vec::new(),
+        },
+        MirVariantDesc {
+            id: NodeId("builtin:variant:Option::Some".into()),
+            name: "Some".into(),
+            discriminant: 1,
+            fields: vec![MirFieldDesc {
+                id: NodeId("builtin:variant:Option::Some/payload:0".into()),
+                name: "_0".into(),
+                ty: inner.clone(),
+            }],
+        },
+    ]
+}
+
+fn result_variants(ok: &ResolvedTypeId, error: &ResolvedTypeId) -> Vec<MirVariantDesc> {
+    vec![
+        MirVariantDesc {
+            id: NodeId("builtin:variant:Result::Ok".into()),
+            name: "Ok".into(),
+            discriminant: 0,
+            fields: vec![MirFieldDesc {
+                id: NodeId("builtin:variant:Result::Ok/payload:0".into()),
+                name: "_0".into(),
+                ty: ok.clone(),
+            }],
+        },
+        MirVariantDesc {
+            id: NodeId("builtin:variant:Result::Err".into()),
+            name: "Err".into(),
+            discriminant: 1,
+            fields: vec![MirFieldDesc {
+                id: NodeId("builtin:variant:Result::Err/payload:0".into()),
+                name: "_0".into(),
+                ty: error.clone(),
+            }],
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -656,6 +717,140 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate one canonical variant construction.  The instruction carries
+    /// stable variant/member identities; this method supplies the semantic
+    /// discriminant and payload ABI from TypeDesc.
+    pub fn validate_variant_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &NodeId,
+        field_ids: &[NodeId],
+        field_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        if field_ids.len() != field_types.len() {
+            return Err(format!(
+                "variant '{}' names {} fields but carries {} values",
+                variant.0,
+                field_ids.len(),
+                field_types.len()
+            ));
+        }
+        let (expected_nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
+            format!(
+                "type '{}' has no canonical variant layout",
+                result_ty.as_str()
+            )
+        })?;
+        if nominal.as_str() != expected_nominal {
+            return Err(format!(
+                "variant nominal '{}' disagrees with canonical nominal '{}'",
+                nominal.as_str(),
+                expected_nominal
+            ));
+        }
+        let expected = variants
+            .iter()
+            .find(|candidate| candidate.id == *variant)
+            .ok_or_else(|| format!("variant '{}' is absent from TypeDesc", variant.0))?;
+        validate_variant_fields(expected, field_ids, field_types)
+    }
+
+    /// Return the canonical nominal label and discriminant/payload table for
+    /// the built-in Option/Result families.  User enum layouts remain
+    /// fail-closed until their schema is promoted into this catalog.
+    pub fn variant_layout(&self, ty: &ResolvedTypeId) -> Option<(&str, &[MirVariantDesc])> {
+        let descriptor = self.get(ty)?;
+        match &descriptor.layout {
+            MirLayout::Option { variants, .. } => {
+                Some(("builtin:type:Option", variants.as_slice()))
+            }
+            MirLayout::Result { variants, .. } => {
+                Some(("builtin:type:Result", variants.as_slice()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn variant(&self, ty: &ResolvedTypeId, variant: &NodeId) -> Option<&MirVariantDesc> {
+        self.variant_layout(ty)?
+            .1
+            .iter()
+            .find(|candidate| candidate.id == *variant)
+    }
+
+    /// Validate a switch over a canonical variant family.  Exhaustiveness is
+    /// part of the MIR contract: either every discriminant is listed exactly
+    /// once or the final arm is an explicit default.
+    pub fn validate_switch(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+    ) -> Result<(), String> {
+        let Some((_, variants)) = self.variant_layout(scrutinee_ty) else {
+            if arms
+                .iter()
+                .any(|arm| matches!(arm.case, crate::core::mir::MirSwitchCase::Variant(_)))
+            {
+                return Err(format!(
+                    "switch scrutinee type '{}' has no canonical variant layout",
+                    scrutinee_ty.as_str()
+                ));
+            }
+            return Ok(());
+        };
+        if arms.is_empty() {
+            return Err("variant switch has no arms".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut has_default = false;
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.case {
+                crate::core::mir::MirSwitchCase::Variant(variant) => {
+                    if has_default {
+                        return Err("variant switch has an arm after its default".into());
+                    }
+                    if !variants.iter().any(|candidate| candidate.id == *variant) {
+                        return Err(format!(
+                            "variant switch case '{}' is absent from TypeDesc",
+                            variant.0
+                        ));
+                    }
+                    if !seen.insert(variant) {
+                        return Err(format!("variant switch case '{}' is repeated", variant.0));
+                    }
+                }
+                crate::core::mir::MirSwitchCase::Default => {
+                    if has_default {
+                        return Err("variant switch has more than one default arm".into());
+                    }
+                    if index + 1 != arms.len() {
+                        return Err("variant switch default arm must be last".into());
+                    }
+                    if !arm.bindings.is_empty() {
+                        return Err("variant switch default arm cannot bind a payload".into());
+                    }
+                    has_default = true;
+                }
+                crate::core::mir::MirSwitchCase::Literal(_) => {
+                    return Err("variant switch cannot use a literal case".into());
+                }
+            }
+        }
+        if !has_default && seen.len() != variants.len() {
+            let missing = variants
+                .iter()
+                .filter(|candidate| !seen.contains(&candidate.id))
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "variant switch is not exhaustive; missing: {missing}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn canonical_text(&self) -> String {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {
@@ -672,6 +867,47 @@ impl MirTypeCatalog {
         }
         output
     }
+}
+
+fn validate_variant_fields(
+    variant: &MirVariantDesc,
+    field_ids: &[NodeId],
+    field_types: &[ResolvedTypeId],
+) -> Result<(), String> {
+    if variant.fields.len() != field_ids.len() {
+        return Err(format!(
+            "variant '{}' expects {} payload fields but carries {}",
+            variant.name,
+            variant.fields.len(),
+            field_ids.len()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (field_id, actual) in field_ids.iter().zip(field_types) {
+        if !seen.insert(field_id) {
+            return Err(format!(
+                "variant payload field '{}' is repeated",
+                field_id.0
+            ));
+        }
+        let expected = variant
+            .fields
+            .iter()
+            .find(|field| field.id == *field_id)
+            .ok_or_else(|| format!("variant payload field '{}' is absent", field_id.0))?;
+        if actual != &expected.ty {
+            return Err(format!(
+                "variant payload field '{}' type '{}' disagrees with layout type '{}'",
+                field_id.0,
+                actual.as_str(),
+                expected.ty.as_str()
+            ));
+        }
+    }
+    if variant.fields.iter().any(|field| !seen.contains(&field.id)) {
+        return Err(format!("variant '{}' payload is incomplete", variant.name));
+    }
+    Ok(())
 }
 
 fn primitive_layout(primitive: PrimitiveType) -> MirLayout {
@@ -888,19 +1124,30 @@ mod tests {
             catalog.get(&tuple_id).expect("tuple descriptor").layout,
             MirLayout::Tuple(vec![i32_id.clone(), bool_id.clone()])
         );
-        assert_eq!(
-            catalog.get(&option_id).expect("option descriptor").layout,
-            MirLayout::Option {
-                inner: i32_id.clone()
-            }
-        );
-        assert_eq!(
-            catalog.get(&result_id).expect("result descriptor").layout,
-            MirLayout::Result {
-                ok: i32_id.clone(),
-                error: bool_id.clone(),
-            }
-        );
+        assert!(matches!(
+            &catalog.get(&option_id).expect("option descriptor").layout,
+            MirLayout::Option { inner, variants }
+                if inner == &i32_id
+                    && variants.iter().map(|variant| variant.name.as_str()).collect::<Vec<_>>()
+                        == ["None", "Some"]
+                    && variants[0].discriminant == 0
+                    && variants[1].discriminant == 1
+                    && variants[1].fields[0].id.0
+                        == "builtin:variant:Option::Some/payload:0"
+                    && variants[1].fields[0].ty == i32_id
+        ));
+        assert!(matches!(
+            &catalog.get(&result_id).expect("result descriptor").layout,
+            MirLayout::Result { ok, error, variants }
+                if ok == &i32_id
+                    && error == &bool_id
+                    && variants.iter().map(|variant| variant.name.as_str()).collect::<Vec<_>>()
+                        == ["Ok", "Err"]
+                    && variants[0].discriminant == 0
+                    && variants[1].discriminant == 1
+                    && variants[0].fields[0].ty == i32_id
+                    && variants[1].fields[0].ty == bool_id
+        ));
         assert!(catalog
             .validate_aggregate(
                 &tuple_id,
@@ -999,6 +1246,55 @@ mod tests {
                 std::slice::from_ref(&y.ty),
             )
             .is_ok());
+    }
+
+    #[test]
+    fn variant_layout_rejects_bad_payload_and_non_exhaustive_switches() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(i32_id.clone()))
+            .expect("option");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let option_nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
+        let some = crate::core::NodeId("builtin:variant:Option::Some".into());
+        let some_field = crate::core::NodeId("builtin:variant:Option::Some/payload:0".into());
+        assert!(catalog
+            .validate_variant_construct(
+                &option_id,
+                &option_nominal,
+                &some,
+                std::slice::from_ref(&some_field),
+                std::slice::from_ref(&bool_id),
+            )
+            .is_err());
+        assert!(catalog
+            .validate_variant_construct(
+                &option_id,
+                &option_nominal,
+                &crate::core::NodeId("builtin:variant:Option::Missing".into()),
+                &[],
+                &[],
+            )
+            .is_err());
+
+        let only_some = crate::core::mir::MirSwitchArm {
+            edge: crate::core::mir::MirEdgeId::new("edge:some").expect("edge"),
+            target: crate::core::mir::MirBlockId::new("bb:some").expect("block"),
+            arguments: Vec::new(),
+            bindings: Vec::new(),
+            case: crate::core::mir::MirSwitchCase::Variant(some),
+        };
+        let error = catalog
+            .validate_switch(&option_id, &[only_some])
+            .expect_err("missing None must fail closed");
+        assert!(error.contains("None"));
     }
 
     #[test]

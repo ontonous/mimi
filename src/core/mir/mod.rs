@@ -150,6 +150,15 @@ pub enum MirInstructionKind {
         kind: MirAggregateKind,
         fields: Vec<MirValueId>,
     },
+    /// Construct a canonical Option/Result variant. Payload identities are
+    /// checker-owned; discriminant and physical payload encoding come from
+    /// the TypeDesc variant layout.
+    ConstructVariant {
+        result: MirValueId,
+        nominal: NominalTypeId,
+        variant: NodeId,
+        fields: Vec<(NodeId, MirValueId)>,
+    },
     /// Consume a record base and produce the same record with the explicit
     /// field values overlaid.  The field identities in `kind` remain
     /// checker-owned; backend field names are recovered from TypeDesc only.
@@ -234,7 +243,16 @@ pub struct MirSwitchArm {
     pub edge: MirEdgeId,
     pub target: MirBlockId,
     pub arguments: Vec<MirValueId>,
+    /// Payloads projected from the selected variant into target block
+    /// parameters. A default arm cannot contain bindings.
+    pub bindings: Vec<MirSwitchBinding>,
     pub case: MirSwitchCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirSwitchBinding {
+    pub parameter: MirValueId,
+    pub field: NodeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +498,19 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             kind,
             fields,
         } => format!("construct {result} = {kind:?}({})", format_values(fields)),
+        MirInstructionKind::ConstructVariant {
+            result,
+            nominal,
+            variant,
+            fields,
+        } => format!(
+            "construct_variant {result} = {nominal:?}::{variant:?}({})",
+            fields
+                .iter()
+                .map(|(field, value)| format!("{field:?}:{value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         MirInstructionKind::UpdateRecord {
             result,
             base,
@@ -549,11 +580,15 @@ fn format_terminator(terminator: &MirTerminator) -> String {
             arms.iter()
                 .map(|arm| {
                     format!(
-                        "{:?}:{:?}:{}({})",
+                        "{:?}:{:?}:{}({}; bind={:?})",
                         arm.case,
                         arm.edge,
                         arm.target,
-                        format_values(&arm.arguments)
+                        format_values(&arm.arguments),
+                        arm.bindings
+                            .iter()
+                            .map(|binding| format!("{}<-{:?}", binding.parameter, binding.field))
+                            .collect::<Vec<_>>()
                     )
                 })
                 .collect::<Vec<_>>()
@@ -801,6 +836,18 @@ impl<'a> MirValidator<'a> {
                 self.values(fields);
                 self.result_at(result, &instruction.id, block, index);
             }
+            ConstructVariant { result, fields, .. } => {
+                for (field, value) in fields {
+                    self.use_value(value);
+                    if field.0.trim().is_empty() {
+                        self.error(
+                            result.to_string(),
+                            "variant payload field identity is empty",
+                        );
+                    }
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             UpdateRecord {
                 result,
                 base,
@@ -863,7 +910,7 @@ impl<'a> MirValidator<'a> {
                 self.edge(edge);
                 self.target(target);
                 self.values(arguments);
-                self.check_arity(target, arguments);
+                self.check_arity(target, arguments, &[]);
             }
             MirTerminator::Branch {
                 condition,
@@ -881,8 +928,8 @@ impl<'a> MirValidator<'a> {
                 self.target(else_target);
                 self.values(then_arguments);
                 self.values(else_arguments);
-                self.check_arity(then_target, then_arguments);
-                self.check_arity(else_target, else_arguments);
+                self.check_arity(then_target, then_arguments, &[]);
+                self.check_arity(else_target, else_arguments, &[]);
             }
             MirTerminator::Switch { scrutinee, arms } => {
                 self.use_value(scrutinee);
@@ -891,7 +938,21 @@ impl<'a> MirValidator<'a> {
                     self.edge(&arm.edge);
                     self.target(&arm.target);
                     self.values(&arm.arguments);
-                    self.check_arity(&arm.target, &arm.arguments);
+                    self.check_arity(&arm.target, &arm.arguments, &arm.bindings);
+                    let mut binding_fields = BTreeSet::new();
+                    for binding in &arm.bindings {
+                        if binding.parameter.as_str().trim().is_empty()
+                            || binding.field.0.trim().is_empty()
+                        {
+                            self.error(arm.edge.to_string(), "switch binding identity is empty");
+                        }
+                        if !binding_fields.insert(&binding.field) {
+                            self.error(
+                                arm.edge.to_string(),
+                                "switch binding field identity is duplicated",
+                            );
+                        }
+                    }
                     if matches!(arm.case, MirSwitchCase::Default) {
                         if has_default {
                             self.error(
@@ -948,14 +1009,19 @@ impl<'a> MirValidator<'a> {
         }
     }
 
-    fn check_arity(&mut self, target: &MirBlockId, arguments: &[MirValueId]) {
+    fn check_arity(
+        &mut self,
+        target: &MirBlockId,
+        arguments: &[MirValueId],
+        bindings: &[MirSwitchBinding],
+    ) {
         if let Some(block) = self.function.blocks.get(target) {
-            if block.parameters.len() != arguments.len() {
+            if block.parameters.len() != arguments.len() + bindings.len() {
                 self.error(
                     target.to_string(),
                     format!(
-                        "edge passes {} values but target expects {} parameters",
-                        arguments.len(),
+                        "edge passes {} values/bindings but target expects {} parameters",
+                        arguments.len() + bindings.len(),
                         block.parameters.len()
                     ),
                 );
@@ -978,6 +1044,21 @@ impl<'a> MirValidator<'a> {
                     self.error(
                         target.to_string(),
                         format!("edge argument {index} type disagrees with target parameter"),
+                    );
+                }
+            }
+            for (index, (binding, parameter)) in bindings
+                .iter()
+                .zip(parameters.iter().skip(arguments.len()))
+                .enumerate()
+            {
+                if binding.parameter != parameter.value {
+                    self.error(
+                        target.to_string(),
+                        format!(
+                            "switch binding {index} parameter '{}' disagrees with target parameter '{}'",
+                            binding.parameter, parameter.value
+                        ),
                     );
                 }
             }
@@ -1142,6 +1223,9 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
+            }
+            MirInstructionKind::ConstructVariant { fields, .. } => {
+                uses.extend(fields.iter().map(|(_, value)| value.clone()));
             }
             MirInstructionKind::UpdateRecord { base, fields, .. } => {
                 uses.push(base.clone());

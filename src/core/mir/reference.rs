@@ -27,6 +27,11 @@ pub enum MirRuntimeValue {
         nominal: crate::core::ir::NominalTypeId,
         fields: Vec<MirRuntimeValue>,
     },
+    Variant {
+        nominal: crate::core::ir::NominalTypeId,
+        variant: NodeId,
+        payload: Vec<MirRuntimeValue>,
+    },
     Unit,
 }
 
@@ -262,6 +267,46 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::ConstructVariant {
+                            result,
+                            nominal,
+                            variant,
+                            fields,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let field_types = fields
+                                .iter()
+                                .filter_map(|(_, field)| {
+                                    function.values.get(field).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            let field_ids = fields
+                                .iter()
+                                .map(|(field, _)| field.clone())
+                                .collect::<Vec<_>>();
+                            if field_types.len() != fields.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "variant payload is absent from MIR value catalog"
+                                        .into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog.validate_variant_construct(
+                                &result_value.ty,
+                                nominal,
+                                variant,
+                                &field_ids,
+                                &field_types,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::UpdateRecord {
                             result,
                             base,
@@ -300,7 +345,84 @@ impl MirProgram {
                                 });
                             }
                         }
-                        _ => {}
+                        super::MirInstructionKind::Const { .. }
+                        | super::MirInstructionKind::Call { .. }
+                        | super::MirInstructionKind::Copy { .. }
+                        | super::MirInstructionKind::Move { .. }
+                        | super::MirInstructionKind::Clone { .. }
+                        | super::MirInstructionKind::Drop { .. }
+                        | super::MirInstructionKind::Borrow { .. }
+                        | super::MirInstructionKind::EndBorrow { .. }
+                        | super::MirInstructionKind::Binary { .. }
+                        | super::MirInstructionKind::Unary { .. }
+                        | super::MirInstructionKind::Convert { .. }
+                        | super::MirInstructionKind::Nop => {}
+                    }
+                }
+                if let super::MirTerminator::Switch { scrutinee, arms } = &block.terminator {
+                    let Some(scrutinee_value) = function.values.get(scrutinee) else {
+                        continue;
+                    };
+                    if let Err(message) = type_catalog.validate_switch(&scrutinee_value.ty, arms) {
+                        errors.push(super::MirValidationError {
+                            subject: block.id.to_string(),
+                            message,
+                        });
+                    }
+                    for arm in arms {
+                        let Some(target) = function.blocks.get(&arm.target) else {
+                            continue;
+                        };
+                        let variant = match &arm.case {
+                            super::MirSwitchCase::Variant(variant) => {
+                                type_catalog.variant(&scrutinee_value.ty, variant)
+                            }
+                            _ => None,
+                        };
+                        if variant.is_none() && !arm.bindings.is_empty() {
+                            errors.push(super::MirValidationError {
+                                subject: arm.edge.to_string(),
+                                message: "switch payload bindings require a canonical variant case"
+                                    .into(),
+                            });
+                            continue;
+                        }
+                        if let Some(variant) = variant {
+                            for (index, binding) in arm.bindings.iter().enumerate() {
+                                let Some(parameter) = target
+                                    .parameters
+                                    .get(arm.arguments.len() + index)
+                                    .and_then(|parameter| function.values.get(&parameter.value))
+                                else {
+                                    continue;
+                                };
+                                let Some(field) = variant
+                                    .fields
+                                    .iter()
+                                    .find(|field| field.id == binding.field)
+                                else {
+                                    errors.push(super::MirValidationError {
+                                        subject: arm.edge.to_string(),
+                                        message: format!(
+                                            "switch binding field '{}' is absent from variant TypeDesc",
+                                            binding.field.0
+                                        ),
+                                    });
+                                    continue;
+                                };
+                                if parameter.ty != field.ty {
+                                    errors.push(super::MirValidationError {
+                                        subject: arm.edge.to_string(),
+                                        message: format!(
+                                            "switch binding '{}' type '{}' disagrees with payload type '{}'",
+                                            binding.parameter,
+                                            parameter.ty.as_str(),
+                                            field.ty.as_str()
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -442,9 +564,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                     current = target.clone();
                 }
                 MirTerminator::Switch { scrutinee, arms } => {
+                    let scrutinee_id = scrutinee.clone();
                     let scrutinee = self.read_value(function, &values, scrutinee)?;
                     let arm = self.select_switch_arm(function, &scrutinee, arms)?;
-                    incoming = self.read_values(function, &values, &arm.arguments)?;
+                    incoming =
+                        self.switch_arguments(function, &values, &scrutinee_id, &scrutinee, arm)?;
                     current = arm.target.clone();
                 }
                 MirTerminator::Return { value } => {
@@ -540,6 +664,30 @@ impl<'a> MirReferenceInterpreter<'a> {
                         fields: field_ids,
                     } => self.construct_record(function, result, nominal, field_ids, fields)?,
                 };
+                values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ConstructVariant {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => {
+                let field_ids = fields
+                    .iter()
+                    .map(|(field, _)| field.clone())
+                    .collect::<Vec<_>>();
+                let field_values = fields
+                    .iter()
+                    .map(|(_, value)| self.read_value(function, values, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = self.construct_variant(
+                    function,
+                    result,
+                    nominal,
+                    variant,
+                    &field_ids,
+                    field_values,
+                )?;
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::UpdateRecord {
@@ -795,6 +943,67 @@ impl<'a> MirReferenceInterpreter<'a> {
         })
     }
 
+    fn construct_variant(
+        &self,
+        function: &MirFunction,
+        result: &MirValueId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &NodeId,
+        field_ids: &[NodeId],
+        values: Vec<MirRuntimeValue>,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let result_ty = function
+            .values
+            .get(result)
+            .map(|value| &value.ty)
+            .ok_or_else(|| self.error(&function.owner, "variant result has no MIR type"))?;
+        let Some((expected_nominal, variants)) =
+            self.program.type_catalog().variant_layout(result_ty)
+        else {
+            return Err(self.error(&function.owner, "variant result has no TypeDesc layout"));
+        };
+        if nominal.as_str() != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "variant construction nominal disagrees with TypeDesc",
+            ));
+        }
+        let Some(expected_variant) = variants.iter().find(|candidate| candidate.id == *variant)
+        else {
+            return Err(self.error(&function.owner, "variant is absent from TypeDesc"));
+        };
+        let mut supplied = HashMap::new();
+        for (field, value) in field_ids.iter().zip(values) {
+            if supplied.insert(field.clone(), value).is_some() {
+                return Err(self.error(&function.owner, "variant payload field is repeated"));
+            }
+        }
+        let payload = expected_variant
+            .fields
+            .iter()
+            .map(|field| {
+                supplied.remove(&field.id).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("variant payload field '{}' is missing", field.id.0),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !supplied.is_empty() {
+            return Err(self.error(
+                &function.owner,
+                "variant construction contains an unknown payload field",
+            ));
+        }
+        Ok(MirRuntimeValue::Variant {
+            nominal: crate::core::NominalTypeId::new(expected_nominal)
+                .expect("TypeDesc variant nominal is non-empty"),
+            variant: expected_variant.id.clone(),
+            payload,
+        })
+    }
+
     fn read_value(
         &self,
         function: &MirFunction,
@@ -830,12 +1039,84 @@ impl<'a> MirReferenceInterpreter<'a> {
                 MirSwitchCase::Literal(literal) if &runtime_literal(literal) == value => {
                     return Ok(arm);
                 }
+                MirSwitchCase::Variant(variant) if matches!(value, MirRuntimeValue::Variant { variant: actual, .. } if actual == variant) =>
+                {
+                    return Ok(arm);
+                }
                 MirSwitchCase::Default => default = Some(arm),
                 MirSwitchCase::Variant(_) => {}
                 MirSwitchCase::Literal(_) => {}
             }
         }
         default.ok_or_else(|| self.error(&function.owner, "switch has no matching arm"))
+    }
+
+    fn switch_arguments(
+        &self,
+        function: &MirFunction,
+        values: &HashMap<MirValueId, MirRuntimeValue>,
+        scrutinee_id: &MirValueId,
+        value: &MirRuntimeValue,
+        arm: &MirSwitchArm,
+    ) -> Result<Vec<MirRuntimeValue>, MirExecutionError> {
+        let mut incoming = self.read_values(function, values, &arm.arguments)?;
+        let scrutinee_ty = function
+            .values
+            .get(scrutinee_id)
+            .map(|value| &value.ty)
+            .ok_or_else(|| self.error(&function.owner, "switch scrutinee has no MIR type"))?;
+        let Some((expected_nominal, _)) = self.program.type_catalog().variant_layout(scrutinee_ty)
+        else {
+            return Ok(incoming);
+        };
+        let MirRuntimeValue::Variant {
+            nominal: actual_nominal,
+            variant: actual_variant,
+            payload,
+        } = value
+        else {
+            return Err(self.error(
+                &function.owner,
+                "variant switch payload binding received a non-variant value",
+            ));
+        };
+        if actual_nominal.as_str() != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "runtime variant nominal disagrees with scrutinee TypeDesc",
+            ));
+        }
+        if !matches!(&arm.case, MirSwitchCase::Variant(case) if case == actual_variant) {
+            return Err(self.error(
+                &function.owner,
+                "switch payload binding case disagrees with runtime variant",
+            ));
+        }
+        if arm.bindings.is_empty() {
+            return Ok(incoming);
+        }
+        let variant = self
+            .program
+            .type_catalog()
+            .variant(scrutinee_ty, actual_variant)
+            .ok_or_else(|| {
+                self.error(&function.owner, "runtime variant is absent from TypeDesc")
+            })?;
+        for binding in &arm.bindings {
+            let field_index = variant
+                .fields
+                .iter()
+                .position(|field| field.id == binding.field)
+                .ok_or_else(|| self.error(&function.owner, "switch binding field is absent"))?;
+            let field = payload.get(field_index).cloned().ok_or_else(|| {
+                self.error(
+                    &function.owner,
+                    "runtime variant payload is shorter than TypeDesc",
+                )
+            })?;
+            incoming.push(field);
+        }
+        Ok(incoming)
     }
 
     fn error(&self, function: &NodeId, message: impl Into<String>) -> MirExecutionError {
@@ -1120,6 +1401,8 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
     use crate::lexer::Lexer;
@@ -1296,5 +1579,66 @@ mod tests {
             .execute(&owner, &[])
             .expect("reference execution");
         assert_eq!(value, MirRuntimeValue::Int(40));
+    }
+
+    #[test]
+    fn executes_copy_option_and_result_variants_from_canonical_mir() {
+        for (source, expected) in [
+            (
+                "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v, None => 0 } }",
+                41,
+            ),
+            (
+                "func main() -> i32 { let value: Result<i32, i32> = Err(7); match value { Ok(v) => v, Err(e) => e } }",
+                7,
+            ),
+            (
+                "func main() -> i32 { let value: Option<i32> = None; match value { Some(v) => v, None => 0 } }",
+                0,
+            ),
+            (
+                "func main() -> i32 { let value: Result<i32, i32> = Ok(41); match value { Ok(v) => v, Err(e) => e } }",
+                41,
+            ),
+        ] {
+            let (owner, program) = canonical_program_with_main(source);
+            let value = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("reference execution");
+            assert_eq!(value, MirRuntimeValue::Int(expected));
+        }
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_duplicate_variant_switch_case() {
+        let source =
+            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v, None => 0 } }";
+        let (_, program) = canonical_program_with_main(source);
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = program.functions().get(&owner).cloned().expect("main");
+        function
+            .blocks
+            .values_mut()
+            .find_map(|block| match &mut block.terminator {
+                crate::core::mir::MirTerminator::Switch { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .expect("variant switch")
+            .get_mut(1)
+            .expect("second variant arm")
+            .case = crate::core::mir::MirSwitchCase::Variant(crate::core::NodeId(
+            "builtin:variant:Option::Some".into(),
+        ));
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            program.type_catalog().clone(),
+        )
+        .expect_err("duplicate variant MIR must fail before execution");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("repeated")),
+            "{errors:?}"
+        );
     }
 }
