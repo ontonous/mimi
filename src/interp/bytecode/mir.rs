@@ -3460,6 +3460,136 @@ mod tests {
     }
 
     #[test]
+    fn rejects_consumption_hidden_before_canonical_branch_join() {
+        let source = "func consume_after_branch(choose: bool) -> string { let value = \"owned\"; let marker = if choose { 0 } else { 0 }; value }\nfunc main() -> i32 { 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:consume_after_branch".into());
+        let mut function = mir
+            .functions()
+            .get(&owner)
+            .cloned()
+            .expect("branch function");
+        let value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Const {
+                    result,
+                    literal: crate::core::ir::ResolvedLiteral::String(value),
+                } if value == "owned" => Some(result.clone()),
+                _ => None,
+            })
+            .expect("owned string value");
+        let branch_target = function
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                crate::core::mir::MirTerminator::Branch { then_target, .. } => {
+                    Some(then_target.clone())
+                }
+                _ => None,
+            })
+            .expect("branch target");
+        function
+            .blocks
+            .get_mut(&branch_target)
+            .expect("branch block")
+            .instructions
+            .push(crate::core::mir::MirInstruction {
+                id: crate::core::mir::MirInstructionId::new("synthetic/branch-drop")
+                    .expect("instruction id"),
+                kind: crate::core::mir::MirInstructionKind::Drop { value },
+            });
+        let error = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect_err("a branch-local consumption must reach its join");
+        assert!(error
+            .iter()
+            .any(|error| error.message.contains("use after consuming non-Copy value")));
+    }
+
+    #[test]
+    fn rejects_consumption_hidden_before_canonical_loop_back_edge() {
+        let source = "func consume_after_loop(choose: bool) -> string { let value = \"owned\"; while choose { 0 } value }\nfunc main() -> i32 { 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:consume_after_loop".into());
+        let mut function = mir.functions().get(&owner).cloned().expect("loop function");
+        let value = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Const {
+                    result,
+                    literal: crate::core::ir::ResolvedLiteral::String(value),
+                } if value == "owned" => Some(result.clone()),
+                _ => None,
+            })
+            .expect("owned string value");
+        let body_target = function
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                crate::core::mir::MirTerminator::Branch { then_target, .. }
+                    if function.blocks.get(then_target).is_some_and(|body| {
+                        matches!(
+                            body.terminator,
+                            crate::core::mir::MirTerminator::Goto { .. }
+                        )
+                    }) =>
+                {
+                    Some(then_target.clone())
+                }
+                _ => None,
+            })
+            .expect("loop body target");
+        let body = function
+            .blocks
+            .get_mut(&body_target)
+            .expect("loop body block");
+        body.instructions.push(crate::core::mir::MirInstruction {
+            id: crate::core::mir::MirInstructionId::new("synthetic/loop-drop")
+                .expect("instruction id"),
+            kind: crate::core::mir::MirInstructionKind::Drop { value },
+        });
+        let error = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect_err("a loop-body consumption must reach the loop exit");
+        assert!(error
+            .iter()
+            .any(|error| error.message.contains("use after consuming non-Copy value")));
+    }
+
+    #[test]
+    fn canonical_ownership_fixed_point_allows_unconsumed_loop_return() {
+        let source = "func main() -> string { let value = \"owned\"; while false { 0 } value }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::String("owned".into()));
+        assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
     fn rejects_ownership_events_without_runtime_glue() {
         let source = "func main() -> i32 { 42 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

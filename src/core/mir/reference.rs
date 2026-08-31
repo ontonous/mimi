@@ -5,7 +5,7 @@
 //! against a third semantic oracle. The supported operation set grows with
 //! MIR lowering; unsupported operations fail explicitly.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
@@ -930,44 +930,43 @@ fn validate_call_graph(
 }
 
 /// Validate explicit ownership boundaries before any execution backend sees
-/// MIR. This pass is intentionally conservative: non-Copy values can only be
-/// consumed once along a block-local path, and each mutually exclusive CFG
-/// edge is checked from the same pre-terminator state. Aggregate destructuring
-/// and partial moves remain fail-closed until their own field-level contract
-/// is materialized.
+/// MIR. The state is a set of consumed non-Copy value identities and is
+/// propagated through every CFG edge to a fixed point. Joining states uses
+/// union: if any incoming path has consumed a value, a later use is rejected
+/// unless a block parameter explicitly rebinds it. This makes branch joins and
+/// loop back-edges fail closed instead of relying on block-local bookkeeping.
+/// Aggregate destructuring and partial moves remain fail-closed until their
+/// own field-level contract is materialized.
 fn validate_linear_consumption(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
-    for block in function.blocks.values() {
-        let mut consumed = BTreeSet::new();
+    let mut seen_errors = BTreeSet::new();
+    let mut incoming = function
+        .blocks
+        .keys()
+        .cloned()
+        .map(|block| (block, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut worklist = function.blocks.keys().cloned().collect::<VecDeque<_>>();
+    let mut queued = function.blocks.keys().cloned().collect::<BTreeSet<_>>();
+
+    while let Some(block_id) = worklist.pop_front() {
+        queued.remove(&block_id);
+        let Some(block) = function.blocks.get(&block_id) else {
+            continue;
+        };
+        let mut consumed = incoming.get(&block_id).cloned().unwrap_or_default();
+        // A block parameter is a fresh value on each incoming edge. In
+        // particular, this resets a parameter on a loop back-edge rather than
+        // mistaking the previous iteration's value for the next one.
+        for parameter in &block.parameters {
+            consumed.remove(&parameter.value);
+        }
+
         for instruction in &block.instructions {
-            let sources: Vec<&MirValueId> = match &instruction.kind {
-                super::MirInstructionKind::Move { source, .. }
-                | super::MirInstructionKind::Drop { value: source } => vec![source],
-                super::MirInstructionKind::MoveProject { base, .. } => vec![base],
-                super::MirInstructionKind::Call { arguments, .. }
-                | super::MirInstructionKind::BuiltinCall { arguments, .. }
-                | super::MirInstructionKind::Construct {
-                    fields: arguments, ..
-                } => arguments.iter().collect(),
-                super::MirInstructionKind::ConstructVariant { fields, .. }
-                | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
-                    fields.iter().map(|(_, value)| value).collect()
-                }
-                super::MirInstructionKind::UpdateRecord {
-                    base,
-                    fields: arguments,
-                    ..
-                } => {
-                    let mut sources = Vec::with_capacity(arguments.len() + 1);
-                    sources.push(base);
-                    sources.extend(arguments.iter());
-                    sources
-                }
-                _ => Vec::new(),
-            };
+            let sources = consumed_sources(&instruction.kind);
             consume_values(
                 function,
                 type_catalog,
@@ -975,85 +974,125 @@ fn validate_linear_consumption(
                 &sources,
                 instruction.id.to_string(),
                 &mut errors,
+                &mut seen_errors,
             );
+            if let Some(result) = produced_value(&instruction.kind) {
+                // MIR structural validation guarantees a single definition;
+                // a produced value is live until a later consuming operation.
+                consumed.remove(result);
+            }
         }
+
         match &block.terminator {
             super::MirTerminator::Goto {
-                arguments, edge, ..
-            } => consume_edge_values(
+                target,
+                arguments,
+                edge,
+            } => propagate_edge(
                 function,
                 type_catalog,
                 &consumed,
+                target,
                 arguments,
                 edge.to_string(),
+                &mut incoming,
+                &mut worklist,
+                &mut queued,
                 &mut errors,
+                &mut seen_errors,
             ),
             super::MirTerminator::Branch {
+                then_target,
                 then_arguments,
                 then_edge,
+                else_target,
                 else_arguments,
                 else_edge,
                 ..
             } => {
-                consume_edge_values(
+                propagate_edge(
                     function,
                     type_catalog,
                     &consumed,
+                    then_target,
                     then_arguments,
                     then_edge.to_string(),
+                    &mut incoming,
+                    &mut worklist,
+                    &mut queued,
                     &mut errors,
+                    &mut seen_errors,
                 );
-                consume_edge_values(
+                propagate_edge(
                     function,
                     type_catalog,
                     &consumed,
+                    else_target,
                     else_arguments,
                     else_edge.to_string(),
+                    &mut incoming,
+                    &mut worklist,
+                    &mut queued,
                     &mut errors,
+                    &mut seen_errors,
                 );
             }
             super::MirTerminator::Switch {
                 scrutinee, arms, ..
             } => {
                 if is_non_copy(function, type_catalog, scrutinee) {
-                    errors.push(super::MirValidationError {
-                        subject: block.id.to_string(),
-                        message: format!(
+                    push_ownership_error(
+                        &mut errors,
+                        &mut seen_errors,
+                        block.id.to_string(),
+                        format!(
                             "switch scrutinee '{}' is non-Copy but aggregate match glue is not materialized",
                             scrutinee
                         ),
-                    });
+                    );
                 }
                 for arm in arms {
-                    consume_edge_values(
+                    propagate_edge(
                         function,
                         type_catalog,
                         &consumed,
+                        &arm.target,
                         &arm.arguments,
                         arm.edge.to_string(),
+                        &mut incoming,
+                        &mut worklist,
+                        &mut queued,
                         &mut errors,
+                        &mut seen_errors,
                     );
                 }
             }
             super::MirTerminator::SwitchMove {
                 scrutinee, arms, ..
             } => {
+                let mut after_switch = consumed;
                 consume_values(
                     function,
                     type_catalog,
-                    &mut consumed,
-                    &[scrutinee],
+                    &mut after_switch,
+                    std::slice::from_ref(scrutinee),
                     block.id.to_string(),
                     &mut errors,
+                    &mut seen_errors,
                 );
                 for arm in arms {
-                    consume_edge_values(
+                    propagate_edge(
                         function,
                         type_catalog,
-                        &consumed,
+                        &after_switch,
+                        &arm.target,
                         &arm.arguments,
                         arm.edge.to_string(),
+                        &mut incoming,
+                        &mut worklist,
+                        &mut queued,
                         &mut errors,
+                        &mut seen_errors,
                     );
                 }
             }
@@ -1061,9 +1100,10 @@ fn validate_linear_consumption(
                 function,
                 type_catalog,
                 &mut consumed,
-                &[value],
+                std::slice::from_ref(value),
                 block.id.to_string(),
                 &mut errors,
+                &mut seen_errors,
             ),
             super::MirTerminator::Return { value: None }
             | super::MirTerminator::Trap { .. }
@@ -1074,44 +1114,128 @@ fn validate_linear_consumption(
     errors
 }
 
-fn consume_edge_values(
+fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
+    match kind {
+        super::MirInstructionKind::Move { source, .. }
+        | super::MirInstructionKind::Drop { value: source }
+        | super::MirInstructionKind::MoveProject { base: source, .. } => vec![source.clone()],
+        super::MirInstructionKind::Call { arguments, .. }
+        | super::MirInstructionKind::BuiltinCall { arguments, .. }
+        | super::MirInstructionKind::Construct {
+            fields: arguments, ..
+        } => arguments.clone(),
+        super::MirInstructionKind::ConstructVariant { fields, .. }
+        | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
+            fields.iter().map(|(_, value)| value.clone()).collect()
+        }
+        super::MirInstructionKind::UpdateRecord {
+            base,
+            fields: arguments,
+            ..
+        } => {
+            let mut sources = Vec::with_capacity(arguments.len() + 1);
+            sources.push(base.clone());
+            sources.extend(arguments.iter().cloned());
+            sources
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
+    match kind {
+        super::MirInstructionKind::Const { result, .. }
+        | super::MirInstructionKind::Load { result, .. }
+        | super::MirInstructionKind::Copy { result, .. }
+        | super::MirInstructionKind::Move { result, .. }
+        | super::MirInstructionKind::Clone { result, .. }
+        | super::MirInstructionKind::Borrow { result, .. }
+        | super::MirInstructionKind::Project { result, .. }
+        | super::MirInstructionKind::MoveProject { result, .. }
+        | super::MirInstructionKind::Construct { result, .. }
+        | super::MirInstructionKind::ConstructVariant { result, .. }
+        | super::MirInstructionKind::ConstructVariantMove { result, .. }
+        | super::MirInstructionKind::UpdateRecord { result, .. }
+        | super::MirInstructionKind::Binary { result, .. }
+        | super::MirInstructionKind::Unary { result, .. }
+        | super::MirInstructionKind::BuiltinCall { result, .. }
+        | super::MirInstructionKind::Convert { result, .. } => Some(result),
+        super::MirInstructionKind::Call { result, .. } => result.as_ref(),
+        super::MirInstructionKind::EndBorrow { .. }
+        | super::MirInstructionKind::Drop { .. }
+        | super::MirInstructionKind::Nop => None,
+    }
+}
+
+fn propagate_edge(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
     before_edge: &BTreeSet<MirValueId>,
+    target: &super::MirBlockId,
     values: &[MirValueId],
     subject: String,
+    incoming: &mut BTreeMap<super::MirBlockId, BTreeSet<MirValueId>>,
+    worklist: &mut VecDeque<super::MirBlockId>,
+    queued: &mut BTreeSet<super::MirBlockId>,
     errors: &mut Vec<super::MirValidationError>,
+    seen_errors: &mut BTreeSet<(String, String)>,
 ) {
     let mut consumed = before_edge.clone();
-    let sources = values.iter().collect::<Vec<_>>();
     consume_values(
         function,
         type_catalog,
         &mut consumed,
-        &sources,
+        values,
         subject,
         errors,
+        seen_errors,
     );
+    if let Some(block) = function.blocks.get(target) {
+        for parameter in &block.parameters {
+            consumed.remove(&parameter.value);
+        }
+    }
+    let Some(state) = incoming.get_mut(target) else {
+        return;
+    };
+    let changed = consumed.iter().any(|value| state.insert(value.clone()));
+    if changed && queued.insert(target.clone()) {
+        worklist.push_back(target.clone());
+    }
 }
 
 fn consume_values(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
     consumed: &mut BTreeSet<MirValueId>,
-    values: &[&MirValueId],
+    values: &[MirValueId],
     subject: String,
     errors: &mut Vec<super::MirValidationError>,
+    seen_errors: &mut BTreeSet<(String, String)>,
 ) {
     for value in values {
         if !is_non_copy(function, type_catalog, value) {
             continue;
         }
         if !consumed.insert((*value).clone()) {
-            errors.push(super::MirValidationError {
-                subject: subject.clone(),
-                message: format!("use after consuming non-Copy value '{}'", value),
-            });
+            push_ownership_error(
+                errors,
+                seen_errors,
+                subject.clone(),
+                format!("use after consuming non-Copy value '{}'", value),
+            );
         }
+    }
+}
+
+fn push_ownership_error(
+    errors: &mut Vec<super::MirValidationError>,
+    seen_errors: &mut BTreeSet<(String, String)>,
+    subject: String,
+    message: String,
+) {
+    if seen_errors.insert((subject.clone(), message.clone())) {
+        errors.push(super::MirValidationError { subject, message });
     }
 }
 
