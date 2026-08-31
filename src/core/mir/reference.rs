@@ -2963,6 +2963,17 @@ mod tests {
     }
 
     #[test]
+    fn canonical_native_flat_record_slice_has_a_reference_oracle() {
+        let (owner, program) = canonical_program_with_main(
+            "type Point { x: i32, enabled: bool }\nfunc make_point(x: i32, enabled: bool) -> Point { Point { enabled: enabled, x: x } }\nfunc main() -> i32 { let point = make_point(40, true); if point.enabled { point.x + 2 } else { 0 } }",
+        );
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
     fn canonical_i32_to_f64_conversion_rejects_before_any_backend() {
         let source = "func main() -> f64 { let value: i32 = 7; value as f64 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

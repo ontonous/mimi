@@ -284,6 +284,74 @@ fn canonical_mir_native_builds_min_max_and_widening_convert() {
 }
 
 #[test]
+fn canonical_mir_native_build_record_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_copy.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record reference run");
+    assert_eq!(mir_run.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR record native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR record native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR record native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_rejects_noncopy_record_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_noncopy_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR record build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR native backend rejected"));
+    assert!(stderr.contains("flat Copy record contract"));
+    assert!(stderr.contains("ownership Move"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
 fn canonical_mir_native_build_rejects_unsupported_shape_without_fallback() {
     let fixture = project_root()
         .join("tests")

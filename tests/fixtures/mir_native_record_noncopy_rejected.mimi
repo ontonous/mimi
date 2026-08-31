@@ -1,0 +1,9 @@
+type Box {
+    text: string
+}
+
+func main() -> i32 {
+    let value = Box { text: "x" }
+    drop(value)
+    0
+}

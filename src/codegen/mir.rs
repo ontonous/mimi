@@ -1,4 +1,4 @@
-//! AST-free native consumer for the closed scalar Canonical MIR slice.
+//! AST-free native consumer for the closed scalar/flat-record Canonical MIR slice.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
 //! surface AST or `CheckedProgram`, and it never calls the legacy emitter.  A
@@ -20,10 +20,13 @@ use crate::codegen::{call_try_basic_value, CodeGenerator};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
-    MirAbiClass, MirBuiltinContract, MirBuiltinKind, MirConversionKind, MirGlueKind, MirLayout,
-    MirOwnership, MirTypeCatalog,
+    MirAbiClass, MirBuiltinContract, MirBuiltinKind, MirConversionKind, MirGlueContract,
+    MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc,
 };
-use crate::core::mir::{MirBlockId, MirFunction, MirInstructionKind, MirTerminator, MirValueId};
+use crate::core::mir::{
+    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirTerminator,
+    MirValueId,
+};
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 
@@ -52,7 +55,7 @@ impl NativeMirError {
     }
 }
 
-/// Compile a validated scalar MIR program directly to LLVM.
+/// Compile a validated scalar/flat-record MIR program directly to LLVM.
 ///
 /// This is an explicit migration entry point. It is not used by the default
 /// `build` path until the wider MIR shape and differential gates are closed.
@@ -188,7 +191,10 @@ impl<'a> NativeMirValidator<'a> {
                 signed: true,
             } | MirAbiClass::Bool
         ) && desc.layout == MirLayout::Scalar)
-            || (allow_unit_result && desc.abi == MirAbiClass::Unit);
+            || (allow_unit_result
+                && desc.abi == MirAbiClass::Unit
+                && desc.layout == MirLayout::Unit)
+            || self.validate_flat_copy_record(ty, subject, desc);
         if !supported {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -219,6 +225,60 @@ impl<'a> NativeMirValidator<'a> {
                 "Copy scalar TypeDesc does not carry the canonical no-op glue contract",
             ));
         }
+    }
+
+    fn validate_flat_copy_record(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+        desc: &MirTypeDesc,
+    ) -> bool {
+        let MirLayout::Record { fields, .. } = &desc.layout else {
+            return false;
+        };
+        if desc.abi != MirAbiClass::Aggregate {
+            return false;
+        }
+        if fields.is_empty() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!(
+                    "record TypeDesc '{}' has no fields in the native ABI",
+                    ty.as_str()
+                ),
+            ));
+            return false;
+        }
+        let mut valid = true;
+        let mut field_ids = BTreeSet::new();
+        for field in fields {
+            if !field_ids.insert(&field.id) {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!("record field identity '{}' is duplicated", field.id.0),
+                ));
+                valid = false;
+            }
+            let Some(field_desc) = self.program.type_catalog().get(&field.ty) else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!("record field '{}' TypeDesc is absent", field.name),
+                ));
+                valid = false;
+                continue;
+            };
+            if !is_native_scalar_descriptor(field_desc) {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!(
+                        "record field '{}' ABI {:?}/layout {:?} is outside the flat Copy record contract",
+                        field.name, field_desc.abi, field_desc.layout
+                    ),
+                ));
+                valid = false;
+            }
+        }
+        valid
     }
 
     fn validate_instruction(
@@ -302,6 +362,16 @@ impl<'a> NativeMirValidator<'a> {
                 left,
                 right,
             } => self.validate_binary(function, result, *op, left, right, subject),
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection,
+            } => self.validate_project(function, result, base, projection, subject),
+            MirInstructionKind::Construct {
+                result,
+                kind,
+                fields,
+            } => self.validate_construct(function, result, kind, fields, subject),
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
@@ -395,6 +465,75 @@ impl<'a> NativeMirValidator<'a> {
                 subject,
                 "result and source types disagree",
             ));
+        }
+    }
+
+    fn validate_project(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "projection result");
+        self.validate_value(function, base, "projection base");
+        if !matches!(projection, MirProjection::Field(_)) {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "only stable record field projection is in the native aggregate contract",
+            ));
+            return;
+        }
+        let (Some(base_value), Some(result_value)) =
+            (function.values.get(base), function.values.get(result))
+        else {
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_projection(
+            &base_value.ty,
+            &result_value.ty,
+            projection,
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_construct(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        kind: &MirAggregateKind,
+        fields: &[MirValueId],
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "record result");
+        for field in fields {
+            self.validate_value(function, field, "record field value");
+        }
+        if !matches!(kind, MirAggregateKind::Record { .. }) {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "tuple construction is outside the flat Copy record native contract",
+            ));
+            return;
+        }
+        let Some(result_value) = function.values.get(result) else {
+            return;
+        };
+        let field_types = fields
+            .iter()
+            .filter_map(|field| function.values.get(field).map(|value| value.ty.clone()))
+            .collect::<Vec<_>>();
+        if field_types.len() != fields.len() {
+            return;
+        }
+        if let Err(message) =
+            self.program
+                .type_catalog()
+                .validate_aggregate(&result_value.ty, kind, &field_types)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
         }
     }
 
@@ -968,6 +1107,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_binary(result, *op, left, right, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection,
+            } => {
+                let value = self.emit_project(result, base, projection, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::Construct {
+                result,
+                kind,
+                fields,
+            } => {
+                let value = self.emit_construct(result, kind, fields, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
@@ -992,6 +1147,113 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
         }
         Ok(())
+    }
+
+    fn emit_construct(
+        &mut self,
+        result: &MirValueId,
+        kind: &MirAggregateKind,
+        fields: &[MirValueId],
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let MirAggregateKind::Record {
+            nominal,
+            fields: field_ids,
+        } = kind
+        else {
+            return Err(NativeMirError::new(
+                subject,
+                "tuple construction reached the flat record emitter",
+            ));
+        };
+        let result_ty = self.value_type(result, subject)?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(&result_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "record result TypeDesc is absent"))?;
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err(NativeMirError::new(
+                subject,
+                "record construction result has no canonical record layout",
+            ));
+        };
+        if nominal != expected_nominal || field_ids.len() != fields.len() {
+            return Err(NativeMirError::new(
+                subject,
+                "record construction does not match its TypeDesc layout",
+            ));
+        }
+        let struct_ty = native_basic_type(
+            self.generator.context,
+            self.program.type_catalog(),
+            &result_ty,
+        )?
+        .into_struct_type();
+        let mut aggregate = struct_ty.get_undef();
+        for (field_id, source) in field_ids.iter().zip(fields) {
+            let index = layout_fields
+                .iter()
+                .position(|field| field.id == *field_id)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        format!("record field '{}' is absent from TypeDesc", field_id.0),
+                    )
+                })?;
+            let value = self.value(source, subject)?;
+            aggregate = self
+                .generator
+                .builder
+                .build_insert_value(aggregate, value, index as u32, "mir_record_insert")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+        }
+        Ok(aggregate.into())
+    }
+
+    fn emit_project(
+        &mut self,
+        _result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let MirProjection::Field(field_id) = projection else {
+            return Err(NativeMirError::new(
+                subject,
+                "only record field projection is emitted by the native aggregate adapter",
+            ));
+        };
+        let base_ty = self.value_type(base, subject)?;
+        let descriptor =
+            self.program.type_catalog().get(&base_ty).ok_or_else(|| {
+                NativeMirError::new(subject, "projection base TypeDesc is absent")
+            })?;
+        let MirLayout::Record { fields, .. } = &descriptor.layout else {
+            return Err(NativeMirError::new(
+                subject,
+                "projection base has no canonical record layout",
+            ));
+        };
+        let index = fields
+            .iter()
+            .position(|field| field.id == *field_id)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    format!("record field '{}' is absent from TypeDesc", field_id.0),
+                )
+            })?;
+        let aggregate = self.value(base, subject)?.into_struct_value();
+        self.generator
+            .builder
+            .build_extract_value(aggregate, index as u32, "mir_record_project")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
     fn emit_const(
@@ -1630,6 +1892,24 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     }
 }
 
+fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
+    desc.layout == MirLayout::Scalar
+        && matches!(
+            desc.abi,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } | MirAbiClass::Bool
+        )
+        && desc.ownership == MirOwnership::Copy
+        && desc.glue
+            == (MirGlueContract {
+                move_out: MirGlueKind::Noop,
+                clone: MirGlueKind::Noop,
+                drop: MirGlueKind::Noop,
+            })
+}
+
 fn native_basic_type<'ctx>(
     context: &'ctx Context,
     catalog: &MirTypeCatalog,
@@ -1648,6 +1928,31 @@ fn native_basic_type<'ctx>(
             signed: true,
         } => Ok(context.i64_type().into()),
         MirAbiClass::Bool => Ok(context.bool_type().into()),
+        MirAbiClass::Aggregate => match &desc.layout {
+            MirLayout::Record { fields, .. } if !fields.is_empty() => {
+                let mut field_types = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let field_desc = catalog.get(&field.ty).ok_or_else(|| {
+                        NativeMirError::new(
+                            field.name.clone(),
+                            "record field TypeDesc is absent from native catalog",
+                        )
+                    })?;
+                    if !is_native_scalar_descriptor(field_desc) {
+                        return Err(NativeMirError::new(
+                            field.name.clone(),
+                            "record field is outside the flat Copy record ABI",
+                        ));
+                    }
+                    field_types.push(native_basic_type(context, catalog, &field.ty)?);
+                }
+                Ok(context.struct_type(&field_types, false).into())
+            }
+            layout => Err(NativeMirError::new(
+                ty.as_str(),
+                format!("aggregate layout {layout:?} is outside native contract"),
+            )),
+        },
         MirAbiClass::Unit => Err(NativeMirError::new(
             ty.as_str(),
             "unit has no LLVM BasicType",
@@ -1692,6 +1997,35 @@ mod tests {
         assert!(
             generator.module.get_function("main").is_none(),
             "L2 requires validation before LLVM function declarations"
+        );
+    }
+
+    #[test]
+    fn native_validator_rejects_non_copy_record_before_llvm_declarations() {
+        let program = canonical_program(
+            "type Box { text: string }\nfunc main() -> i32 { let value = Box { text: \"x\" }; drop(value); 0 }",
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_record_validator_test");
+
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("non-Copy record must fail closed in scalar native slice");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("flat Copy record contract")),
+            "missing flat-record rejection: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("ownership Move")),
+            "missing ownership rejection: {diagnostics:?}"
+        );
+        assert!(
+            generator.module.get_function("main").is_none(),
+            "non-Copy aggregate must be rejected before LLVM declarations"
         );
     }
 }

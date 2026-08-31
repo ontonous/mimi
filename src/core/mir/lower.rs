@@ -601,6 +601,18 @@ impl<'a> Lowerer<'a> {
                                 projection,
                             },
                         );
+                    } else if let Some(projection) =
+                        self.copy_projection_for_place(&local, &expression.ty, place)
+                    {
+                        self.emit(
+                            &expression.node_id,
+                            "project",
+                            MirInstructionKind::Project {
+                                result: result.clone(),
+                                base: local,
+                                projection,
+                            },
+                        );
                     } else {
                         self.emit(
                             &expression.node_id,
@@ -1383,6 +1395,32 @@ impl<'a> Lowerer<'a> {
             .is_ok()
             .then_some(projection)
     }
+
+    fn copy_projection_for_place(
+        &self,
+        base: &MirValueId,
+        result_ty: &crate::core::ResolvedTypeId,
+        place: &crate::core::ResolvedPlace,
+    ) -> Option<super::MirProjection> {
+        let [projection] = place.projections.as_slice() else {
+            return None;
+        };
+        let projection = match projection {
+            crate::core::ir::ResolvedProjection::Field { field, .. } => {
+                super::MirProjection::Field(field.clone())
+            }
+            crate::core::ir::ResolvedProjection::Tuple { index, .. } => {
+                super::MirProjection::Tuple(*index)
+            }
+            _ => return None,
+        };
+        let type_catalog = self.type_catalog?;
+        let base_ty = self.values.get(base)?.ty.clone();
+        type_catalog
+            .validate_projection(&base_ty, result_ty, &projection)
+            .is_ok()
+            .then_some(projection)
+    }
 }
 
 fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<NodeId>)> {
@@ -1573,6 +1611,32 @@ mod tests {
         assert!(text.contains("Variant"));
         assert!(text.contains("bind="), "{text}");
         assert!(mir.validate().is_ok(), "{:?}", mir.validate());
+    }
+
+    #[test]
+    fn copy_record_field_place_load_lowers_to_canonical_project() {
+        let source = "type Point { x: i32, enabled: bool }\nfunc main() -> i32 { let point = Point { x: 40, enabled: true }; if point.enabled { point.x + 2 } else { 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc");
+        let callable = checked
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .expect("main callable");
+        let mir =
+            lower_body_with_type_catalog(&callable.body, &catalog).expect("record MIR lowering");
+        assert!(mir
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Project { .. })));
+        assert!(!mir
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Load { .. })));
     }
 
     #[test]

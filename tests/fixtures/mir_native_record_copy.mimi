@@ -1,0 +1,17 @@
+type Point {
+    x: i32,
+    enabled: bool
+}
+
+func make_point(x: i32, enabled: bool) -> Point {
+    Point { enabled: enabled, x: x }
+}
+
+func main() -> i32 {
+    let point = make_point(40, true)
+    if point.enabled {
+        point.x + 2
+    } else {
+        0
+    }
+}
