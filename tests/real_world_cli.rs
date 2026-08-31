@@ -730,6 +730,46 @@ fn canonical_mir_native_builds_copy_option_and_result_variants() {
 }
 
 #[test]
+fn canonical_mir_native_builds_non_copy_option_string_glue() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_string.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR Option<string> reference run");
+    assert_eq!(mir_run.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-option-string-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR Option<string> native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR Option<string> native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR Option<string> native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
 fn canonical_mir_native_option_overflow_matches_mir_trap_class() {
     let fixture = project_root()
         .join("tests")
@@ -796,6 +836,33 @@ fn canonical_mir_native_rejects_mixed_variant_payload_without_fallback() {
     assert!(stderr.contains("canonical MIR native backend rejected"));
     assert!(stderr.contains("flat Copy variant contract"));
     assert!(stderr.contains("mixed payload ABI"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
+fn canonical_mir_native_rejects_non_copy_variant_outside_promoted_contract_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_string_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-option-string-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR Option<string> build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR native backend rejected"));
+    assert!(stderr.contains("native non-Copy Option<string> variant contract"));
     assert!(!stderr.contains("bytecode runtime error"));
 }
 

@@ -1,0 +1,5 @@
+func main() -> i32 {
+    let value: Option<(string, i32)> = Some(("owned", 41))
+    drop(value)
+    42
+}

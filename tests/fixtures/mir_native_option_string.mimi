@@ -1,0 +1,17 @@
+func make_some() -> Option<string> {
+    Some("owned")
+}
+
+func make_none() -> Option<string> {
+    None
+}
+
+func main() -> i32 {
+    let some = make_some()
+    let cloned = some
+    drop(cloned)
+    drop(some)
+    let none = make_none()
+    drop(none)
+    42
+}
