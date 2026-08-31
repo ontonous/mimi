@@ -1,0 +1,9 @@
+func min_i64(left: i64, right: i64) -> i64 { min(left, right) }
+func max_i64(left: i64, right: i64) -> i64 { max(left, right) }
+func main() -> i32 {
+    if min_i64(9223372036854775806, 9223372036854775807) == 9223372036854775806 {
+        if max_i64(-9223372036854775807, 9223372036854775806) == 9223372036854775806 { 42 } else { 0 }
+    } else {
+        0
+    }
+}

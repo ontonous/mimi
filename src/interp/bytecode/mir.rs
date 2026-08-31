@@ -557,10 +557,7 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
-        let Some(argument) = arguments.first() else {
-            return;
-        };
-        for value in [argument, result] {
+        for value in arguments.iter().chain(std::iter::once(result)) {
             if let Err(message) = self.supported_type_for_value(value) {
                 self.error(format!(
                     "builtin '{}' value '{}' is unsupported: {message}",
@@ -569,25 +566,81 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        let Some(argument_desc) = self.type_of(argument) else {
-            self.error(format!(
-                "builtin '{}' argument '{}' has no TypeDesc",
-                contract.name, argument
-            ));
+        let mut first_type = None;
+        for (index, argument) in arguments.iter().enumerate() {
+            let Some(argument_desc) = self.type_of(argument) else {
+                self.error(format!(
+                    "builtin '{}' argument {index} '{}' has no TypeDesc",
+                    contract.name, argument
+                ));
+                return;
+            };
+            if contract.requires_same_input_type {
+                if let Some(first_type) = &first_type {
+                    let Some(argument_info) = self.function.values.get(argument) else {
+                        return;
+                    };
+                    if first_type != &argument_info.ty {
+                        self.error(format!(
+                            "builtin '{}' arguments do not share one canonical ResolvedTypeId",
+                            contract.name
+                        ));
+                        return;
+                    }
+                } else if let Some(argument_info) = self.function.values.get(argument) {
+                    first_type = Some(argument_info.ty.clone());
+                }
+            } else if first_type.is_none() {
+                first_type = self
+                    .function
+                    .values
+                    .get(argument)
+                    .map(|value| value.ty.clone());
+            }
+            if !contract.accepts_abi(argument_desc.abi)
+                || !contract.accepts_layout(&argument_desc.layout)
+                || (contract.requires_copy && argument_desc.ownership != MirOwnership::Copy)
+            {
+                self.error(format!(
+                    "builtin '{}' argument {index} does not satisfy its canonical TypeDesc/ABI contract (accepted ABI: {})",
+                    contract.name,
+                    contract.accepted_abi_description()
+                ));
+                return;
+            }
+        }
+        let Some(first_type) = first_type else {
             return;
         };
-        if !contract.accepts_abi(argument_desc.abi)
-            || !contract.accepts_layout(&argument_desc.layout)
-            || (contract.requires_copy && argument_desc.ownership != MirOwnership::Copy)
-        {
+        let Some(result_info) = self.function.values.get(result) else {
+            return;
+        };
+        if contract.preserves_type && result_info.ty != first_type {
             self.error(format!(
-                "builtin '{}' argument does not satisfy its canonical TypeDesc/ABI contract",
+                "builtin '{}' result does not preserve the canonical argument type",
                 contract.name
             ));
             return;
         }
-        let Some(ra) = self.reg(argument) else { return };
         let Some(rd) = self.reg(result) else { return };
+        // Builtin operands use the same consecutive range ABI as calls.  The
+        // copies are explicit so MIR value register allocation remains an
+        // implementation detail and never becomes semantic argument order.
+        let args_base = self.proto.alloc_reg();
+        for (index, argument) in arguments.iter().enumerate() {
+            let destination = if index == 0 {
+                args_base
+            } else {
+                self.proto.alloc_reg()
+            };
+            let Some(source) = self.reg(argument) else {
+                return;
+            };
+            self.proto.emit(Op::Mov {
+                rd: destination,
+                rs: source,
+            });
+        }
         let registry = super::registry::create_registry();
         let Some(builtin) = registry.lookup(contract.name) else {
             self.error(format!(
@@ -599,7 +652,7 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(Op::CallBuiltin {
             rd,
             builtin,
-            args_base: ra,
+            args_base,
             argc: contract.arity as u16,
         });
     }
@@ -2499,6 +2552,11 @@ mod tests {
                 "func main() -> f64 { let value: f64 = -2.5; abs(value) }",
                 "builtin_call",
             ),
+            (
+                "builtin-min-max-i64",
+                "func min_i64(left: i64, right: i64) -> i64 { min(left, right) }\nfunc max_i64(left: i64, right: i64) -> i64 { max(left, right) }\nfunc main() -> i32 { if min_i64(9223372036854775806, 9223372036854775807) == 9223372036854775806 { if max_i64(-9223372036854775807, 9223372036854775806) == 9223372036854775806 { 42 } else { 0 } } else { 0 } }",
+                "builtin_call",
+            ),
         ];
 
         for (name, source, shape) in cases {
@@ -2629,6 +2687,22 @@ mod tests {
             .expect_err("bytecode abs overflow");
         assert!(reference.message.contains("E0802"));
         assert_eq!(vm_error.code(), "E0802");
+    }
+
+    #[test]
+    fn executes_first_class_min_max_through_ast_free_bytecode() {
+        let source = "func min_i64(left: i64, right: i64) -> i64 { min(left, right) }\nfunc max_i64(left: i64, right: i64) -> i64 { max(left, right) }\nfunc main() -> i32 { if min_i64(9223372036854775806, 9223372036854775807) == 9223372036854775806 { if max_i64(-9223372036854775807, 9223372036854775806) == 9223372036854775806 { 42 } else { 0 } } else { 0 } }";
+        let program = compile(source);
+        assert!(program.ast.is_none());
+        let builtin_ops = program
+            .functions
+            .iter()
+            .flat_map(|function| function.code.iter())
+            .filter(|op| matches!(op, Op::CallBuiltin { .. }))
+            .count();
+        assert!(builtin_ops >= 2, "expected min and max builtin opcodes");
+        let value = BytecodeVM::new(program).run_value().expect("VM min/max");
+        assert!(matches!(value, Value::Int(42)));
     }
 
     #[test]

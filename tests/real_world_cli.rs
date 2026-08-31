@@ -203,12 +203,64 @@ fn canonical_mir_builtin_abs_rejects_unsupported_width_without_fallback() {
     assert!(
         stderr.contains("canonical MIR build error")
             && stderr.contains("builtin 'abs'")
-            && stderr.contains("canonical slice accepts signed i64 or f64"),
+            && stderr.contains("canonical contract accepts signed i64 or f64"),
         "unexpected canonical abs rejection:\n{stderr}"
     );
     assert!(
         !stderr.contains("bytecode runtime error"),
         "canonical abs rejection must not fall back to the legacy runtime:\n{stderr}"
+    );
+}
+
+#[test]
+fn canonical_mir_builtin_min_max_cli_smoke() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_builtin_min_max.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR min/max fixture");
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "canonical MIR min/max fixture failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn canonical_mir_builtin_min_rejects_unsupported_abi_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_builtin_min_f64_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical MIR min fixture");
+    assert!(
+        !output.status.success(),
+        "unsupported min ABI must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("canonical MIR build error")
+            && stderr.contains("builtin 'min'")
+            && stderr.contains("canonical contract accepts signed i64"),
+        "unexpected canonical min rejection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bytecode runtime error"),
+        "canonical min rejection must not fall back to the legacy runtime:\n{stderr}"
     );
 }
 

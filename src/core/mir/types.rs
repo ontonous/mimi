@@ -82,6 +82,12 @@ pub enum MirAbiClass {
 pub enum MirBuiltinKind {
     /// Signed i64 / f64 absolute value. i64::MIN traps with E0802.
     Abs,
+    /// Signed i64 minimum. Narrower widths and floating-point finiteness are
+    /// deliberately outside this first comparison contract.
+    Min,
+    /// Signed i64 maximum. Narrower widths and floating-point finiteness are
+    /// deliberately outside this first comparison contract.
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +98,7 @@ pub struct MirBuiltinContract {
     pub input_abi: MirAbiClass,
     pub preserves_type: bool,
     pub requires_copy: bool,
+    pub requires_same_input_type: bool,
     pub overflow_trap: Option<&'static str>,
 }
 
@@ -108,7 +115,34 @@ impl MirBuiltinContract {
                 },
                 preserves_type: true,
                 requires_copy: true,
+                requires_same_input_type: false,
                 overflow_trap: Some("E0802"),
+            },
+            MirBuiltinKind::Min => Self {
+                kind,
+                name: "min",
+                arity: 2,
+                input_abi: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                preserves_type: true,
+                requires_copy: true,
+                requires_same_input_type: true,
+                overflow_trap: None,
+            },
+            MirBuiltinKind::Max => Self {
+                kind,
+                name: "max",
+                arity: 2,
+                input_abi: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                preserves_type: true,
+                requires_copy: true,
+                requires_same_input_type: true,
+                overflow_trap: None,
             },
         }
     }
@@ -119,6 +153,8 @@ impl MirBuiltinContract {
     pub fn from_builtin(id: &BuiltinId) -> Option<Self> {
         match id.as_str() {
             "abs" => Some(Self::for_kind(MirBuiltinKind::Abs)),
+            "min" => Some(Self::for_kind(MirBuiltinKind::Min)),
+            "max" => Some(Self::for_kind(MirBuiltinKind::Max)),
             _ => None,
         }
     }
@@ -135,11 +171,28 @@ impl MirBuiltinContract {
                     signed: true,
                 } | MirAbiClass::Float { bits: 64 }
             ),
+            MirBuiltinKind::Min | MirBuiltinKind::Max => matches!(
+                abi,
+                MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                }
+            ),
         }
     }
 
     pub fn accepts_layout(self, layout: &MirLayout) -> bool {
-        matches!(self.kind, MirBuiltinKind::Abs) && matches!(layout, MirLayout::Scalar)
+        matches!(
+            self.kind,
+            MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
+        ) && matches!(layout, MirLayout::Scalar)
+    }
+
+    pub fn accepted_abi_description(self) -> &'static str {
+        match self.kind {
+            MirBuiltinKind::Abs => "signed i64 or f64",
+            MirBuiltinKind::Min | MirBuiltinKind::Max => "signed i64",
+        }
     }
 }
 

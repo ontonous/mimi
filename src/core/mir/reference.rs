@@ -682,65 +682,91 @@ fn validate_builtin_calls(
                     ),
                 });
             }
-            let Some(argument) = arguments.first() else {
-                continue;
-            };
-            let Some(argument_value) = function.values.get(argument) else {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!("builtin argument '{}' is absent from MIR values", argument),
-                });
-                continue;
-            };
-            let Some(result_value) = function.values.get(result) else {
+            let result_value = function.values.get(result);
+            if result_value.is_none() {
                 errors.push(super::MirValidationError {
                     subject: instruction.id.to_string(),
                     message: format!("builtin result '{}' is absent from MIR values", result),
                 });
-                continue;
             };
-            if contract.preserves_type && result_value.ty != argument_value.ty {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: "builtin result type disagrees with its argument type".into(),
-                });
+            let mut first_type = None;
+            for (index, argument) in arguments.iter().enumerate() {
+                let Some(argument_value) = function.values.get(argument) else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin argument {index} value '{}' is absent from MIR values",
+                            argument
+                        ),
+                    });
+                    continue;
+                };
+                if contract.requires_same_input_type {
+                    if let Some(first_type) = &first_type {
+                        if first_type != &argument_value.ty {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "builtin '{}' arguments must have the same ResolvedTypeId (argument {index} differs)",
+                                    contract.name
+                                ),
+                            });
+                        }
+                    } else {
+                        first_type = Some(argument_value.ty.clone());
+                    }
+                } else if first_type.is_none() {
+                    first_type = Some(argument_value.ty.clone());
+                }
+                let Some(descriptor) = type_catalog.get(&argument_value.ty) else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin argument {index} type '{}' is absent from MIR TypeDesc",
+                            argument_value.ty.as_str()
+                        ),
+                    });
+                    continue;
+                };
+                if !contract.accepts_abi(descriptor.abi) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin '{}' does not support argument {index} ABI {:?}; canonical contract accepts {}",
+                            contract.name,
+                            descriptor.abi,
+                            contract.accepted_abi_description()
+                        ),
+                    });
+                }
+                if !contract.accepts_layout(&descriptor.layout) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin '{}' requires scalar TypeDesc layout for argument {index}, got {:?}",
+                            contract.name, descriptor.layout
+                        ),
+                    });
+                }
+                if contract.requires_copy
+                    && descriptor.ownership != super::types::MirOwnership::Copy
+                {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin '{}' requires Copy arguments but argument {index} TypeDesc says {:?}",
+                            contract.name, descriptor.ownership
+                        ),
+                    });
+                }
             }
-            let Some(descriptor) = type_catalog.get(&argument_value.ty) else {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!(
-                        "builtin argument type '{}' is absent from MIR TypeDesc",
-                        argument_value.ty.as_str()
-                    ),
-                });
-                continue;
-            };
-            if !contract.accepts_abi(descriptor.abi) {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!(
-                        "builtin '{}' does not support argument ABI {:?}; canonical slice accepts signed i64 or f64",
-                        contract.name, descriptor.abi
-                    ),
-                });
-            }
-            if !contract.accepts_layout(&descriptor.layout) {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!(
-                        "builtin '{}' requires a scalar TypeDesc layout, got {:?}",
-                        contract.name, descriptor.layout
-                    ),
-                });
-            }
-            if contract.requires_copy && descriptor.ownership != super::types::MirOwnership::Copy {
-                errors.push(super::MirValidationError {
-                    subject: instruction.id.to_string(),
-                    message: format!(
-                        "builtin '{}' requires Copy arguments but TypeDesc says {:?}",
-                        contract.name, descriptor.ownership
-                    ),
-                });
+            if let (Some(result_value), Some(first_type)) = (result_value, first_type) {
+                if contract.preserves_type && result_value.ty != first_type {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: "builtin result type disagrees with its argument type".into(),
+                    });
+                }
             }
         }
     }
@@ -1455,25 +1481,64 @@ impl<'a> MirReferenceInterpreter<'a> {
                         ),
                     ));
                 }
-                let argument = self.read_value(function, values, &arguments[0])?;
-                let output = match (kind, argument) {
-                    (super::types::MirBuiltinKind::Abs, MirRuntimeValue::Int(value)) => value
-                        .checked_abs()
-                        .map(MirRuntimeValue::Int)
-                        .ok_or_else(|| {
-                            self.error(&function.owner, "E0802: integer absolute value overflow")
-                        })?,
-                    (super::types::MirBuiltinKind::Abs, MirRuntimeValue::FloatBits(bits)) => {
-                        MirRuntimeValue::FloatBits(f64::from_bits(bits).abs().to_bits())
+                let output = match *kind {
+                    super::types::MirBuiltinKind::Abs => {
+                        let argument = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "builtin argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        match argument {
+                            MirRuntimeValue::Int(value) => value
+                                .checked_abs()
+                                .map(MirRuntimeValue::Int)
+                                .ok_or_else(|| {
+                                    self.error(
+                                        &function.owner,
+                                        "E0802: integer absolute value overflow",
+                                    )
+                                })?,
+                            MirRuntimeValue::FloatBits(bits) => {
+                                MirRuntimeValue::FloatBits(f64::from_bits(bits).abs().to_bits())
+                            }
+                            _ => {
+                                return Err(self.error(
+                                    &function.owner,
+                                    format!(
+                                        "builtin '{}' received an incompatible runtime value",
+                                        contract.name
+                                    ),
+                                ))
+                            }
+                        }
                     }
-                    (_, _) => {
-                        return Err(self.error(
-                            &function.owner,
-                            format!(
-                                "builtin '{}' received an incompatible runtime value",
-                                contract.name
-                            ),
-                        ))
+                    super::types::MirBuiltinKind::Min | super::types::MirBuiltinKind::Max => {
+                        let left = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "builtin left argument is absent")
+                        })?;
+                        let right = arguments.get(1).ok_or_else(|| {
+                            self.error(&function.owner, "builtin right argument is absent")
+                        })?;
+                        let left = self.read_value(function, values, left)?;
+                        let right = self.read_value(function, values, right)?;
+                        match (left, right) {
+                            (MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)) => {
+                                let value = if *kind == super::types::MirBuiltinKind::Min {
+                                    left.min(right)
+                                } else {
+                                    left.max(right)
+                                };
+                                MirRuntimeValue::Int(value)
+                            }
+                            _ => {
+                                return Err(self.error(
+                                    &function.owner,
+                                    format!(
+                                        "builtin '{}' received an incompatible runtime value",
+                                        contract.name
+                                    ),
+                                ))
+                            }
+                        }
                     }
                 };
                 values.insert(result.clone(), output);
@@ -2733,9 +2798,51 @@ mod tests {
                 error.message.contains("builtin 'abs'")
                     && error
                         .message
-                        .contains("canonical slice accepts signed i64 or f64")
+                        .contains("canonical contract accepts signed i64 or f64")
             })),
             other => panic!("unsupported builtin ABI escaped the validator: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_min_max_have_first_class_nodes_and_reference_oracle() {
+        let (owner, program) = canonical_program_with_main(
+            "func min_i64(left: i64, right: i64) -> i64 { min(left, right) }\nfunc max_i64(left: i64, right: i64) -> i64 { max(left, right) }\nfunc main() -> i32 { if min_i64(9223372036854775806, 9223372036854775807) == 9223372036854775806 { if max_i64(-9223372036854775807, 9223372036854775806) == 9223372036854775806 { 42 } else { 0 } } else { 0 } }",
+        );
+        let kinds: Vec<_> = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::BuiltinCall { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert!(kinds.contains(&crate::core::mir::types::MirBuiltinKind::Min));
+        assert!(kinds.contains(&crate::core::mir::types::MirBuiltinKind::Max));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference min/max");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn canonical_min_rejects_f64_before_any_backend() {
+        let source = "func main() -> f64 { min(1.0, 2.0) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("f64 min is outside the first finite scalar contract");
+        match error {
+            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
+                error.message.contains("builtin 'min'")
+                    && error
+                        .message
+                        .contains("canonical contract accepts signed i64")
+            })),
+            other => panic!("unsupported min ABI escaped the validator: {other:?}"),
         }
     }
 
