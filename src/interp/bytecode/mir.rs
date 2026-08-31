@@ -438,6 +438,11 @@ impl<'a> FunctionEmitter<'a> {
                     let arity = match &desc.layout {
                         MirLayout::Tuple(elements) => elements.len(),
                         MirLayout::Record { fields, .. } => fields.len(),
+                        MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                            let Some(ra) = self.reg(value) else { return };
+                            self.proto.emit(Op::DropVariant { ra });
+                            return;
+                        }
                         layout => {
                             self.error(format!(
                                 "aggregate drop value '{}' has no product layout: {:?}",
@@ -493,7 +498,13 @@ impl<'a> FunctionEmitter<'a> {
                 nominal,
                 variant,
                 fields,
-            } => self.emit_variant_construct(result, nominal, variant, fields),
+            } => self.emit_variant_construct(result, nominal, variant, fields, false),
+            MirInstructionKind::ConstructVariantMove {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => self.emit_variant_construct(result, nominal, variant, fields, true),
             MirInstructionKind::UpdateRecord {
                 result,
                 base,
@@ -1348,6 +1359,7 @@ impl<'a> FunctionEmitter<'a> {
         nominal: &crate::core::ir::NominalTypeId,
         variant: &crate::core::NodeId,
         fields: &[(crate::core::NodeId, MirValueId)],
+        move_payload: bool,
     ) {
         let Some(rd) = self.reg(result) else { return };
         let Some(result_desc) = self.type_of(result).cloned() else {
@@ -1453,20 +1465,37 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.proto.alloc_reg()
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
+            self.proto.emit(if move_payload {
+                Op::Move {
+                    rd: destination,
+                    rs: source,
+                }
+            } else {
+                Op::Mov {
+                    rd: destination,
+                    rs: source,
+                }
             });
         }
         let type_name = self
             .proto
             .add_const(ConstValue::Str(variant_desc.name.clone()));
-        self.proto.emit(Op::NewVariant {
-            rd,
-            type_name,
-            variant: variant_desc.discriminant,
-            base,
-            arity: variant_desc.fields.len() as u16,
+        self.proto.emit(if move_payload {
+            Op::NewVariantMove {
+                rd,
+                type_name,
+                variant: variant_desc.discriminant,
+                base,
+                arity: variant_desc.fields.len() as u16,
+            }
+        } else {
+            Op::NewVariant {
+                rd,
+                type_name,
+                variant: variant_desc.discriminant,
+                base,
+                arity: variant_desc.fields.len() as u16,
+            }
         });
     }
 
@@ -1662,9 +1691,14 @@ impl<'a> FunctionEmitter<'a> {
                     Ok(())
                 }
                 MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => {
-                    if desc.ownership != MirOwnership::Copy {
+                    if desc.ownership != MirOwnership::Copy
+                        && (desc.glue.move_out != MirGlueKind::Aggregate
+                            || desc.glue.clone != MirGlueKind::Aggregate
+                            || desc.glue.drop != MirGlueKind::Aggregate
+                            || desc.variant_drop_plan.is_none())
+                    {
                         return Err(format!(
-                            "type '{}' has ownership {:?} and needs runtime glue",
+                            "type '{}' has ownership {:?} without a canonical variant glue/drop plan",
                             ty.as_str(),
                             desc.ownership
                         ));
@@ -2252,6 +2286,103 @@ mod tests {
     }
 
     #[test]
+    fn executes_move_owned_option_payload_through_both_oracles() {
+        let source = "func main() -> Option<string> { Some(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewVariantMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            MirRuntimeValue::Variant {
+                nominal: crate::core::ir::NominalTypeId::new("builtin:type:Option")
+                    .expect("option nominal"),
+                variant: crate::core::NodeId("builtin:variant:Option::Some".into()),
+                payload: vec![MirRuntimeValue::String("owned".into())],
+            }
+        );
+        assert!(matches!(
+            value,
+            Value::Variant(tag, payload)
+                if tag == "Some" && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+        ));
+    }
+
+    #[test]
+    fn drops_move_owned_option_payload_through_both_oracles() {
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); drop(value); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DropVariant { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_move_owned_result_payload_through_both_oracles() {
+        let source = "func main() -> Result<string, i32> { Ok(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewVariantMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            MirRuntimeValue::Variant {
+                nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                    .expect("result nominal"),
+                variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                payload: vec![MirRuntimeValue::String("owned".into())],
+            }
+        );
+        assert!(matches!(
+            value,
+            Value::Variant(tag, payload)
+                if tag == "Ok" && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+        ));
+    }
+
+    #[test]
     fn executes_owned_string_move_through_canonical_mir() {
         let source = "func main() -> string { let value = \"owned\"; value }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -2448,7 +2579,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_move_variant_payload_before_any_backend() {
+    fn rejects_move_variant_switch_before_any_backend() {
         let source =
             "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -2456,7 +2587,8 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("move payload needs explicit aggregate glue");
-        assert!(format!("{error:?}").contains("no canonical"));
+        let message = format!("{error:?}");
+        assert!(message.contains("no canonical") || message.contains("switch scrutinee"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-7";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-8";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
@@ -95,6 +95,15 @@ pub struct MirDropGlueField {
     pub index: usize,
     pub ty: ResolvedTypeId,
     pub glue: MirGlueKind,
+}
+
+/// Canonical drop schedule for one Option/Result variant payload.  Unlike a
+/// product drop plan, a variant has a runtime-selected payload shape, so the
+/// active variant identity is part of the schedule key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantDropGluePlan {
+    pub variant: NodeId,
+    pub fields: Vec<MirDropGlueField>,
 }
 
 impl MirGlueContract {
@@ -224,6 +233,7 @@ pub struct MirTypeDesc {
     pub needs_clone_glue: bool,
     pub glue: MirGlueContract,
     pub drop_plan: Option<MirDropGluePlan>,
+    pub variant_drop_plan: Option<Vec<MirVariantDropGluePlan>>,
 }
 
 impl MirTypeDesc {
@@ -349,6 +359,7 @@ impl MirTypeDesc {
             needs_clone_glue: ownership.needs_clone(),
             glue,
             drop_plan: None,
+            variant_drop_plan: None,
         }
     }
 }
@@ -540,7 +551,117 @@ impl MirTypeCatalog {
             MirGlueOperation::Drop => descriptor.glue.drop,
         };
         if operation_glue == MirGlueKind::Aggregate {
-            self.validate_aggregate_glue(ty, operation)?;
+            match &descriptor.layout {
+                MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                    self.validate_variant_glue(ty, operation)?;
+                }
+                _ => self.validate_aggregate_glue(ty, operation)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the recursive glue graph for an Option/Result payload.  The
+    /// plan must cover every canonical variant, including zero-field `None`,
+    /// and every payload child must be validated through its own TypeDesc.
+    pub fn validate_variant_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let variants = match &descriptor.layout {
+            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            _ => {
+                return Err(format!(
+                    "variant glue type '{}' has no canonical Option/Result layout",
+                    ty.as_str()
+                ))
+            }
+        };
+        let expected_contract = MirGlueContract {
+            move_out: MirGlueKind::Aggregate,
+            clone: MirGlueKind::Aggregate,
+            drop: MirGlueKind::Aggregate,
+        };
+        if descriptor.glue != expected_contract {
+            return Err(format!(
+                "type '{}' variant glue contract is not fully materialized",
+                ty.as_str()
+            ));
+        }
+        let Some(plans) = &descriptor.variant_drop_plan else {
+            return Err(format!(
+                "type '{}' variant glue has no variant drop plan",
+                ty.as_str()
+            ));
+        };
+        if plans.len() != variants.len() {
+            return Err(format!(
+                "type '{}' variant drop plan has {} variants but layout has {}",
+                ty.as_str(),
+                plans.len(),
+                variants.len()
+            ));
+        }
+        for (variant, plan) in variants.iter().zip(plans) {
+            if plan.variant != variant.id {
+                return Err(format!(
+                    "type '{}' variant drop plan identity disagrees with layout",
+                    ty.as_str()
+                ));
+            }
+            let fields = if matches!(operation, MirGlueOperation::Drop) {
+                if plan.fields.len() != variant.fields.len() {
+                    return Err(format!(
+                        "type '{}' variant '{}' drop plan has {} fields but layout has {}",
+                        ty.as_str(),
+                        variant.name,
+                        plan.fields.len(),
+                        variant.fields.len()
+                    ));
+                }
+                for (expected_index, field) in (0..variant.fields.len()).rev().zip(&plan.fields) {
+                    if field.index != expected_index || field.ty != variant.fields[field.index].ty {
+                        return Err(format!(
+                            "type '{}' variant '{}' drop plan is not in reverse declaration order",
+                            ty.as_str(),
+                            variant.name
+                        ));
+                    }
+                    let child = self.get(&field.ty).ok_or_else(|| {
+                        format!(
+                            "type '{}' variant '{}' child type '{}' is absent",
+                            ty.as_str(),
+                            variant.name,
+                            field.ty.as_str()
+                        )
+                    })?;
+                    if child.glue.drop != field.glue {
+                        return Err(format!(
+                            "type '{}' variant '{}' field {} glue disagrees with child TypeDesc",
+                            ty.as_str(),
+                            variant.name,
+                            field.index
+                        ));
+                    }
+                }
+                plan.fields
+                    .iter()
+                    .map(|field| &field.ty)
+                    .collect::<Vec<_>>()
+            } else {
+                variant
+                    .fields
+                    .iter()
+                    .map(|field| &field.ty)
+                    .collect::<Vec<_>>()
+            };
+            for field_ty in fields {
+                self.validate_glue(field_ty, operation)?;
+            }
         }
         Ok(())
     }
@@ -645,7 +766,7 @@ impl MirTypeCatalog {
         let ids = self.entries.keys().cloned().collect::<Vec<_>>();
         for id in ids {
             let mut visiting = BTreeSet::new();
-            let _ = self.materialize_product_glue_for(&id, &mut visiting);
+            let _ = self.materialize_glue_for(&id, &mut visiting);
         }
     }
 
@@ -670,15 +791,21 @@ impl MirTypeCatalog {
         };
         let mut children = Vec::with_capacity(elements.len());
         for (index, child_id) in elements.iter().enumerate() {
-            let child_is_product = self.get(child_id).is_some_and(|child| {
-                matches!(child.layout, MirLayout::Tuple(_) | MirLayout::Record { .. })
+            let child_is_composite = self.get(child_id).is_some_and(|child| {
+                matches!(
+                    child.layout,
+                    MirLayout::Tuple(_)
+                        | MirLayout::Record { .. }
+                        | MirLayout::Option { .. }
+                        | MirLayout::Result { .. }
+                )
             });
             let child_is_copy = self
                 .get(child_id)
                 .is_some_and(|child| child.ownership == MirOwnership::Copy);
-            if child_is_product
+            if child_is_composite
                 && !child_is_copy
-                && !self.materialize_product_glue_for(child_id, visiting)
+                && !self.materialize_glue_for(child_id, visiting)
             {
                 visiting.remove(id);
                 return false;
@@ -712,6 +839,101 @@ impl MirTypeCatalog {
             };
             children.reverse();
             descriptor.drop_plan = Some(MirDropGluePlan { fields: children });
+        }
+        visiting.remove(id);
+        descriptor.glue.move_out == MirGlueKind::Aggregate
+    }
+
+    fn materialize_glue_for(
+        &mut self,
+        id: &ResolvedTypeId,
+        visiting: &mut BTreeSet<ResolvedTypeId>,
+    ) -> bool {
+        let layout = self.get(id).map(|descriptor| descriptor.layout.clone());
+        match layout {
+            Some(MirLayout::Tuple(elements)) => {
+                self.materialize_product_glue_for(id, visiting)
+                    || elements.is_empty()
+                        && self
+                            .get(id)
+                            .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy)
+            }
+            Some(MirLayout::Record { .. }) => self.materialize_product_glue_for(id, visiting),
+            Some(MirLayout::Option { variants, .. }) | Some(MirLayout::Result { variants, .. }) => {
+                self.materialize_variant_glue_for(id, variants, visiting)
+            }
+            _ => self
+                .get(id)
+                .is_some_and(|descriptor| descriptor.glue.supports_move_out()),
+        }
+    }
+
+    fn materialize_variant_glue_for(
+        &mut self,
+        id: &ResolvedTypeId,
+        variants: Vec<MirVariantDesc>,
+        visiting: &mut BTreeSet<ResolvedTypeId>,
+    ) -> bool {
+        if !visiting.insert(id.clone()) {
+            return false;
+        }
+        let mut plans = Vec::with_capacity(variants.len());
+        for variant in &variants {
+            let mut fields = Vec::with_capacity(variant.fields.len());
+            for (index, field) in variant.fields.iter().enumerate() {
+                let child_is_composite = self.get(&field.ty).is_some_and(|child| {
+                    matches!(
+                        child.layout,
+                        MirLayout::Tuple(_)
+                            | MirLayout::Record { .. }
+                            | MirLayout::Option { .. }
+                            | MirLayout::Result { .. }
+                    )
+                });
+                let child_is_copy = self
+                    .get(&field.ty)
+                    .is_some_and(|child| child.ownership == MirOwnership::Copy);
+                if child_is_composite
+                    && !child_is_copy
+                    && !self.materialize_glue_for(&field.ty, visiting)
+                {
+                    visiting.remove(id);
+                    return false;
+                }
+                let Some(child) = self.get(&field.ty) else {
+                    visiting.remove(id);
+                    return false;
+                };
+                if !child.glue.supports_move_out()
+                    || !child.glue.supports_clone()
+                    || !child.glue.supports_drop()
+                {
+                    visiting.remove(id);
+                    return false;
+                }
+                fields.push(MirDropGlueField {
+                    index,
+                    ty: field.ty.clone(),
+                    glue: child.glue.drop,
+                });
+            }
+            fields.reverse();
+            plans.push(MirVariantDropGluePlan {
+                variant: variant.id.clone(),
+                fields,
+            });
+        }
+        let Some(descriptor) = self.entries.get_mut(id) else {
+            visiting.remove(id);
+            return false;
+        };
+        if descriptor.ownership != MirOwnership::Copy {
+            descriptor.glue = MirGlueContract {
+                move_out: MirGlueKind::Aggregate,
+                clone: MirGlueKind::Aggregate,
+                drop: MirGlueKind::Aggregate,
+            };
+            descriptor.variant_drop_plan = Some(plans);
         }
         visiting.remove(id);
         descriptor.glue.move_out == MirGlueKind::Aggregate
@@ -1289,7 +1511,7 @@ impl MirTypeCatalog {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {
             output.push_str(&format!(
-                "{} kind={:?} layout={:?} ownership={:?} abi={:?} glue={:?} drop_plan={:?} drop={} clone={}\n",
+                "{} kind={:?} layout={:?} ownership={:?} abi={:?} glue={:?} drop_plan={:?} variant_drop_plan={:?} drop={} clone={}\n",
                 id.as_str(),
                 descriptor.kind,
                 descriptor.layout,
@@ -1297,6 +1519,7 @@ impl MirTypeCatalog {
                 descriptor.abi,
                 descriptor.glue,
                 descriptor.drop_plan,
+                descriptor.variant_drop_plan,
                 descriptor.needs_drop_glue,
                 descriptor.needs_clone_glue,
             ));
@@ -1547,21 +1770,66 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_move_aggregate_remains_fail_closed_in_glue_contract() {
+    fn materializes_move_owned_variant_glue_and_drop_schedule() {
         let mut table = ResolvedTypeTable::new();
         let string_id = table
             .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
             .expect("string");
         let option_id = table
-            .intern_resolved(ResolvedType::Option(string_id))
+            .intern_resolved(ResolvedType::Option(string_id.clone()))
             .expect("option");
         let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
         let descriptor = catalog.get(&option_id).expect("descriptor");
         assert_eq!(descriptor.ownership, MirOwnership::Move);
-        assert_eq!(descriptor.glue.move_out, MirGlueKind::Unsupported);
+        assert_eq!(descriptor.glue.move_out, MirGlueKind::Aggregate);
+        let plans = descriptor
+            .variant_drop_plan
+            .as_ref()
+            .expect("variant drop plans");
+        assert_eq!(plans.len(), 2);
+        assert!(plans[0].fields.is_empty(), "None has no payload");
+        assert_eq!(plans[1].fields.len(), 1);
+        assert_eq!(plans[1].fields[0].index, 0);
+        assert_eq!(plans[1].fields[0].ty, string_id);
+        assert_eq!(plans[1].fields[0].glue, MirGlueKind::OwnedString);
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            assert!(catalog.validate_glue(&option_id, operation).is_ok());
+        }
+    }
+
+    #[test]
+    fn materializes_result_variant_glue_for_each_payload_family() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let result_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: string_id.clone(),
+                error: i32_id.clone(),
+            })
+            .expect("result");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let descriptor = catalog.get(&result_id).expect("result descriptor");
+        assert_eq!(descriptor.glue.move_out, MirGlueKind::Aggregate);
+        let plans = descriptor
+            .variant_drop_plan
+            .as_ref()
+            .expect("result variant drop plans");
+        assert_eq!(plans[0].fields[0].ty, string_id);
+        assert_eq!(plans[0].fields[0].glue, MirGlueKind::OwnedString);
+        assert_eq!(plans[1].fields[0].ty, i32_id);
+        assert_eq!(plans[1].fields[0].glue, MirGlueKind::Noop);
         assert!(catalog
-            .validate_glue(&option_id, MirGlueOperation::MoveOut)
-            .is_err());
+            .validate_variant_glue(&result_id, MirGlueOperation::Drop)
+            .is_ok());
     }
 
     #[test]
@@ -1617,23 +1885,24 @@ mod tests {
     }
 
     #[test]
-    fn tuple_with_unmaterialized_child_glue_stays_fail_closed() {
+    fn variant_with_unmaterialized_child_glue_stays_fail_closed() {
         let mut table = ResolvedTypeTable::new();
-        let string_id = table
-            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
-            .expect("string type");
+        let opaque_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("user:type:Opaque").expect("nominal"),
+                arguments: Vec::new(),
+                is_linear: false,
+            })
+            .expect("opaque type");
         let option_id = table
-            .intern_resolved(ResolvedType::Option(string_id))
+            .intern_resolved(ResolvedType::Option(opaque_id))
             .expect("option type");
-        let tuple_id = table
-            .intern_resolved(ResolvedType::Tuple(vec![option_id]))
-            .expect("tuple type");
         let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
-        let tuple = catalog.get(&tuple_id).expect("tuple descriptor");
-        assert_eq!(tuple.glue.move_out, MirGlueKind::Unsupported);
-        assert!(tuple.drop_plan.is_none());
+        let option = catalog.get(&option_id).expect("option descriptor");
+        assert_eq!(option.glue.move_out, MirGlueKind::Unsupported);
+        assert!(option.variant_drop_plan.is_none());
         assert!(catalog
-            .validate_glue(&tuple_id, MirGlueOperation::Drop)
+            .validate_glue(&option_id, MirGlueOperation::Drop)
             .is_err());
     }
 

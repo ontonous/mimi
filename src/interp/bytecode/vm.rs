@@ -626,6 +626,19 @@ impl BytecodeVM {
                     // Dropping the owned product recursively drops its fields;
                     // the MIR emitter already proved the TypeDesc schedule.
                 }
+                Op::DropVariant { ra } => {
+                    let frame = self.cur_frame_mut();
+                    let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
+                    if !matches!(&value, Value::Variant(_, _)) {
+                        return Err(InterpError::new(format!(
+                            "variant drop: expected Variant, got {}",
+                            value
+                        )));
+                    }
+                    // The MIR adapter proves the active-variant payload plan;
+                    // moving the whole value into this op lets Rust recursively
+                    // release every owned payload without a second type pass.
+                }
                 Op::DerefValue { rd, ra } => {
                     let val = self.get_reg(ra).clone();
                     let inner = match &val {
@@ -2677,6 +2690,25 @@ impl BytecodeVM {
                     };
                     let payload: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
+                    self.set_reg(rd, Value::Variant(tag, payload));
+                }
+                Op::NewVariantMove {
+                    rd,
+                    type_name,
+                    variant,
+                    base,
+                    arity,
+                } => {
+                    let tag = match &proto.constants[type_name as usize] {
+                        ConstValue::Str(s) => s.clone(),
+                        _ => format!("variant_{}", variant),
+                    };
+                    let payload: Vec<Value> = (0..arity)
+                        .map(|i| {
+                            let frame = self.cur_frame_mut();
+                            std::mem::replace(&mut frame.regs[(base + i) as usize], Value::Unit)
+                        })
+                        .collect();
                     self.set_reg(rd, Value::Variant(tag, payload));
                 }
                 Op::IsVariant { rd, ra, tag } => {

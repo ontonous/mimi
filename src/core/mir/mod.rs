@@ -168,6 +168,15 @@ pub enum MirInstructionKind {
         variant: NodeId,
         fields: Vec<(NodeId, MirValueId)>,
     },
+    /// Construct a non-Copy Option/Result variant by consuming its payloads.
+    /// The TypeDesc variant glue plan proves the payload ownership boundary;
+    /// a backend must not lower this as a shallow Copy construction.
+    ConstructVariantMove {
+        result: MirValueId,
+        nominal: NominalTypeId,
+        variant: NodeId,
+        fields: Vec<(NodeId, MirValueId)>,
+    },
     /// Consume a record base and produce the same record with the explicit
     /// field values overlaid.  The field identities in `kind` remain
     /// checker-owned; backend field names are recovered from TypeDesc only.
@@ -525,6 +534,19 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        MirInstructionKind::ConstructVariantMove {
+            result,
+            nominal,
+            variant,
+            fields,
+        } => format!(
+            "construct_variant_move {result} = {nominal:?}::{variant:?}({})",
+            fields
+                .iter()
+                .map(|(field, value)| format!("{field:?}:{value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         MirInstructionKind::UpdateRecord {
             result,
             base,
@@ -869,7 +891,8 @@ impl<'a> MirValidator<'a> {
                 self.values(fields);
                 self.result_at(result, &instruction.id, block, index);
             }
-            ConstructVariant { result, fields, .. } => {
+            ConstructVariant { result, fields, .. }
+            | ConstructVariantMove { result, fields, .. } => {
                 for (field, value) in fields {
                     self.use_value(value);
                     if field.0.trim().is_empty() {
@@ -1265,7 +1288,8 @@ impl<'a> MirValidator<'a> {
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
             }
-            MirInstructionKind::ConstructVariant { fields, .. } => {
+            MirInstructionKind::ConstructVariant { fields, .. }
+            | MirInstructionKind::ConstructVariantMove { fields, .. } => {
                 uses.extend(fields.iter().map(|(_, value)| value.clone()));
             }
             MirInstructionKind::UpdateRecord { base, fields, .. } => {

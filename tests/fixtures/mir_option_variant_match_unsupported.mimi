@@ -1,0 +1,7 @@
+func main() -> string {
+    let value: Option<string> = Some("owned")
+    match value {
+        Some(v) => v,
+        None => "fallback"
+    }
+}

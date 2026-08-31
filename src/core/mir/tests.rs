@@ -377,6 +377,82 @@ fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
 }
 
 #[test]
+fn lowers_move_owned_option_payload_to_explicit_mir_node() {
+    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned variant glue must be materialized");
+    let main = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    assert!(main.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::ConstructVariantMove { .. }
+            )
+        })
+    }));
+}
+
+#[test]
+fn rejects_shallow_variant_construction_before_any_backend() {
+    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut function = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::ConstructVariantMove { .. }
+            )
+        })
+        .expect("move variant construction");
+    let crate::core::mir::MirInstructionKind::ConstructVariantMove {
+        result,
+        nominal,
+        variant,
+        fields,
+    } = instruction.kind.clone()
+    else {
+        unreachable!();
+    };
+    instruction.kind = crate::core::mir::MirInstructionKind::ConstructVariant {
+        result,
+        nominal,
+        variant,
+        fields,
+    };
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        std::collections::BTreeMap::from([(owner, function)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("shallow construction must fail closed");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("ConstructVariantMove") || error.message.contains("non-Copy")
+    }));
+}
+
+#[test]
 fn non_copy_record_materializes_field_drop_schedule_before_backend() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -489,20 +565,21 @@ fn rejects_reuse_of_record_field_after_aggregate_construction() {
 }
 
 #[test]
-fn rejects_record_with_unmaterialized_non_copy_field_glue() {
+fn materializes_record_with_move_owned_variant_field() {
     let source = "type Bad { value: Option<string> }\nfunc main() -> i32 { let p = Bad { value: Some(\"owned\") }; drop(p); 42 }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check");
-    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("unsupported record field glue must fail closed");
-    let message = format!("{error:?}");
-    assert!(
-        message.contains("canonical") || message.contains("glue"),
-        "unexpected error: {message}"
-    );
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("variant field glue is materialized recursively");
+    assert!(canonical.type_catalog().iter().any(|(_, descriptor)| {
+        matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { .. }
+        ) && descriptor.glue.move_out == crate::core::mir::types::MirGlueKind::Aggregate
+    }));
 }
 
 #[test]
@@ -539,6 +616,7 @@ fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
         tuple_id,
         crate::core::mir::types::MirTypeDesc {
             drop_plan: Some(malformed),
+            variant_drop_plan: descriptor.variant_drop_plan.clone(),
             ..descriptor
         },
     );

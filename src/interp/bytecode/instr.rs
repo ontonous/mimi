@@ -87,6 +87,11 @@ pub enum Op {
         ra: Reg,
         arity: u16,
     },
+    /// Consume an owned Option/Result variant after the MIR TypeDesc
+    /// validator has proved every active-variant payload drop plan.
+    DropVariant {
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Integer arithmetic (checked: trap on overflow per SD-7)
@@ -726,6 +731,14 @@ pub enum Op {
         base: Reg,
         arity: u16,
     },
+    /// rd = consume payload[0..arity] and build a tagged owned variant.
+    NewVariantMove {
+        rd: Reg,
+        type_name: ConstIdx,
+        variant: VariantIdx,
+        base: Reg,
+        arity: u16,
+    },
     /// rd = variant_tag(ra) — extract tag as Int
     VariantTag {
         rd: Reg,
@@ -995,6 +1008,7 @@ impl Op {
             | NewRecord { rd, .. }
             | UpdateRecord { rd, .. }
             | NewVariant { rd, .. }
+            | NewVariantMove { rd, .. }
             | NewMap { rd, .. }
             | NewSet { rd, .. }
             | ListGet { rd, .. }
@@ -1091,6 +1105,7 @@ impl Op {
             | Op::NewTuple { rd, .. }
             | Op::NewRecord { rd, .. }
             | Op::NewVariant { rd, .. }
+            | Op::NewVariantMove { rd, .. }
             | Op::NewMap { rd, .. }
             | Op::NewSet { rd, .. }
             | Op::ListGet { rd, .. }
@@ -1162,7 +1177,7 @@ impl Op {
             | RetUnit
             | FaultRetEarly => false,
             Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
-            Drop { ra } | DropAggregate { ra, .. } => *ra == reg,
+            Drop { ra } | DropAggregate { ra, .. } | DropVariant { ra } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
             | MulInt { ra, rb, .. }
@@ -1280,7 +1295,8 @@ impl Op {
             } => reads_range(*regs_base, *count, reg),
             NewTuple { base, arity, .. }
             | NewTupleMove { base, arity, .. }
-            | NewVariant { base, arity, .. } => reads_range(*base, *arity, reg),
+            | NewVariant { base, arity, .. }
+            | NewVariantMove { base, arity, .. } => reads_range(*base, *arity, reg),
             NewRecord { base, count, .. } | NewRecordMove { base, count, .. } => {
                 reads_range(*base, *count, reg)
             }

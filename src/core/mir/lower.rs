@@ -554,17 +554,29 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::Constant(item) if item.0.as_str() == "builtin:value:None" => {
-                self.emit(
-                    &expression.node_id,
-                    "construct_variant",
+                let move_owned = self.type_catalog.is_some_and(|catalog| {
+                    catalog.get(&expression.ty).is_some_and(|descriptor| {
+                        descriptor.ownership != super::types::MirOwnership::Copy
+                    })
+                });
+                let instruction = if move_owned {
+                    MirInstructionKind::ConstructVariantMove {
+                        result: result.clone(),
+                        nominal: NominalTypeId::new("builtin:type:Option")
+                            .expect("static Option nominal"),
+                        variant: NodeId("builtin:variant:Option::None".into()),
+                        fields: Vec::new(),
+                    }
+                } else {
                     MirInstructionKind::ConstructVariant {
                         result: result.clone(),
                         nominal: NominalTypeId::new("builtin:type:Option")
                             .expect("static Option nominal"),
                         variant: NodeId("builtin:variant:Option::None".into()),
                         fields: Vec::new(),
-                    },
-                );
+                    }
+                };
+                self.emit(&expression.node_id, "construct_variant", instruction);
             }
             ResolvedExprKind::Load(place) => {
                 if let Ok(local) = self.local_value(&place.base) {
@@ -756,16 +768,27 @@ impl<'a> Lowerer<'a> {
                         );
                     }
                     let fields = field_ids.into_iter().zip(arguments).collect();
-                    self.emit(
-                        &expression.node_id,
-                        "construct_variant",
+                    let move_owned = self.type_catalog.is_some_and(|catalog| {
+                        catalog.get(&expression.ty).is_some_and(|descriptor| {
+                            descriptor.ownership != super::types::MirOwnership::Copy
+                        })
+                    });
+                    let instruction = if move_owned {
+                        MirInstructionKind::ConstructVariantMove {
+                            result: result.clone(),
+                            nominal,
+                            variant,
+                            fields,
+                        }
+                    } else {
                         MirInstructionKind::ConstructVariant {
                             result: result.clone(),
                             nominal,
                             variant,
                             fields,
-                        },
-                    );
+                        }
+                    };
+                    self.emit(&expression.node_id, "construct_variant", instruction);
                 } else {
                     self.emit(
                         &expression.node_id,

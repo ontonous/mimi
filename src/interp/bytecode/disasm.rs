@@ -17,6 +17,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::Clone { .. } => "CLONE",
         Op::Drop { .. } => "DROP",
         Op::DropAggregate { .. } => "DROP_AGGREGATE",
+        Op::DropVariant { .. } => "DROP_VARIANT",
         Op::DerefValue { .. } => "DEREF_VALUE",
         Op::AddInt { .. } => "ADD_INT",
         Op::SubInt { .. } => "SUB_INT",
@@ -96,6 +97,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SetAdd { .. } => "SET_ADD",
         Op::SetContains { .. } => "SET_CONTAINS",
         Op::NewVariant { .. } => "NEW_VARIANT",
+        Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::VariantTag { .. } => "VARIANT_TAG",
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
         Op::IsVariant { .. } => "IS_VARIANT",
@@ -473,6 +475,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} drop_aggregate r{} (arity={})",
             pc, name, ra, arity
         ),
+        Op::DropVariant { ra } => format!("{:04}  {:<16} drop_variant r{}", pc, name, ra),
         Op::TupleGet { rd, ra, idx } => {
             format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx)
         }
@@ -624,6 +627,32 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .unwrap_or("?");
             format!(
                 "{:04}  {:<16} r{} = {}::v{}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                tname,
+                variant,
+                base,
+                *base as u16 + arity.saturating_sub(1)
+            )
+        }
+        Op::NewVariantMove {
+            rd,
+            type_name,
+            variant,
+            base,
+            arity,
+        } => {
+            let tname = proto
+                .constants
+                .get(*type_name as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
+                .unwrap_or("?");
+            format!(
+                "{:04}  {:<16} r{} = {}::v{}_move(r{}..r{})",
                 pc,
                 name,
                 rd,

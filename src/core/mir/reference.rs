@@ -365,6 +365,78 @@ impl MirProgram {
                                     message,
                                 });
                             }
+                            if type_catalog
+                                .get(&result_value.ty)
+                                .is_some_and(|descriptor| {
+                                    descriptor.ownership != super::types::MirOwnership::Copy
+                                })
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "copy variant construction cannot produce a non-Copy value; use ConstructVariantMove".into(),
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::ConstructVariantMove {
+                            result,
+                            nominal,
+                            variant,
+                            fields,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let field_types = fields
+                                .iter()
+                                .filter_map(|(_, field)| {
+                                    function.values.get(field).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            let field_ids = fields
+                                .iter()
+                                .map(|(field, _)| field.clone())
+                                .collect::<Vec<_>>();
+                            if field_types.len() != fields.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "variant payload is absent from MIR value catalog"
+                                        .into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog.validate_variant_construct(
+                                &result_value.ty,
+                                nominal,
+                                variant,
+                                &field_ids,
+                                &field_types,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                            if type_catalog
+                                .get(&result_value.ty)
+                                .is_some_and(|descriptor| {
+                                    descriptor.ownership == super::types::MirOwnership::Copy
+                                })
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "ConstructVariantMove requires a non-Copy variant value"
+                                            .into(),
+                                });
+                            }
+                            if let Err(message) = type_catalog
+                                .validate_glue(&result_value.ty, MirGlueOperation::MoveOut)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
                         }
                         super::MirInstructionKind::UpdateRecord {
                             result,
@@ -587,7 +659,8 @@ fn validate_linear_consumption(
                 | super::MirInstructionKind::Construct {
                     fields: arguments, ..
                 } => arguments.iter().collect(),
-                super::MirInstructionKind::ConstructVariant { fields, .. } => {
+                super::MirInstructionKind::ConstructVariant { fields, .. }
+                | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
                     fields.iter().map(|(_, value)| value).collect()
                 }
                 super::MirInstructionKind::UpdateRecord {
@@ -1013,6 +1086,30 @@ impl<'a> MirReferenceInterpreter<'a> {
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::ConstructVariant {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => {
+                let field_ids = fields
+                    .iter()
+                    .map(|(field, _)| field.clone())
+                    .collect::<Vec<_>>();
+                let field_values = fields
+                    .iter()
+                    .map(|(_, value)| self.take_transfer_value(function, values, value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = self.construct_variant(
+                    function,
+                    result,
+                    nominal,
+                    variant,
+                    &field_ids,
+                    field_values,
+                )?;
+                values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ConstructVariantMove {
                 result,
                 nominal,
                 variant,
@@ -1492,6 +1589,75 @@ impl<'a> MirReferenceInterpreter<'a> {
                 &function.owner,
                 "non-Copy opaque value has no canonical drop implementation",
             )),
+            MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                let MirRuntimeValue::Variant {
+                    nominal,
+                    variant,
+                    mut payload,
+                } = value
+                else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop value is not a canonical Variant",
+                    ));
+                };
+                let Some((expected_nominal, expected_variants)) =
+                    self.program.type_catalog().variant_layout(ty)
+                else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop value has no canonical TypeDesc layout",
+                    ));
+                };
+                if nominal.as_str() != expected_nominal {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop nominal disagrees with TypeDesc",
+                    ));
+                }
+                let Some(expected_variant) = expected_variants
+                    .iter()
+                    .find(|candidate| candidate.id == variant)
+                else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop discriminant is absent from TypeDesc",
+                    ));
+                };
+                let descriptor = self
+                    .program
+                    .type_catalog()
+                    .get(ty)
+                    .ok_or_else(|| self.error(&function.owner, "drop value has no TypeDesc"))?;
+                let Some(plan) = descriptor
+                    .variant_drop_plan
+                    .as_ref()
+                    .and_then(|plans| plans.iter().find(|plan| plan.variant == variant))
+                else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop value has no variant drop plan",
+                    ));
+                };
+                if payload.len() != expected_variant.fields.len()
+                    || plan.fields.len() != expected_variant.fields.len()
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant drop value disagrees with TypeDesc arity",
+                    ));
+                }
+                for field in &plan.fields {
+                    let child = std::mem::replace(
+                        payload.get_mut(field.index).ok_or_else(|| {
+                            self.error(&function.owner, "variant drop field is out of bounds")
+                        })?,
+                        MirRuntimeValue::Unit,
+                    );
+                    self.drop_runtime_value(function, &field.ty, child)?;
+                }
+                Ok(())
+            }
             _ => Err(self.error(
                 &function.owner,
                 "non-Copy value has no canonical reference drop implementation",
