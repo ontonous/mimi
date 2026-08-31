@@ -252,6 +252,56 @@ fn canonical_mir_native_owned_string_glue_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_recursive_tuple_glue_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_recursive_tuple.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR recursive tuple reference run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(42),
+        "canonical MIR recursive tuple reference run failed:\n{}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-recursive-tuple-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR recursive tuple native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR recursive tuple native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR recursive tuple native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native_run.status.code(),
+        Some(42),
+        "canonical MIR recursive tuple native run failed:\n{}",
+        String::from_utf8_lossy(&native_run.stderr)
+    );
+}
+
+#[test]
 fn canonical_mir_native_abs_overflow_matches_mir_trap_class() {
     let fixture = project_root()
         .join("tests")
@@ -647,6 +697,33 @@ fn canonical_mir_native_rejects_noncopy_record_without_fallback() {
     assert!(stderr.contains("canonical MIR native backend rejected"));
     assert!(stderr.contains("flat Copy record contract"));
     assert!(stderr.contains("ownership Move"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
+fn canonical_mir_native_rejects_recursive_tuple_with_list_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_recursive_tuple_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-recursive-tuple-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR recursive tuple build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR native backend rejected"));
+    assert!(stderr.contains("outside the scalar/String/tuple ABI"));
     assert!(!stderr.contains("bytecode runtime error"));
 }
 

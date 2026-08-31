@@ -1,0 +1,15 @@
+func make_nested() -> ((string, i32), bool) {
+    (("inner", 41), true)
+}
+
+func consume_nested(value: ((string, i32), bool)) -> i32 {
+    drop(value);
+    42
+}
+
+func main() -> i32 {
+    let value = make_nested();
+    let cloned = value;
+    drop(cloned);
+    consume_nested(value)
+}

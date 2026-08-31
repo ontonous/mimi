@@ -1,0 +1,5 @@
+func main() -> i32 {
+    let value = ("x", [1]);
+    drop(value);
+    0
+}
