@@ -1189,6 +1189,7 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
     gen.export("mimi_actor_drop", |f| {
         f.param("handle", handle("ActorHandle")).effect("dealloc")
     });
+    gen.export("mimi_actor_drop_all", |f| f.effect("dealloc"));
     gen.export("mimi_actor_id", |f| {
         f.param("handle", handle("ActorHandle")).returns(prim(U64))
     });
@@ -1712,6 +1713,7 @@ mod tests {
             "mimi_actor_spawn",
             "mimi_actor_call",
             "mimi_actor_drop",
+            "mimi_actor_drop_all",
             "mimi_actor_id",
             "mimi_actor_current_id",
             "mimi_actor_fault",

@@ -155,6 +155,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ret_type,
                         self.current_fn_ret_ty_ast.as_ref(),
                     )?;
+                    // A2: nested `if`/block returns must use the same
+                    // discriminator-aware ownership adoption as top-level
+                    // returns. Without this, `return Some(...)` / `return
+                    // Err(...)` hands the caller a payload whose callee scope
+                    // is freed immediately below.
+                    val = self.clone_surface_structural_return_with_glue(
+                        self.current_fn_ret_ty_ast.as_ref(),
+                        val,
+                    )?;
                     // 0.34.41 第二档: ensures with a proper `result` binding
                     // (previously this path asserted with no result binding —
                     // "undefined variable 'result'"). Mirrors func.rs
@@ -1416,6 +1425,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
         merge_vars: bool,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        self.compile_if_stmt_with_expected_return(cond, then_, else_, vars, merge_vars, None)
+    }
+
+    pub(in crate::codegen) fn compile_if_stmt_with_expected_return(
+        &mut self,
+        cond: &Expr,
+        then_: &Block,
+        else_: &Option<Block>,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+        merge_vars: bool,
+        expected_return: Option<(BasicTypeEnum<'ctx>, &Type)>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         let cond_val = self.compile_expr(cond, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
             // Builtin predicates return i64 booleans; normalize to i1 so the
@@ -1469,9 +1490,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.compile_block(then_, &mut then_vars)?;
             None
         } else {
-            Some(self.compile_block_last_val(then_, &mut then_vars)?)
+            Some(self.compile_block_last_val_with_expected_return(
+                then_,
+                &mut then_vars,
+                expected_return,
+            )?)
         };
         let then_reaches = !self.block_has_terminator();
+        let then_val = if then_reaches {
+            match (then_val, expected_return) {
+                (Some(value), Some((target_ty, target_ast))) if !merge_vars => {
+                    Some(self.coerce_variant_value(value, target_ty, Some(target_ast))?)
+                }
+                (value, _) => value,
+            }
+        } else {
+            then_val
+        };
         if then_reaches {
             self.build_br(merge_bb)?;
         }
@@ -1487,7 +1522,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_block(else_block, &mut else_vars)?;
                 None
             } else {
-                Some(self.compile_block_last_val(else_block, &mut else_vars)?)
+                Some(self.compile_block_last_val_with_expected_return(
+                    else_block,
+                    &mut else_vars,
+                    expected_return,
+                )?)
             }
         } else if merge_vars {
             None
@@ -1496,6 +1535,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(self.context.i64_type().const_int(0, false).into())
         };
         let else_reaches = !self.block_has_terminator();
+        let else_val = if else_reaches {
+            match (else_val, expected_return) {
+                (Some(value), Some((target_ty, target_ast))) if !merge_vars => {
+                    Some(self.coerce_variant_value(value, target_ty, Some(target_ast))?)
+                }
+                (value, _) => value,
+            }
+        } else {
+            else_val
+        };
         if else_reaches {
             self.build_br(merge_bb)?;
         }
@@ -1666,6 +1715,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // promote the else value to a zero of the phi type to avoid LLVM
         // physreg COPY errors from type-mismatched phi nodes.
         let else_val = if else_val.get_type() != phi_type {
+            if expected_return.is_some() {
+                return Err(CompileError::TypeMismatch(format!(
+                    "return-position if branches have incompatible types ({:?} vs {:?})",
+                    phi_type,
+                    else_val.get_type()
+                )));
+            }
             self.const_zero_for_type(phi_type)
         } else {
             else_val
@@ -1820,11 +1876,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         block: &Block,
         vars: &mut HashMap<String, VarEntry<'ctx>>,
     ) -> MimiResult<BasicValueEnum<'ctx>> {
+        self.compile_block_last_val_with_expected_return(block, vars, None)
+    }
+
+    pub(super) fn compile_block_last_val_with_expected_return(
+        &mut self,
+        block: &Block,
+        vars: &mut HashMap<String, VarEntry<'ctx>>,
+        expected_return: Option<(BasicTypeEnum<'ctx>, &Type)>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
         self.push_comp_scope();
         self.push_defer_scope();
         self.push_shared_scope();
         let mut last_val = self.context.i64_type().const_int(0, false).into();
-        for stmt in block {
+        for (stmt_index, stmt) in block.iter().enumerate() {
+            let is_tail = stmt_index + 1 == block.len();
             // Run compensations before exit() — same execution-point hook as
             // compile_block (0.34.36, audit §6/§9). Without it, an `on failure`
             // registered in this block would be discarded by pop_comp_scope
@@ -1840,10 +1906,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             match stmt.unlocated() {
                 Stmt::Expr(e) => {
-                    last_val = self.compile_expr(e, vars)?;
+                    last_val = if is_tail {
+                        if let Some((target_ty, target_ast)) = expected_return {
+                            self.compile_expr_for_return(e, vars, target_ty, Some(target_ast))?
+                        } else {
+                            self.compile_expr(e, vars)?
+                        }
+                    } else {
+                        self.compile_expr(e, vars)?
+                    };
                 }
                 Stmt::Return(Some(e)) => {
-                    let mut val = self.compile_expr(e, vars)?;
+                    let ret_type = self
+                        .current_fn_ret_type()
+                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
+                    let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                    let mut val =
+                        self.compile_expr_for_return(e, vars, ret_type, ret_ty_ast.as_ref())?;
                     // v0.34.16 (ADR-002): multi-target transition return
                     // inside an if-branch — wrap into {i32 tag, i64 payload}.
                     if self.in_multi_target_transition {
@@ -1881,9 +1960,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if self.in_fails_transition {
                         val = self.compile_ok_constructor(vec![val])?;
                     }
-                    let ret_type = self
-                        .current_fn_ret_type()
-                        .unwrap_or_else(|| BasicTypeEnum::IntType(self.context.i64_type()));
                     val = self.adjust_int_val(val, ret_type)?;
                     // P0-4: heap-copy string returns so the caller
                     // doesn't later free() a .rodata literal pointer.
@@ -1898,6 +1974,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         val,
                         ret_type,
                         self.current_fn_ret_ty_ast.as_ref(),
+                    )?;
+                    // A2: keep nested explicit returns on the canonical
+                    // structural glue path before callee cleanup.
+                    val = self.clone_surface_structural_return_with_glue(
+                        self.current_fn_ret_ty_ast.as_ref(),
+                        val,
                     )?;
                     // 0.34.41 第二档: ensures with `result` binding (same fix
                     // as compile_block's Return; was unbound here too).
@@ -2435,7 +2517,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.compile_assign_stmt(target, value, vars)?;
                 }
                 Stmt::If { cond, then_, else_ } => {
-                    if let Some(v) = self.compile_if_stmt(cond, then_, else_, vars, false)? {
+                    let value = if is_tail {
+                        self.compile_if_stmt_with_expected_return(
+                            cond,
+                            then_,
+                            else_,
+                            vars,
+                            false,
+                            expected_return,
+                        )?
+                    } else {
+                        self.compile_if_stmt(cond, then_, else_, vars, false)?
+                    };
+                    if let Some(v) = value {
                         last_val = v;
                     }
                 }

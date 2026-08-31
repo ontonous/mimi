@@ -4316,6 +4316,14 @@ fn register_actor_concurrency_rt<'ctx>(
         void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
+    // Process-boundary cleanup for aliasable actor handles. The native main
+    // epilogue calls this once after the last user statement, so worker threads
+    // and the live-actor registry do not survive into Valgrind process teardown.
+    module.add_function(
+        "mimi_actor_drop_all",
+        void.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_actor_fault(handle: i8*) — v0.29.11 Fault absorption short-circuit
     module.add_function(
         "mimi_actor_fault",

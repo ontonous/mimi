@@ -1554,6 +1554,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         val: Option<&dyn inkwell::values::BasicValue<'ctx>>,
     ) -> Result<(), CompileError> {
+        // Actor handles are intentionally aliasable Free values, so local
+        // `drop(handle)` cannot destroy the runtime actor without risking a
+        // use-after-drop through another alias.  Close the process boundary
+        // instead: every native `main` return drains the live-actor registry
+        // after user code has finished and before the process exits.  Restrict
+        // the call to programs that actually declare actors to keep ordinary
+        // golden IR stable and avoid an unnecessary runtime dependency.
+        let is_main = self
+            .current_function()
+            .and_then(|function| function.get_name().to_str().ok().map(|name| name == "main"))
+            .unwrap_or(false);
+        if is_main && !self.actor_names.is_empty() {
+            let drop_all = self.get_runtime_fn("mimi_actor_drop_all")?;
+            self.builder
+                .build_call(drop_all, &[], "actor_drop_all")
+                .map_err(|e| CompileError::LlvmError(format!("actor drop-all: {}", e)))?;
+        }
         self.builder
             .build_return(val)
             .map_err(|e| CompileError::LlvmError(format!("return error: {}", e)))?;

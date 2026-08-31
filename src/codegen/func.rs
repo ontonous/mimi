@@ -951,7 +951,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         crate::codegen::abi::ownership::classify_surface(&concrete, &self.type_defs)
     }
 
-    fn clone_surface_product_return_with_glue(
+    pub(in crate::codegen) fn clone_surface_structural_return_with_glue(
         &self,
         ret_ty_ast: Option<&Type>,
         value: BasicValueEnum<'ctx>,
@@ -964,6 +964,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             ownership,
             crate::codegen::abi::ownership::OwnershipClass::Tuple(_)
                 | crate::codegen::abi::ownership::OwnershipClass::Record(_)
+                | crate::codegen::abi::ownership::OwnershipClass::Option(_)
+                | crate::codegen::abi::ownership::OwnershipClass::Result { .. }
         ) {
             return Ok(value);
         }
@@ -1012,7 +1014,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 val,
             );
         }
-        // Product returns adopted by A2 are normalized once, after the value
+        // Structural returns adopted by A2 are normalized once, after the value
         // has been loaded/coerced into a by-value struct. Skip the legacy
         // LLVM-shape field probe here so it cannot clone/claim child strings
         // before the product glue clones the whole ownership value.
@@ -1023,6 +1025,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ownership,
                     crate::codegen::abi::ownership::OwnershipClass::Tuple(_)
                         | crate::codegen::abi::ownership::OwnershipClass::Record(_)
+                        | crate::codegen::abi::ownership::OwnershipClass::Option(_)
+                        | crate::codegen::abi::ownership::OwnershipClass::Result { .. }
                 ) && self.value_glue_can_adopt_return(&ownership, ret_type)?
                 {
                     return Ok(val);
@@ -1803,7 +1807,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             Some(v) => {
                 let adjusted = self.coerce_variant_value(v, ret_type, ret_ty_ast)?;
                 let adjusted = self.load_return_value_if_needed(adjusted)?;
-                let adjusted = self.clone_surface_product_return_with_glue(ret_ty_ast, adjusted)?;
+                let adjusted =
+                    self.clone_surface_structural_return_with_glue(ret_ty_ast, adjusted)?;
                 // 0.35.20 (#6): claim returned List variables' data buffers —
                 // null out the variable slot's data field AFTER the return
                 // value has been loaded, so the returned struct keeps the
@@ -2346,13 +2351,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                             self.compile_match_expr(scrutinee, arms, vars, true)?;
                         }
                     } else {
-                        last_val = self.compile_expr(expr, vars)?;
+                        last_val = if is_tail {
+                            self.compile_expr_for_return(expr, vars, ret_type, ret_ty_ast)?
+                        } else {
+                            self.compile_expr(expr, vars)?
+                        };
                         last_val = self.adjust_int_val(last_val, ret_type)?;
                         last_val = self.coerce_variant_value(last_val, ret_type, ret_ty_ast)?;
                     }
                 }
                 Stmt::Return(Some(expr)) => {
-                    let mut val = self.compile_expr(expr, vars)?;
+                    let mut val = self.compile_expr_for_return(expr, vars, ret_type, ret_ty_ast)?;
                     // v0.34.16 (ADR-002): multi-target transition return —
                     // wrap the target state struct into the synthetic
                     // {i32 tag, i64 payload} union (payload = ptrtoint boxed
@@ -4148,7 +4157,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // A2 product adoption must happen before the callee flushes its heap
         // scope. The clone owns fresh StringBox leaves; all original leaves
         // may then be released normally.
-        let last_val = self.clone_surface_product_return_with_glue(ret_ty_ast, last_val)?;
+        let last_val = self.clone_surface_structural_return_with_glue(ret_ty_ast, last_val)?;
 
         // Pop scopes (discard compensations on normal exit)
         // A function owns exactly one shared-release frame. Popping only that

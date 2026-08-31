@@ -376,6 +376,194 @@ func main() -> i32 {
     );
 }
 
+#[test]
+fn dual_a2_value_glue_variant_returns_opt_in() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+func maybe(flag: bool) -> Option<string> {
+    if flag { Some("some-" + "value") } else { None }
+}
+func outcome(flag: bool) -> Result<string, string> {
+    if flag { Ok("ok-" + "value") } else { Err("err-" + "value") }
+}
+func main() -> i32 {
+    match maybe(true) {
+        Some(value) => println(value),
+        None => println("none-unexpected"),
+    }
+    match maybe(false) {
+        Some(value) => println(value),
+        None => println("none"),
+    }
+    match outcome(true) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    match outcome(false) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    0
+}
+"#;
+    check_source(source).expect("A2 variant source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let baseline = checked_codegen_compile_and_run(source)
+        .expect("existing variant return path must compile and run");
+    let native = checked_codegen_compile_and_run_with_value_glue(source)
+        .expect("A2 discriminator-aware glue must compile and run");
+    let legacy = legacy_codegen_compile_and_run_with_value_glue(source)
+        .expect("legacy caller must adopt discriminator-aware returns");
+    let expected = "some-value\nnone\nok-value\nerr-value";
+    assert_eq!(vm.trim(), expected);
+    assert_eq!(baseline.trim(), expected);
+    assert_eq!(native.trim(), expected);
+    assert_eq!(legacy.trim(), expected);
+}
+
+#[test]
+fn dual_a2_value_glue_actor_variant_returns_opt_in() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+actor Provider {
+    func maybe(flag: bool) -> Option<string> {
+        if flag { Some("actor-some-" + "value") } else { None }
+    }
+    func outcome(flag: bool) -> Result<string, string> {
+        if flag { Ok("actor-ok-" + "value") } else { Err("actor-err-" + "value") }
+    }
+}
+func main() -> i32 {
+    let p = Provider.spawn()
+    match p.maybe(true) {
+        Some(value) => println(value),
+        None => println("none-unexpected"),
+    }
+    match p.maybe(false) {
+        Some(value) => println(value),
+        None => println("actor-none"),
+    }
+    match p.outcome(true) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    match p.outcome(false) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    0
+}
+"#;
+    check_source(source).expect("actor A2 variant source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let native = checked_codegen_compile_and_run_with_value_glue(source)
+        .expect("actor A2 variant glue must compile and run");
+    let legacy = legacy_codegen_compile_and_run_with_value_glue(source)
+        .expect("legacy actor A2 variant glue must compile and run");
+    let expected = "actor-some-value\nactor-none\nactor-ok-value\nactor-err-value";
+    assert_eq!(vm.trim(), expected);
+    assert_eq!(native.trim(), expected);
+    assert_eq!(legacy.trim(), expected);
+}
+
+#[test]
+fn dual_a2_value_glue_lambda_variant_returns_opt_in() {
+    if !can_link() {
+        return;
+    }
+    let source = r#"
+func make_option(prefix: string) -> func(bool) -> Option<string> {
+    func inner(flag: bool) -> Option<string> {
+        if flag { Some(prefix + "some-value") } else { None }
+    }
+    inner
+}
+func make_result(prefix: string) -> func(bool) -> Result<string, string> {
+    fn(flag: bool) -> Result<string, string> {
+        if flag { Ok(prefix + "ok-value") } else { Err(prefix + "err-value") }
+    }
+}
+func main() -> i32 {
+    let option = make_option("lambda-")
+    match option(true) {
+        Some(value) => println(value),
+        None => println("none-unexpected"),
+    }
+    match option(false) {
+        Some(value) => println(value),
+        None => println("lambda-none"),
+    }
+    let result = make_result("lambda-")
+    match result(true) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    match result(false) {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    0
+}
+"#;
+    check_source(source).expect("lambda A2 variant source must typecheck");
+    let (_, vm) = checked_run_source_with_stdout(source);
+    let native = checked_codegen_compile_and_run_with_value_glue(source)
+        .expect("lambda A2 variant glue must compile and run");
+    let legacy = legacy_codegen_compile_and_run_with_value_glue(source)
+        .expect("legacy lambda A2 variant glue must compile and run");
+    let expected = "lambda-some-value\nlambda-none\nlambda-ok-value\nlambda-err-value";
+    assert_eq!(vm.trim(), expected);
+    assert_eq!(native.trim(), expected);
+    assert_eq!(legacy.trim(), expected);
+}
+
+#[test]
+fn a2_value_glue_variant_ir_is_tagged_packed_and_deduplicated() {
+    let source = r#"
+func first(flag: bool) -> Result<string, string> {
+    if flag { Ok("first") } else { Err("error-first") }
+}
+func second(flag: bool) -> Result<string, string> {
+    if flag { Ok("second") } else { Err("error-second") }
+}
+func maybe(flag: bool) -> Option<string> {
+    if flag { Some("some") } else { None }
+}
+func main() -> i32 {
+    println(first(true))
+    println(second(false))
+    println(maybe(true))
+    0
+}
+"#;
+    let ir =
+        checked_codegen_ir_with_value_glue(source).expect("A2 variant glue module must compile");
+    let packed_clone = "@mimi_value_clone_glue__result_error_packed_string(";
+    let packed_drop = "@mimi_value_drop_glue__result_error_packed_string(";
+    assert_eq!(
+        ir.lines()
+            .filter(|line| line.starts_with("define internal") && line.contains(packed_clone))
+            .count(),
+        1,
+        "packed Result<String> clone bridge must be module-deduplicated"
+    );
+    assert_eq!(
+        ir.lines()
+            .filter(|line| line.starts_with("define internal") && line.contains(packed_drop))
+            .count(),
+        1,
+        "packed Result<String> drop bridge must be module-deduplicated"
+    );
+    assert!(ir.contains("variant_clone_is_active"));
+    assert!(ir.contains("clone_result_clear_error"));
+    assert!(ir.contains("clone_result_clear_ok"));
+    assert!(ir.contains("returned_result_error_readable"));
+}
+
 /// Soft-typecheck variant of `dual_assert!` for tests that exercise features
 /// the checker does not yet support (0.31.29 止血线 §7: tests that bypass
 /// CheckedProgram must be explicitly marked, not silently counted as stable

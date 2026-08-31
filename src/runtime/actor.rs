@@ -106,7 +106,11 @@ impl Drop for MimiActorRepr {
             // SystemKill may be initiated by the actor itself. Dropping the
             // JoinHandle detaches in that case; the closed mailbox lets the
             // worker return immediately after the current dispatch.
-            if worker.thread().id() != std::thread::current().id() {
+            // Use our actor TLS rather than `std::thread::current()`: the latter
+            // initializes Rust's std::thread mpmc context on the caller and
+            // leaves a small Valgrind "possibly lost" TLS allocation behind.
+            let on_own_worker = CURRENT_ACTOR_ID.with(|current| current.get() as u64 == self.id);
+            if !on_own_worker {
                 let _ = worker.join();
             }
         }
@@ -577,6 +581,36 @@ pub unsafe extern "C" fn mimi_actor_drop(handle: *mut std::ffi::c_void) {
         |v| Some(v.saturating_sub(1)),
     );
     drop(actor);
+}
+
+/// Drop every actor still owned by the native process.
+///
+/// Native `main` has no language-level destructor for free actor handles: an
+/// actor handle is intentionally aliasable, so eagerly destroying it when a
+/// local goes out of scope would make another alias dangling.  The compiler
+/// therefore calls this process-boundary hook immediately before returning
+/// from `main`.  Removing the registry entries before dropping the Arcs keeps
+/// concurrent mailbox operations pinned until they finish, just like the
+/// single-handle `mimi_actor_drop` path.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_actor_drop_all() {
+    let actors = {
+        let mut registry = live_actors().lock().unwrap_or_else(|e| e.into_inner());
+        // `HashMap::drain` leaves its bucket allocation attached to the global
+        // registry. Replace the map wholesale so process-boundary cleanup also
+        // releases that capacity before Valgrind checks the exit state.
+        let old = std::mem::take(&mut *registry);
+        old.into_values().collect::<Vec<_>>()
+    };
+    let removed = actors.len() as u64;
+    if removed > 0 {
+        let _ = ACTOR_SPAWN_COUNT.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |count| Some(count.saturating_sub(removed)),
+        );
+    }
+    drop(actors);
 }
 
 /// Terminate an actor and every transitively owned, non-detached child.

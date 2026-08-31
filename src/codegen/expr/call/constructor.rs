@@ -416,6 +416,14 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     str_len_gep,
                                     self.build_extract_value(sv.into(), 1, "err_str_len")?,
                                 )?;
+                                // A2.3: the erased Result error slot owns this
+                                // wrapper independently of the StringBox data.
+                                // Track it when derived variant glue is active;
+                                // return cloning then leaves both source layers
+                                // to ordinary callee cleanup.
+                                if self.value_glue_enabled() {
+                                    self.register_heap_box(heap_ptr);
+                                }
                                 self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
                                     .into()
                             } else {
@@ -531,6 +539,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                         str_len_gep,
                         self.build_extract_value(sv.into(), 1, "err_str_len")?,
                     )?;
+                    if self.value_glue_enabled() {
+                        self.register_heap_box(heap_ptr);
+                    }
                     self.build_ptr_to_int(heap_ptr, i64_ty, "err_str_heap_i64")?
                         .into()
                 } else {

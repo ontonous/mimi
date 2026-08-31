@@ -7684,6 +7684,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         self.generator
                             .build_extract_value(sv.into(), 1, "err_str_len")?,
                     )?;
+                    if self.generator.value_glue_enabled() {
+                        self.generator.register_heap_box(heap_ptr);
+                    }
                     Ok(BasicValueEnum::IntValue(self.generator.build_ptr_to_int(
                         heap_ptr,
                         i64_ty,

@@ -40,7 +40,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let saved_mt = self.in_multi_target_transition;
         let saved_states = std::mem::take(&mut self.multi_target_states);
         let saved_from = std::mem::take(&mut self.current_from_state);
+        let saved_ret_ty_ast = self.current_fn_ret_ty_ast.clone();
         self.in_multi_target_transition = false;
+        self.current_fn_ret_ty_ast = ret.clone();
 
         let mut lambda_vars = vars.clone();
         let env_ptr_param = lambda_fn
@@ -54,6 +56,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.in_multi_target_transition = saved_mt;
         self.multi_target_states = saved_states;
         self.current_from_state = saved_from;
+        self.current_fn_ret_ty_ast = saved_ret_ty_ast;
         body_result?;
 
         if let Some(bb) = saved_block {
@@ -277,19 +280,40 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut last_val = default_ret_value(self.context, ret_type);
         let mut last_expr: Option<&Expr> = None;
         let mut returned = false;
-        for stmt in body {
+        for (stmt_index, stmt) in body.iter().enumerate() {
+            let is_tail = stmt_index + 1 == body.len();
             match stmt.unlocated() {
                 Stmt::Expr(e) => {
-                    last_val = self.compile_expr(e, lambda_vars)?;
+                    let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                    last_val = if is_tail {
+                        self.compile_expr_for_return(e, lambda_vars, ret_type, ret_ty_ast.as_ref())?
+                    } else {
+                        self.compile_expr(e, lambda_vars)?
+                    };
                     last_expr = Some(e);
                 }
                 Stmt::Return(Some(e)) => {
-                    let v = self.compile_expr(e, lambda_vars)?;
+                    let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                    let v = self.compile_expr_for_return(
+                        e,
+                        lambda_vars,
+                        ret_type,
+                        ret_ty_ast.as_ref(),
+                    )?;
                     let v = self.load_return_value_if_needed(v)?;
+                    let v = self.coerce_variant_value(
+                        v,
+                        ret_type,
+                        self.current_fn_ret_ty_ast.as_ref(),
+                    )?;
                     // Claim string/tuple return values so free_heap_allocs
                     // doesn't free them before the caller receives them.
                     let claimed =
                         self.claim_string_return_value(v, ret_type, Some(e), lambda_vars)?;
+                    let claimed = self.clone_surface_structural_return_with_glue(
+                        self.current_fn_ret_ty_ast.as_ref(),
+                        claimed,
+                    )?;
                     // L6: claim a returned custom-enum payload box (caller
                     // re-registers via EnumBox). Mirrors func.rs emit_return.
                     self.claim_returned_enum_box(claimed, ret_type)?;
@@ -321,7 +345,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         })?;
                 }
                 Stmt::If { cond, then_, else_ } => {
-                    if let Some(v) = self.compile_if_stmt(cond, then_, else_, lambda_vars, false)? {
+                    let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                    let value = if is_tail {
+                        self.compile_if_stmt_with_expected_return(
+                            cond,
+                            then_,
+                            else_,
+                            lambda_vars,
+                            false,
+                            ret_ty_ast.as_ref().map(|ast| (ret_type, ast)),
+                        )?
+                    } else {
+                        self.compile_if_stmt(cond, then_, else_, lambda_vars, false)?
+                    };
+                    if let Some(v) = value {
                         let v = self.adjust_int_value_width(v, ret_type, "lambda_if_ret")?;
                         last_val = v;
                         last_expr = None;
@@ -354,8 +391,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             // the tail expression so `ret <mismatch>` never reaches O1.
             let last_val = self.adjust_int_value_width(last_val, ret_type, "lambda_tail_ret")?;
             let last_val = self.load_return_value_if_needed(last_val)?;
+            let last_val =
+                self.coerce_variant_value(last_val, ret_type, self.current_fn_ret_ty_ast.as_ref())?;
             let claimed =
                 self.claim_string_return_value(last_val, ret_type, last_expr, lambda_vars)?;
+            let claimed = self.clone_surface_structural_return_with_glue(
+                self.current_fn_ret_ty_ast.as_ref(),
+                claimed,
+            )?;
             // L6: claim a returned custom-enum payload box (caller re-registers
             // via EnumBox). Mirrors the explicit-return path above.
             self.claim_returned_enum_box(claimed, ret_type)?;

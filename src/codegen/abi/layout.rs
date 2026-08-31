@@ -3,6 +3,21 @@
 use inkwell::context::Context;
 use inkwell::types::{BasicTypeEnum, StructType};
 
+/// Canonical field/tag contract for the built-in discriminated containers.
+///
+/// `Option` and `Result` are consumed by both native emitters, pattern
+/// matching, `?`, and value glue.  Keeping the indices and active-tag polarity
+/// here prevents those consumers from independently re-inventing the ABI.
+pub(in crate::codegen) mod builtin_variant {
+    pub const DISCRIMINANT_FIELD: u32 = 0;
+    pub const ACTIVE_TAG: u64 = 1;
+
+    pub const OPTION_PAYLOAD_FIELD: u32 = 1;
+
+    pub const RESULT_OK_FIELD: u32 = 1;
+    pub const RESULT_ERROR_FIELD: u32 = 2;
+}
+
 /// Widen an integer used as an Option/Result payload slot to i64.
 ///
 /// Container payloads historically widen every sub-64-bit integer, including

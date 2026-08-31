@@ -2088,6 +2088,88 @@ fn e2e_valgrind_a2_value_glue_product_returns_legacy_caller() {
 }
 
 #[test]
+fn e2e_valgrind_a2_value_glue_variant_returns() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    if !can_valgrind() {
+        eprintln!("SKIP: valgrind not available");
+        return;
+    }
+    let source = r#"
+        func maybe(flag: bool) -> Option<string> {
+            if flag { return Some("some-" + "value") }
+            None
+        }
+        func outcome(flag: bool) -> Result<string, string> {
+            if flag { Ok("ok-" + "value") } else { Err("err-" + "value") }
+        }
+        actor Provider {
+            func outcome(flag: bool) -> Result<string, string> {
+                if flag {
+                    Ok("actor-ok-" + "value")
+                } else {
+                    Err("actor-err-" + "value")
+                }
+            }
+        }
+        func make_result(prefix: string) -> func(bool) -> Result<string, string> {
+            fn(flag: bool) -> Result<string, string> {
+                if flag {
+                    Ok(prefix + "ok-value")
+                } else {
+                    Err(prefix + "err-value")
+                }
+            }
+        }
+        func main() -> i32 {
+            let provider = Provider.spawn()
+            let lambda = make_result("lambda-")
+            let mut i = 0
+            while i < 12 {
+                println(maybe(i % 2 == 0))
+                println(outcome(i % 2 == 0))
+                match provider.outcome(i % 2 == 0) {
+                    Ok(value) => println(value),
+                    Err(error) => println(error),
+                }
+                match lambda(i % 2 == 0) {
+                    Ok(value) => println(value),
+                    Err(error) => println(error),
+                }
+                i = i + 1
+            }
+            0
+        }
+    "#;
+    // Rust's std::sync::mpsc initializes a main-thread TLS context on the
+    // first mailbox call. Its 48-byte context is reported by Valgrind as
+    // `possibly lost` until the C process exits, even after the actor worker
+    // and registry have been deterministically torn down. Keep this actor
+    // ownership gate strict for definite/indirect leaks while excluding that
+    // toolchain-owned possible leak; all A2 allocations remain fully checked.
+    let actor_valgrind_config = E2EConfig {
+        use_valgrind: true,
+        valgrind_args: vec![
+            "--tool=memcheck".into(),
+            "--error-exitcode=1".into(),
+            "--leak-check=full".into(),
+            "--errors-for-leak-kinds=definite,indirect".into(),
+        ],
+        ..Default::default()
+    };
+    let resolved =
+        checked_codegen_compile_and_run_with_value_glue_config(source, &actor_valgrind_config)
+            .expect("resolved A2 variant glue must be Valgrind-clean");
+    let legacy =
+        legacy_codegen_compile_and_run_with_value_glue_config(source, &actor_valgrind_config)
+            .expect("legacy A2 variant glue must be Valgrind-clean");
+    assert_eq!(resolved.lines().count(), 48);
+    assert_eq!(legacy, resolved);
+}
+
+#[test]
 fn e2e_valgrind_list_ops() {
     if !can_link() {
         eprintln!("SKIP: cc not available");

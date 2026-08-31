@@ -15,6 +15,41 @@ impl<'ctx> CodeGenerator<'ctx> {
         else_: &Option<Block>,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.compile_if_expr_with_expected_return(cond, then_, else_, vars, None)
+    }
+
+    /// Compile an expression that directly feeds a declared return slot. Only
+    /// an if-expression needs contextual handling: its branch values must be
+    /// coerced before the phi, while their narrow constructor ABI is still
+    /// available. Coercing the phi afterwards cannot recover an Err payload
+    /// that was discarded to make unlike branch types meet.
+    pub(in crate::codegen) fn compile_expr_for_return(
+        &mut self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        target_ty: BasicTypeEnum<'ctx>,
+        target_ast: Option<&Type>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match expr.unlocated() {
+            Expr::If { cond, then_, else_ } => self.compile_if_expr_with_expected_return(
+                cond,
+                then_,
+                else_,
+                vars,
+                target_ast.map(|ast| (target_ty, ast)),
+            ),
+            _ => self.compile_expr(expr, vars),
+        }
+    }
+
+    fn compile_if_expr_with_expected_return(
+        &mut self,
+        cond: &Expr,
+        then_: &Block,
+        else_: &Option<Block>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        expected_return: Option<(BasicTypeEnum<'ctx>, &Type)>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let cond_val = self.compile_expr(cond, vars)?;
         let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
             // H-22 (full-audit 2026-08-05 §2.6): builtin predicates (contains,
@@ -47,7 +82,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.builder.position_at_end(then_bb);
         let mut then_vars = vars.clone();
         let then_val = self
-            .compile_block_last_val(then_, &mut then_vars)
+            .compile_block_last_val_with_expected_return(then_, &mut then_vars, expected_return)
             .map_err(|e| CompileError::Generic(e.to_string()))?;
         // 0.35.23 deep-eval: a string-literal branch (e.g. `else { "ERROR" }`
         // in mimi-log's level fallback chain) yields a raw C-string pointer
@@ -56,6 +91,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Mirror the func.rs if-statement path's normalization.
         let then_val = self.normalize_block_last_string(then_val, then_)?;
         let then_reaches = !self.block_has_terminator();
+        let then_val = if then_reaches {
+            if let Some((target_ty, target_ast)) = expected_return {
+                self.coerce_variant_value(then_val, target_ty, Some(target_ast))?
+            } else {
+                then_val
+            }
+        } else {
+            then_val
+        };
         if then_reaches {
             self.builder
                 .build_unconditional_branch(merge_bb)
@@ -69,12 +113,17 @@ impl<'ctx> CodeGenerator<'ctx> {
         let (mut else_val, else_reaches) = if let Some(eb) = else_ {
             let mut else_vars = vars.clone();
             let mut v = self
-                .compile_block_last_val(eb, &mut else_vars)
+                .compile_block_last_val_with_expected_return(eb, &mut else_vars, expected_return)
                 .map_err(|e| CompileError::Generic(e.to_string()))?;
             // 0.35.23 deep-eval: same string-literal normalization as the
             // then branch (mimi-log `else { "INFO" }` vs `{ lvl }`).
             v = self.normalize_block_last_string(v, eb)?;
             let reaches = !self.block_has_terminator();
+            if reaches {
+                if let Some((target_ty, target_ast)) = expected_return {
+                    v = self.coerce_variant_value(v, target_ty, Some(target_ast))?;
+                }
+            }
             if reaches {
                 self.builder
                     .build_unconditional_branch(merge_bb)

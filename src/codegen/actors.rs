@@ -723,6 +723,19 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         let handle_val = call_try_basic_value(&handle).unwrap_or(i8_ptr.const_null().into());
 
+        // `mimi_actor_spawn` copies the fields blob synchronously before it
+        // returns.  The blob is therefore a spawn temporary, not actor-owned
+        // storage; retaining it until process exit leaked one allocation per
+        // spawn.  Free it on both successful and quota-rejected spawns (free
+        // accepts null, and the runtime has already copied the bytes).
+        let free_fn = self
+            .module
+            .get_function("free")
+            .ok_or_else(|| CompileError::LlvmError("free not declared".to_string()))?;
+        self.builder
+            .build_call(free_fn, &[raw_ptr.into()], "actor_fields_free")
+            .map_err(|e| CompileError::LlvmError(format!("actor fields free: {}", e)))?;
+
         // Prefer CheckedProgram mailbox depth; fall back to Surface FlowDef annotations.
         let mailbox_depth = self
             .resolved_mailbox_depths
@@ -821,17 +834,28 @@ impl<'ctx> CodeGenerator<'ctx> {
         actor: &crate::ast::ActorDef,
         method: &FuncDef,
     ) -> MimiResult<()> {
-        let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
-        let last_val = self.compile_actor_method_body(method, &mut vars)?;
-        let last_expr = method.body.last().and_then(|s| {
-            if let Stmt::Expr(e) = s.unlocated() {
-                Some(e)
-            } else {
-                None
-            }
-        });
-        let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val, last_expr);
-        self.end_function_heap_scope();
+        // Actor methods are emitted outside the regular function-body funnel,
+        // so make their surface return type explicit while compiling the body.
+        // A2 structural glue uses this AST type to derive discriminator-aware
+        // clone/drop operations; inheriting a previous function's type would
+        // silently skip adoption for Option/Result/product returns.
+        let saved_ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+        let result = (|| {
+            let (ret_type, mut vars) = self.build_actor_method_function(actor, method)?;
+            self.current_fn_ret_ty_ast = method.ret.clone();
+            let last_val = self.compile_actor_method_body(method, &mut vars)?;
+            let last_expr = method.body.last().and_then(|s| {
+                if let Stmt::Expr(e) = s.unlocated() {
+                    Some(e)
+                } else {
+                    None
+                }
+            });
+            let result = self.emit_actor_method_epilogue(&mut vars, ret_type, last_val, last_expr);
+            self.end_function_heap_scope();
+            result
+        })();
+        self.current_fn_ret_ty_ast = saved_ret_ty_ast;
         result
     }
 
@@ -980,8 +1004,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             _ => self.context.i64_type().const_int(0, false).into(),
         };
         let mut last_val: BasicValueEnum = default_val;
-        for stmt in &method.body {
-            if self.compile_actor_method_stmt(stmt, vars, &mut last_val, ret_type)? {
+        for (stmt_index, stmt) in method.body.iter().enumerate() {
+            let is_tail = stmt_index + 1 == method.body.len();
+            if self.compile_actor_method_stmt(stmt, vars, &mut last_val, ret_type, is_tail)? {
                 return Ok(last_val);
             }
         }
@@ -996,6 +1021,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &mut HashMap<String, VarEntry<'ctx>>,
         last_val: &mut BasicValueEnum<'ctx>,
         ret_type: BasicTypeEnum<'ctx>,
+        is_tail: bool,
     ) -> Result<bool, CompileError> {
         // Run compensations before exit()
         if let Stmt::Expr(expr) = stmt.unlocated() {
@@ -1010,11 +1036,18 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         match stmt.unlocated() {
             Stmt::Expr(expr) => {
-                *last_val = self.compile_expr(expr, vars)?;
+                let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                *last_val = if is_tail {
+                    self.compile_expr_for_return(expr, vars, ret_type, ret_ty_ast.as_ref())?
+                } else {
+                    self.compile_expr(expr, vars)?
+                };
                 *last_val = self.adjust_int_val(*last_val, ret_type)?;
             }
             Stmt::Return(Some(expr)) => {
-                let mut val = self.compile_expr(expr, vars)?;
+                let ret_ty_ast = self.current_fn_ret_ty_ast.clone();
+                let mut val =
+                    self.compile_expr_for_return(expr, vars, ret_type, ret_ty_ast.as_ref())?;
                 val = self.adjust_int_val(
                     val,
                     self.current_fn_ret_type()
@@ -1025,8 +1058,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // re-registers via EnumBox). Mirrors func.rs emit_return.
                 self.claim_returned_enum_box(val, ret_type)?;
                 val = self.load_return_value_if_needed(val)?;
+                val =
+                    self.coerce_variant_value(val, ret_type, self.current_fn_ret_ty_ast.as_ref())?;
                 self.claim_returned_lists(Some(expr), vars);
                 val = self.claim_returned_list_literals(val, Some(expr))?;
+                // A2: actor methods return through the mailbox, but the
+                // callee still flushes its heap scope before the result is
+                // packed. Clone structural values while their original leaves
+                // are live, matching the regular function/block funnels.
+                val = self.clone_surface_structural_return_with_glue(
+                    self.current_fn_ret_ty_ast.as_ref(),
+                    val,
+                )?;
                 // 0.34.41 第二档: ensures with `result` binding (was unbound
                 // here — "undefined variable 'result'" family).
                 self.compile_ensures_asserts(Some(val), ret_type, vars)?;
@@ -1237,92 +1280,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_assign_stmt(target, value, vars)?;
             }
             Stmt::If { cond, then_, else_ } => {
-                let cond_val = self.compile_expr(cond, vars)?;
-                let cond_bool = if let BasicValueEnum::IntValue(iv) = cond_val {
-                    iv
+                let expected_return_ast = if is_tail {
+                    self.current_fn_ret_ty_ast.clone()
                 } else {
-                    return Err(CompileError::TypeMismatch(
-                        "if condition must be boolean".to_string(),
-                    ));
+                    None
                 };
-                let function = self.current_function().ok_or_else(|| {
-                    CompileError::LlvmError(
-                        "codegen: no current function for if in actor method".to_string(),
-                    )
-                })?;
-                let then_bb = self.context.append_basic_block(function, "then");
-                let else_bb = self.context.append_basic_block(function, "else");
-                let merge_bb = self.context.append_basic_block(function, "ifcont");
-                self.build_cond_br(cond_bool, then_bb, else_bb)?;
-                self.builder.position_at_end(then_bb);
-                let mut then_vars = vars.clone();
-                let then_val = self.compile_block_last_val(then_, &mut then_vars)?;
-                // 0.35.23 deep-eval: branch-value normalization (block.rs /
-                // resolved compile_if_expr parity). `if found { to_string(
-                // val) } else { "" }` yields a {ptr,i64} struct in one arm
-                // and a raw C-string pointer in the other — with mismatched
-                // types the phi below is skipped and the actor method's tail
-                // value silently became i64 0 (get_nick returned a NULL
-                // string ptr → strcmp(NULL, …) SIGSEGV in mimichat
-                // test_user_manager_basic). Wrap raw string pointers so both
-                // arms share the canonical {ptr,len} layout.
-                let then_val = self.normalize_block_last_string(then_val, then_)?;
-                let then_reaches = !self.block_has_terminator();
-                if then_reaches {
-                    self.build_br(merge_bb)?;
-                }
-                let then_bb_end = then_reaches
-                    .then(|| self.builder.get_insert_block())
-                    .flatten();
-                self.builder.position_at_end(else_bb);
-                let (else_val, else_reaches) = if let Some(else_block) = else_ {
-                    let mut else_vars = vars.clone();
-                    let v = self.compile_block_last_val(else_block, &mut else_vars)?;
-                    let v = self.normalize_block_last_string(v, else_block)?;
-                    let reaches = !self.block_has_terminator();
-                    if reaches {
-                        self.build_br(merge_bb)?;
-                    }
-                    (Some(v), reaches)
+                let expected_return = expected_return_ast.as_ref().map(|ty| (ret_type, ty));
+                let value = if is_tail {
+                    self.compile_if_stmt_with_expected_return(
+                        cond,
+                        then_,
+                        else_,
+                        vars,
+                        false,
+                        expected_return,
+                    )?
                 } else {
-                    let reaches = !self.block_has_terminator();
-                    if reaches {
-                        self.build_br(merge_bb)?;
-                    }
-                    // Synthesize a default value so the merge phi receives an
-                    // incoming entry for the else edge. A phi with zero entries
-                    // is invalid IR (its entry count must equal the block's
-                    // predecessor count); LLVM O0 tolerates it, but O1/O2
-                    // verifier passes crash on it (SIGSEGV in mimi build).
-                    // Mirrors the func.rs if-statement handling.
-                    let default_val = match then_val.get_type() {
-                        BasicTypeEnum::IntType(t) => t.const_int(0, false).into(),
-                        BasicTypeEnum::FloatType(t) => t.const_float(0.0).into(),
-                        _ => self.context.i64_type().const_int(0, false).into(),
-                    };
-                    (Some(default_val), reaches)
+                    self.compile_if_stmt(cond, then_, else_, vars, false)?
                 };
-                let else_bb_end = else_reaches
-                    .then(|| self.builder.get_insert_block())
-                    .flatten();
-                self.builder.position_at_end(merge_bb);
-                if then_val.get_type()
-                    == else_val
-                        .as_ref()
-                        .map(|v| v.get_type())
-                        .unwrap_or(then_val.get_type())
-                {
-                    let phi = self
-                        .builder
-                        .build_phi(then_val.get_type(), "if_result")
-                        .map_err(|e| CompileError::LlvmError(format!("phi error: {}", e)))?;
-                    if let Some(bb) = then_bb_end {
-                        phi.add_incoming(&[(&then_val as &dyn inkwell::values::BasicValue, bb)]);
-                    }
-                    if let (Some(bb), Some(ev)) = (else_bb_end, else_val) {
-                        phi.add_incoming(&[(&ev as &dyn inkwell::values::BasicValue, bb)]);
-                    }
-                    *last_val = phi.as_basic_value();
+                if let Some(value) = value {
+                    *last_val = value;
                 }
             }
             Stmt::For {
@@ -1497,6 +1474,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => self.load_return_value_if_needed(last_val)?,
         };
+        // Actor tails can construct a narrow None/Err value even though the
+        // method signature carries a wider payload ABI. Normalize before A2
+        // derives glue, exactly as regular function returns do.
+        let last_val =
+            self.coerce_variant_value(last_val, ret_type, self.current_fn_ret_ty_ast.as_ref())?;
         // 0.39.135 (L1 parity): claim heap-backed scalar-string returns
         // *before* free_heap_scopes — mirrors func.rs emit_implicit_return.
         // Without this, an implicit tail expression like `"hi " + name`
@@ -1508,6 +1490,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Claim returned List variables' data buffers & literals before flushing heap scopes.
         self.claim_returned_lists(last_expr, vars);
         let last_val = self.claim_returned_list_literals(last_val, last_expr)?;
+        // A2: use the same structural ownership adoption for implicit actor
+        // returns before mailbox dispatch cleanup releases the method scope.
+        let last_val = self.clone_surface_structural_return_with_glue(
+            self.current_fn_ret_ty_ast.as_ref(),
+            last_val,
+        )?;
         // 0.1.9 (L1 parity): a tail expression that is a bare local variable
         // holding a list can miss the var_type_names registry (un-annotated
         // list-literal binds inside actor methods carry no element info), so
@@ -2036,7 +2024,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         //
         // For the self case, we already returned above, so we don't reach here.
         //
-        // The result is the mailbox result.
+        // The actor method cloned adopted structural returns before its worker
+        // scope was flushed. Register those fresh leaves in the caller just as
+        // named and closure calls do, so mailbox transport does not become an
+        // ownership blind spot.
+        let result_val = self.track_derived_structural_return_lifetime_for_type(
+            method_ret_ty.as_ref(),
+            result_val,
+        )?;
         Ok(Some(result_val))
     }
 }

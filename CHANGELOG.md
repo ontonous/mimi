@@ -2,6 +2,34 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### 0.40.3.3 — A2：判别式容器 glue 与 actor 进程边界生命周期收口
+
+在 product glue 之后接通内建 `Option`/`Result` 的活动载荷语义，并收口 native actor
+的进程边界生命周期。所有实现仍由 canonical ownership/layout 元数据驱动，保持
+`MIMI_VALUE_GLUE` opt-in；未证明的存储形状继续 fail-closed。
+
+- `layout.rs` 集中 Option/Result 的 tag、payload 字段索引和活动值约定。Option 使用
+  `{i1, payload}`，Result 使用 `{i1, ok, erased-i64-error}`；clone/drop 按活动 tag 分支，
+  非活动字段归零，避免重叠/未活动载荷被错误释放。
+- Option 的 scalar/StringBox/product payload 与 Result 的 Ok payload 已接入递归 glue；
+  Result 的 Err 槽只接受 scalar bits 或 StringBox 的 i64 handle bridge。复杂 error、
+  List/Array/Map/Set、linear/generic/unknown 形状保持硬错误，不削弱 E0723 或恰一次约束。
+- 普通函数、lambda、actor method 的显式返回、隐式尾返回和尾部 `if` 统一 clone 一次，
+  caller 侧按同一 ownership plan 登记新 StringBox 叶；覆盖 mailbox 返回和闭包返回边界。
+- actor spawn 在 runtime 同步复制 fields 后立即释放临时 blob；含 actor 声明的 native
+  `main` 返回前调用 `mimi_actor_drop_all`，以 `mem::take` 清空 live registry 并 join worker。
+  通过 actor TLS 判断 worker self-drop，避免额外初始化 std thread TLS；actor handle 仍
+  保持可别名语义，不做隐式局部析构。
+
+不变量类别：L1（VM ≡ opt-out native ≡ opt-in native，resolved ≡ legacy）/
+L2（canonical tag/layout 与 ownership plan 成对）/ L3（活动载荷恰一次释放、actor worker
+进程边界收割）。
+
+测试：A2 定向 8/8；Option/Result、actor、lambda 双后端覆盖；Valgrind 定向 4/4（definite/
+indirect leak 为 0，工具链 `possibly lost` TLS 单独过滤）；`dual_` 1121/0、`typecheck::`
+112/0、`codegen_e2e` 210/0（5 ignored）、`v1_2_verification` 30/0；`cargo fmt --check`
+与 `git diff --check` 通过。
+
 ### 0.40.3.2 — A2：递归 product value glue 与双发射器返回收养
 
 value glue 的可执行面由 StringBox 扩展到 tuple/record product，当前递归叶只允许

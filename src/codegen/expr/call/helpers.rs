@@ -353,7 +353,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     pub(in crate::codegen) fn expr_type_of(
         &self,
         expr: &Expr,
-        _vars: &HashMap<String, VarEntry<'ctx>>,
+        vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Option<Type> {
         match expr.unlocated() {
             Expr::Ident(name) => {
@@ -397,6 +397,19 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .get(name)
                         .and_then(|f| f.ret.clone())
                         .map(|t| self.resolve_type(&t))
+                } else if let Expr::Field(object, method) = callee.unlocated() {
+                    // Actor mailbox calls still carry the method's declared
+                    // return type. Preserve that exact AST type here so direct
+                    // consumers such as `match actor.result()` can recover
+                    // packed Result error payloads instead of treating the i64
+                    // transport slot as an integer.
+                    let object_type = self.infer_object_type(object, vars);
+                    let actor_name = object_type.split('<').next().unwrap_or(&object_type);
+                    self.actor_defs
+                        .get(actor_name)
+                        .and_then(|actor| actor.methods.iter().find(|item| item.name == *method))
+                        .and_then(|item| item.ret.clone())
+                        .map(|ty| self.resolve_type(&ty))
                 } else {
                     None
                 }

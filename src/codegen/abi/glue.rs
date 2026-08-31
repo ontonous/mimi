@@ -9,6 +9,7 @@ use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
 
+use crate::codegen::abi::layout::builtin_variant;
 use crate::codegen::abi::ownership::{LinearOwnershipKind, OwnershipClass};
 use crate::codegen::{call_try_basic_value, CodeGenerator};
 use crate::error::CompileError;
@@ -112,19 +113,30 @@ impl GluePlan {
         match self {
             Self::Trivial | Self::StringBox => true,
             Self::Tuple(fields) | Self::Record(fields) => fields.iter().all(Self::is_emitted),
-            Self::List(_)
-            | Self::Option(_)
-            | Self::Result { .. }
-            | Self::Array(_)
-            | Self::OpaqueNoop => false,
+            Self::Option(payload) => payload.is_emitted(),
+            Self::Result { ok, error } => {
+                ok.is_emitted() && error.is_emitted_result_error_storage()
+            }
+            Self::List(_) | Self::Array(_) | Self::OpaqueNoop => false,
         }
+    }
+
+    /// The native Result ABI deliberately erases `E` into an i64 slot.  This
+    /// slice supports the two storage contracts that can be proven without
+    /// recovering source spelling: scalar bits inline and StringBox behind an
+    /// owned `{ptr,len}` heap handle.  Product/list errors remain closed until
+    /// their erased storage descriptor is carried by canonical ABI metadata.
+    fn is_emitted_result_error_storage(&self) -> bool {
+        matches!(self, Self::Trivial | Self::StringBox)
     }
 
     fn owns_heap(&self) -> bool {
         match self {
             Self::StringBox => true,
             Self::Tuple(fields) | Self::Record(fields) => fields.iter().any(Self::owns_heap),
-            Self::List(_) | Self::Option(_) | Self::Result { .. } | Self::Array(_) => true,
+            Self::List(_) | Self::Array(_) => true,
+            Self::Option(payload) => payload.owns_heap(),
+            Self::Result { ok, error } => ok.owns_heap() || error.owns_heap(),
             Self::Trivial | Self::OpaqueNoop => false,
         }
     }
@@ -132,7 +144,14 @@ impl GluePlan {
     fn is_adoptable_return(&self) -> bool {
         self.is_emitted()
             && self.owns_heap()
-            && matches!(self, Self::StringBox | Self::Tuple(_) | Self::Record(_))
+            && matches!(
+                self,
+                Self::StringBox
+                    | Self::Option(_)
+                    | Self::Result { .. }
+                    | Self::Tuple(_)
+                    | Self::Record(_)
+            )
     }
 }
 
@@ -211,6 +230,47 @@ fn validate_plan_type(plan: &GluePlan, ty: BasicTypeEnum<'_>) -> Result<(), Comp
                 ))
             }
         }
+        GluePlan::Option(payload) => {
+            let BasicTypeEnum::StructType(option) = ty else {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "Option glue requires a by-value struct ABI",
+                ));
+            };
+            let fields = option.get_field_types();
+            if fields.len() != 2
+                || !matches!(fields[0], BasicTypeEnum::IntType(tag) if tag.get_bit_width() == 1)
+            {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "Option requires the canonical {i1, payload} ABI",
+                ));
+            }
+            validate_plan_type(payload, fields[1])
+        }
+        GluePlan::Result { ok, error } => {
+            let BasicTypeEnum::StructType(result) = ty else {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "Result glue requires a by-value struct ABI",
+                ));
+            };
+            let fields = result.get_field_types();
+            if fields.len() != 3
+                || !matches!(fields[0], BasicTypeEnum::IntType(tag) if tag.get_bit_width() == 1)
+            {
+                return Err(glue_shape_error(
+                    plan,
+                    ty,
+                    "Result requires the canonical {i1, ok, i64-error-handle} ABI",
+                ));
+            }
+            validate_plan_type(ok, fields[1])?;
+            validate_result_error_storage(error, fields[2], plan, ty)
+        }
         GluePlan::Tuple(fields) | GluePlan::Record(fields) => {
             let BasicTypeEnum::StructType(product) = ty else {
                 return Err(glue_shape_error(
@@ -236,6 +296,31 @@ fn validate_plan_type(plan: &GluePlan, ty: BasicTypeEnum<'_>) -> Result<(), Comp
             plan,
             ty,
             "this ownership shape has no emitter in the current slice",
+        )),
+    }
+}
+
+fn validate_result_error_storage(
+    error: &GluePlan,
+    storage: BasicTypeEnum<'_>,
+    parent: &GluePlan,
+    parent_ty: BasicTypeEnum<'_>,
+) -> Result<(), CompileError> {
+    let is_i64 =
+        matches!(storage, BasicTypeEnum::IntType(integer) if integer.get_bit_width() == 64);
+    if !is_i64 {
+        return Err(glue_shape_error(
+            parent,
+            parent_ty,
+            "Result error storage must be the canonical erased i64 slot",
+        ));
+    }
+    match error {
+        GluePlan::Trivial | GluePlan::StringBox => Ok(()),
+        _ => Err(glue_shape_error(
+            parent,
+            parent_ty,
+            "the erased Result error shape has no payload-storage bridge in the current slice",
         )),
     }
 }
@@ -340,6 +425,67 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.register_heap_alloc(data);
                 Ok(())
             }
+            GluePlan::Option(payload) => {
+                let BasicTypeEnum::StructType(option) = ty else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned Option tracking requires a struct ABI",
+                    ));
+                };
+                let BasicValueEnum::StructValue(option_value) = value else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned Option tracking requires a struct value",
+                    ));
+                };
+                // Variant clone glue canonicalizes an inactive payload to zero,
+                // so tracking can remain branch-free: None recursively
+                // registers only null pointers, while Some registers its fresh
+                // payload leaves. This keeps every cleanup operand dominated.
+                let payload_ty =
+                    option.get_field_types()[builtin_variant::OPTION_PAYLOAD_FIELD as usize];
+                let payload_value = self.build_extract_value(
+                    option_value.into(),
+                    builtin_variant::OPTION_PAYLOAD_FIELD,
+                    "returned_glue_option_payload",
+                )?;
+                self.register_returned_plan(payload, payload_value, payload_ty)
+            }
+            GluePlan::Result { ok, error } => {
+                let BasicTypeEnum::StructType(result) = ty else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned Result tracking requires a struct ABI",
+                    ));
+                };
+                let BasicValueEnum::StructValue(result_value) = value else {
+                    return Err(glue_shape_error(
+                        plan,
+                        ty,
+                        "returned Result tracking requires a struct value",
+                    ));
+                };
+                let fields = result.get_field_types();
+                let ok_value = self.build_extract_value(
+                    result_value.into(),
+                    builtin_variant::RESULT_OK_FIELD,
+                    "returned_glue_result_ok",
+                )?;
+                self.register_returned_plan(
+                    ok,
+                    ok_value,
+                    fields[builtin_variant::RESULT_OK_FIELD as usize],
+                )?;
+                let error_value = self.build_extract_value(
+                    result_value.into(),
+                    builtin_variant::RESULT_ERROR_FIELD,
+                    "returned_glue_result_error",
+                )?;
+                self.register_result_error_storage(error, error_value)
+            }
             GluePlan::Tuple(fields) | GluePlan::Record(fields) => {
                 let BasicTypeEnum::StructType(product) = ty else {
                     return Err(glue_shape_error(
@@ -375,6 +521,69 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    fn register_result_error_storage(
+        &self,
+        error: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        match error {
+            GluePlan::Trivial => Ok(()),
+            GluePlan::StringBox => {
+                let BasicValueEnum::IntValue(handle) = value else {
+                    return Err(CompileError::Unsupported(
+                        "returned Result<string-error> requires an i64 payload handle".into(),
+                    ));
+                };
+                let pointer_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                let box_pointer =
+                    self.build_int_to_ptr(handle, pointer_type, "returned_result_error_box")?;
+                let is_null = self
+                    .builder
+                    .build_is_null(box_pointer, "returned_result_error_is_null")
+                    .map_err(|error| {
+                        CompileError::LlvmError(format!("returned Result error null test: {error}"))
+                    })?;
+                // Loading the inactive zero handle would dereference null.
+                // Select a zero-initialized, entry-dominating StringBox slot
+                // instead; its data leaf is null and therefore safe to track.
+                let string = self.string_box_type();
+                let zero_box = self.build_entry_alloca(string, "returned_result_error_zero")?;
+                self.build_store(zero_box, string.const_zero())?;
+                let readable = self
+                    .builder
+                    .build_select(
+                        is_null,
+                        zero_box,
+                        box_pointer,
+                        "returned_result_error_readable",
+                    )
+                    .map_err(|error| {
+                        CompileError::LlvmError(format!(
+                            "returned Result error pointer select: {error}"
+                        ))
+                    })?
+                    .into_pointer_value();
+                let boxed = self
+                    .build_load(
+                        BasicTypeEnum::StructType(string),
+                        readable,
+                        "returned_result_error_string",
+                    )?
+                    .into_struct_value();
+                let data = self
+                    .build_extract_value(boxed.into(), 0, "returned_result_error_string_data")?
+                    .into_pointer_value();
+                self.register_heap_alloc(data);
+                self.register_heap_alloc(box_pointer);
+                Ok(())
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "returned Result error storage `{}` is not adopted in the current slice",
+                error.symbol_suffix()
+            ))),
+        }
+    }
+
     fn ensure_value_glue(
         &self,
         plan: &GluePlan,
@@ -383,6 +592,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         validate_plan_type(plan, ty)?;
         match plan {
             GluePlan::StringBox => self.ensure_string_glue_pair(plan, ty),
+            GluePlan::Option(_) | GluePlan::Result { .. } if plan.is_emitted() => {
+                self.ensure_variant_glue_pair(plan, ty)
+            }
             GluePlan::Tuple(_) | GluePlan::Record(_) if plan.is_emitted() => {
                 self.ensure_product_glue_pair(plan, ty)
             }
@@ -438,6 +650,656 @@ impl<'ctx> CodeGenerator<'ctx> {
             None => self.emit_string_drop_glue(&drop_name)?,
         };
         Ok(GluePair { clone, drop })
+    }
+
+    fn ensure_variant_glue_pair(
+        &self,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<GluePair<'ctx>, CompileError> {
+        validate_plan_type(plan, ty)?;
+        let BasicTypeEnum::StructType(variant) = ty else {
+            return Err(glue_shape_error(
+                plan,
+                ty,
+                "variant glue requires a struct ABI",
+            ));
+        };
+        let suffix = format!(
+            "{}__llvm_{}",
+            plan.symbol_suffix(),
+            llvm_type_symbol_suffix(ty)
+        );
+        let clone_name = format!("mimi_value_clone_glue__{suffix}");
+        let drop_name = format!("mimi_value_drop_glue__{suffix}");
+        let clone_type = variant.fn_type(&[BasicMetadataTypeEnum::StructType(variant)], false);
+        let drop_type = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::StructType(variant)], false);
+
+        let clone = match self.module.get_function(&clone_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == clone_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{clone_name}`"
+                )))
+            }
+            None => self.emit_variant_clone_glue(plan, variant, &clone_name)?,
+        };
+        let drop = match self.module.get_function(&drop_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == drop_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{drop_name}`"
+                )))
+            }
+            None => self.emit_variant_drop_glue(plan, variant, &drop_name)?,
+        };
+        Ok(GluePair { clone, drop })
+    }
+
+    fn clone_inline_glue_value(
+        &self,
+        plan: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if matches!(plan, GluePlan::Trivial) {
+            return Ok(value);
+        }
+        let pair = self.ensure_value_glue(plan, ty)?;
+        let call = self.build_call(pair.clone, &[BasicMetadataValueEnum::from(value)], name)?;
+        call_try_basic_value(&call)
+            .ok_or_else(|| CompileError::LlvmError("child clone glue returned void".into()))
+    }
+
+    fn drop_inline_glue_value(
+        &self,
+        plan: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<(), CompileError> {
+        if matches!(plan, GluePlan::Trivial) {
+            return Ok(());
+        }
+        let pair = self.ensure_value_glue(plan, ty)?;
+        self.build_call(pair.drop, &[BasicMetadataValueEnum::from(value)], name)?;
+        Ok(())
+    }
+
+    fn clone_result_error_storage(
+        &self,
+        plan: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        match plan {
+            GluePlan::Trivial => Ok(value),
+            GluePlan::StringBox => {
+                let pair = self.ensure_packed_result_string_glue_pair()?;
+                let call = self.build_call(
+                    pair.clone,
+                    &[BasicMetadataValueEnum::from(value)],
+                    "clone_result_error_child",
+                )?;
+                call_try_basic_value(&call).ok_or_else(|| {
+                    CompileError::LlvmError("packed Result error clone returned void".into())
+                })
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "Result error storage `{}` cannot be cloned in the current slice",
+                plan.symbol_suffix()
+            ))),
+        }
+    }
+
+    fn drop_result_error_storage(
+        &self,
+        plan: &GluePlan,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        match plan {
+            GluePlan::Trivial => Ok(()),
+            GluePlan::StringBox => {
+                let pair = self.ensure_packed_result_string_glue_pair()?;
+                self.build_call(
+                    pair.drop,
+                    &[BasicMetadataValueEnum::from(value)],
+                    "drop_result_error_child",
+                )?;
+                Ok(())
+            }
+            _ => Err(CompileError::Unsupported(format!(
+                "Result error storage `{}` cannot be dropped in the current slice",
+                plan.symbol_suffix()
+            ))),
+        }
+    }
+
+    fn emit_variant_clone_glue(
+        &self,
+        plan: &GluePlan,
+        variant: inkwell::types::StructType<'ctx>,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let function = self.module.add_function(
+            name,
+            variant.fn_type(&[BasicMetadataTypeEnum::StructType(variant)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            let active_block = self.context.append_basic_block(function, "variant_active");
+            let inactive_block = self
+                .context
+                .append_basic_block(function, "variant_inactive");
+            let merge_block = self
+                .context
+                .append_basic_block(function, "variant_clone_merge");
+            self.builder.position_at_end(entry);
+            let source = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("variant clone glue parameter missing".into())
+                })?
+                .into_struct_value();
+            let tag = self
+                .build_extract_value(
+                    source.into(),
+                    builtin_variant::DISCRIMINANT_FIELD,
+                    "variant_clone_tag",
+                )?
+                .into_int_value();
+            let active = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    tag.get_type().const_int(builtin_variant::ACTIVE_TAG, false),
+                    "variant_clone_is_active",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("variant clone tag compare: {error}"))
+                })?;
+            self.build_cond_br(active, active_block, inactive_block)?;
+
+            let fields = variant.get_field_types();
+            self.builder.position_at_end(active_block);
+            let active_value = match plan {
+                GluePlan::Option(payload) => {
+                    let field = self.build_extract_value(
+                        source.into(),
+                        builtin_variant::OPTION_PAYLOAD_FIELD,
+                        "clone_option_payload",
+                    )?;
+                    let cloned = self.clone_inline_glue_value(
+                        payload,
+                        field,
+                        fields[builtin_variant::OPTION_PAYLOAD_FIELD as usize],
+                        "clone_option_child",
+                    )?;
+                    self.builder
+                        .build_insert_value(
+                            source,
+                            cloned,
+                            builtin_variant::OPTION_PAYLOAD_FIELD,
+                            "clone_option_insert",
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!("Option clone payload insert: {error}"))
+                        })?
+                        .into_struct_value()
+                }
+                GluePlan::Result { ok, .. } => {
+                    let field = self.build_extract_value(
+                        source.into(),
+                        builtin_variant::RESULT_OK_FIELD,
+                        "clone_result_ok",
+                    )?;
+                    let cloned = self.clone_inline_glue_value(
+                        ok,
+                        field,
+                        fields[builtin_variant::RESULT_OK_FIELD as usize],
+                        "clone_result_ok_child",
+                    )?;
+                    let with_ok = self
+                        .builder
+                        .build_insert_value(
+                            source,
+                            cloned,
+                            builtin_variant::RESULT_OK_FIELD,
+                            "clone_result_ok_insert",
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!("Result clone Ok insert: {error}"))
+                        })?
+                        .into_struct_value();
+                    self.builder
+                        .build_insert_value(
+                            with_ok,
+                            self.zero_value_for(
+                                fields[builtin_variant::RESULT_ERROR_FIELD as usize],
+                            ),
+                            builtin_variant::RESULT_ERROR_FIELD,
+                            "clone_result_clear_error",
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!(
+                                "Result clone inactive error clear: {error}"
+                            ))
+                        })?
+                        .into_struct_value()
+                }
+                _ => {
+                    return Err(CompileError::Unsupported(format!(
+                        "value glue `{}` is not a built-in variant",
+                        plan.symbol_suffix()
+                    )))
+                }
+            };
+            let active_end = self
+                .builder
+                .get_insert_block()
+                .ok_or_else(|| CompileError::LlvmError("variant clone lost active block".into()))?;
+            self.build_br(merge_block)?;
+
+            self.builder.position_at_end(inactive_block);
+            let inactive_value = match plan {
+                GluePlan::Option(_) => self
+                    .builder
+                    .build_insert_value(
+                        source,
+                        self.zero_value_for(fields[builtin_variant::OPTION_PAYLOAD_FIELD as usize]),
+                        builtin_variant::OPTION_PAYLOAD_FIELD,
+                        "clone_option_clear_payload",
+                    )
+                    .map_err(|error| {
+                        CompileError::LlvmError(format!(
+                            "Option clone inactive payload clear: {error}"
+                        ))
+                    })?
+                    .into_struct_value(),
+                GluePlan::Result { error, .. } => {
+                    let field = self.build_extract_value(
+                        source.into(),
+                        builtin_variant::RESULT_ERROR_FIELD,
+                        "clone_result_error",
+                    )?;
+                    let cloned = self.clone_result_error_storage(error, field)?;
+                    let cleared = self
+                        .builder
+                        .build_insert_value(
+                            source,
+                            self.zero_value_for(fields[builtin_variant::RESULT_OK_FIELD as usize]),
+                            builtin_variant::RESULT_OK_FIELD,
+                            "clone_result_clear_ok",
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!(
+                                "Result clone inactive Ok clear: {error}"
+                            ))
+                        })?
+                        .into_struct_value();
+                    self.builder
+                        .build_insert_value(
+                            cleared,
+                            cloned,
+                            builtin_variant::RESULT_ERROR_FIELD,
+                            "clone_result_error_insert",
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!("Result clone Err insert: {error}"))
+                        })?
+                        .into_struct_value()
+                }
+                _ => unreachable!("variant plan checked above"),
+            };
+            let inactive_end = self.builder.get_insert_block().ok_or_else(|| {
+                CompileError::LlvmError("variant clone lost inactive block".into())
+            })?;
+            self.build_br(merge_block)?;
+
+            self.builder.position_at_end(merge_block);
+            let phi = self
+                .builder
+                .build_phi(variant, "variant_clone_result")
+                .map_err(|error| CompileError::LlvmError(format!("variant clone phi: {error}")))?;
+            phi.add_incoming(&[(&active_value, active_end), (&inactive_value, inactive_end)]);
+            self.build_return(Some(&phi.as_basic_value()))
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
+    fn emit_variant_drop_glue(
+        &self,
+        plan: &GluePlan,
+        variant: inkwell::types::StructType<'ctx>,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let function = self.module.add_function(
+            name,
+            self.context
+                .void_type()
+                .fn_type(&[BasicMetadataTypeEnum::StructType(variant)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            let active_block = self.context.append_basic_block(function, "variant_active");
+            let inactive_block = self
+                .context
+                .append_basic_block(function, "variant_inactive");
+            let exit_block = self
+                .context
+                .append_basic_block(function, "variant_drop_exit");
+            self.builder.position_at_end(entry);
+            let source = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("variant drop glue parameter missing".into())
+                })?
+                .into_struct_value();
+            let tag = self
+                .build_extract_value(
+                    source.into(),
+                    builtin_variant::DISCRIMINANT_FIELD,
+                    "variant_drop_tag",
+                )?
+                .into_int_value();
+            let active = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    tag,
+                    tag.get_type().const_int(builtin_variant::ACTIVE_TAG, false),
+                    "variant_drop_is_active",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("variant drop tag compare: {error}"))
+                })?;
+            self.build_cond_br(active, active_block, inactive_block)?;
+
+            let fields = variant.get_field_types();
+            self.builder.position_at_end(active_block);
+            match plan {
+                GluePlan::Option(payload) => {
+                    let value = self.build_extract_value(
+                        source.into(),
+                        builtin_variant::OPTION_PAYLOAD_FIELD,
+                        "drop_option_payload",
+                    )?;
+                    self.drop_inline_glue_value(
+                        payload,
+                        value,
+                        fields[builtin_variant::OPTION_PAYLOAD_FIELD as usize],
+                        "drop_option_child",
+                    )?;
+                }
+                GluePlan::Result { ok, .. } => {
+                    let value = self.build_extract_value(
+                        source.into(),
+                        builtin_variant::RESULT_OK_FIELD,
+                        "drop_result_ok",
+                    )?;
+                    self.drop_inline_glue_value(
+                        ok,
+                        value,
+                        fields[builtin_variant::RESULT_OK_FIELD as usize],
+                        "drop_result_ok_child",
+                    )?;
+                }
+                _ => unreachable!("variant plan checked above"),
+            }
+            self.build_br(exit_block)?;
+
+            self.builder.position_at_end(inactive_block);
+            if let GluePlan::Result { error, .. } = plan {
+                let value = self.build_extract_value(
+                    source.into(),
+                    builtin_variant::RESULT_ERROR_FIELD,
+                    "drop_result_error",
+                )?;
+                self.drop_result_error_storage(error, value)?;
+            }
+            self.build_br(exit_block)?;
+
+            self.builder.position_at_end(exit_block);
+            self.build_return(None)
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
+    fn ensure_packed_result_string_glue_pair(&self) -> Result<GluePair<'ctx>, CompileError> {
+        let clone_name = "mimi_value_clone_glue__result_error_packed_string";
+        let drop_name = "mimi_value_drop_glue__result_error_packed_string";
+        let i64_type = self.context.i64_type();
+        let clone_type = i64_type.fn_type(&[BasicMetadataTypeEnum::IntType(i64_type)], false);
+        let drop_type = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::IntType(i64_type)], false);
+        let clone = match self.module.get_function(clone_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == clone_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{clone_name}`"
+                )))
+            }
+            None => self.emit_packed_result_string_clone_glue(clone_name)?,
+        };
+        let drop = match self.module.get_function(drop_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == drop_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved value-glue symbol collision: `{drop_name}`"
+                )))
+            }
+            None => self.emit_packed_result_string_drop_glue(drop_name)?,
+        };
+        Ok(GluePair { clone, drop })
+    }
+
+    fn emit_packed_result_string_clone_glue(
+        &self,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let function = self.module.add_function(
+            name,
+            i64_type.fn_type(&[BasicMetadataTypeEnum::IntType(i64_type)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            let null_block = self
+                .context
+                .append_basic_block(function, "packed_string_null");
+            let copy_block = self
+                .context
+                .append_basic_block(function, "packed_string_copy");
+            let merge_block = self
+                .context
+                .append_basic_block(function, "packed_string_merge");
+            self.builder.position_at_end(entry);
+            let handle = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("packed string clone parameter missing".into())
+                })?
+                .into_int_value();
+            let is_null = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    handle,
+                    i64_type.const_zero(),
+                    "packed_string_is_null",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("packed string null compare: {error}"))
+                })?;
+            self.build_cond_br(is_null, null_block, copy_block)?;
+
+            self.builder.position_at_end(null_block);
+            self.build_br(merge_block)?;
+
+            self.builder.position_at_end(copy_block);
+            let pointer_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let source_pointer =
+                self.build_int_to_ptr(handle, pointer_type, "packed_string_ptr")?;
+            let string = self.string_box_type();
+            let source = self.build_load(
+                BasicTypeEnum::StructType(string),
+                source_pointer,
+                "packed_string_value",
+            )?;
+            let string_pair = self.ensure_string_glue_pair(&GluePlan::StringBox, string.into())?;
+            let call = self.build_call(
+                string_pair.clone,
+                &[BasicMetadataValueEnum::from(source)],
+                "packed_string_clone_child",
+            )?;
+            let cloned = call_try_basic_value(&call).ok_or_else(|| {
+                CompileError::LlvmError("packed string child clone returned void".into())
+            })?;
+            let box_size = string
+                .size_of()
+                .ok_or_else(|| CompileError::LlvmError("StringBox size is unknown".into()))?;
+            let copy_pointer = self.malloc_or_abort(box_size, "packed_result_string")?;
+            self.build_store(copy_pointer, cloned)?;
+            let copied_handle =
+                self.build_ptr_to_int(copy_pointer, i64_type, "packed_result_string_handle")?;
+            let copy_end = self.builder.get_insert_block().ok_or_else(|| {
+                CompileError::LlvmError("packed string clone lost copy block".into())
+            })?;
+            self.build_br(merge_block)?;
+
+            self.builder.position_at_end(merge_block);
+            let phi = self
+                .builder
+                .build_phi(i64_type, "packed_string_clone_result")
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("packed string clone phi: {error}"))
+                })?;
+            phi.add_incoming(&[
+                (&handle as &dyn inkwell::values::BasicValue, null_block),
+                (&copied_handle as &dyn inkwell::values::BasicValue, copy_end),
+            ]);
+            self.build_return(Some(&phi.as_basic_value()))
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
+    fn emit_packed_result_string_drop_glue(
+        &self,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let function = self.module.add_function(
+            name,
+            self.context
+                .void_type()
+                .fn_type(&[BasicMetadataTypeEnum::IntType(i64_type)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            let drop_block = self
+                .context
+                .append_basic_block(function, "packed_string_drop");
+            let exit_block = self
+                .context
+                .append_basic_block(function, "packed_string_drop_exit");
+            self.builder.position_at_end(entry);
+            let handle = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("packed string drop parameter missing".into())
+                })?
+                .into_int_value();
+            let is_null = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    handle,
+                    i64_type.const_zero(),
+                    "packed_string_drop_is_null",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("packed string drop null compare: {error}"))
+                })?;
+            self.build_cond_br(is_null, exit_block, drop_block)?;
+
+            self.builder.position_at_end(drop_block);
+            let pointer_type = self.context.ptr_type(inkwell::AddressSpace::default());
+            let box_pointer =
+                self.build_int_to_ptr(handle, pointer_type, "packed_string_drop_ptr")?;
+            let string = self.string_box_type();
+            let value = self.build_load(
+                BasicTypeEnum::StructType(string),
+                box_pointer,
+                "packed_string_drop_value",
+            )?;
+            let string_pair = self.ensure_string_glue_pair(&GluePlan::StringBox, string.into())?;
+            self.build_call(
+                string_pair.drop,
+                &[BasicMetadataValueEnum::from(value)],
+                "packed_string_drop_child",
+            )?;
+            let free = self.get_runtime_fn("free")?;
+            self.build_call(
+                free,
+                &[BasicMetadataValueEnum::PointerValue(box_pointer)],
+                "packed_string_drop_box",
+            )?;
+            self.build_br(exit_block)?;
+
+            self.builder.position_at_end(exit_block);
+            self.build_return(None)
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
     }
 
     fn ensure_product_glue_pair(
@@ -835,6 +1697,84 @@ mod tests {
         let ir = generator.emit_ir();
         assert!(ir.contains("mimi_value_clone_glue__tuple"));
         assert!(ir.contains("mimi_value_drop_glue__tuple"));
+    }
+
+    #[test]
+    fn option_and_result_glue_are_discriminator_aware_and_abi_keyed() {
+        let context = inkwell::context::Context::create();
+        let generator = CodeGenerator::new(&context, "value_variant_glue_test");
+        let string = generator.string_box_type();
+
+        let option = context.struct_type(
+            &[
+                BasicTypeEnum::IntType(context.bool_type()),
+                BasicTypeEnum::StructType(string),
+            ],
+            false,
+        );
+        let option_plan =
+            GluePlan::derive(&OwnershipClass::Option(Box::new(OwnershipClass::StringBox))).unwrap();
+        let first = generator
+            .ensure_value_glue(&option_plan, option.into())
+            .unwrap();
+        let second = generator
+            .ensure_value_glue(&option_plan, option.into())
+            .unwrap();
+        assert_eq!(first.clone, second.clone);
+        assert_eq!(first.drop, second.drop);
+
+        // Result E is stored through the canonical erased i64 handle. The
+        // semantic StringBox plan must therefore emit the packed-storage bridge
+        // as well as the outer discriminator-aware glue.
+        let result = context.struct_type(
+            &[
+                BasicTypeEnum::IntType(context.bool_type()),
+                BasicTypeEnum::StructType(string),
+                BasicTypeEnum::IntType(context.i64_type()),
+            ],
+            false,
+        );
+        let result_plan = GluePlan::derive(&OwnershipClass::Result {
+            ok: Box::new(OwnershipClass::StringBox),
+            error: Box::new(OwnershipClass::StringBox),
+        })
+        .unwrap();
+        generator
+            .ensure_value_glue(&result_plan, result.into())
+            .unwrap();
+
+        generator.module.verify().unwrap();
+        let ir = generator.emit_ir();
+        assert!(ir.contains("variant_clone_is_active"));
+        assert!(ir.contains("variant_drop_is_active"));
+        assert!(ir.contains("mimi_value_clone_glue__result_error_packed_string"));
+        assert!(ir.contains("mimi_value_drop_glue__result_error_packed_string"));
+        assert!(ir.contains("clone_result_clear_error"));
+        assert!(ir.contains("clone_result_clear_ok"));
+    }
+
+    #[test]
+    fn erased_result_product_error_stays_fail_closed() {
+        let context = inkwell::context::Context::create();
+        let generator = CodeGenerator::new(&context, "value_variant_fail_closed_test");
+        let result = context.struct_type(
+            &[
+                BasicTypeEnum::IntType(context.bool_type()),
+                BasicTypeEnum::IntType(context.i64_type()),
+                BasicTypeEnum::IntType(context.i64_type()),
+            ],
+            false,
+        );
+        let plan = GluePlan::derive(&OwnershipClass::Result {
+            ok: Box::new(OwnershipClass::Scalar),
+            error: Box::new(OwnershipClass::Record(vec![OwnershipClass::StringBox])),
+        })
+        .unwrap();
+        let error = match generator.ensure_value_glue(&plan, result.into()) {
+            Err(error) => error,
+            Ok(_) => panic!("erased product errors need an explicit storage descriptor"),
+        };
+        assert!(error.to_string().contains("no payload-storage bridge"));
     }
 
     #[test]
