@@ -145,6 +145,15 @@ pub enum MirInstructionKind {
         base: MirValueId,
         projection: MirProjection,
     },
+    /// Consume a non-Copy record product and move one non-Copy field out.
+    /// The TypeDesc contract requires every sibling field to be Copy, so the
+    /// consumed record has no residual ownership obligation. General
+    /// field-level partial move remains a separate MIR shape.
+    MoveProject {
+        result: MirValueId,
+        base: MirValueId,
+        projection: MirProjection,
+    },
     Construct {
         result: MirValueId,
         kind: MirAggregateKind,
@@ -493,6 +502,11 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             base,
             projection,
         } => format!("project {result} <- {base}.{projection:?}"),
+        MirInstructionKind::MoveProject {
+            result,
+            base,
+            projection,
+        } => format!("move_project {result} <- {base}.{projection:?}"),
         MirInstructionKind::Construct {
             result,
             kind,
@@ -827,6 +841,25 @@ impl<'a> MirValidator<'a> {
                         self.error(
                             result.to_string(),
                             "record projection field identity is empty",
+                        );
+                    }
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
+            MoveProject {
+                result,
+                base,
+                projection,
+            } => {
+                self.use_value(base);
+                if let MirProjection::Index(index) = projection {
+                    self.use_value(index);
+                }
+                if let MirProjection::Field(field) = projection {
+                    if field.0.trim().is_empty() {
+                        self.error(
+                            result.to_string(),
+                            "record move projection field identity is empty",
                         );
                     }
                 }
@@ -1214,6 +1247,14 @@ impl<'a> MirValidator<'a> {
             | MirInstructionKind::EndBorrow { borrow: value } => uses.push(value.clone()),
             MirInstructionKind::Borrow { source, .. } => uses.push(source.clone()),
             MirInstructionKind::Project {
+                base, projection, ..
+            } => {
+                uses.push(base.clone());
+                if let MirProjection::Index(index) = projection {
+                    uses.push(index.clone());
+                }
+            }
+            MirInstructionKind::MoveProject {
                 base, projection, ..
             } => {
                 uses.push(base.clone());

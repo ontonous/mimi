@@ -17,6 +17,7 @@ use crate::core::{
     CanonicalActionKind, CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResourceAnalysis,
 };
 
+use super::types::MirTypeCatalog;
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
     MirInstruction, MirInstructionId, MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind,
@@ -50,12 +51,31 @@ impl std::error::Error for MirLoweringError {}
 /// record construction/projection/update are also represented, as is the
 /// materialized recursive tuple product `(string, i32)` ownership shape.
 /// Direct local reads become explicit `Clone` nodes, while root drops become
-/// explicit `Drop` nodes; projected drops and ownership-bearing records,
-/// variants, and containers remain rejected until their field-level contracts
+/// explicit `Drop` nodes.  With a TypeDesc catalog, the narrow
+/// ownership-safe record field move becomes `MoveProject`; general partial
+/// moves and projected drops remain rejected until their residual contracts
 /// are represented in MIR.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_body_impl(body, None)
+}
+
+/// Lower a body with the checker-derived TypeDesc catalog available.  The
+/// catalog is used only to choose an already-defined ownership operation;
+/// consumers still validate the resulting MIR before execution.
+pub fn lower_body_with_type_catalog(
+    body: &ResolvedBody,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_body_impl(body, Some(type_catalog))
+}
+
+fn lower_body_impl(
+    body: &ResolvedBody,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,
+        type_catalog,
         values: BTreeMap::new(),
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
@@ -142,6 +162,26 @@ pub fn lower_callable(
     Ok(function)
 }
 
+/// Lower one callable with the canonical TypeDesc catalog.  This is the
+/// production path for ownership-sensitive MIR shapes.
+pub fn lower_callable_with_type_catalog(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    let mut function = lower_body_with_type_catalog(&callable.body, type_catalog)?;
+    function.ownership = ownership_summary(&callable.resources);
+    function.validate().map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| MirLoweringError {
+                node_id: callable.owner.clone(),
+                message: error.to_string(),
+            })
+            .collect::<Vec<_>>()
+    })?;
+    Ok(function)
+}
+
 /// Lower every checker-owned callable that has a ResolvedCallable body.
 /// Errors are aggregated so callers can report the complete migration gap in
 /// one pass instead of falling back one function at a time.
@@ -152,6 +192,31 @@ pub fn lower_program(
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
         match lower_callable(callable) {
+            Ok(function) => {
+                lowered.insert(owner.clone(), function);
+            }
+            Err(mut body_errors) => errors.append(&mut body_errors),
+        }
+    }
+    if errors.is_empty() {
+        Ok(lowered)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Lower every callable with the canonical TypeDesc catalog.  This is the
+/// production entry point used by `MirProgram`; all ownership-sensitive
+/// projection decisions therefore use checker-derived facts before backend
+/// emission.
+pub fn lower_program_with_type_catalog(
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
+    let mut lowered = BTreeMap::new();
+    let mut errors = Vec::new();
+    for (owner, callable) in program.callables() {
+        match lower_callable_with_type_catalog(callable, type_catalog) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
             }
@@ -214,6 +279,7 @@ struct LoopTargets {
 
 struct Lowerer<'a> {
     body: &'a ResolvedBody,
+    type_catalog: Option<&'a MirTypeCatalog>,
     values: BTreeMap<MirValueId, MirValue>,
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
@@ -511,6 +577,18 @@ impl<'a> Lowerer<'a> {
                                 source: local,
                             },
                         );
+                    } else if let Some(projection) =
+                        self.move_projection_for_place(&local, &expression.ty, place)
+                    {
+                        self.emit(
+                            &expression.node_id,
+                            "move_project",
+                            MirInstructionKind::MoveProject {
+                                result: result.clone(),
+                                base: local,
+                                projection,
+                            },
+                        );
                     } else {
                         self.emit(
                             &expression.node_id,
@@ -586,15 +664,27 @@ impl<'a> Lowerer<'a> {
                         super::MirProjection::Dereference
                     }
                 };
-                self.emit(
-                    &expression.node_id,
-                    "project",
-                    MirInstructionKind::Project {
-                        result: result.clone(),
-                        base,
-                        projection,
-                    },
-                );
+                if self.can_move_project(&base, &result, &projection) {
+                    self.emit(
+                        &expression.node_id,
+                        "move_project",
+                        MirInstructionKind::MoveProject {
+                            result: result.clone(),
+                            base,
+                            projection,
+                        },
+                    );
+                } else {
+                    self.emit(
+                        &expression.node_id,
+                        "project",
+                        MirInstructionKind::Project {
+                            result: result.clone(),
+                            base,
+                            projection,
+                        },
+                    );
+                }
             }
             ResolvedExprKind::Tuple(elements) => {
                 let fields = elements
@@ -1171,6 +1261,48 @@ impl<'a> Lowerer<'a> {
         } else {
             self.error(node, "cannot emit into a missing MIR block");
         }
+    }
+
+    fn can_move_project(
+        &self,
+        base: &MirValueId,
+        result: &MirValueId,
+        projection: &super::MirProjection,
+    ) -> bool {
+        let Some(type_catalog) = self.type_catalog else {
+            return false;
+        };
+        let (Some(base_value), Some(result_value)) =
+            (self.values.get(base), self.values.get(result))
+        else {
+            return false;
+        };
+        type_catalog
+            .validate_move_projection(&base_value.ty, &result_value.ty, projection)
+            .is_ok()
+    }
+
+    fn move_projection_for_place(
+        &self,
+        base: &MirValueId,
+        result_ty: &crate::core::ResolvedTypeId,
+        place: &crate::core::ResolvedPlace,
+    ) -> Option<super::MirProjection> {
+        let [projection] = place.projections.as_slice() else {
+            return None;
+        };
+        let projection = match projection {
+            crate::core::ir::ResolvedProjection::Field { field, .. } => {
+                super::MirProjection::Field(field.clone())
+            }
+            _ => return None,
+        };
+        let type_catalog = self.type_catalog?;
+        let base_ty = self.values.get(base)?.ty.clone();
+        type_catalog
+            .validate_move_projection(&base_ty, result_ty, &projection)
+            .is_ok()
+            .then_some(projection)
     }
 }
 

@@ -471,6 +471,13 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.emit_project(result, base, projection);
             }
+            MirInstructionKind::MoveProject {
+                result,
+                base,
+                projection,
+            } => {
+                self.emit_move_project(result, base, projection);
+            }
             MirInstructionKind::Construct {
                 result,
                 kind: MirAggregateKind::Tuple,
@@ -1067,6 +1074,73 @@ impl<'a> FunctionEmitter<'a> {
                 projection, layout
             )),
         }
+    }
+
+    fn emit_move_project(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+    ) {
+        let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
+            return;
+        };
+        for value in [result, base] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "move projection value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let Some(base_desc) = self.type_of(base).cloned() else {
+            self.error(format!(
+                "move projection base '{}' has no type descriptor",
+                base
+            ));
+            return;
+        };
+        let Some(result_desc) = self.type_of(result).cloned() else {
+            self.error(format!(
+                "move projection result '{}' has no type descriptor",
+                result
+            ));
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_move_projection(
+            &base_desc.id,
+            &result_desc.id,
+            projection,
+        ) {
+            self.error(format!(
+                "move projection has no canonical contract: {message}"
+            ));
+            return;
+        }
+        let MirLayout::Record { fields, .. } = &base_desc.layout else {
+            self.error("move projection base has no record layout");
+            return;
+        };
+        let MirProjection::Field(field) = projection else {
+            self.error("move projection requires a direct record field");
+            return;
+        };
+        let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field) else {
+            self.error(format!(
+                "move projection field '{}' is absent from TypeDesc",
+                field.0
+            ));
+            return;
+        };
+        let field_idx = self
+            .proto
+            .add_const(ConstValue::Str(field_desc.name.clone()));
+        self.proto.emit(Op::RecordMoveGet {
+            rd,
+            ra,
+            field: field_idx,
+        });
     }
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
@@ -1985,6 +2059,48 @@ mod tests {
             .expect("bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(42));
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_non_copy_record_move_projection_through_both_oracles() {
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference move projection");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::RecordMoveGet { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode move projection");
+        assert_eq!(reference, MirRuntimeValue::String("owned".into()));
+        assert!(matches!(
+            value,
+            Value::String(value) if value.as_str() == "owned"
+        ));
+    }
+
+    #[test]
+    fn rejects_non_copy_record_move_projection_with_non_copy_sibling() {
+        let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("partial move must fail before bytecode emission");
+        let text = format!("{error:?}");
+        assert!(
+            text.contains("non-Copy") || text.contains("move projection"),
+            "unexpected fail-closed error: {text}"
+        );
     }
 
     #[test]

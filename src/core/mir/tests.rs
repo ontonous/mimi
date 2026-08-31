@@ -290,6 +290,50 @@ fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
 }
 
 #[test]
+fn non_copy_record_projection_lowers_to_explicit_move_project() {
+    let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    assert!(function.blocks.values().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(&instruction.kind, MirInstructionKind::MoveProject { .. }))
+    }));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference move projection");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::String("owned".into())
+    );
+}
+
+#[test]
+fn non_copy_record_projection_with_non_copy_sibling_fails_closed() {
+    let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("record with a non-Copy sibling must not invent a residual");
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("non-Copy") || text.contains("move projection"),
+        "unexpected fail-closed error: {text}"
+    );
+}
+
+#[test]
 fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
     let source = "func main() -> (string, i32) { (\"owned\", 41) }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

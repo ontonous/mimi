@@ -930,6 +930,83 @@ impl MirTypeCatalog {
         }
     }
 
+    /// Validate the narrow ownership-safe field move projection contract.
+    ///
+    /// This operation consumes the complete record and returns one owned
+    /// field. It is only sound without a residual value when every sibling is
+    /// Copy; records with two or more non-Copy fields therefore remain
+    /// unsupported until MIR carries an explicit residual/partial-move node.
+    pub fn validate_move_projection(
+        &self,
+        base_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        projection: &crate::core::mir::MirProjection,
+    ) -> Result<(), String> {
+        let base = self
+            .get(base_ty)
+            .ok_or_else(|| format!("move projection base type '{}' is absent", base_ty.as_str()))?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "move projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { nominal: _, fields } = &base.layout else {
+            return Err("move projection requires a record product base".into());
+        };
+        if base.ownership == MirOwnership::Copy {
+            return Err("move projection base must be non-Copy".into());
+        }
+        self.validate_glue(base_ty, MirGlueOperation::MoveOut)?;
+        self.validate_aggregate_glue(base_ty, MirGlueOperation::Drop)?;
+        let crate::core::mir::MirProjection::Field(field) = projection else {
+            return Err("move projection currently supports direct record fields only".into());
+        };
+        let selected = fields
+            .iter()
+            .find(|candidate| candidate.id == *field)
+            .ok_or_else(|| format!("move projection field '{}' is absent", field.0))?;
+        if selected.ty != *result_ty {
+            return Err(format!(
+                "move projection field '{}' type '{}' disagrees with result type '{}'",
+                field.0,
+                selected.ty.as_str(),
+                result_ty.as_str()
+            ));
+        }
+        if result.ownership == MirOwnership::Copy {
+            return Err(format!(
+                "move projection result type '{}' must be non-Copy",
+                result_ty.as_str()
+            ));
+        }
+        if result.glue.move_out != MirGlueKind::OwnedString
+            || result.glue.clone != MirGlueKind::OwnedString
+            || result.glue.drop != MirGlueKind::OwnedString
+        {
+            return Err(format!(
+                "move projection result type '{}' requires owned-string field glue",
+                result_ty.as_str()
+            ));
+        }
+        for sibling in fields.iter().filter(|candidate| candidate.id != *field) {
+            let sibling_desc = self.get(&sibling.ty).ok_or_else(|| {
+                format!(
+                    "move projection sibling field '{}' type '{}' is absent",
+                    sibling.name,
+                    sibling.ty.as_str()
+                )
+            })?;
+            if sibling_desc.ownership != MirOwnership::Copy {
+                return Err(format!(
+                    "move projection of '{}' leaves non-Copy sibling field '{}' without a residual contract",
+                    field.0, sibling.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate a place load one projection at a time.  This keeps lvalue
     /// projection type facts in MIR's TypeDesc contract instead of asking a
     /// backend to rediscover them from `ResolvedPlace` names.
@@ -1761,6 +1838,62 @@ mod tests {
                 std::slice::from_ref(&y.ty),
             )
             .is_ok());
+    }
+
+    #[test]
+    fn record_move_projection_requires_owned_string_and_copy_siblings() {
+        let source =
+            "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("catalog");
+        let (named_ty, name_ty, name_id) = catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, fields } if nominal.as_str().ends_with("Named") => {
+                    let name = fields.iter().find(|field| field.name == "name")?;
+                    Some((id.clone(), name.ty.clone(), name.id.clone()))
+                }
+                _ => None,
+            })
+            .expect("Named field contract");
+        catalog
+            .validate_move_projection(
+                &named_ty,
+                &name_ty,
+                &crate::core::mir::MirProjection::Field(name_id),
+            )
+            .expect("owned string field with Copy sibling is movable");
+
+        let source =
+            "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("catalog");
+        let (pair_ty, left_ty, left_id) = catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, fields } if nominal.as_str().ends_with("Pair") => {
+                    let left = fields.iter().find(|field| field.name == "left")?;
+                    Some((id.clone(), left.ty.clone(), left.id.clone()))
+                }
+                _ => None,
+            })
+            .expect("Pair field contract");
+        let error = catalog
+            .validate_move_projection(
+                &pair_ty,
+                &left_ty,
+                &crate::core::mir::MirProjection::Field(left_id),
+            )
+            .expect_err("non-Copy sibling requires a residual partial-move contract");
+        assert!(error.contains("non-Copy sibling"), "{error}");
     }
 
     #[test]

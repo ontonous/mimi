@@ -72,6 +72,13 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
             .collect::<HashSet<_>>();
         Some(ids)
     };
+    let type_catalog = mimi::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+        .map_err(|errors| {
+            format!(
+                "MIR type catalog construction failed:\n{}",
+                errors.join("\n")
+            )
+        })?;
     let mut functions = BTreeMap::new();
     let mut lowering_errors = Vec::new();
     for (owner, callable) in checked.callables() {
@@ -81,7 +88,7 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
         {
             continue;
         }
-        match mimi::core::mir::lower::lower_callable(callable) {
+        match mimi::core::mir::lower::lower_callable_with_type_catalog(callable, &type_catalog) {
             Ok(function) => {
                 functions.insert(owner.clone(), function);
             }
@@ -105,13 +112,6 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
             path.display()
         ));
     }
-    let type_catalog = mimi::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
-        .map_err(|errors| {
-            format!(
-                "MIR type catalog construction failed:\n{}",
-                errors.join("\n")
-            )
-        })?;
     let program =
         mimi::core::mir::reference::MirProgram::with_type_catalog(functions, type_catalog)
             .map_err(|errors| {

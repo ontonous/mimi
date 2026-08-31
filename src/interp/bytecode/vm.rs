@@ -2362,6 +2362,35 @@ impl BytecodeVM {
                     };
                     self.set_reg(rd, v);
                 }
+                Op::RecordMoveGet { rd, ra, field } => {
+                    let field_name = match proto.constants.get(field as usize) {
+                        Some(ConstValue::Str(s)) => s.clone(),
+                        _ => {
+                            return Err(InterpError::new(
+                                "record move get: field constant is not a string",
+                            ))
+                        }
+                    };
+                    let source =
+                        std::mem::replace(&mut self.cur_frame_mut().regs[ra as usize], Value::Unit);
+                    let value = match source {
+                        Value::Record(_, mut fields) => {
+                            fields.remove(&field_name).ok_or_else(|| {
+                                InterpError::new(format!(
+                                    "record move get: record has no field '{}'",
+                                    field_name
+                                ))
+                            })?
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "record move get: expected Record, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, value);
+                }
                 Op::RecordSet { ra, field, rb } => {
                     let field_name = match &proto.constants[field as usize] {
                         ConstValue::Str(s) => s.clone(),

@@ -94,10 +94,10 @@ impl MirProgram {
     pub fn from_checked_program(
         program: &crate::core::CheckedProgram,
     ) -> Result<Self, MirProgramBuildError> {
-        let functions =
-            super::lower::lower_program(program).map_err(MirProgramBuildError::Lowering)?;
         let type_catalog =
             MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
+        let functions = super::lower::lower_program_with_type_catalog(program, &type_catalog)
+            .map_err(MirProgramBuildError::Lowering)?;
         Self::with_type_catalog(functions, type_catalog).map_err(MirProgramBuildError::Validation)
     }
 
@@ -112,13 +112,15 @@ impl MirProgram {
         program: &crate::core::CheckedProgram,
         excluded_sources: &HashSet<crate::span::SourceId>,
     ) -> Result<Self, MirProgramBuildError> {
+        let type_catalog =
+            MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
         let mut functions = BTreeMap::new();
         let mut lowering_errors = Vec::new();
         for (owner, callable) in program.callables() {
             if excluded_sources.contains(&callable.body.root.origin.user_span().source_id) {
                 continue;
             }
-            match super::lower::lower_callable(callable) {
+            match super::lower::lower_callable_with_type_catalog(callable, &type_catalog) {
                 Ok(function) => {
                     functions.insert(owner.clone(), function);
                 }
@@ -128,8 +130,6 @@ impl MirProgram {
         if !lowering_errors.is_empty() {
             return Err(MirProgramBuildError::Lowering(lowering_errors));
         }
-        let type_catalog =
-            MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
         Self::with_type_catalog(functions, type_catalog).map_err(MirProgramBuildError::Validation)
     }
 
@@ -216,6 +216,28 @@ impl MirProgram {
                                 continue;
                             };
                             if let Err(message) = type_catalog.validate_projection(
+                                &base_value.ty,
+                                &result_value.ty,
+                                projection,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::MoveProject {
+                            result,
+                            base,
+                            projection,
+                        } => {
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_move_projection(
                                 &base_value.ty,
                                 &result_value.ty,
                                 projection,
@@ -560,6 +582,7 @@ fn validate_linear_consumption(
             let sources: Vec<&MirValueId> = match &instruction.kind {
                 super::MirInstructionKind::Move { source, .. }
                 | super::MirInstructionKind::Drop { value: source } => vec![source],
+                super::MirInstructionKind::MoveProject { base, .. } => vec![base],
                 super::MirInstructionKind::Call { arguments, .. }
                 | super::MirInstructionKind::Construct {
                     fields: arguments, ..
@@ -939,6 +962,36 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &function.owner,
                     value,
                     base_ty,
+                    projection,
+                    self.program.type_catalog(),
+                )?;
+                values.insert(result.clone(), projected);
+            }
+            MirInstructionKind::MoveProject {
+                result,
+                base,
+                projection,
+            } => {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "move projection base has no type")
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "move projection result has no type")
+                    })?;
+                let base_value = self.take_transfer_value(function, values, base)?;
+                let projected = move_project_value(
+                    &function.owner,
+                    base_value,
+                    &base_ty,
+                    &result_ty,
                     projection,
                     self.program.type_catalog(),
                 )?;
@@ -1630,6 +1683,67 @@ fn project_value(
             "projection does not match aggregate value",
         )),
     }
+}
+
+fn move_project_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    projection: &MirProjection,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    let MirRuntimeValue::Record {
+        nominal,
+        mut fields,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "move projection base is not a record",
+        ));
+    };
+    let MirLayout::Record {
+        nominal: expected_nominal,
+        fields: layout_fields,
+    } = &type_catalog
+        .get(base_ty)
+        .ok_or_else(|| execution_error(function, "move projection base has no TypeDesc"))?
+        .layout
+    else {
+        return Err(execution_error(
+            function,
+            "move projection base has no record layout",
+        ));
+    };
+    if &nominal != expected_nominal || fields.len() != layout_fields.len() {
+        return Err(execution_error(
+            function,
+            "move projection record disagrees with TypeDesc",
+        ));
+    }
+    let MirProjection::Field(field) = projection else {
+        return Err(execution_error(
+            function,
+            "move projection requires a direct record field",
+        ));
+    };
+    let selected = layout_fields
+        .iter()
+        .position(|candidate| candidate.id == *field)
+        .ok_or_else(|| execution_error(function, "move projection field is absent"))?;
+    if layout_fields[selected].ty != *result_ty {
+        return Err(execution_error(
+            function,
+            "move projection result type disagrees with TypeDesc",
+        ));
+    }
+    Ok(std::mem::replace(
+        fields
+            .get_mut(selected)
+            .ok_or_else(|| execution_error(function, "move projection field is out of bounds"))?,
+        MirRuntimeValue::Unit,
+    ))
 }
 
 fn evaluate_unary(

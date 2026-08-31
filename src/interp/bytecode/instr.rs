@@ -655,6 +655,15 @@ pub enum Op {
         ra: Reg,
         field: ConstIdx,
     },
+    /// rd = consume ra and move ra.field[field_name] out of the record.
+    /// The canonical MIR contract guarantees that no non-Copy residual field
+    /// remains; field name is still resolved from the TypeDesc by the MIR
+    /// adapter before this op is emitted.
+    RecordMoveGet {
+        rd: Reg,
+        ra: Reg,
+        field: ConstIdx,
+    },
     /// ra.field[field_name] = rb — field name is a string constant
     RecordSet {
         ra: Reg,
@@ -992,6 +1001,7 @@ impl Op {
             | ListPop { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
+            | RecordMoveGet { rd, .. }
             | VariantTag { rd, .. }
             | VariantPayload { rd, .. }
             | VariantGet { rd, .. }
@@ -1087,6 +1097,7 @@ impl Op {
             | Op::ListPop { rd, .. }
             | Op::TupleGet { rd, .. }
             | Op::RecordGet { rd, .. }
+            | Op::RecordMoveGet { rd, .. }
             | Op::VariantTag { rd, .. }
             | Op::VariantPayload { rd, .. }
             | Op::VariantGet { rd, .. }
@@ -1217,6 +1228,7 @@ impl Op {
             | VariantGet { ra, .. }
             | TupleGet { ra, .. }
             | RecordGet { ra, .. }
+            | RecordMoveGet { ra, .. }
             | Len { ra, .. }
             | ListPop { ra, .. }
             | SharedNew { ra, .. }
