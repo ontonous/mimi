@@ -82,6 +82,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::NewTupleMove { .. } => "NEW_TUPLE_MOVE",
         Op::TupleGet { .. } => "TUPLE_GET",
         Op::NewRecord { .. } => "NEW_RECORD",
+        Op::NewRecordMove { .. } => "NEW_RECORD_MOVE",
         Op::UpdateRecord { .. } => "UPDATE_RECORD",
         Op::RecordGet { .. } => "RECORD_GET",
         Op::RecordSet { .. } => "RECORD_SET",
@@ -490,6 +491,30 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .unwrap_or("?");
             format!(
                 "{:04}  {:<16} r{} = {}(r{}..r{})",
+                pc,
+                name,
+                rd,
+                tname,
+                base,
+                *base as u16 + count.saturating_sub(1)
+            )
+        }
+        Op::NewRecordMove {
+            rd,
+            type_name,
+            base,
+            count,
+        } => {
+            let tname = proto
+                .constants
+                .get(*type_name as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
+                .unwrap_or("?");
+            format!(
+                "{:04}  {:<16} r{} = {}_move(r{}..r{})",
                 pc,
                 name,
                 rd,

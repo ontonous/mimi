@@ -5,7 +5,7 @@
 //! resolver, or checker.  Unsupported MIR shapes are reported explicitly
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
-//! glued tuple products.
+//! glued tuple/record products.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -435,20 +435,24 @@ impl<'a> FunctionEmitter<'a> {
                     && desc.glue.drop == MirGlueKind::Aggregate
                 {
                     let Some(ra) = self.reg(value) else { return };
-                    let MirLayout::Tuple(elements) = &desc.layout else {
-                        self.error(format!(
-                            "aggregate drop value '{}' has no tuple layout",
-                            value
-                        ));
-                        return;
+                    let arity = match &desc.layout {
+                        MirLayout::Tuple(elements) => elements.len(),
+                        MirLayout::Record { fields, .. } => fields.len(),
+                        layout => {
+                            self.error(format!(
+                                "aggregate drop value '{}' has no product layout: {:?}",
+                                value, layout
+                            ));
+                            return;
+                        }
                     };
-                    if elements.len() > u16::MAX as usize {
+                    if arity > u16::MAX as usize {
                         self.error("aggregate drop arity exceeds bytecode ABI");
                         return;
                     }
                     self.proto.emit(Op::DropAggregate {
                         ra,
-                        arity: elements.len() as u16,
+                        arity: arity as u16,
                     });
                 } else if desc.ownership != MirOwnership::Copy {
                     self.error(format!(
@@ -1231,10 +1235,14 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.proto.alloc_reg()
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
-            });
+            if result_desc.ownership == MirOwnership::Copy {
+                self.proto.emit(Op::Mov {
+                    rd: destination,
+                    rs: source,
+                });
+            } else if !self.emit_value_transfer(destination, source, &field_desc.ty) {
+                return;
+            }
         }
         let type_name = self
             .proto
@@ -1243,12 +1251,21 @@ impl<'a> FunctionEmitter<'a> {
             self.proto
                 .add_const_raw(ConstValue::Str(field.name.clone()));
         }
-        self.proto.emit(Op::NewRecord {
-            rd,
-            type_name,
-            base,
-            count: layout_fields.len() as u16,
-        });
+        if result_desc.ownership == MirOwnership::Copy {
+            self.proto.emit(Op::NewRecord {
+                rd,
+                type_name,
+                base,
+                count: layout_fields.len() as u16,
+            });
+        } else {
+            self.proto.emit(Op::NewRecordMove {
+                rd,
+                type_name,
+                base,
+                count: layout_fields.len() as u16,
+            });
+        }
     }
 
     fn emit_variant_construct(
@@ -1553,9 +1570,14 @@ impl<'a> FunctionEmitter<'a> {
                     Ok(())
                 }
                 MirLayout::Record { fields, .. } => {
-                    if desc.ownership != MirOwnership::Copy {
+                    if desc.ownership != MirOwnership::Copy
+                        && (desc.glue.move_out != MirGlueKind::Aggregate
+                            || desc.glue.clone != MirGlueKind::Aggregate
+                            || desc.glue.drop != MirGlueKind::Aggregate
+                            || desc.drop_plan.is_none())
+                    {
                         return Err(format!(
-                            "type '{}' has ownership {:?} and needs runtime glue",
+                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
                             ty.as_str(),
                             desc.ownership
                         ));
@@ -1935,6 +1957,70 @@ mod tests {
         let program = compile(source);
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(40)));
+    }
+
+    #[test]
+    fn executes_owned_record_construct_and_drop_through_both_oracles() {
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewRecordMove { .. })));
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DropAggregate { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn returns_owned_record_through_canonical_mir_and_bytecode() {
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> Named { Named { count: 41, name: \"owned\" } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewRecordMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert!(matches!(
+            reference,
+            MirRuntimeValue::Record { fields, .. }
+                if fields == [
+                    MirRuntimeValue::String("owned".into()),
+                    MirRuntimeValue::Int(41)
+                ]
+        ));
+        assert!(matches!(
+            value,
+            Value::Record(_, fields)
+                if fields.get("name") == Some(&Value::String(std::sync::Arc::new("owned".into())))
+                    && fields.get("count") == Some(&Value::Int(41))
+        ));
     }
 
     #[test]

@@ -612,13 +612,18 @@ impl BytecodeVM {
                 Op::DropAggregate { ra, arity } => {
                     let frame = self.cur_frame_mut();
                     let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
-                    if !matches!(&value, Value::Tuple(items) if items.len() == arity as usize) {
+                    let valid_shape = match &value {
+                        Value::Tuple(items) => items.len() == arity as usize,
+                        Value::Record(_, fields) => fields.len() == arity as usize,
+                        _ => false,
+                    };
+                    if !valid_shape {
                         return Err(InterpError::new(format!(
-                            "aggregate drop: expected tuple of arity {}, got {}",
+                            "aggregate drop: expected product of arity {}, got {}",
                             arity, value
                         )));
                     }
-                    // Dropping the owned tuple recursively drops its fields;
+                    // Dropping the owned product recursively drops its fields;
                     // the MIR emitter already proved the TypeDesc schedule.
                 }
                 Op::DerefValue { rd, ra } => {
@@ -2193,6 +2198,53 @@ impl BytecodeVM {
                         fields.insert(field_name, value);
                     }
                     self.set_reg(rd, Value::Record(type_name_str, fields));
+                }
+                Op::NewRecordMove {
+                    rd,
+                    type_name,
+                    base,
+                    count,
+                } => {
+                    let type_name_str = match &proto.constants.get(type_name as usize) {
+                        Some(ConstValue::Str(s)) => {
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
+                        }
+                        _ => None,
+                    };
+                    // Validate and materialize field names before consuming
+                    // any source register.  A malformed bytecode record must
+                    // fail closed without partially transferring its fields.
+                    let mut field_names = Vec::with_capacity(count as usize);
+                    for i in 0..count {
+                        let idx = (type_name + 1 + i as u32) as usize;
+                        let field_name = match proto.constants.get(idx) {
+                            Some(ConstValue::Str(s)) => s.clone(),
+                            _ => {
+                                if idx < proto.constants.len() {
+                                    format!("_{}", i)
+                                } else {
+                                    return Err(InterpError::new(format!(
+                                        "NewRecordMove: field constant {} out of bounds (len {})",
+                                        idx,
+                                        proto.constants.len()
+                                    )));
+                                }
+                            }
+                        };
+                        field_names.push(field_name);
+                    }
+                    let frame = self.cur_frame_mut();
+                    let mut fields = std::collections::HashMap::new();
+                    for (i, field_name) in field_names.into_iter().enumerate() {
+                        let value =
+                            std::mem::replace(&mut frame.regs[(base as usize) + i], Value::Unit);
+                        fields.insert(field_name, value);
+                    }
+                    frame.regs[rd as usize] = Value::Record(type_name_str, fields);
                 }
                 Op::UpdateRecord {
                     rd,

@@ -1395,6 +1395,45 @@ impl<'a> MirReferenceInterpreter<'a> {
                 }
                 Ok(())
             }
+            MirLayout::Record {
+                nominal: expected_nominal,
+                fields: layout_fields,
+            } => {
+                let MirRuntimeValue::Record {
+                    nominal,
+                    mut fields,
+                } = value
+                else {
+                    return Err(self.error(&function.owner, "aggregate drop value is not a record"));
+                };
+                if nominal != *expected_nominal {
+                    return Err(self.error(
+                        &function.owner,
+                        "aggregate drop record nominal disagrees with TypeDesc",
+                    ));
+                }
+                let Some(plan) = &descriptor.drop_plan else {
+                    return Err(
+                        self.error(&function.owner, "aggregate drop value has no drop plan")
+                    );
+                };
+                if fields.len() != layout_fields.len() || plan.fields.len() != layout_fields.len() {
+                    return Err(self.error(
+                        &function.owner,
+                        "aggregate drop record disagrees with TypeDesc arity",
+                    ));
+                }
+                for field in &plan.fields {
+                    let child = std::mem::replace(
+                        fields.get_mut(field.index).ok_or_else(|| {
+                            self.error(&function.owner, "aggregate drop field is out of bounds")
+                        })?,
+                        MirRuntimeValue::Unit,
+                    );
+                    self.drop_runtime_value(function, &field.ty, child)?;
+                }
+                Ok(())
+            }
             MirLayout::Handle if matches!(&value, MirRuntimeValue::String(_)) => Ok(()),
             MirLayout::Opaque => Err(self.error(
                 &function.owner,

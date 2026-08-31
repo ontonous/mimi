@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-6";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-7";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
@@ -420,7 +420,7 @@ impl MirTypeCatalog {
             entries.insert(id.clone(), descriptor);
         }
         let mut catalog = Self { entries };
-        catalog.materialize_tuple_glue();
+        catalog.materialize_product_glue();
         Ok(catalog)
     }
 
@@ -493,10 +493,11 @@ impl MirTypeCatalog {
             }
         }
         // Record ownership/layout facts are attached above from the checker.
-        // Re-run tuple materialization now so a tuple containing a Copy record
-        // sees the final child descriptor rather than the pre-layout nominal
-        // placeholder produced by `from_resolved_types`.
-        catalog.materialize_tuple_glue();
+        // Re-run product materialization now so a tuple or record containing a
+        // checker-described product sees the final child descriptor rather
+        // than the pre-layout nominal placeholder produced by
+        // `from_resolved_types`.
+        catalog.materialize_product_glue();
         if errors.is_empty() {
             Ok(catalog)
         } else {
@@ -555,12 +556,25 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
-        let MirLayout::Tuple(elements) = &descriptor.layout else {
+        let (layout_name, elements) = match &descriptor.layout {
+            MirLayout::Tuple(elements) => ("tuple", elements.clone()),
+            MirLayout::Record { fields, .. } => (
+                "record",
+                fields.iter().map(|field| field.ty.clone()).collect(),
+            ),
+            _ => {
+                return Err(format!(
+                    "aggregate glue type '{}' has no canonical product layout",
+                    ty.as_str()
+                ));
+            }
+        };
+        if elements.is_empty() {
             return Err(format!(
-                "aggregate glue type '{}' has no canonical tuple layout",
+                "aggregate glue type '{}' has no fields",
                 ty.as_str()
             ));
-        };
+        }
         let expected_contract = MirGlueContract {
             move_out: MirGlueKind::Aggregate,
             clone: MirGlueKind::Aggregate,
@@ -581,9 +595,10 @@ impl MirTypeCatalog {
             };
             if plan.fields.len() != elements.len() {
                 return Err(format!(
-                    "type '{}' drop plan has {} fields but tuple has {}",
+                    "type '{}' drop plan has {} fields but {} has {}",
                     ty.as_str(),
                     plan.fields.len(),
+                    layout_name,
                     elements.len()
                 ));
             }
@@ -596,9 +611,10 @@ impl MirTypeCatalog {
                 }
                 if field.ty != elements[field.index] {
                     return Err(format!(
-                        "type '{}' drop plan field {} type disagrees with tuple layout",
+                        "type '{}' drop plan field {} type disagrees with {} layout",
                         ty.as_str(),
-                        field.index
+                        field.index,
+                        layout_name
                     ));
                 }
                 let child = self.get(&field.ty).ok_or_else(|| {
@@ -619,21 +635,21 @@ impl MirTypeCatalog {
             }
         } else {
             for element in elements {
-                self.validate_glue(element, operation)?;
+                self.validate_glue(&element, operation)?;
             }
         }
         Ok(())
     }
 
-    fn materialize_tuple_glue(&mut self) {
+    fn materialize_product_glue(&mut self) {
         let ids = self.entries.keys().cloned().collect::<Vec<_>>();
         for id in ids {
             let mut visiting = BTreeSet::new();
-            let _ = self.materialize_tuple_glue_for(&id, &mut visiting);
+            let _ = self.materialize_product_glue_for(&id, &mut visiting);
         }
     }
 
-    fn materialize_tuple_glue_for(
+    fn materialize_product_glue_for(
         &mut self,
         id: &ResolvedTypeId,
         visiting: &mut BTreeSet<ResolvedTypeId>,
@@ -642,21 +658,27 @@ impl MirTypeCatalog {
             return false;
         }
         let layout = self.get(id).map(|descriptor| descriptor.layout.clone());
-        let Some(MirLayout::Tuple(elements)) = layout else {
+        let Some(elements) = (match layout {
+            Some(MirLayout::Tuple(elements)) => Some(elements),
+            Some(MirLayout::Record { fields, .. }) => {
+                Some(fields.into_iter().map(|field| field.ty).collect())
+            }
+            _ => None,
+        }) else {
             visiting.remove(id);
             return false;
         };
         let mut children = Vec::with_capacity(elements.len());
         for (index, child_id) in elements.iter().enumerate() {
-            let child_is_tuple = self
-                .get(child_id)
-                .is_some_and(|child| matches!(child.layout, MirLayout::Tuple(_)));
+            let child_is_product = self.get(child_id).is_some_and(|child| {
+                matches!(child.layout, MirLayout::Tuple(_) | MirLayout::Record { .. })
+            });
             let child_is_copy = self
                 .get(child_id)
                 .is_some_and(|child| child.ownership == MirOwnership::Copy);
-            if child_is_tuple
+            if child_is_product
                 && !child_is_copy
-                && !self.materialize_tuple_glue_for(child_id, visiting)
+                && !self.materialize_product_glue_for(child_id, visiting)
             {
                 visiting.remove(id);
                 return false;
@@ -1634,6 +1656,59 @@ mod tests {
             ["x", "y"]
         );
         assert!(point.1.iter().all(|field| catalog.get(&field.ty).is_some()));
+    }
+
+    #[test]
+    fn materializes_non_copy_record_product_glue_and_drop_schedule() {
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("catalog");
+        let named = catalog
+            .iter()
+            .find_map(|(_, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, fields } if nominal.as_str().ends_with("Named") => {
+                    Some((descriptor, fields))
+                }
+                _ => None,
+            })
+            .expect("Named record contract");
+        assert_eq!(named.0.ownership, MirOwnership::Move);
+        assert_eq!(named.0.abi, MirAbiClass::Aggregate);
+        assert_eq!(
+            named.0.glue,
+            crate::core::mir::types::MirGlueContract {
+                move_out: MirGlueKind::Aggregate,
+                clone: MirGlueKind::Aggregate,
+                drop: MirGlueKind::Aggregate,
+            }
+        );
+        assert_eq!(
+            named
+                .0
+                .drop_plan
+                .as_ref()
+                .expect("record drop plan")
+                .fields
+                .iter()
+                .map(|field| field.index)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            named
+                .1
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["name", "count"]
+        );
+        catalog
+            .validate_aggregate_glue(&named.0.id, MirGlueOperation::Drop)
+            .expect("record drop schedule");
     }
 
     #[test]

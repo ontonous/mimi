@@ -2,8 +2,9 @@
 //!
 //! This is intentionally a narrow, fail-closed slice. It proves the
 //! architectural boundary for scalar expressions, structured branch control
-//! flow, Copy record aggregates, and the first recursive Move-owned tuple
-//! product glue shape (for example `(string, i32)`). Unsupported shapes return a structured error and must not
+//! flow, Copy record aggregates, and recursive Move-owned tuple/record product
+//! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
+//! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
 use std::collections::{BTreeMap, HashMap};

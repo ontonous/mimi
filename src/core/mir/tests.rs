@@ -333,6 +333,135 @@ fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
 }
 
 #[test]
+fn non_copy_record_materializes_field_drop_schedule_before_backend() {
+    let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("record glue must be materialized");
+    let (record_id, descriptor) = canonical
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            matches!(
+                descriptor.layout,
+                crate::core::mir::types::MirLayout::Record { ref nominal, .. }
+                    if nominal.as_str().ends_with("Named")
+            )
+            .then(|| (id.clone(), descriptor))
+        })
+        .expect("record descriptor");
+    assert_eq!(
+        descriptor.ownership,
+        crate::core::mir::types::MirOwnership::Move
+    );
+    assert_eq!(
+        descriptor.glue,
+        crate::core::mir::types::MirGlueContract {
+            move_out: crate::core::mir::types::MirGlueKind::Aggregate,
+            clone: crate::core::mir::types::MirGlueKind::Aggregate,
+            drop: crate::core::mir::types::MirGlueKind::Aggregate,
+        }
+    );
+    assert_eq!(
+        descriptor
+            .drop_plan
+            .as_ref()
+            .expect("record drop plan")
+            .fields
+            .iter()
+            .map(|field| field.index)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    canonical
+        .type_catalog()
+        .validate_aggregate_glue(&record_id, crate::core::mir::types::MirGlueOperation::Drop)
+        .expect("record drop schedule");
+}
+
+#[test]
+fn rejects_reuse_of_record_field_after_aggregate_construction() {
+    let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("record MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut function = canonical.functions().get(&owner).cloned().expect("main");
+    let block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Construct { .. }
+                )
+            })
+        })
+        .expect("record construction block");
+    let field = block
+        .instructions
+        .iter()
+        .find_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Construct { fields, .. } => fields
+                .iter()
+                .find(|field| {
+                    function
+                        .values
+                        .get(*field)
+                        .and_then(|value| canonical.type_catalog().get(&value.ty))
+                        .is_some_and(|descriptor| {
+                            descriptor.ownership == crate::core::mir::types::MirOwnership::Move
+                        })
+                })
+                .cloned(),
+            _ => None,
+        })
+        .expect("owned record field");
+    block.instructions.push(crate::core::mir::MirInstruction {
+        id: crate::core::mir::MirInstructionId::new("synthetic/reuse-record-field")
+            .expect("instruction id"),
+        kind: crate::core::mir::MirInstructionKind::Drop { value: field },
+    });
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        std::collections::BTreeMap::from([(owner, function)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("record field reuse must fail before a backend");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("use after consuming")
+            || error.message.contains("already consumed")
+            || error.message.contains("multiple")
+            || error.message.contains("reuse")
+    }));
+}
+
+#[test]
+fn rejects_record_with_unmaterialized_non_copy_field_glue() {
+    let source = "type Bad { value: Option<string> }\nfunc main() -> i32 { let p = Bad { value: Some(\"owned\") }; drop(p); 42 }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("unsupported record field glue must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("canonical") || message.contains("glue"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
 fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
     let source = "func main() -> (string, i32) { (\"owned\", 41) }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

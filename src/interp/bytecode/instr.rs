@@ -631,6 +631,15 @@ pub enum Op {
         base: Reg,
         count: u16,
     },
+    /// rd = new Record by consuming fields from [base..base+count).
+    /// Field names are stored in constants[type_name..type_name+count].
+    /// This is the runtime realization of canonical MIR aggregate move.
+    NewRecordMove {
+        rd: Reg,
+        type_name: ConstIdx,
+        base: Reg,
+        count: u16,
+    },
     /// rd = clone of ra, then fields from [base..base+count) override by name.
     /// Field names are stored in constants[type_name..type_name+count].
     UpdateRecord {
@@ -1260,7 +1269,9 @@ impl Op {
             NewTuple { base, arity, .. }
             | NewTupleMove { base, arity, .. }
             | NewVariant { base, arity, .. } => reads_range(*base, *arity, reg),
-            NewRecord { base, count, .. } => reads_range(*base, *count, reg),
+            NewRecord { base, count, .. } | NewRecordMove { base, count, .. } => {
+                reads_range(*base, *count, reg)
+            }
             UpdateRecord {
                 ra, base, count, ..
             } => *ra == reg || reads_range(*base, *count, reg),
