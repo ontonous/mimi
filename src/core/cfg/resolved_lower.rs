@@ -572,8 +572,8 @@ impl<'a> ResolvedCfgLowerer<'a> {
                 op: ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable,
                 operand,
             } => {
-                if let ResolvedExprKind::Load(place) = &operand.kind {
-                    current = self.lower_place_inputs(place, current)?;
+                if let Some(place) = self.borrow_place(operand) {
+                    current = self.lower_borrow_place_inputs(operand, current)?;
                     // Borrowing evaluates the place identity, but it is not an
                     // ordinary value read. Keep the root use for loan liveness
                     // without emitting a read-place action that would obscure
@@ -584,8 +584,8 @@ impl<'a> ResolvedCfgLowerer<'a> {
                         &operand.origin,
                         CfgPointKind::Expression,
                         PointAccesses {
-                            uses: vec![self.local_name(&place.base)],
-                            reads: vec![self.place_spelling(place)],
+                            uses: vec![place.base_name.clone()],
+                            reads: vec![place.display()],
                             ..PointAccesses::default()
                         },
                     );
@@ -1153,6 +1153,48 @@ impl<'a> ResolvedCfgLowerer<'a> {
             );
         }
         break_seen.then_some(exit)
+    }
+
+    /// Recover the stable place borrowed by a typed value projection. Read-
+    /// only indexing is represented as a value projection in the resolved
+    /// body, but borrow analysis must preserve its underlying place identity.
+    fn borrow_place(&self, expression: &ResolvedExpr) -> Option<Place> {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => Some(self.canonical_place(place)),
+            ResolvedExprKind::Project {
+                value,
+                projection: ResolvedValueProjection::Index(index),
+            } => {
+                let mut place = self.borrow_place(value)?;
+                let index = match &index.kind {
+                    crate::core::ir::ResolvedExprKind::Literal(
+                        crate::core::ir::ResolvedLiteral::Int(index),
+                    ) => IndexProjection::Constant(*index),
+                    _ => IndexProjection::Dynamic,
+                };
+                place.projections.push(PlaceProjection::Index(index));
+                Some(place)
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_borrow_place_inputs(
+        &mut self,
+        expression: &ResolvedExpr,
+        mut current: BasicBlockId,
+    ) -> Option<BasicBlockId> {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => self.lower_place_inputs(place, current),
+            ResolvedExprKind::Project {
+                value,
+                projection: ResolvedValueProjection::Index(index),
+            } => {
+                current = self.lower_borrow_place_inputs(value, current)?;
+                self.lower_expr(index, current, CfgPointKind::Expression)
+            }
+            _ => None,
+        }
     }
 
     fn lower_place_inputs(

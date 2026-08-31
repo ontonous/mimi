@@ -179,7 +179,10 @@ impl MirProgram {
                 let Some(descriptor) = type_catalog.get(&value.ty) else {
                     continue;
                 };
-                if descriptor.ownership == super::types::MirOwnership::Copy {
+                if matches!(
+                    descriptor.ownership,
+                    super::types::MirOwnership::Copy | super::types::MirOwnership::SharedBorrow
+                ) {
                     continue;
                 }
                 for operation in [
@@ -585,10 +588,30 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::Borrow {
+                            result,
+                            source,
+                            mutable,
+                        } => {
+                            let (Some(result_value), Some(source_value)) =
+                                (function.values.get(result), function.values.get(source))
+                            else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_borrow(
+                                &source_value.ty,
+                                &result_value.ty,
+                                *mutable,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::Const { .. }
                         | super::MirInstructionKind::Call { .. }
                         | super::MirInstructionKind::BuiltinCall { .. }
-                        | super::MirInstructionKind::Borrow { .. }
                         | super::MirInstructionKind::EndBorrow { .. }
                         | super::MirInstructionKind::Binary { .. }
                         | super::MirInstructionKind::Unary { .. }

@@ -585,7 +585,20 @@ impl<'a> Lowerer<'a> {
             }
             ResolvedExprKind::Load(place) => {
                 if let Ok(local) = self.local_value(&place.base) {
-                    if place.projections.is_empty() {
+                    if matches!(
+                        place.projections.as_slice(),
+                        [crate::core::ir::ResolvedProjection::Deref { .. }]
+                    ) {
+                        self.emit(
+                            &expression.node_id,
+                            "project.deref",
+                            MirInstructionKind::Project {
+                                result: result.clone(),
+                                base: local,
+                                projection: super::MirProjection::Dereference,
+                            },
+                        );
+                    } else if place.projections.is_empty() {
                         self.emit(
                             &expression.node_id,
                             "clone",

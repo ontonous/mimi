@@ -15,7 +15,7 @@ use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, Resolve
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout, MirOwnership,
-    MirTypeDesc,
+    MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
@@ -204,10 +204,10 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     /// Prove that every checker-owned ownership fact has a runtime
-    /// representation in this adapter.  The scalar emitter has no drop,
-    /// borrow, session, or actor glue, so accepting those facts would make the
-    /// backend appear executable while silently discarding an ownership
-    /// obligation.  Fail closed before emitting any bytecode instead.
+    /// representation in this adapter.  The admitted immutable Copy-scalar
+    /// borrow is value-shaped and therefore needs no separate bytecode glue;
+    /// mutable, session, and actor effects remain fail-closed so an
+    /// unsupported fact cannot be silently discarded.
     fn validate_ownership(&mut self) {
         let events = self.function.ownership.events.clone();
         for event in events {
@@ -278,13 +278,12 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 MirOwnershipEventKind::TransferSession
                 | MirOwnershipEventKind::TransferChild
-                | MirOwnershipEventKind::BorrowShared
-                | MirOwnershipEventKind::BorrowMut
-                | MirOwnershipEventKind::BorrowEnd => self.error(format!(
+                | MirOwnershipEventKind::BorrowMut => self.error(format!(
                     "ownership event '{}' for '{}' is outside the scalar bytecode glue slice",
                     event.kind.as_str(),
                     value
                 )),
+                MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowEnd => {}
             }
         }
     }
@@ -470,9 +469,12 @@ impl<'a> FunctionEmitter<'a> {
                     ));
                 }
             }
-            MirInstructionKind::Borrow { .. } | MirInstructionKind::EndBorrow { .. } => {
-                self.error("borrow lifetime instructions are not emitted by the scalar adapter");
-            }
+            MirInstructionKind::Borrow {
+                result,
+                source,
+                mutable,
+            } => self.emit_borrow(result, source, *mutable),
+            MirInstructionKind::EndBorrow { borrow } => self.emit_end_borrow(borrow),
             MirInstructionKind::Project {
                 result,
                 base,
@@ -1129,6 +1131,55 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(opcode);
     }
 
+    fn emit_borrow(&mut self, result: &MirValueId, source: &MirValueId, mutable: bool) {
+        let (Some(result_value), Some(source_value)) = (
+            self.function.values.get(result),
+            self.function.values.get(source),
+        ) else {
+            return;
+        };
+        if let Err(message) =
+            self.program
+                .type_catalog()
+                .validate_borrow(&source_value.ty, &result_value.ty, mutable)
+        {
+            self.error(format!("borrow is unsupported: {message}"));
+            return;
+        }
+        for value in [result, source] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "borrow value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let (Some(rd), Some(rs)) = (self.reg(result), self.reg(source)) else {
+            return;
+        };
+        // The admitted immutable Copy-scalar representation is value-shaped:
+        // the target scalar is copied into the reference register. The
+        // checker-owned Pointer/target TypeDesc still makes this a typed
+        // reference boundary; no backend may generalize this to aliases.
+        self.proto.emit(Op::Mov { rd, rs });
+    }
+
+    fn emit_end_borrow(&mut self, borrow: &MirValueId) {
+        let Some(value) = self.function.values.get(borrow) else {
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_reference_type(&value.ty)
+        {
+            self.error(format!("borrow end is unsupported: {message}"));
+            return;
+        }
+        self.proto.emit(Op::Nop);
+    }
+
     fn emit_project(&mut self, result: &MirValueId, base: &MirValueId, projection: &MirProjection) {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
@@ -1237,7 +1288,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("indexed projection requires a canonical List layout");
             }
             (_, MirProjection::Dereference) => {
-                self.error("dereference projection has no canonical MIR layout contract");
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_dereference(&base_desc.id, &result_desc.id)
+                {
+                    self.error(format!("dereference projection is unsupported: {message}"));
+                    return;
+                }
+                self.proto.emit(Op::Mov { rd, rs: ra });
             }
             (layout, projection) => self.error(format!(
                 "projection {:?} does not match base layout {:?}",
@@ -1878,6 +1937,14 @@ impl<'a> FunctionEmitter<'a> {
                     unreachable!()
                 };
                 self.supported_type(element)
+            }
+            MirAbiClass::Pointer
+                if matches!(&desc.kind, MirTypeKind::Reference { mutable: false }) =>
+            {
+                self.program
+                    .type_catalog()
+                    .validate_reference_type(ty)
+                    .map(|_| ())
             }
             MirAbiClass::Aggregate => match &desc.layout {
                 MirLayout::Tuple(elements) => {
@@ -2914,6 +2981,78 @@ mod tests {
     }
 
     #[test]
+    fn immutable_scalar_borrow_and_dereference_agree_with_reference_oracle() {
+        let source = "func main() -> i32 { let value = 41; *(&value) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let function = mir.functions().get(&owner).expect("main");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Borrow { mutable: false, .. }
+                )
+            })
+        }));
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Project {
+                        projection: crate::core::mir::MirProjection::Dereference,
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn canonical_gate_rejects_mutable_borrow_before_any_backend() {
+        let source = "func main() -> i32 { let value = 41; (&value); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = mir.functions().get(&owner).cloned().expect("main");
+        let borrow = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find_map(|instruction| match &mut instruction.kind {
+                crate::core::mir::MirInstructionKind::Borrow { mutable, .. } => {
+                    *mutable = true;
+                    Some(instruction.id.clone())
+                }
+                _ => None,
+            })
+            .expect("borrow instruction");
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect_err("mutable borrow must fail the canonical gate");
+        assert!(errors.iter().any(|error| {
+            error.subject == borrow.to_string() && error.message.contains("mutable Borrow")
+        }));
+    }
+
+    #[test]
     fn executes_first_class_abs_through_ast_free_bytecode() {
         let source = "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }";
         let program = compile(source);
@@ -3854,7 +3993,7 @@ mod tests {
             .cloned()
             .unwrap_or_else(|| function.values.keys().next().cloned().expect("value"));
         function.ownership.events.push(MirOwnershipEvent {
-            kind: MirOwnershipEventKind::BorrowShared,
+            kind: MirOwnershipEventKind::BorrowMut,
             resource: "synthetic/resource".into(),
             value: Some(value.clone()),
             source: Some("x".into()),
@@ -3869,6 +4008,6 @@ mod tests {
         let errors = compile_mir_program(&patched).expect_err("glue must be explicit");
         assert!(errors
             .iter()
-            .any(|error| error.message.contains("borrow_shared")));
+            .any(|error| error.message.contains("borrow_mut")));
     }
 }

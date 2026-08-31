@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-9";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-10";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -418,7 +418,12 @@ pub enum MirLayout {
     Unit,
     Scalar,
     Handle,
-    Pointer,
+    /// Pointer-shaped storage with an optional checker-owned target. Raw
+    /// pointer-like types carry their pointee here; opaque pointer families
+    /// retain `None` until their target contract is materialized.
+    Pointer {
+        target: Option<ResolvedTypeId>,
+    },
     Tuple(Vec<ResolvedTypeId>),
     Option {
         inner: ResolvedTypeId,
@@ -518,10 +523,16 @@ impl MirTypeDesc {
                 MirAbiClass::OpaqueHandle,
                 MirLayout::Handle,
             ),
-            ResolvedType::Reference { mutable, .. } => (
+            ResolvedType::Reference {
+                lifetime: _,
+                mutable,
+                target,
+            } => (
                 MirTypeKind::Reference { mutable: *mutable },
                 MirAbiClass::Pointer,
-                MirLayout::Pointer,
+                MirLayout::Pointer {
+                    target: Some(target.clone()),
+                },
             ),
             ResolvedType::Option(inner) => (
                 MirTypeKind::Option,
@@ -557,10 +568,12 @@ impl MirTypeDesc {
                 MirAbiClass::FunctionPointer,
                 MirLayout::Handle,
             ),
-            ResolvedType::CBuffer(_) => (
+            ResolvedType::CBuffer(target) => (
                 MirTypeKind::CBuffer,
                 MirAbiClass::Pointer,
-                MirLayout::Pointer,
+                MirLayout::Pointer {
+                    target: Some(target.clone()),
+                },
             ),
             ResolvedType::Capability(_) => (
                 MirTypeKind::Capability,
@@ -588,18 +601,24 @@ impl MirTypeDesc {
                     length: *length,
                 },
             ),
-            ResolvedType::Slice(_) => {
-                (MirTypeKind::Slice, MirAbiClass::Pointer, MirLayout::Pointer)
-            }
+            ResolvedType::Slice(target) => (
+                MirTypeKind::Slice,
+                MirAbiClass::Pointer,
+                MirLayout::Pointer {
+                    target: Some(target.clone()),
+                },
+            ),
             ResolvedType::Trait { .. } => (
                 MirTypeKind::Trait,
                 MirAbiClass::OpaqueHandle,
                 MirLayout::Opaque,
             ),
-            ResolvedType::RawPointer { mutable, .. } => (
+            ResolvedType::RawPointer { mutable, target } => (
                 MirTypeKind::RawPointer { mutable: *mutable },
                 MirAbiClass::Pointer,
-                MirLayout::Pointer,
+                MirLayout::Pointer {
+                    target: Some(target.clone()),
+                },
             ),
             ResolvedType::DynamicAny { .. } => (
                 MirTypeKind::DynamicAny,
@@ -1299,6 +1318,106 @@ impl MirTypeCatalog {
         }
     }
 
+    /// Validate the reference representation admitted by the first canonical
+    /// borrow slice.  An immutable reference to a Copy scalar is represented
+    /// as the scalar value in the reference backend/bytecode register; the
+    /// pointer ABI and target identity remain explicit TypeDesc facts.  This
+    /// is deliberately narrower than the surface language: mutable borrows,
+    /// aggregate targets, and owned targets need an aliasing/storage contract
+    /// before they can cross the MIR boundary.
+    pub fn validate_reference_type(
+        &self,
+        reference_ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, String> {
+        let descriptor = self.get(reference_ty).ok_or_else(|| {
+            format!(
+                "reference type '{}' is absent from MIR type catalog",
+                reference_ty.as_str()
+            )
+        })?;
+        let MirTypeKind::Reference { mutable: false } = descriptor.kind else {
+            return Err(format!(
+                "reference type '{}' is mutable or not a canonical shared reference",
+                reference_ty.as_str()
+            ));
+        };
+        let MirLayout::Pointer {
+            target: Some(target),
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "reference type '{}' has no checker-owned pointer target",
+                reference_ty.as_str()
+            ));
+        };
+        if descriptor.abi != MirAbiClass::Pointer
+            || descriptor.ownership != MirOwnership::SharedBorrow
+        {
+            return Err(format!(
+                "reference type '{}' has inconsistent pointer ABI/ownership",
+                reference_ty.as_str()
+            ));
+        }
+        let target_desc = self.get(target).ok_or_else(|| {
+            format!(
+                "reference type '{}' target '{}' is absent from MIR type catalog",
+                reference_ty.as_str(),
+                target.as_str()
+            )
+        })?;
+        if !is_copy_scalar(target_desc) {
+            return Err(format!(
+                "reference target '{}' is outside the immutable Copy scalar borrow contract",
+                target.as_str()
+            ));
+        }
+        Ok(target.clone())
+    }
+
+    /// Validate a Borrow node's complete TypeDesc contract.  The source
+    /// operand is the pointee value, while the result is the typed reference
+    /// value; no backend is allowed to infer that relationship from a native
+    /// pointer or a VM reference object.
+    pub fn validate_borrow(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        mutable: bool,
+    ) -> Result<(), String> {
+        if mutable {
+            return Err(
+                "mutable Borrow is outside the canonical immutable Copy scalar contract".into(),
+            );
+        }
+        let target = self.validate_reference_type(result_ty)?;
+        if &target != source_ty {
+            return Err(format!(
+                "reference target '{}' disagrees with Borrow source type '{}'",
+                target.as_str(),
+                source_ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate a dereference projection against the same explicit reference
+    /// target contract used by Borrow.
+    pub fn validate_dereference(
+        &self,
+        reference_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        let target = self.validate_reference_type(reference_ty)?;
+        if &target != result_ty {
+            return Err(format!(
+                "dereference result type '{}' disagrees with reference target '{}'",
+                result_ty.as_str(),
+                target.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolve and validate a checked `Convert` against the closed canonical
     /// scalar conversion contract.  The returned contract is shared by the
     /// reference executor and every production adapter; no backend may grow
@@ -1600,7 +1719,7 @@ impl MirTypeCatalog {
                 Err("indexed projection requires a canonical List layout".into())
             }
             (_, crate::core::mir::MirProjection::Dereference) => {
-                Err("dereference projection has no canonical MIR layout contract".into())
+                self.validate_reference_type(base_ty)
             }
             (layout, projection) => Err(format!(
                 "projection {:?} does not match base layout {:?}",
@@ -1682,7 +1801,7 @@ impl MirTypeCatalog {
                 Err("indexed projection requires a canonical List layout".into())
             }
             (_, crate::core::mir::MirProjection::Dereference) => {
-                Err("dereference projection has no canonical MIR layout contract".into())
+                self.validate_dereference(base_ty, result_ty)
             }
             (layout, projection) => Err(format!(
                 "projection {:?} does not match base layout {:?}",
@@ -1791,11 +1910,7 @@ impl MirTypeCatalog {
                         "indexed place projection has no canonical MIR layout contract".into(),
                     )
                 }
-                ResolvedProjection::Deref { .. } => {
-                    return Err(
-                        "dereference place projection has no canonical MIR layout contract".into(),
-                    )
-                }
+                ResolvedProjection::Deref { .. } => crate::core::mir::MirProjection::Dereference,
             };
             self.validate_projection(&current_ty, projection.ty(), &mir_projection)?;
             current_ty = projection.ty().clone();
@@ -2244,6 +2359,17 @@ fn primitive_abi(primitive: PrimitiveType) -> MirAbiClass {
     }
 }
 
+fn is_copy_scalar(descriptor: &MirTypeDesc) -> bool {
+    descriptor.ownership == MirOwnership::Copy
+        && descriptor.glue
+            == (MirGlueContract {
+                move_out: MirGlueKind::Noop,
+                clone: MirGlueKind::Noop,
+                drop: MirGlueKind::Noop,
+            })
+        && matches!(descriptor.layout, MirLayout::Scalar)
+}
+
 fn ownership_for(
     id: &ResolvedTypeId,
     table: &ResolvedTypeTable,
@@ -2345,6 +2471,56 @@ mod tests {
             }
         );
         assert!(!descriptor.needs_drop_glue);
+    }
+
+    #[test]
+    fn reference_typedesc_carries_target_and_rejects_mutable_or_mismatched_borrows() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let reference_id = table
+            .intern_resolved(ResolvedType::Reference {
+                lifetime: None,
+                mutable: false,
+                target: i32_id.clone(),
+            })
+            .expect("shared reference");
+        let mutable_reference_id = table
+            .intern_resolved(ResolvedType::Reference {
+                lifetime: None,
+                mutable: true,
+                target: i32_id.clone(),
+            })
+            .expect("mutable reference");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        assert_eq!(
+            catalog
+                .get(&reference_id)
+                .expect("reference descriptor")
+                .layout,
+            MirLayout::Pointer {
+                target: Some(i32_id.clone())
+            }
+        );
+        assert_eq!(
+            catalog
+                .validate_borrow(&i32_id, &reference_id, false)
+                .expect("immutable Copy scalar borrow"),
+            ()
+        );
+        let mutable_error = catalog
+            .validate_borrow(&i32_id, &mutable_reference_id, true)
+            .expect_err("mutable borrow is outside this canonical slice");
+        assert!(mutable_error.contains("mutable Borrow"));
+        let mismatch_error = catalog
+            .validate_borrow(&bool_id, &reference_id, false)
+            .expect_err("reference target identity must be exact");
+        assert!(mismatch_error.contains("target") || mismatch_error.contains("source"));
     }
 
     #[test]

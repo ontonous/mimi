@@ -1348,13 +1348,12 @@ impl<'a> ActionEmitter<'a> {
                 operand,
             } => {
                 self.visit_expr(operand, None);
-                let mut source = match &operand.kind {
-                    ResolvedExprKind::Load(source) => self.canonical_place(source),
-                    _ => Place::root(
+                let mut source = self.borrow_place(operand).unwrap_or_else(|| {
+                    Place::root(
                         LocalId(NodeId(format!("{}/temporary", expression.node_id.0))),
                         "<temporary>",
-                    ),
-                };
+                    )
+                });
                 let kind = match &expression.kind {
                     ResolvedExprKind::Unary {
                         op: ResolvedUnaryOp::BorrowMutable,
@@ -2701,6 +2700,32 @@ impl<'a> ActionEmitter<'a> {
             base: LocalId(place.base.0.clone()),
             base_name: self.local_name(&place.base),
             projections,
+        }
+    }
+
+    /// Recover the stable place behind a typed read projection used as a
+    /// borrow operand. The resolved body keeps indexed reads as value
+    /// projections so the index remains an explicit typed child; ownership
+    /// analysis must nevertheless retain `xs[0]`/`xs[*]` rather than inventing
+    /// a temporary resource.
+    fn borrow_place(&self, expression: &ResolvedExpr) -> Option<Place> {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => Some(self.canonical_place(place)),
+            ResolvedExprKind::Project {
+                value,
+                projection: ResolvedValueProjection::Index(index),
+            } => {
+                let mut place = self.borrow_place(value)?;
+                let index = match &index.kind {
+                    ResolvedExprKind::Literal(crate::core::ir::ResolvedLiteral::Int(index)) => {
+                        IndexProjection::Constant(*index)
+                    }
+                    _ => IndexProjection::Dynamic,
+                };
+                place.projections.push(PlaceProjection::Index(index));
+                Some(place)
+            }
+            _ => None,
         }
     }
 
