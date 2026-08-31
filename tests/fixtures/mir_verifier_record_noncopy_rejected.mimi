@@ -1,0 +1,15 @@
+// Contract projection over a move-owned record is outside the Copy aggregate
+// verifier subset until the ownership snapshot/glue contract is materialized.
+type Box {
+    text: string
+}
+
+func unsupported(p: Box) -> Box {
+    requires: true
+    ensures: result.text == old(p.text)
+    p
+}
+
+func main() -> i32 {
+    0
+}

@@ -1,0 +1,15 @@
+// Aggregate projection does not hide the checked arithmetic trap in its field.
+type Point {
+    x: i32,
+    enabled: bool
+}
+
+func overflowing(p: Point) -> Point {
+    requires: true
+    ensures: result.x == p.x + 1
+    Point { x: p.x + 1, enabled: p.enabled }
+}
+
+func main() -> i32 {
+    0
+}

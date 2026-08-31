@@ -1354,6 +1354,39 @@ impl MirTypeCatalog {
     /// Validate one value projection against the canonical semantic layout.
     /// Field names are intentionally unavailable here: the stable field ID is
     /// the only identity that crosses the MIR/backend boundary.
+    pub fn projection_result_type(
+        &self,
+        base_ty: &ResolvedTypeId,
+        projection: &crate::core::mir::MirProjection,
+    ) -> Result<ResolvedTypeId, String> {
+        let base = self
+            .get(base_ty)
+            .ok_or_else(|| format!("projection base type '{}' is absent", base_ty.as_str()))?;
+        match (&base.layout, projection) {
+            (MirLayout::Tuple(elements), crate::core::mir::MirProjection::Tuple(index)) => elements
+                .get(*index)
+                .cloned()
+                .ok_or_else(|| format!("tuple projection index {} is out of bounds", index)),
+            (MirLayout::Record { fields, .. }, crate::core::mir::MirProjection::Field(field)) => {
+                fields
+                    .iter()
+                    .find(|candidate| candidate.id == *field)
+                    .map(|candidate| candidate.ty.clone())
+                    .ok_or_else(|| format!("record projection field '{}' is absent", field.0))
+            }
+            (_, crate::core::mir::MirProjection::Index(_)) => {
+                Err("indexed projection has no canonical MIR layout contract".into())
+            }
+            (_, crate::core::mir::MirProjection::Dereference) => {
+                Err("dereference projection has no canonical MIR layout contract".into())
+            }
+            (layout, projection) => Err(format!(
+                "projection {:?} does not match base layout {:?}",
+                projection, layout
+            )),
+        }
+    }
+
     pub fn validate_projection(
         &self,
         base_ty: &ResolvedTypeId,

@@ -12,8 +12,8 @@ use std::time::Instant;
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{MirAbiClass, MirBuiltinKind, MirLayout, MirOwnership};
 use crate::core::mir::{
-    MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp, MirFunction,
-    MirInstructionKind, MirTerminator, MirValueId,
+    MirAggregateKind, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
+    MirFunction, MirInstructionKind, MirProjection, MirTerminator, MirValueId,
 };
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
@@ -25,6 +25,11 @@ use z3::SatResult;
 enum SymbolicValue {
     Int(Int),
     Bool(Bool),
+    Tuple(Vec<SymbolicValue>),
+    Record {
+        nominal: crate::core::ir::NominalTypeId,
+        fields: BTreeMap<crate::core::NodeId, SymbolicValue>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -271,22 +276,100 @@ fn initial_state(
         traps: Vec::new(),
     };
     for parameter in &function.parameters {
-        let kind = value_scalar_kind(function, catalog, parameter)?;
         let name = format!("mir.value.{}", parameter.as_str());
-        let value = match kind {
-            ScalarKind::Int { bits } => {
-                let symbol = Int::new_const(name);
-                state.constraints.push(int_range_constraint(&symbol, bits));
-                SymbolicValue::Int(symbol)
-            }
-            ScalarKind::Bool => SymbolicValue::Bool(Bool::new_const(name)),
-        };
+        let (value, constraints) = symbolic_value_for_type(
+            catalog,
+            &function
+                .values
+                .get(parameter)
+                .ok_or_else(|| format!("MIR parameter '{}' is absent from values", parameter))?
+                .ty,
+            &name,
+        )?;
+        state.constraints.extend(constraints);
         state.values.insert(parameter.clone(), value);
     }
     // Keep the session argument in the constructor signature so all future
     // canonical initialization constraints have one explicit proof boundary.
     let _ = session;
     Ok(state)
+}
+
+fn symbolic_value_for_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ir::ResolvedTypeId,
+    name: &str,
+) -> Result<(SymbolicValue, Vec<Bool>), String> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.ownership != MirOwnership::Copy
+        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
+    {
+        return Err(format!(
+            "MIR verifier TypeDesc '{}' is outside the Copy/no-op aggregate contract",
+            ty.as_str()
+        ));
+    }
+    match &descriptor.layout {
+        MirLayout::Scalar => match descriptor.abi {
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } => {
+                let MirAbiClass::Integer { bits, .. } = descriptor.abi else {
+                    unreachable!()
+                };
+                let symbol = Int::new_const(name);
+                Ok((
+                    SymbolicValue::Int(symbol.clone()),
+                    vec![int_range_constraint(&symbol, bits)],
+                ))
+            }
+            MirAbiClass::Bool => Ok((SymbolicValue::Bool(Bool::new_const(name)), Vec::new())),
+            abi => Err(format!(
+                "MIR verifier ABI {:?} is outside the checked scalar contract",
+                abi
+            )),
+        },
+        MirLayout::Tuple(elements) => {
+            let mut values = Vec::with_capacity(elements.len());
+            let mut constraints = Vec::new();
+            for (index, element) in elements.iter().enumerate() {
+                let (value, nested) =
+                    symbolic_value_for_type(catalog, element, &format!("{name}.tuple{index}"))?;
+                values.push(value);
+                constraints.extend(nested);
+            }
+            Ok((SymbolicValue::Tuple(values), constraints))
+        }
+        MirLayout::Record { nominal, fields } => {
+            let mut values = BTreeMap::new();
+            let mut constraints = Vec::new();
+            for field in fields {
+                let (value, nested) = symbolic_value_for_type(
+                    catalog,
+                    &field.ty,
+                    &format!("{name}.field.{}", field.id.0.as_str()),
+                )?;
+                values.insert(field.id.clone(), value);
+                constraints.extend(nested);
+            }
+            Ok((
+                SymbolicValue::Record {
+                    nominal: nominal.clone(),
+                    fields: values,
+                },
+                constraints,
+            ))
+        }
+        layout => Err(format!(
+            "MIR verifier layout {:?} is outside the Copy aggregate contract",
+            layout
+        )),
+    }
 }
 
 fn value_scalar_kind(
@@ -335,6 +418,45 @@ fn int_range_constraint(value: &Int, bits: u16) -> Bool {
         (i64::MIN, i64::MAX)
     };
     Bool::and(&[&value.ge(Int::from_i64(lo)), &value.le(Int::from_i64(hi))])
+}
+
+fn resolved_projection(
+    projection: &crate::core::ir::ResolvedProjection,
+) -> Result<MirProjection, String> {
+    match projection {
+        crate::core::ir::ResolvedProjection::Field { field, .. } => {
+            Ok(MirProjection::Field(field.clone()))
+        }
+        crate::core::ir::ResolvedProjection::Tuple { index, .. } => {
+            Ok(MirProjection::Tuple(*index))
+        }
+        crate::core::ir::ResolvedProjection::Index { .. } => {
+            Err("MIR verifier does not admit indexed contract projection".into())
+        }
+        crate::core::ir::ResolvedProjection::Deref { .. } => {
+            Err("MIR verifier does not admit dereference contract projection".into())
+        }
+    }
+}
+
+fn symbolic_project(
+    value: SymbolicValue,
+    projection: &MirProjection,
+) -> Result<SymbolicValue, String> {
+    match (value, projection) {
+        (SymbolicValue::Tuple(values), MirProjection::Tuple(index)) => values
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| format!("MIR tuple projection index {} is out of bounds", index)),
+        (SymbolicValue::Record { fields, .. }, MirProjection::Field(field)) => fields
+            .get(field)
+            .cloned()
+            .ok_or_else(|| format!("MIR record projection field '{}' is absent", field.0)),
+        (_, MirProjection::Index(_) | MirProjection::Dereference) => {
+            Err("MIR verifier projection is outside the aggregate contract".into())
+        }
+        _ => Err("MIR verifier projection base is not an aggregate".into()),
+    }
 }
 
 fn explore_block(
@@ -474,16 +596,18 @@ fn eval_instruction(
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Load { result, place } => {
-            if !place.projections.is_empty() {
-                return Err("MIR verifier does not admit projected scalar loads".into());
-            }
             let source = MirValueId::new(format!("local:{}", place.base.0 .0))
                 .map_err(|error| error.to_string())?;
-            let value = state
+            let mut value = state
                 .values
                 .get(&source)
                 .cloned()
                 .ok_or_else(|| format!("MIR load source '{}' is not defined", source))?;
+            for projection in &place.projections {
+                let projection = resolved_projection(projection)?;
+                value = symbolic_project(value, &projection)?;
+            }
+            ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Copy { result, source }
@@ -494,11 +618,11 @@ fn eval_instruction(
                 .get(source)
                 .cloned()
                 .ok_or_else(|| format!("MIR value '{}' is not defined", source))?;
-            ensure_result_kind(function, catalog, result, &value)?;
+            ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Drop { value } => {
-            let _ = value_scalar_kind(function, catalog, value)?;
+            ensure_copy_value(function, catalog, value)?;
             if !state.values.contains_key(value) {
                 return Err(format!("MIR drop value '{}' is not defined", value));
             }
@@ -532,7 +656,7 @@ fn eval_instruction(
                 }
                 _ => return Err("MIR unary operation is outside scalar verifier contract".into()),
             };
-            ensure_result_kind(function, catalog, result, &output)?;
+            ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
         MirInstructionKind::Binary {
@@ -552,7 +676,7 @@ fn eval_instruction(
                 .cloned()
                 .ok_or_else(|| format!("MIR binary right value '{}' is not defined", right))?;
             let output = eval_binary(function, catalog, state, *op, left, right, result)?;
-            ensure_result_kind(function, catalog, result, &output)?;
+            ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
         MirInstructionKind::BuiltinCall {
@@ -582,7 +706,7 @@ fn eval_instruction(
                 }
                 _ => return Err("MIR builtin is outside scalar verifier contract".into()),
             };
-            ensure_result_kind(function, catalog, result, &output)?;
+            ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
         MirInstructionKind::Convert { result, source } => {
@@ -591,15 +715,45 @@ fn eval_instruction(
                 .get(source)
                 .cloned()
                 .ok_or_else(|| format!("MIR conversion source '{}' is not defined", source))?;
-            ensure_result_kind(function, catalog, result, &value)?;
+            ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Nop => {}
-        MirInstructionKind::Project { .. }
-        | MirInstructionKind::MoveProject { .. }
+        MirInstructionKind::Project {
+            result,
+            base,
+            projection,
+        } => {
+            let value = state
+                .values
+                .get(base)
+                .cloned()
+                .ok_or_else(|| format!("MIR projection base '{}' is not defined", base))?;
+            let value = symbolic_project(value, projection)?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::Construct {
+            result,
+            kind,
+            fields,
+        } => {
+            let values =
+                fields
+                    .iter()
+                    .map(|value| {
+                        state.values.get(value).cloned().ok_or_else(|| {
+                            format!("MIR aggregate field '{}' is not defined", value)
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            let value = symbolic_construct(function, catalog, result, kind, values)?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::MoveProject { .. }
         | MirInstructionKind::Borrow { .. }
         | MirInstructionKind::EndBorrow { .. }
-        | MirInstructionKind::Construct { .. }
         | MirInstructionKind::ConstructVariant { .. }
         | MirInstructionKind::ConstructVariantMove { .. }
         | MirInstructionKind::UpdateRecord { .. }
@@ -610,25 +764,147 @@ fn eval_instruction(
     Ok(())
 }
 
-fn ensure_result_kind(
+fn ensure_copy_value(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    value: &MirValueId,
+) -> Result<(), String> {
+    let info = function
+        .values
+        .get(value)
+        .ok_or_else(|| format!("MIR value '{}' is absent", value))?;
+    let descriptor = catalog
+        .get(&info.ty)
+        .ok_or_else(|| format!("MIR value '{}' TypeDesc is absent", value))?;
+    if descriptor.ownership != MirOwnership::Copy
+        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
+        || !matches!(
+            descriptor.layout,
+            MirLayout::Scalar | MirLayout::Tuple(_) | MirLayout::Record { .. }
+        )
+    {
+        return Err(format!(
+            "MIR value '{}' is outside the Copy/no-op contract",
+            value
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_result_shape(
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     result: &MirValueId,
     value: &SymbolicValue,
 ) -> Result<(), String> {
-    let expected = value_scalar_kind(function, catalog, result)?;
-    let actual = match value {
-        SymbolicValue::Int(_) => ScalarKind::Int { bits: 0 },
-        SymbolicValue::Bool(_) => ScalarKind::Bool,
-    };
-    match (expected, actual) {
-        (ScalarKind::Int { .. }, ScalarKind::Int { .. }) | (ScalarKind::Bool, ScalarKind::Bool) => {
-            Ok(())
-        }
-        _ => Err(format!(
-            "MIR result '{}' disagrees with symbolic scalar kind",
+    let ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| format!("MIR result '{}' is absent", result))?
+        .ty
+        .clone();
+    if symbolic_matches_type(catalog, &ty, value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "MIR result '{}' disagrees with canonical TypeDesc shape",
             result
-        )),
+        ))
+    }
+}
+
+fn symbolic_matches_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ir::ResolvedTypeId,
+    value: &SymbolicValue,
+) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    match (&descriptor.layout, &descriptor.abi, value) {
+        (
+            MirLayout::Scalar,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            },
+            SymbolicValue::Int(_),
+        )
+        | (MirLayout::Scalar, MirAbiClass::Bool, SymbolicValue::Bool(_)) => true,
+        (MirLayout::Tuple(elements), _, SymbolicValue::Tuple(values)) => {
+            elements.len() == values.len()
+                && elements
+                    .iter()
+                    .zip(values)
+                    .all(|(ty, value)| symbolic_matches_type(catalog, ty, value))
+        }
+        (
+            MirLayout::Record { nominal, fields },
+            _,
+            SymbolicValue::Record {
+                nominal: actual_nominal,
+                fields: actual_fields,
+            },
+        ) => {
+            nominal == actual_nominal
+                && fields.len() == actual_fields.len()
+                && fields.iter().all(|field| {
+                    actual_fields
+                        .get(&field.id)
+                        .is_some_and(|value| symbolic_matches_type(catalog, &field.ty, value))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn symbolic_construct(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result: &MirValueId,
+    kind: &MirAggregateKind,
+    values: Vec<SymbolicValue>,
+) -> Result<SymbolicValue, String> {
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| format!("MIR aggregate result '{}' is absent", result))?
+        .ty
+        .clone();
+    let descriptor = catalog
+        .get(&result_ty)
+        .ok_or_else(|| format!("MIR aggregate result '{}' TypeDesc is absent", result))?;
+    match (kind, &descriptor.layout) {
+        (MirAggregateKind::Tuple, MirLayout::Tuple(elements)) if elements.len() == values.len() => {
+            Ok(SymbolicValue::Tuple(values))
+        }
+        (
+            MirAggregateKind::Record {
+                nominal,
+                fields: field_ids,
+            },
+            MirLayout::Record {
+                nominal: expected_nominal,
+                fields: layout_fields,
+            },
+        ) if nominal == expected_nominal
+            && field_ids.len() == values.len()
+            && field_ids.len() == layout_fields.len() =>
+        {
+            let mut fields = BTreeMap::new();
+            for (field, value) in field_ids.iter().cloned().zip(values) {
+                if fields.insert(field, value).is_some() {
+                    return Err("MIR record construction repeats a field".into());
+                }
+            }
+            Ok(SymbolicValue::Record {
+                nominal: expected_nominal.clone(),
+                fields,
+            })
+        }
+        _ => Err("MIR aggregate construction disagrees with canonical TypeDesc".into()),
     }
 }
 
@@ -717,7 +993,9 @@ fn add_definedness(state: &mut SymbolicState, defined: Bool, code: &str) -> Resu
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
-        SymbolicValue::Int(_) => Err(format!("{context} is not boolean")),
+        SymbolicValue::Int(_) | SymbolicValue::Tuple(_) | SymbolicValue::Record { .. } => {
+            Err(format!("{context} is not boolean"))
+        }
     }
 }
 
@@ -750,6 +1028,10 @@ fn contract_term(
         MirContractExpr::Result => result
             .cloned()
             .ok_or_else(|| "ensures result is not available before a return path".into()),
+        MirContractExpr::Project { base, projection } => {
+            let value = contract_term(base, values, old_values, result)?;
+            symbolic_project(value, projection)
+        }
         MirContractExpr::Int(value) => Ok(SymbolicValue::Int(Int::from_i64(*value))),
         MirContractExpr::Bool(value) => Ok(SymbolicValue::Bool(Bool::from_bool(*value))),
         MirContractExpr::Unary { op, operand } => {
@@ -862,5 +1144,68 @@ mod tests {
             .expect("function")
             .canonical_text()
             .contains("contract"));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_copy_record_projection() {
+        let source = r#"
+            type Point { x: i32, enabled: bool }
+
+            func advance(p: Point, choose_step: bool) -> Point {
+                requires: p.x < 2147483647
+                ensures: result.x == old(p.x) + 1
+                if choose_step {
+                    Point { x: p.x + 1, enabled: p.enabled }
+                } else {
+                    Point { x: p.x + 1, enabled: p.enabled }
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("advance"))
+            .cloned()
+            .expect("advance MIR function");
+        let point = crate::core::ir::NominalTypeId::new("type:Point").expect("Point nominal");
+
+        let reference_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &owner,
+                &[
+                    MirRuntimeValue::Record {
+                        nominal: point,
+                        fields: vec![MirRuntimeValue::Int(41), MirRuntimeValue::Bool(true)],
+                    },
+                    MirRuntimeValue::Bool(true),
+                ],
+            )
+            .expect("reference record execution");
+        assert_eq!(
+            reference_value,
+            MirRuntimeValue::Record {
+                nominal: crate::core::ir::NominalTypeId::new("type:Point").expect("Point nominal"),
+                fields: vec![MirRuntimeValue::Int(42), MirRuntimeValue::Bool(true)],
+            }
+        );
+
+        let results = verify_program(&program, "record-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("record contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        assert!(program
+            .functions()
+            .get(&owner)
+            .expect("record function")
+            .canonical_text()
+            .contains("project("));
     }
 }

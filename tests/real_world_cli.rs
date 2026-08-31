@@ -742,6 +742,106 @@ fn canonical_mir_verifier_proves_branch_contract() {
 }
 
 #[test]
+fn canonical_mir_record_contract_matches_reference_native_and_verifier() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_record_contract.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record reference run");
+    assert_eq!(reference.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-record-contract-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR record native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR record native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR record native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(42));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record verifier");
+    assert!(
+        verification.status.success(),
+        "canonical MIR record verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_record_contract_rejects_move_owned_projection() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_record_noncopy_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical MIR record verifier");
+    assert!(
+        !output.status.success(),
+        "move-owned projection must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canonical MIR verifier input rejected"));
+    assert!(stderr.contains("outside the canonical Copy aggregate contract"));
+    assert!(!stderr.contains("flow_ast"));
+}
+
+#[test]
+fn canonical_mir_record_projection_preserves_checked_trap_class() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_record_trap_contract.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record trap verifier");
+    assert!(
+        !output.status.success(),
+        "reachable record-field trap must fail"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("can reach trap 'E0802'"));
+}
+
+#[test]
 fn canonical_mir_verifier_reports_ensures_counterexample() {
     let fixture = project_root()
         .join("tests")

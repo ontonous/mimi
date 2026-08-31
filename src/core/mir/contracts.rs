@@ -7,11 +7,11 @@
 //! verifier consume the same contract facts as the execution backends without
 //! reparsing or re-encoding the source AST.
 
-use crate::core::ir::ResolvedBinaryOp;
+use crate::core::ir::{ResolvedBinaryOp, ResolvedProjection};
 use crate::core::NodeId;
 
-use super::types::{MirAbiClass, MirTypeCatalog};
-use super::{MirFunction, MirValidationError, MirValueId};
+use super::types::{MirAbiClass, MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog};
+use super::{MirFunction, MirProjection, MirValidationError, MirValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirContractKind {
@@ -75,6 +75,10 @@ pub enum MirContractExpr {
     Value(MirValueId),
     Result,
     Old(MirValueId),
+    Project {
+        base: Box<Self>,
+        projection: MirProjection,
+    },
     Int(i64),
     Bool(bool),
     Unary {
@@ -94,6 +98,9 @@ impl MirContractExpr {
             Self::Value(value) => value.to_string(),
             Self::Result => "result".into(),
             Self::Old(value) => format!("old({value})"),
+            Self::Project { base, projection } => {
+                format!("project({}, {projection:?})", base.canonical_text())
+            }
             Self::Int(value) => value.to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Unary { op, operand } => {
@@ -152,10 +159,55 @@ impl MirContract {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ContractValueKind {
     Int,
     Bool,
+    Aggregate(crate::core::ir::ResolvedTypeId),
+}
+
+fn type_kind(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ir::ResolvedTypeId,
+) -> Result<ContractValueKind, String> {
+    let descriptor = catalog.get(ty).ok_or_else(|| {
+        format!(
+            "contract type '{}' is absent from MIR TypeDesc",
+            ty.as_str()
+        )
+    })?;
+    match descriptor.abi {
+        MirAbiClass::Integer {
+            bits: 32 | 64,
+            signed: true,
+        } => Ok(ContractValueKind::Int),
+        MirAbiClass::Bool => Ok(ContractValueKind::Bool),
+        _ if matches!(
+            descriptor.layout,
+            MirLayout::Tuple(_) | MirLayout::Record { .. }
+        ) && descriptor.ownership == MirOwnership::Copy
+            && descriptor.glue.move_out == MirGlueKind::Noop
+            && descriptor.glue.clone == MirGlueKind::Noop
+            && descriptor.glue.drop == MirGlueKind::Noop =>
+        {
+            Ok(ContractValueKind::Aggregate(ty.clone()))
+        }
+        _ if matches!(
+            descriptor.layout,
+            MirLayout::Tuple(_) | MirLayout::Record { .. }
+        ) =>
+        {
+            Err(format!(
+                "contract type '{}' is outside the canonical Copy aggregate contract",
+                ty.as_str()
+            ))
+        }
+        abi => Err(format!(
+            "contract type '{}' ABI {:?} is outside the canonical scalar verifier contract",
+            ty.as_str(),
+            abi
+        )),
+    }
 }
 
 fn value_kind(
@@ -167,43 +219,49 @@ fn value_kind(
         .values
         .get(value)
         .ok_or_else(|| format!("contract value '{}' is absent from MIR values", value))?;
-    let descriptor = catalog.get(&value.ty).ok_or_else(|| {
+    type_kind(catalog, &value.ty).map_err(|message| {
         format!(
-            "contract value '{}' type is absent from MIR TypeDesc",
-            value.id.as_str()
-        )
-    })?;
-    match descriptor.abi {
-        MirAbiClass::Integer {
-            bits: 32 | 64,
-            signed: true,
-        } => Ok(ContractValueKind::Int),
-        MirAbiClass::Bool => Ok(ContractValueKind::Bool),
-        abi => Err(format!(
-            "contract value '{}' ABI {:?} is outside the canonical scalar verifier contract",
+            "contract value '{}' {}",
             value.id.as_str(),
-            abi
-        )),
-    }
+            message.trim_start_matches("contract ")
+        )
+    })
 }
 
 fn result_kind(
     function: &MirFunction,
     catalog: &MirTypeCatalog,
 ) -> Result<ContractValueKind, String> {
-    let descriptor = catalog
-        .get(&function.result)
-        .ok_or_else(|| "contract result type is absent from MIR TypeDesc".to_string())?;
-    match descriptor.abi {
-        MirAbiClass::Integer {
-            bits: 32 | 64,
-            signed: true,
-        } => Ok(ContractValueKind::Int),
-        MirAbiClass::Bool => Ok(ContractValueKind::Bool),
-        abi => Err(format!(
-            "contract result ABI {:?} is outside the canonical scalar verifier contract",
-            abi
-        )),
+    type_kind(catalog, &function.result).map_err(|message| {
+        format!(
+            "contract result {}",
+            message.trim_start_matches("contract ")
+        )
+    })
+}
+
+fn expression_type(
+    expression: &MirContractExpr,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+) -> Result<crate::core::ir::ResolvedTypeId, String> {
+    match expression {
+        MirContractExpr::Value(value) | MirContractExpr::Old(value) => function
+            .values
+            .get(value)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| format!("contract value '{}' is absent from MIR values", value)),
+        MirContractExpr::Result => Ok(function.result.clone()),
+        MirContractExpr::Project { base, projection } => {
+            let base_ty = expression_type(base, function, catalog)?;
+            catalog.projection_result_type(&base_ty, projection)
+        }
+        MirContractExpr::Int(_)
+        | MirContractExpr::Bool(_)
+        | MirContractExpr::Unary { .. }
+        | MirContractExpr::Binary { .. } => {
+            Err("contract expression has no aggregate projection type".into())
+        }
     }
 }
 
@@ -217,11 +275,22 @@ fn expr_kind(
             value_kind(function, catalog, value)
         }
         MirContractExpr::Result => result_kind(function, catalog),
+        MirContractExpr::Project { base, projection } => {
+            let base_ty = expression_type(base, function, catalog)?;
+            if !matches!(
+                type_kind(catalog, &base_ty)?,
+                ContractValueKind::Aggregate(_)
+            ) {
+                return Err("contract projection base must be a Copy tuple or record".into());
+            }
+            let result_ty = catalog.projection_result_type(&base_ty, projection)?;
+            type_kind(catalog, &result_ty)
+        }
         MirContractExpr::Int(_) => Ok(ContractValueKind::Int),
         MirContractExpr::Bool(_) => Ok(ContractValueKind::Bool),
         MirContractExpr::Unary { op, operand } => {
             let kind = expr_kind(operand, function, catalog)?;
-            match (op, kind) {
+            match (op, kind.clone()) {
                 (MirContractUnaryOp::Negate, ContractValueKind::Int)
                 | (MirContractUnaryOp::Not, ContractValueKind::Bool) => Ok(kind),
                 _ => Err("contract unary operator has an incompatible scalar operand".into()),
@@ -251,7 +320,11 @@ fn expr_kind(
                     }
                 }
                 MirContractBinaryOp::Equal | MirContractBinaryOp::NotEqual => {
-                    if left_kind == right_kind {
+                    if matches!(
+                        (left_kind, right_kind),
+                        (ContractValueKind::Int, ContractValueKind::Int)
+                            | (ContractValueKind::Bool, ContractValueKind::Bool)
+                    ) {
                         Ok(ContractValueKind::Bool)
                     } else {
                         Err("contract equality operands have incompatible scalar types".into())
@@ -319,6 +392,7 @@ fn contains_result(expression: &MirContractExpr) -> bool {
         MirContractExpr::Binary { left, right, .. } => {
             contains_result(left) || contains_result(right)
         }
+        MirContractExpr::Project { base, .. } => contains_result(base),
         MirContractExpr::Value(_)
         | MirContractExpr::Old(_)
         | MirContractExpr::Int(_)
@@ -333,11 +407,66 @@ fn contains_invalid_old(function: &MirFunction, expression: &MirContractExpr) ->
         MirContractExpr::Binary { left, right, .. } => {
             contains_invalid_old(function, left) || contains_invalid_old(function, right)
         }
+        MirContractExpr::Project { base, .. } => contains_invalid_old(function, base),
         MirContractExpr::Value(_)
         | MirContractExpr::Result
         | MirContractExpr::Int(_)
         | MirContractExpr::Bool(_) => false,
     }
+}
+
+fn lower_projection(projection: &ResolvedProjection) -> Result<MirProjection, String> {
+    match projection {
+        ResolvedProjection::Field { field, .. } => Ok(MirProjection::Field(field.clone())),
+        ResolvedProjection::Tuple { index, .. } => Ok(MirProjection::Tuple(*index)),
+        ResolvedProjection::Index { .. } => {
+            Err("contract indexed projection is outside the canonical aggregate contract".into())
+        }
+        ResolvedProjection::Deref { .. } => Err(
+            "contract dereference projection is outside the canonical aggregate contract".into(),
+        ),
+    }
+}
+
+fn lower_contract_place(
+    place: &crate::core::ResolvedPlace,
+    function: &MirFunction,
+    body: &crate::core::ir::ResolvedBody,
+    old: bool,
+) -> Result<MirContractExpr, String> {
+    let value =
+        MirValueId::new(format!("local:{}", place.base.0 .0)).map_err(|error| error.to_string())?;
+    let mut base = if old {
+        if place.base.0 .0.ends_with("/contract-result/local")
+            || !body.parameters.contains(&place.base)
+        {
+            return Err("old() requires a direct callable parameter load".into());
+        }
+        if !function.values.contains_key(&value) {
+            return Err(format!(
+                "old() parameter '{}' is absent from canonical MIR values",
+                place.base.0 .0
+            ));
+        }
+        MirContractExpr::Old(value)
+    } else if place.base.0 .0.ends_with("/contract-result/local") {
+        MirContractExpr::Result
+    } else {
+        if !function.values.contains_key(&value) {
+            return Err(format!(
+                "contract local '{}' is absent from canonical MIR values",
+                place.base.0 .0
+            ));
+        }
+        MirContractExpr::Value(value)
+    };
+    for projection in &place.projections {
+        base = MirContractExpr::Project {
+            base: Box::new(base),
+            projection: lower_projection(projection)?,
+        };
+    }
+    Ok(base)
 }
 
 /// Resolve a ResolvedExpr condition into canonical MIR identities.  This is
@@ -355,37 +484,17 @@ pub(crate) fn lower_contract_expr(
         ResolvedExprKind::Literal(ResolvedLiteral::Bool(value)) => {
             Ok(MirContractExpr::Bool(*value))
         }
-        ResolvedExprKind::Load(place) if place.projections.is_empty() => {
-            let value = MirValueId::new(format!("local:{}", place.base.0 .0))
-                .map_err(|error| error.to_string())?;
-            if place.base.0 .0.ends_with("/contract-result/local") {
-                return Ok(MirContractExpr::Result);
-            }
-            if !function.values.contains_key(&value) {
-                return Err(format!(
-                    "contract local '{}' is absent from canonical MIR values",
-                    place.base.0 .0
-                ));
-            }
-            Ok(MirContractExpr::Value(value))
-        }
+        ResolvedExprKind::Load(place) => lower_contract_place(place, function, body, false),
         ResolvedExprKind::Old(inner) => {
             let ResolvedExprKind::Load(place) = &inner.kind else {
                 return Err("old() requires a direct callable parameter load".into());
             };
-            if !place.projections.is_empty() || !body.parameters.contains(&place.base) {
-                return Err("old() requires a direct callable parameter load".into());
-            }
-            let value = MirValueId::new(format!("local:{}", place.base.0 .0))
-                .map_err(|error| error.to_string())?;
-            if !function.values.contains_key(&value) {
-                return Err(format!(
-                    "old() parameter '{}' is absent from canonical MIR values",
-                    place.base.0 .0
-                ));
-            }
-            Ok(MirContractExpr::Old(value))
+            lower_contract_place(place, function, body, true)
         }
+        ResolvedExprKind::Project { value, projection } => Ok(MirContractExpr::Project {
+            base: Box::new(lower_contract_expr(value, function, body)?),
+            projection: lower_value_projection(projection)?,
+        }),
         ResolvedExprKind::Unary { op, operand } => {
             let op = match op {
                 ResolvedUnaryOp::Negate => MirContractUnaryOp::Negate,
@@ -415,6 +524,23 @@ pub(crate) fn lower_contract_expr(
             "contract expression shape {:?} is outside the canonical MIR verifier contract",
             expression.kind
         )),
+    }
+}
+
+fn lower_value_projection(
+    projection: &crate::core::ir::ResolvedValueProjection,
+) -> Result<MirProjection, String> {
+    match projection {
+        crate::core::ir::ResolvedValueProjection::Field(field) => {
+            Ok(MirProjection::Field(field.clone()))
+        }
+        crate::core::ir::ResolvedValueProjection::Tuple(index) => Ok(MirProjection::Tuple(*index)),
+        crate::core::ir::ResolvedValueProjection::Index(_) => {
+            Err("contract indexed projection is outside the canonical aggregate contract".into())
+        }
+        crate::core::ir::ResolvedValueProjection::Dereference => Err(
+            "contract dereference projection is outside the canonical aggregate contract".into(),
+        ),
     }
 }
 

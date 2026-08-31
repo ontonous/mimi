@@ -1,0 +1,20 @@
+type Point {
+    x: i32,
+    enabled: bool
+}
+
+func advance(p: Point, take_step: bool) -> Point {
+    requires: p.x < 2147483647
+    ensures: result.x == old(p.x) + 1
+    if take_step {
+        Point { x: p.x + 1, enabled: p.enabled }
+    } else {
+        Point { x: p.x + 1, enabled: p.enabled }
+    }
+}
+
+func main() -> i32 {
+    let p = Point { x: 41, enabled: true }
+    let q = advance(p, true)
+    q.x
+}
