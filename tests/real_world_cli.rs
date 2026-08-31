@@ -324,6 +324,123 @@ fn canonical_mir_native_build_record_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_builds_copy_option_and_result_variants() {
+    for (fixture_name, expected_status) in [
+        ("mir_native_option_bool.mimi", 42),
+        ("mir_native_option_copy.mimi", 42),
+        ("mir_native_result_copy.mimi", 8),
+    ] {
+        let fixture = project_root()
+            .join("tests")
+            .join("fixtures")
+            .join(fixture_name);
+        let mir_run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&fixture)
+            .arg("--mir")
+            .output()
+            .expect("failed to spawn canonical MIR variant reference run");
+        assert_eq!(mir_run.status.code(), Some(expected_status));
+
+        let binary = std::env::temp_dir().join(format!(
+            "mimi-canonical-native-variant-{}-{}",
+            std::process::id(),
+            fixture_name
+        ));
+        let build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg(&fixture)
+            .arg("--mir")
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("failed to spawn canonical MIR variant native build");
+        assert!(
+            build.status.success(),
+            "canonical MIR variant native build failed for {fixture_name}:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native_run = Command::new(&binary)
+            .output()
+            .expect("failed to execute canonical MIR variant native binary");
+        let _ = fs::remove_file(&binary);
+        assert_eq!(native_run.status.code(), Some(expected_status));
+    }
+}
+
+#[test]
+fn canonical_mir_native_option_overflow_matches_mir_trap_class() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_overflow.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR variant trap oracle");
+    assert_eq!(mir_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&mir_run.stderr).contains("E0802"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-variant-trap-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR variant trap build");
+    assert!(
+        build.status.success(),
+        "canonical MIR variant trap build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR variant trap binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&native_run.stderr).contains("E0802"));
+}
+
+#[test]
+fn canonical_mir_native_rejects_mixed_variant_payload_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_variant_mixed_payload_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-variant-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR variant build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR native backend rejected"));
+    assert!(stderr.contains("flat Copy variant contract"));
+    assert!(stderr.contains("mixed payload ABI"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
 fn canonical_mir_native_rejects_noncopy_record_without_fallback() {
     let fixture = project_root()
         .join("tests")

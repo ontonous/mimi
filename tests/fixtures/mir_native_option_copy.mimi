@@ -1,0 +1,15 @@
+func choose(flag: bool) -> Option<i64> {
+    if flag {
+        Some(41)
+    } else {
+        None
+    }
+}
+
+func main() -> i64 {
+    let value = choose(true)
+    match value {
+        Some(v) => v + (1 as i64),
+        None => (0 as i64)
+    }
+}

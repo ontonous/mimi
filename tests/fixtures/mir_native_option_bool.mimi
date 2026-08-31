@@ -1,0 +1,7 @@
+func main() -> i32 {
+    let value: Option<bool> = Some(true)
+    match value {
+        Some(v) => if v { 42 } else { 0 },
+        None => 0
+    }
+}

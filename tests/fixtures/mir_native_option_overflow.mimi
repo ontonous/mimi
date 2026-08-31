@@ -1,0 +1,7 @@
+func main() -> i64 {
+    let value: Option<i64> = Some(9223372036854775807)
+    match value {
+        Some(v) => v + (1 as i64),
+        None => (0 as i64)
+    }
+}

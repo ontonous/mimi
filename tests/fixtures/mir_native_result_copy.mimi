@@ -1,0 +1,11 @@
+func produce() -> Result<i64, i64> {
+    Err(7)
+}
+
+func main() -> i64 {
+    let value = produce()
+    match value {
+        Ok(v) => v + (1 as i64),
+        Err(e) => e + (1 as i64)
+    }
+}

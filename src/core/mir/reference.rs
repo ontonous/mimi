@@ -3128,6 +3128,16 @@ mod tests {
     }
 
     #[test]
+    fn executes_i64_copy_variant_branch_merge_from_canonical_mir() {
+        let source = "func choose(flag: bool) -> Option<i64> { if flag { Some(41) } else { None } }\nfunc main() -> i64 { let value = choose(true); match value { Some(v) => v + (1 as i64), None => (0 as i64) } }";
+        let (owner, program) = canonical_program_with_main(source);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
     fn executes_move_option_and_result_payloads_from_canonical_mir() {
         for (source, expected) in [
             (

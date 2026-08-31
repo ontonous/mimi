@@ -1,4 +1,5 @@
-//! AST-free native consumer for the closed scalar/flat-record Canonical MIR slice.
+//! AST-free native consumer for the closed scalar/flat-record/flat-variant
+//! Canonical MIR slice.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
 //! surface AST or `CheckedProgram`, and it never calls the legacy emitter.  A
@@ -24,8 +25,8 @@ use crate::core::mir::types::{
     MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirTerminator,
-    MirValueId,
+    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirSwitchArm,
+    MirSwitchCase, MirTerminator, MirValueId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -55,7 +56,7 @@ impl NativeMirError {
     }
 }
 
-/// Compile a validated scalar/flat-record MIR program directly to LLVM.
+/// Compile a validated scalar/flat-aggregate MIR program directly to LLVM.
 ///
 /// This is an explicit migration entry point. It is not used by the default
 /// `build` path until the wider MIR shape and differential gates are closed.
@@ -194,7 +195,8 @@ impl<'a> NativeMirValidator<'a> {
             || (allow_unit_result
                 && desc.abi == MirAbiClass::Unit
                 && desc.layout == MirLayout::Unit)
-            || self.validate_flat_copy_record(ty, subject, desc);
+            || self.validate_flat_copy_record(ty, subject, desc)
+            || self.validate_flat_copy_variant(ty, subject, desc);
         if !supported {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -279,6 +281,23 @@ impl<'a> NativeMirValidator<'a> {
             }
         }
         valid
+    }
+
+    fn validate_flat_copy_variant(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+        _desc: &MirTypeDesc,
+    ) -> bool {
+        match native_copy_variant_payload_type(self.program.type_catalog(), ty) {
+            Ok(_) => true,
+            Err(message) => {
+                let mut message = message;
+                message.subject = subject.to_owned();
+                self.errors.push(message);
+                false
+            }
+        }
     }
 
     fn validate_instruction(
@@ -372,6 +391,14 @@ impl<'a> NativeMirValidator<'a> {
                 kind,
                 fields,
             } => self.validate_construct(function, result, kind, fields, subject),
+            MirInstructionKind::ConstructVariant {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => {
+                self.validate_construct_variant(function, result, nominal, variant, fields, subject)
+            }
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
@@ -534,6 +561,163 @@ impl<'a> NativeMirValidator<'a> {
                 .validate_aggregate(&result_value.ty, kind, &field_types)
         {
             self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_construct_variant(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &crate::core::NodeId,
+        fields: &[(crate::core::NodeId, MirValueId)],
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "variant result");
+        for (_, value) in fields {
+            self.validate_value(function, value, "variant payload value");
+        }
+        let Some(result_value) = function.values.get(result) else {
+            return;
+        };
+        let field_ids = fields
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect::<Vec<_>>();
+        let field_types = fields
+            .iter()
+            .filter_map(|(_, value)| function.values.get(value).map(|info| info.ty.clone()))
+            .collect::<Vec<_>>();
+        if field_types.len() != fields.len() {
+            return;
+        }
+        if let Err(message) = self.program.type_catalog().validate_variant_construct(
+            &result_value.ty,
+            nominal,
+            variant,
+            &field_ids,
+            &field_types,
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+        if let Err(message) =
+            native_copy_variant_payload_type(self.program.type_catalog(), &result_value.ty)
+        {
+            let mut message = message;
+            message.subject = subject.to_owned();
+            self.errors.push(message);
+        }
+    }
+
+    fn validate_switch(
+        &mut self,
+        function: &MirFunction,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        subject: &str,
+    ) {
+        self.validate_value(function, scrutinee, "switch scrutinee");
+        let Some(scrutinee_value) = function.values.get(scrutinee) else {
+            return;
+        };
+        if let Err(message) =
+            native_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_value.ty)
+        {
+            let mut message = message;
+            message.subject = subject.to_owned();
+            self.errors.push(message);
+            return;
+        }
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_switch(&scrutinee_value.ty, arms)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+        for arm in arms {
+            let Some(target) = function.blocks.get(&arm.target) else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!("switch edge target '{}' is absent", arm.target),
+                ));
+                continue;
+            };
+            for (index, argument) in arm.arguments.iter().enumerate() {
+                self.validate_value(function, argument, "switch edge argument");
+                let Some(parameter) = target
+                    .parameters
+                    .get(index)
+                    .and_then(|parameter| function.values.get(&parameter.value))
+                else {
+                    continue;
+                };
+                if function
+                    .values
+                    .get(argument)
+                    .is_some_and(|value| value.ty != parameter.ty)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch edge argument type disagrees with block parameter",
+                    ));
+                }
+            }
+            if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "switch edge arguments and payload bindings disagree with block parameter arity",
+                ));
+            }
+            let mut binding_fields = BTreeSet::new();
+            let variant = match &arm.case {
+                MirSwitchCase::Variant(variant) => self
+                    .program
+                    .type_catalog()
+                    .variant(&scrutinee_value.ty, variant),
+                MirSwitchCase::Default | MirSwitchCase::Literal(_) => None,
+            };
+            for (index, binding) in arm.bindings.iter().enumerate() {
+                if !binding_fields.insert(binding.field.clone()) {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "switch payload field '{}' is bound more than once",
+                            binding.field.0
+                        ),
+                    ));
+                }
+                let Some(parameter) = target
+                    .parameters
+                    .get(arm.arguments.len() + index)
+                    .and_then(|parameter| function.values.get(&parameter.value))
+                else {
+                    continue;
+                };
+                let Some(variant) = variant else {
+                    continue;
+                };
+                let Some(field) = variant
+                    .fields
+                    .iter()
+                    .find(|field| field.id == binding.field)
+                else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "switch payload field '{}' is absent from TypeDesc variant",
+                            binding.field.0
+                        ),
+                    ));
+                    continue;
+                };
+                if parameter.ty != field.ty {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch payload binding type disagrees with TypeDesc",
+                    ));
+                }
+            }
         }
     }
 
@@ -748,6 +932,15 @@ impl<'a> NativeMirValidator<'a> {
                 self.validate_edge(function, then_target, then_arguments, &subject);
                 self.validate_edge(function, else_target, else_arguments, &subject);
             }
+            MirTerminator::Switch { scrutinee, arms } => {
+                self.validate_switch(function, scrutinee, arms, &subject);
+            }
+            MirTerminator::SwitchMove { .. } => {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "consuming switch has no native Copy-only variant contract",
+                ));
+            }
             MirTerminator::Return { value } => match value {
                 Some(value) => {
                     self.validate_value(function, value, "return value");
@@ -779,12 +972,6 @@ impl<'a> NativeMirValidator<'a> {
                 if let Err(message) = crate::core::mir::types::validate_trap_code(code) {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
-            }
-            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    "switch terminators are not in native scalar slice",
-                ));
             }
             MirTerminator::Fault { .. } | MirTerminator::Unreachable => {
                 self.errors.push(NativeMirError::new(
@@ -962,7 +1149,12 @@ struct NativeMirFunctionEmitter<'a, 'ctx> {
     blocks: BTreeMap<MirBlockId, BasicBlock<'ctx>>,
     values: HashMap<MirValueId, BasicValueEnum<'ctx>>,
     phis: HashMap<MirValueId, PhiValue<'ctx>>,
-    pending_incoming: Vec<(MirValueId, MirValueId, BasicBlock<'ctx>)>,
+    pending_incoming: Vec<(MirValueId, NativePhiSource<'ctx>, BasicBlock<'ctx>)>,
+}
+
+enum NativePhiSource<'ctx> {
+    Mir(MirValueId),
+    Value(BasicValueEnum<'ctx>),
 }
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
@@ -1123,6 +1315,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_construct(result, kind, fields, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::ConstructVariant {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => {
+                let value =
+                    self.emit_construct_variant(result, nominal, variant, fields, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
@@ -1213,6 +1415,100 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_struct_value();
         }
+        Ok(aggregate.into())
+    }
+
+    fn emit_construct_variant(
+        &mut self,
+        result: &MirValueId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &crate::core::NodeId,
+        fields: &[(crate::core::NodeId, MirValueId)],
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let (expected_nominal, variants) = self
+            .program
+            .type_catalog()
+            .variant_layout(&result_ty)
+            .ok_or_else(|| {
+            NativeMirError::new(subject, "variant result has no canonical TypeDesc layout")
+        })?;
+        if nominal.as_str() != expected_nominal {
+            return Err(NativeMirError::new(
+                subject,
+                format!(
+                    "variant nominal '{}' disagrees with canonical nominal '{}'",
+                    nominal.as_str(),
+                    expected_nominal
+                ),
+            ));
+        }
+        let variant_desc = variants
+            .iter()
+            .find(|candidate| candidate.id == *variant)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    format!("variant '{}' is absent from TypeDesc", variant.0),
+                )
+            })?;
+        let field_ids = fields
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect::<Vec<_>>();
+        let field_types = fields
+            .iter()
+            .map(|(_, value)| self.value_type(value, subject))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.program
+            .type_catalog()
+            .validate_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let payload_ty = native_copy_variant_payload_type(self.program.type_catalog(), &result_ty)?;
+        let struct_ty = native_basic_type(
+            self.generator.context,
+            self.program.type_catalog(),
+            &result_ty,
+        )?
+        .into_struct_type();
+        let mut aggregate = struct_ty.get_undef();
+        aggregate = self
+            .generator
+            .builder
+            .build_insert_value(
+                aggregate,
+                self.generator
+                    .context
+                    .i8_type()
+                    .const_int(u64::from(variant_desc.discriminant), false),
+                0,
+                "mir_variant_tag",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_struct_value();
+        let payload = if fields.is_empty() {
+            native_basic_type(
+                self.generator.context,
+                self.program.type_catalog(),
+                &payload_ty,
+            )?
+            .const_zero()
+        } else {
+            if fields.len() != 1 || fields[0].0 != variant_desc.fields[0].id {
+                return Err(NativeMirError::new(
+                    subject,
+                    "variant payload fields do not match the canonical TypeDesc field",
+                ));
+            }
+            self.value(&fields[0].1, subject)?
+        };
+        aggregate = self
+            .generator
+            .builder
+            .build_insert_value(aggregate, payload, 1, "mir_variant_payload")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_struct_value();
         Ok(aggregate.into())
     }
 
@@ -1731,6 +2027,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
             }
+            MirTerminator::Switch { scrutinee, arms } => {
+                self.emit_switch(scrutinee, arms, subject)?;
+            }
             MirTerminator::Return { value } => match value {
                 Some(value) => {
                     let value = self.value(value, &subject.to_string())?;
@@ -1763,6 +2062,150 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
+    fn emit_switch(
+        &mut self,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
+        let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
+        let variant_arms = arms
+            .iter()
+            .filter(|arm| matches!(arm.case, MirSwitchCase::Variant(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let default_arm = arms
+            .iter()
+            .find(|arm| matches!(arm.case, MirSwitchCase::Default))
+            .cloned();
+
+        if variant_arms.is_empty() {
+            let default_arm = default_arm.ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "variant switch has no native arm")
+            })?;
+            let current = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "switch has no LLVM insertion block")
+            })?;
+            self.queue_edge(
+                &default_arm.target,
+                &default_arm.arguments,
+                current,
+                subject,
+            )?;
+            self.generator
+                .builder
+                .build_unconditional_branch(
+                    *self
+                        .blocks
+                        .get(&default_arm.target)
+                        .expect("validated default target"),
+                )
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            return Ok(());
+        }
+
+        let tag = self
+            .generator
+            .builder
+            .build_extract_value(
+                scrutinee_value.into_struct_value(),
+                0,
+                "mir_variant_tag_load",
+            )
+            .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?
+            .into_int_value();
+        for (index, arm) in variant_arms.iter().enumerate() {
+            let MirSwitchCase::Variant(variant_id) = &arm.case else {
+                unreachable!("variant arms were filtered above")
+            };
+            let variant = self
+                .program
+                .type_catalog()
+                .variant(&scrutinee_ty, variant_id)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        format!("variant '{}' is absent from TypeDesc", variant_id.0),
+                    )
+                })?
+                .clone();
+            let condition = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(variant.discriminant), false),
+                    "mir_variant_case",
+                )
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            let current = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "switch case has no LLVM block")
+            })?;
+            self.queue_variant_edge(
+                &arm.target,
+                &arm.arguments,
+                &arm.bindings,
+                &variant,
+                scrutinee_value,
+                current,
+                subject,
+            )?;
+            let target = *self
+                .blocks
+                .get(&arm.target)
+                .expect("validated variant target");
+            if index + 1 < variant_arms.len() {
+                let next = self
+                    .generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_variant_next");
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, next)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.generator.builder.position_at_end(next);
+            } else if let Some(default_arm) = &default_arm {
+                self.queue_edge(
+                    &default_arm.target,
+                    &default_arm.arguments,
+                    current,
+                    subject,
+                )?;
+                self.generator
+                    .builder
+                    .build_conditional_branch(
+                        condition,
+                        target,
+                        *self
+                            .blocks
+                            .get(&default_arm.target)
+                            .expect("validated default target"),
+                    )
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            } else {
+                let unreachable = self
+                    .generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_variant_unreachable");
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, unreachable)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.generator.builder.position_at_end(unreachable);
+                self.generator
+                    .builder
+                    .build_unreachable()
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn queue_edge(
         &mut self,
         target: &MirBlockId,
@@ -1776,17 +2219,100 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .get(target)
             .ok_or_else(|| NativeMirError::new(subject.to_string(), "edge target is absent"))?;
         for (parameter, argument) in block.parameters.iter().zip(arguments) {
-            self.pending_incoming
-                .push((parameter.value.clone(), argument.clone(), predecessor));
+            self.pending_incoming.push((
+                parameter.value.clone(),
+                NativePhiSource::Mir(argument.clone()),
+                predecessor,
+            ));
+        }
+        Ok(())
+    }
+
+    fn queue_variant_edge(
+        &mut self,
+        target: &MirBlockId,
+        arguments: &[MirValueId],
+        bindings: &[crate::core::mir::MirSwitchBinding],
+        variant: &crate::core::mir::types::MirVariantDesc,
+        scrutinee: BasicValueEnum<'ctx>,
+        predecessor: BasicBlock<'ctx>,
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        let block = self
+            .function
+            .blocks
+            .get(target)
+            .ok_or_else(|| NativeMirError::new(subject.to_string(), "edge target is absent"))?;
+        if block.parameters.len() != arguments.len() + bindings.len() {
+            return Err(NativeMirError::new(
+                subject.to_string(),
+                "variant edge does not match target block parameter arity",
+            ));
+        }
+        for (parameter, argument) in block.parameters.iter().zip(arguments) {
+            self.pending_incoming.push((
+                parameter.value.clone(),
+                NativePhiSource::Mir(argument.clone()),
+                predecessor,
+            ));
+        }
+        let payload = if bindings.is_empty() {
+            None
+        } else {
+            let field = variant
+                .fields
+                .iter()
+                .find(|field| field.id == bindings[0].field)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        "variant payload binding field is absent from TypeDesc",
+                    )
+                })?;
+            if field.id != bindings[0].field || variant.fields.len() != 1 {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "variant payload binding is outside the single-payload native contract",
+                ));
+            }
+            Some(
+                self.generator
+                    .builder
+                    .build_extract_value(
+                        scrutinee.into_struct_value(),
+                        1,
+                        "mir_variant_payload_load",
+                    )
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?,
+            )
+        };
+        if let Some(payload) = payload {
+            for (index, binding) in bindings.iter().enumerate() {
+                if index != 0 || binding.field != variant.fields[0].id {
+                    return Err(NativeMirError::new(
+                        subject.to_string(),
+                        "variant payload binding is outside the single-payload native contract",
+                    ));
+                }
+                let parameter = &block.parameters[arguments.len() + index];
+                self.pending_incoming.push((
+                    parameter.value.clone(),
+                    NativePhiSource::Value(payload),
+                    predecessor,
+                ));
+            }
         }
         Ok(())
     }
 
     fn add_phi_incomings(&mut self) -> Result<(), NativeMirError> {
         for (parameter, source, predecessor) in &self.pending_incoming {
-            let value = *self.values.get(source).ok_or_else(|| {
-                NativeMirError::new(source.to_string(), "phi incoming value was not emitted")
-            })?;
+            let value = match source {
+                NativePhiSource::Mir(source) => *self.values.get(source).ok_or_else(|| {
+                    NativeMirError::new(source.to_string(), "phi incoming value was not emitted")
+                })?,
+                NativePhiSource::Value(value) => *value,
+            };
             let phi = self.phis.get(parameter).ok_or_else(|| {
                 NativeMirError::new(parameter.to_string(), "phi parameter is absent")
             })?;
@@ -1910,6 +2436,158 @@ fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
             })
 }
 
+/// Return the one native payload type shared by a bounded built-in variant.
+///
+/// The physical representation is deliberately narrower than the general MIR
+/// variant contract: `{ i8 discriminant, scalar payload }`.  The payload slot
+/// is present even for a zero-field variant and is zero-filled by the emitter;
+/// that keeps the LLVM ABI stable while making Option/Result shapes with
+/// owned, nested, mixed, or unit payloads fail closed here.
+fn native_copy_variant_payload_type(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
+    let desc = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
+    let variants = match &desc.layout {
+        MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+        layout => {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!("layout {layout:?} is outside the flat Copy variant contract"),
+            ))
+        }
+    };
+    if desc.abi != MirAbiClass::Aggregate {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            format!(
+                "variant ABI {:?} is outside the flat Copy variant contract",
+                desc.abi
+            ),
+        ));
+    }
+    if desc.ownership != MirOwnership::Copy {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            format!(
+                "variant ownership {:?} requires explicit native glue and is outside the flat Copy variant contract",
+                desc.ownership
+            ),
+        ));
+    }
+    if desc.glue
+        != (MirGlueContract {
+            move_out: MirGlueKind::Noop,
+            clone: MirGlueKind::Noop,
+            drop: MirGlueKind::Noop,
+        })
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "variant TypeDesc does not carry the canonical no-op glue contract",
+        ));
+    }
+    if variants.is_empty() {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "variant TypeDesc has no variants in the flat Copy variant contract",
+        ));
+    }
+
+    let mut discriminants = BTreeSet::new();
+    let mut variant_ids = BTreeSet::new();
+    let mut field_ids = BTreeSet::new();
+    let mut payload_type: Option<crate::core::ResolvedTypeId> = None;
+    for variant in variants {
+        if !discriminants.insert(variant.discriminant) {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant discriminant {} is duplicated in the flat Copy variant contract",
+                    variant.discriminant
+                ),
+            ));
+        }
+        if variant.discriminant > u8::MAX as u16 {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant discriminant {} does not fit the native i8 tag contract",
+                    variant.discriminant
+                ),
+            ));
+        }
+        if !variant_ids.insert(variant.id.clone()) {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant identity '{}' is duplicated in the flat Copy variant contract",
+                    variant.id.0
+                ),
+            ));
+        }
+        if variant.fields.len() > 1 {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant '{}' has {} payload fields; the flat Copy variant contract allows at most one",
+                    variant.name,
+                    variant.fields.len()
+                ),
+            ));
+        }
+        let Some(field) = variant.fields.first() else {
+            continue;
+        };
+        if !field_ids.insert(field.id.clone()) {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant payload field identity '{}' is duplicated in the flat Copy variant contract",
+                    field.id.0
+                ),
+            ));
+        }
+        let field_desc = catalog.get(&field.ty).ok_or_else(|| {
+            NativeMirError::new(
+                ty.as_str(),
+                format!("variant payload TypeDesc '{}' is absent", field.ty.as_str()),
+            )
+        })?;
+        if !is_native_scalar_descriptor(field_desc) {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!(
+                    "variant '{}' payload ABI {:?}/layout {:?} is outside the flat Copy variant contract",
+                    variant.name, field_desc.abi, field_desc.layout
+                ),
+            ));
+        }
+        if let Some(expected) = &payload_type {
+            if expected != &field.ty {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!(
+                        "variant payload type '{}' disagrees with '{}'; mixed payload ABI is outside the flat Copy variant contract",
+                        field.ty.as_str(),
+                        expected.as_str()
+                    ),
+                ));
+            }
+        } else {
+            payload_type = Some(field.ty.clone());
+        }
+    }
+    payload_type.ok_or_else(|| {
+        NativeMirError::new(
+            ty.as_str(),
+            "variant has no scalar payload; unit/zero-payload variants are outside the flat Copy variant contract",
+        )
+    })
+}
+
 fn native_basic_type<'ctx>(
     context: &'ctx Context,
     catalog: &MirTypeCatalog,
@@ -1947,6 +2625,13 @@ fn native_basic_type<'ctx>(
                     field_types.push(native_basic_type(context, catalog, &field.ty)?);
                 }
                 Ok(context.struct_type(&field_types, false).into())
+            }
+            MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                let payload_ty = native_copy_variant_payload_type(catalog, ty)?;
+                let payload = native_basic_type(context, catalog, &payload_ty)?;
+                Ok(context
+                    .struct_type(&[context.i8_type().into(), payload], false)
+                    .into())
             }
             layout => Err(NativeMirError::new(
                 ty.as_str(),
@@ -2026,6 +2711,27 @@ mod tests {
         assert!(
             generator.module.get_function("main").is_none(),
             "non-Copy aggregate must be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
+    fn native_validator_rejects_mixed_variant_payload_before_llvm_declarations() {
+        let program = canonical_program(
+            "func main() -> i64 { let value: Result<i64, bool> = Ok(41); match value { Ok(v) => v, Err(_) => (0 as i64) } }",
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_validator_test");
+
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("mixed variant payloads must fail before native emission");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("flat Copy variant contract")
+                && diagnostic.message.contains("mixed payload ABI")
+        }));
+        assert!(
+            generator.module.get_function("main").is_none(),
+            "L2 requires variant validation before LLVM function declarations"
         );
     }
 }

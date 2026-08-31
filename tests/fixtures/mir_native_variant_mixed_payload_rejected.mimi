@@ -1,0 +1,7 @@
+func main() -> i64 {
+    let value: Result<i64, bool> = Ok(41)
+    match value {
+        Ok(v) => v,
+        Err(_) => (0 as i64)
+    }
+}

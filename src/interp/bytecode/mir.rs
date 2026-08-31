@@ -2966,6 +2966,16 @@ mod tests {
     }
 
     #[test]
+    fn executes_i64_copy_variant_branch_merge_through_canonical_mir() {
+        let source = "func choose(flag: bool) -> Option<i64> { if flag { Some(41) } else { None } }\nfunc main() -> i64 { let value = choose(true); match value { Some(v) => v + (1 as i64), None => (0 as i64) } }";
+        let program = compile(source);
+        let value = BytecodeVM::new(program)
+            .run_value()
+            .expect("bytecode execution");
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn preserves_variant_return_shape_between_reference_and_bytecode() {
         let source = "func main() -> Option<i32> { Some(41) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
