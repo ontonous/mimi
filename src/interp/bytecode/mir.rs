@@ -2184,11 +2184,299 @@ mod tests {
     use super::compile_mir_program;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::{MirOwnershipEvent, MirOwnershipEventKind};
+    use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
     use crate::interp::bytecode::Op;
     use crate::interp::value::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum DifferentialOutcome {
+        Return(MirRuntimeValue),
+        Error { class: String, message: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DifferentialObservation {
+        outcome: DifferentialOutcome,
+        output: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct DifferentialReport {
+        source: String,
+        mir_text: String,
+        type_desc_text: String,
+        ownership_text: String,
+        reference: DifferentialObservation,
+        mir_bytecode: DifferentialObservation,
+        legacy_bytecode: DifferentialObservation,
+    }
+
+    #[derive(Debug)]
+    enum DifferentialHarnessError {
+        Parse(String),
+        Check(String),
+        CanonicalMir(String),
+        CanonicalBytecode(String),
+        LegacyBytecode(String),
+        Observation(String),
+        Mismatch(Box<DifferentialReport>),
+    }
+
+    fn parse_and_check(
+        source: &str,
+    ) -> Result<(crate::ast::File, crate::core::CheckedProgram), DifferentialHarnessError> {
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .map_err(|error| DifferentialHarnessError::Parse(error.to_string()))?;
+        let file = Parser::new(tokens)
+            .parse_file()
+            .map_err(|error| DifferentialHarnessError::Parse(error.to_string()))?;
+        let checked = crate::core::check_program(&file)
+            .map_err(|errors| DifferentialHarnessError::Check(format!("{errors:?}")))?;
+        Ok((file, checked))
+    }
+
+    fn canonical_program_text(mir: &MirProgram) -> String {
+        mir.functions()
+            .values()
+            .map(|function| function.canonical_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn canonical_ownership_text(mir: &MirProgram) -> String {
+        mir.functions()
+            .values()
+            .map(|function| {
+                format!(
+                    "{}\n{}",
+                    function.owner.0,
+                    function.ownership.canonical_text()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn normalize_value(value: Value) -> Result<MirRuntimeValue, String> {
+        match value {
+            Value::Int(value) => Ok(MirRuntimeValue::Int(value)),
+            Value::Float(value) => Ok(MirRuntimeValue::FloatBits(value.to_bits())),
+            Value::Bool(value) => Ok(MirRuntimeValue::Bool(value)),
+            Value::String(value) => Ok(MirRuntimeValue::String((*value).clone())),
+            Value::Unit => Ok(MirRuntimeValue::Unit),
+            Value::Tuple(values) => values
+                .into_iter()
+                .map(normalize_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(MirRuntimeValue::Tuple),
+            other => Err(format!(
+                "differential value normalization is not materialized for {other:?}"
+            )),
+        }
+    }
+
+    fn reference_observation(
+        result: Result<MirRuntimeValue, crate::core::mir::reference::MirExecutionError>,
+    ) -> DifferentialObservation {
+        match result {
+            Ok(value) => DifferentialObservation {
+                outcome: DifferentialOutcome::Return(value),
+                output: String::new(),
+            },
+            Err(error) => DifferentialObservation {
+                outcome: DifferentialOutcome::Error {
+                    class: reference_error_class(&error.message),
+                    message: error.message,
+                },
+                output: String::new(),
+            },
+        }
+    }
+
+    fn bytecode_observation(
+        result: Result<Value, crate::interp::error::InterpError>,
+        output: String,
+    ) -> Result<DifferentialObservation, DifferentialHarnessError> {
+        let outcome = match result {
+            Ok(value) => DifferentialOutcome::Return(
+                normalize_value(value).map_err(DifferentialHarnessError::Observation)?,
+            ),
+            Err(error) => DifferentialOutcome::Error {
+                class: format!("runtime:{}", error.code()),
+                message: error.message().to_owned(),
+            },
+        };
+        Ok(DifferentialObservation { outcome, output })
+    }
+
+    fn reference_error_class(message: &str) -> String {
+        if let Some(code) = message.strip_prefix("trap ") {
+            return format!("trap:{code}");
+        }
+        if message.contains("division by zero") {
+            return "runtime:E0801".into();
+        }
+        if message.contains("overflow") {
+            return "runtime:E0802".into();
+        }
+        "runtime:E0800".into()
+    }
+
+    fn observations_match(left: &DifferentialObservation, right: &DifferentialObservation) -> bool {
+        left.output == right.output
+            && match (&left.outcome, &right.outcome) {
+                (DifferentialOutcome::Return(left), DifferentialOutcome::Return(right)) => {
+                    left == right
+                }
+                (
+                    DifferentialOutcome::Error { class: left, .. },
+                    DifferentialOutcome::Error { class: right, .. },
+                ) => left == right,
+                _ => false,
+            }
+    }
+
+    fn run_canonical_differential(
+        source: &str,
+    ) -> Result<DifferentialReport, DifferentialHarnessError> {
+        let (file, checked) = parse_and_check(source)?;
+
+        // This is the only frontend-to-MIR boundary in the harness.  A
+        // failure here is a canonical eligibility failure, never permission
+        // to run the legacy backend.
+        let mir = MirProgram::from_checked_program(&checked)
+            .map_err(|error| DifferentialHarnessError::CanonicalMir(format!("{error:?}")))?;
+        let owner = crate::core::NodeId("function:main".into());
+        let reference =
+            reference_observation(MirReferenceInterpreter::new(&mir).execute(&owner, &[]));
+
+        // The canonical production backend is compiled from MIR only.  Its
+        // AST-free program is an explicit contract of this harness.
+        let mir_bytecode = compile_mir_program(&mir)
+            .map_err(|errors| DifferentialHarnessError::CanonicalBytecode(format!("{errors:?}")))?;
+        if mir_bytecode.ast.is_some() {
+            return Err(DifferentialHarnessError::CanonicalBytecode(
+                "canonical MIR bytecode retained an AST".into(),
+            ));
+        }
+        let mut mir_vm = BytecodeVM::new(mir_bytecode);
+        let mir_bytecode = bytecode_observation(mir_vm.run_value(), mir_vm.stdout().to_owned())?;
+
+        // The legacy compiler is comparison-only in this slice.  It is
+        // intentionally called after canonical construction/emission and can
+        // never rescue a canonical rejection.
+        let mut legacy_compiler = BytecodeCompiler::new();
+        let legacy_program = legacy_compiler
+            .compile_file(&file)
+            .map_err(|error| DifferentialHarnessError::LegacyBytecode(error.to_string()))?;
+        let mut legacy_vm = BytecodeVM::new(legacy_program);
+        let legacy_bytecode =
+            bytecode_observation(legacy_vm.run_value(), legacy_vm.stdout().to_owned())?;
+
+        let report = DifferentialReport {
+            source: source.into(),
+            mir_text: canonical_program_text(&mir),
+            type_desc_text: mir.type_catalog().canonical_text(),
+            ownership_text: canonical_ownership_text(&mir),
+            reference,
+            mir_bytecode,
+            legacy_bytecode,
+        };
+        let semantic_observations = [
+            &report.reference,
+            &report.mir_bytecode,
+            &report.legacy_bytecode,
+        ];
+        let first = &semantic_observations[0];
+        if semantic_observations
+            .iter()
+            .any(|observation| !observations_match(observation, first))
+        {
+            return Err(DifferentialHarnessError::Mismatch(Box::new(report)));
+        }
+        Ok(report)
+    }
+
+    #[test]
+    fn canonical_mir_differential_covers_scalar_branch_call_and_tuple_shapes() {
+        let cases = [
+            ("scalar-binary", "func main() -> i32 { 40 + 2 }", "binary"),
+            (
+                "branch",
+                "func main() -> i32 { if true { 7 } else { 9 } }",
+                "branch",
+            ),
+            (
+                "call",
+                "func add_one(x: i32) -> i32 { x + 1 }\nfunc main() -> i32 { add_one(41) }",
+                "call",
+            ),
+            (
+                "tuple",
+                "func main() -> (i32, bool) { (40, true) }",
+                "construct",
+            ),
+        ];
+
+        for (name, source, shape) in cases {
+            let report = run_canonical_differential(source)
+                .unwrap_or_else(|error| panic!("{name} differential case failed: {error:?}"));
+            assert!(report.mir_text.contains(shape), "missing MIR shape {shape}");
+            assert!(report
+                .type_desc_text
+                .starts_with("mir.type-catalog mimi-mir-type-desc-"));
+            assert!(report.reference.output.is_empty());
+            assert!(report.mir_bytecode.output.is_empty());
+            assert!(report.legacy_bytecode.output.is_empty());
+        }
+    }
+
+    #[test]
+    fn canonical_mir_differential_preserves_ownership_artifact() {
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let value = Named { name: \"owned\", count: 41 }; drop(value); 42 }";
+        let report = run_canonical_differential(source).expect("record ownership differential");
+        assert!(report.mir_text.contains("construct"));
+        assert!(report.mir_text.contains("drop"));
+        assert_eq!(report.ownership_text, "function:main\n");
+        assert!(report.type_desc_text.contains("OwnedString"));
+        assert!(report.type_desc_text.contains("drop=true"));
+    }
+
+    #[test]
+    fn canonical_mir_differential_agrees_on_runtime_error_class() {
+        let report = run_canonical_differential(
+            "func divide(value: i32) -> i32 { 1 / value }\nfunc main() -> i32 { divide(0) }",
+        )
+        .expect("division-by-zero differential");
+        for observation in [
+            &report.reference,
+            &report.mir_bytecode,
+            &report.legacy_bytecode,
+        ] {
+            assert!(matches!(
+                &observation.outcome,
+                DifferentialOutcome::Error { class, .. } if class == "runtime:E0801"
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_mir_differential_rejects_unmaterialized_shape_without_fallback() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let values = [10, 20, 30]; values[0] }",
+        )
+        .expect_err("list literal must remain outside this canonical slice");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(message.contains("expression shape is not lowered"));
+            }
+            other => panic!("unsupported shape crossed the canonical gate: {other:?}"),
+        }
+    }
 
     fn compile(source: &str) -> std::sync::Arc<crate::interp::bytecode::BytecodeProgram> {
         let tokens = Lexer::new(source).tokenize().expect("lex");
