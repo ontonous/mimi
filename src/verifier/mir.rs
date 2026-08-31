@@ -953,7 +953,31 @@ fn eval_instruction(
                 .get(base)
                 .cloned()
                 .ok_or_else(|| format!("MIR projection base '{}' is not defined", base))?;
-            let value = symbolic_project(value, projection)?;
+            let value = if matches!(projection, MirProjection::Dereference) {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .ok_or_else(|| format!("MIR dereference base '{}' is absent", base))?
+                    .ty
+                    .clone();
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| format!("MIR dereference result '{}' is absent", result))?
+                    .ty
+                    .clone();
+                let target = catalog.validate_reference_type(&base_ty)?;
+                catalog.validate_dereference(&base_ty, &result_ty)?;
+                if !symbolic_matches_type(catalog, &target, &value) {
+                    return Err(
+                        "MIR dereference value disagrees with its canonical reference target"
+                            .into(),
+                    );
+                }
+                value
+            } else {
+                symbolic_project(value, projection)?
+            };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
@@ -1010,11 +1034,46 @@ fn eval_instruction(
         }
         MirInstructionKind::MoveProject { .. }
         | MirInstructionKind::ConstructList { .. }
-        | MirInstructionKind::Borrow { .. }
-        | MirInstructionKind::EndBorrow { .. }
         | MirInstructionKind::ConstructVariantMove { .. }
         | MirInstructionKind::Call { .. } => {
             return Err("MIR instruction is outside scalar verifier contract".into())
+        }
+        MirInstructionKind::Borrow {
+            result,
+            source,
+            mutable,
+        } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR borrow result '{}' is absent", result))?
+                .ty
+                .clone();
+            let source_ty = function
+                .values
+                .get(source)
+                .ok_or_else(|| format!("MIR borrow source '{}' is absent", source))?
+                .ty
+                .clone();
+            catalog.validate_borrow(&source_ty, &result_ty, *mutable)?;
+            let value = state
+                .values
+                .get(source)
+                .cloned()
+                .ok_or_else(|| format!("MIR borrow source '{}' is not defined", source))?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::EndBorrow { borrow } => {
+            let borrow_ty = function
+                .values
+                .get(borrow)
+                .ok_or_else(|| format!("MIR end-borrow value '{}' is absent", borrow))?
+                .ty
+                .clone();
+            catalog.validate_reference_type(&borrow_ty)?;
+            if state.values.remove(borrow).is_none() {
+                return Err(format!("MIR end-borrow value '{}' is not defined", borrow));
+            }
         }
         MirInstructionKind::UpdateRecord {
             result,
@@ -1496,6 +1555,7 @@ mod tests {
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use std::collections::BTreeMap;
 
     #[test]
     fn verifier_and_reference_oracle_consume_the_same_canonical_mir() {
@@ -1666,6 +1726,77 @@ mod tests {
             .expect("record update function")
             .canonical_text()
             .contains("update_record"));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_immutable_scalar_borrow() {
+        let source = r#"
+            func read(value: i32) -> i32 {
+                ensures: result == value
+                *(&value)
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("read"))
+            .cloned()
+            .expect("read MIR function");
+
+        let reference_value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[MirRuntimeValue::Int(41)])
+            .expect("reference borrow execution");
+        assert_eq!(reference_value, MirRuntimeValue::Int(41));
+
+        let results = verify_program(&program, "borrow-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("borrow contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        assert!(program
+            .functions()
+            .get(&owner)
+            .expect("borrow function")
+            .canonical_text()
+            .contains("borrow"));
+    }
+
+    #[test]
+    fn verifier_gate_rejects_mutable_borrow_before_symbolic_consumption() {
+        let source = "func main() -> i32 { let value = 41; (&value); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = canonical.functions().get(&owner).cloned().expect("main");
+        let borrow = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find_map(|instruction| match &mut instruction.kind {
+                crate::core::mir::MirInstructionKind::Borrow { mutable, .. } => {
+                    *mutable = true;
+                    Some(instruction.id.clone())
+                }
+                _ => None,
+            })
+            .expect("borrow instruction");
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            canonical.type_catalog().clone(),
+        )
+        .expect_err("mutable borrow must fail before verifier consumption");
+        assert!(errors.iter().any(|error| {
+            error.subject == borrow.to_string() && error.message.contains("mutable Borrow")
+        }));
     }
 
     #[test]
