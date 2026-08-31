@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
+    BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
     ResolvedTypeId, ResolvedTypeTable,
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
@@ -73,6 +73,74 @@ pub enum MirAbiClass {
     Pointer,
     Aggregate,
     FunctionPointer,
+}
+
+/// Semantic builtin operations that have a first-class canonical MIR node.
+/// The enum is intentionally closed: a surface builtin remains a legacy
+/// `Call` until its ABI, effect, trap, and ownership contract is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirBuiltinKind {
+    /// Signed i64 / f64 absolute value. i64::MIN traps with E0802.
+    Abs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirBuiltinContract {
+    pub kind: MirBuiltinKind,
+    pub name: &'static str,
+    pub arity: usize,
+    pub input_abi: MirAbiClass,
+    pub preserves_type: bool,
+    pub requires_copy: bool,
+    pub overflow_trap: Option<&'static str>,
+}
+
+impl MirBuiltinContract {
+    pub fn for_kind(kind: MirBuiltinKind) -> Self {
+        match kind {
+            MirBuiltinKind::Abs => Self {
+                kind,
+                name: "abs",
+                arity: 1,
+                input_abi: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                preserves_type: true,
+                requires_copy: true,
+                overflow_trap: Some("E0802"),
+            },
+        }
+    }
+
+    /// Resolve only the surface builtin identities already admitted to the
+    /// canonical MIR schema. Unknown identities deliberately return `None` so
+    /// the caller can fail closed instead of inventing a backend contract.
+    pub fn from_builtin(id: &BuiltinId) -> Option<Self> {
+        match id.as_str() {
+            "abs" => Some(Self::for_kind(MirBuiltinKind::Abs)),
+            _ => None,
+        }
+    }
+
+    /// The contract admits a second ABI shape for the same polymorphic
+    /// operation. Keeping this rule here makes TypeDesc the source of truth
+    /// rather than duplicating the accepted widths in each consumer.
+    pub fn accepts_abi(self, abi: MirAbiClass) -> bool {
+        match self.kind {
+            MirBuiltinKind::Abs => matches!(
+                abi,
+                MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                } | MirAbiClass::Float { bits: 64 }
+            ),
+        }
+    }
+
+    pub fn accepts_layout(self, layout: &MirLayout) -> bool {
+        matches!(self.kind, MirBuiltinKind::Abs) && matches!(layout, MirLayout::Scalar)
+    }
 }
 
 /// Backend-independent implementation selected for one ownership boundary.

@@ -1,0 +1,4 @@
+func abs_i64(value: i64) -> i64 { abs(value) }
+func main() -> i32 {
+    if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 }
+}

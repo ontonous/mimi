@@ -202,6 +202,14 @@ pub enum MirInstructionKind {
         callee: ResolvedCallee,
         arguments: Vec<MirValueId>,
     },
+    /// A builtin whose ABI, trap behavior, and ownership boundary have been
+    /// fully materialized in the canonical MIR contract. Surface builtin
+    /// names must not cross this boundary as backend-local string dispatch.
+    BuiltinCall {
+        result: MirValueId,
+        kind: types::MirBuiltinKind,
+        arguments: Vec<MirValueId>,
+    },
     /// A checked conversion. Source/target facts live in the value catalog
     /// and the eventual lowering contract.
     Convert {
@@ -592,6 +600,18 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        MirInstructionKind::BuiltinCall {
+            result,
+            kind,
+            arguments,
+        } => format!(
+            "builtin_call {result} {kind:?}({})",
+            arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         MirInstructionKind::Convert { result, source } => {
             format!("convert {result} <- {source}")
         }
@@ -969,6 +989,12 @@ impl<'a> MirValidator<'a> {
                     self.result_at(result, &instruction.id, block, index);
                 }
             }
+            BuiltinCall {
+                result, arguments, ..
+            } => {
+                self.values(arguments);
+                self.result_at(result, &instruction.id, block, index);
+            }
             Nop => {}
         }
     }
@@ -1319,7 +1345,10 @@ impl<'a> MirValidator<'a> {
                 uses.push(right.clone());
             }
             MirInstructionKind::Unary { operand, .. } => uses.push(operand.clone()),
-            MirInstructionKind::Call { arguments, .. } => uses.extend(arguments.iter().cloned()),
+            MirInstructionKind::Call { arguments, .. }
+            | MirInstructionKind::BuiltinCall { arguments, .. } => {
+                uses.extend(arguments.iter().cloned())
+            }
         }
         for value in uses {
             self.check_use_site(&value, block, index, dominators, reachable);

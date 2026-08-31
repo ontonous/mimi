@@ -789,6 +789,16 @@ impl<'a> Lowerer<'a> {
                         }
                     };
                     self.emit(&expression.node_id, "construct_variant", instruction);
+                } else if let Some(contract) = call_builtin_contract(call) {
+                    self.emit(
+                        &expression.node_id,
+                        "builtin_call",
+                        MirInstructionKind::BuiltinCall {
+                            result: result.clone(),
+                            kind: contract.kind,
+                            arguments,
+                        },
+                    );
                 } else {
                     self.emit(
                         &expression.node_id,
@@ -1407,6 +1417,13 @@ fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<No
         NodeId(variant.into()),
         fields,
     ))
+}
+
+fn call_builtin_contract(call: &ResolvedCall) -> Option<super::types::MirBuiltinContract> {
+    let crate::core::ir::ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    super::types::MirBuiltinContract::from_builtin(builtin)
 }
 
 #[cfg(test)]

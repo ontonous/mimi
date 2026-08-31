@@ -201,6 +201,7 @@ impl MirProgram {
                 });
             }
             errors.extend(validate_linear_consumption(function, &type_catalog));
+            errors.extend(validate_builtin_calls(function, &type_catalog));
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
                     match &instruction.kind {
@@ -536,6 +537,7 @@ impl MirProgram {
                         }
                         super::MirInstructionKind::Const { .. }
                         | super::MirInstructionKind::Call { .. }
+                        | super::MirInstructionKind::BuiltinCall { .. }
                         | super::MirInstructionKind::Borrow { .. }
                         | super::MirInstructionKind::EndBorrow { .. }
                         | super::MirInstructionKind::Binary { .. }
@@ -647,6 +649,102 @@ impl MirProgram {
     pub fn type_catalog(&self) -> &MirTypeCatalog {
         &self.type_catalog
     }
+}
+
+/// Validate the complete semantic contract for every first-class builtin
+/// instruction. The validator owns the boundary between checker-resolved
+/// types and backend dispatch: arity, exact result identity, TypeDesc ABI,
+/// and Copy ownership are checked before execution.
+fn validate_builtin_calls(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let super::MirInstructionKind::BuiltinCall {
+                result,
+                kind,
+                arguments,
+            } = &instruction.kind
+            else {
+                continue;
+            };
+            let contract = super::types::MirBuiltinContract::for_kind(*kind);
+            if arguments.len() != contract.arity {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin '{}' supplies {} arguments but its MIR contract requires {}",
+                        contract.name,
+                        arguments.len(),
+                        contract.arity
+                    ),
+                });
+            }
+            let Some(argument) = arguments.first() else {
+                continue;
+            };
+            let Some(argument_value) = function.values.get(argument) else {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!("builtin argument '{}' is absent from MIR values", argument),
+                });
+                continue;
+            };
+            let Some(result_value) = function.values.get(result) else {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!("builtin result '{}' is absent from MIR values", result),
+                });
+                continue;
+            };
+            if contract.preserves_type && result_value.ty != argument_value.ty {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: "builtin result type disagrees with its argument type".into(),
+                });
+            }
+            let Some(descriptor) = type_catalog.get(&argument_value.ty) else {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin argument type '{}' is absent from MIR TypeDesc",
+                        argument_value.ty.as_str()
+                    ),
+                });
+                continue;
+            };
+            if !contract.accepts_abi(descriptor.abi) {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin '{}' does not support argument ABI {:?}; canonical slice accepts signed i64 or f64",
+                        contract.name, descriptor.abi
+                    ),
+                });
+            }
+            if !contract.accepts_layout(&descriptor.layout) {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin '{}' requires a scalar TypeDesc layout, got {:?}",
+                        contract.name, descriptor.layout
+                    ),
+                });
+            }
+            if contract.requires_copy && descriptor.ownership != super::types::MirOwnership::Copy {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin '{}' requires Copy arguments but TypeDesc says {:?}",
+                        contract.name, descriptor.ownership
+                    ),
+                });
+            }
+        }
+    }
+    errors
 }
 
 /// Validate the canonical intra-program call ABI before a backend sees MIR.
@@ -786,6 +884,7 @@ fn validate_linear_consumption(
                 | super::MirInstructionKind::Drop { value: source } => vec![source],
                 super::MirInstructionKind::MoveProject { base, .. } => vec![base],
                 super::MirInstructionKind::Call { arguments, .. }
+                | super::MirInstructionKind::BuiltinCall { arguments, .. }
                 | super::MirInstructionKind::Construct {
                     fields: arguments, ..
                 } => arguments.iter().collect(),
@@ -1337,6 +1436,46 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let integer_width = self.integer_width(function, operand);
                 let operand = self.read_value(function, values, operand)?;
                 let output = evaluate_unary(&function.owner, *op, operand, integer_width)?;
+                values.insert(result.clone(), output);
+            }
+            MirInstructionKind::BuiltinCall {
+                result,
+                kind,
+                arguments,
+            } => {
+                let contract = super::types::MirBuiltinContract::for_kind(*kind);
+                if arguments.len() != contract.arity {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "builtin '{}' received {} arguments; contract requires {}",
+                            contract.name,
+                            arguments.len(),
+                            contract.arity
+                        ),
+                    ));
+                }
+                let argument = self.read_value(function, values, &arguments[0])?;
+                let output = match (kind, argument) {
+                    (super::types::MirBuiltinKind::Abs, MirRuntimeValue::Int(value)) => value
+                        .checked_abs()
+                        .map(MirRuntimeValue::Int)
+                        .ok_or_else(|| {
+                            self.error(&function.owner, "E0802: integer absolute value overflow")
+                        })?,
+                    (super::types::MirBuiltinKind::Abs, MirRuntimeValue::FloatBits(bits)) => {
+                        MirRuntimeValue::FloatBits(f64::from_bits(bits).abs().to_bits())
+                    }
+                    (_, _) => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "builtin '{}' received an incompatible runtime value",
+                                contract.name
+                            ),
+                        ))
+                    }
+                };
                 values.insert(result.clone(), output);
             }
             MirInstructionKind::Call {
@@ -2223,6 +2362,9 @@ fn evaluate_unary(
             .checked_neg()
             .map(MirRuntimeValue::Int)
             .ok_or_else(|| execution_error(function, "integer negation overflow")),
+        (ResolvedUnaryOp::Negate, MirRuntimeValue::FloatBits(value)) => Ok(
+            MirRuntimeValue::FloatBits((-f64::from_bits(value)).to_bits()),
+        ),
         (ResolvedUnaryOp::Not, MirRuntimeValue::Bool(value)) => Ok(MirRuntimeValue::Bool(!value)),
         (ResolvedUnaryOp::Not, MirRuntimeValue::Int(value)) => Ok(MirRuntimeValue::Int(!value)),
         (ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable, value)
@@ -2395,7 +2537,7 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -2540,6 +2682,61 @@ mod tests {
             .execute(&owner, &[])
             .expect("reference execution");
         assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn canonical_abs_has_a_first_class_node_and_reference_oracle() {
+        let (owner, program) = canonical_program_with_main(
+            "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }",
+        );
+        assert!(program.functions().values().any(|function| {
+            function
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        crate::core::mir::MirInstructionKind::BuiltinCall {
+                            kind: crate::core::mir::types::MirBuiltinKind::Abs,
+                            ..
+                        }
+                    )
+                })
+        }));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference abs");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn canonical_abs_supports_f64_through_the_same_contract() {
+        let (owner, program) =
+            canonical_program_with_main("func main() -> f64 { let value: f64 = -2.5; abs(value) }");
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference f64 abs");
+        assert_eq!(value, MirRuntimeValue::FloatBits(2.5_f64.to_bits()));
+    }
+
+    #[test]
+    fn canonical_abs_rejects_i32_before_any_backend() {
+        let source = "func main() -> i32 { abs(5) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("i32 abs is outside the canonical builtin contract");
+        match error {
+            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
+                error.message.contains("builtin 'abs'")
+                    && error
+                        .message
+                        .contains("canonical slice accepts signed i64 or f64")
+            })),
+            other => panic!("unsupported builtin ABI escaped the validator: {other:?}"),
+        }
     }
 
     #[test]

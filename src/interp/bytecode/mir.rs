@@ -90,10 +90,11 @@ pub fn compile_mir_program(
             }]
         })?;
 
+    let builtin_names = super::registry::create_registry().names();
     Ok(Arc::new(BytecodeProgram {
         functions,
         entry,
-        builtin_names: Vec::new(),
+        builtin_names,
         extern_names: Vec::new(),
         actor_defs: std::collections::HashMap::new(),
         flow_defs: std::collections::HashMap::new(),
@@ -530,9 +531,77 @@ impl<'a> FunctionEmitter<'a> {
                 callee,
                 arguments,
             } => self.emit_call(result.as_ref(), callee, arguments),
+            MirInstructionKind::BuiltinCall {
+                result,
+                kind,
+                arguments,
+            } => self.emit_builtin_call(result, *kind, arguments),
             MirInstructionKind::Convert { result, source } => self.emit_convert(result, source),
             MirInstructionKind::Nop => {}
         }
+    }
+
+    fn emit_builtin_call(
+        &mut self,
+        result: &MirValueId,
+        kind: crate::core::mir::types::MirBuiltinKind,
+        arguments: &[MirValueId],
+    ) {
+        let contract = crate::core::mir::types::MirBuiltinContract::for_kind(kind);
+        if arguments.len() != contract.arity {
+            self.error(format!(
+                "builtin '{}' has {} arguments but its MIR contract requires {}",
+                contract.name,
+                arguments.len(),
+                contract.arity
+            ));
+            return;
+        }
+        let Some(argument) = arguments.first() else {
+            return;
+        };
+        for value in [argument, result] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "builtin '{}' value '{}' is unsupported: {message}",
+                    contract.name, value
+                ));
+                return;
+            }
+        }
+        let Some(argument_desc) = self.type_of(argument) else {
+            self.error(format!(
+                "builtin '{}' argument '{}' has no TypeDesc",
+                contract.name, argument
+            ));
+            return;
+        };
+        if !contract.accepts_abi(argument_desc.abi)
+            || !contract.accepts_layout(&argument_desc.layout)
+            || (contract.requires_copy && argument_desc.ownership != MirOwnership::Copy)
+        {
+            self.error(format!(
+                "builtin '{}' argument does not satisfy its canonical TypeDesc/ABI contract",
+                contract.name
+            ));
+            return;
+        }
+        let Some(ra) = self.reg(argument) else { return };
+        let Some(rd) = self.reg(result) else { return };
+        let registry = super::registry::create_registry();
+        let Some(builtin) = registry.lookup(contract.name) else {
+            self.error(format!(
+                "builtin '{}' has no bytecode registry implementation",
+                contract.name
+            ));
+            return;
+        };
+        self.proto.emit(Op::CallBuiltin {
+            rd,
+            builtin,
+            args_base: ra,
+            argc: contract.arity as u16,
+        });
     }
 
     fn emit_load(&mut self, result: &MirValueId, place: &crate::core::ResolvedPlace) {
@@ -2420,6 +2489,16 @@ mod tests {
                 "func main() -> (i32, bool) { (40, true) }",
                 "construct",
             ),
+            (
+                "builtin-abs-i64",
+                "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }",
+                "builtin_call",
+            ),
+            (
+                "builtin-abs-f64",
+                "func main() -> f64 { let value: f64 = -2.5; abs(value) }",
+                "builtin_call",
+            ),
         ];
 
         for (name, source, shape) in cases {
@@ -2518,6 +2597,38 @@ mod tests {
         );
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_first_class_abs_through_ast_free_bytecode() {
+        let source = "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }";
+        let program = compile(source);
+        assert!(program.ast.is_none());
+        assert!(program.functions.iter().any(|function| function
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallBuiltin { .. }))));
+        let value = BytecodeVM::new(program).run_value().expect("VM abs");
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn first_class_abs_preserves_e0802_across_reference_and_bytecode() {
+        let source = "func main() -> i64 { let value: i64 = -9223372036854775808; abs(value) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect_err("reference abs overflow");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let vm_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode abs overflow");
+        assert!(reference.message.contains("E0802"));
+        assert_eq!(vm_error.code(), "E0802");
     }
 
     #[test]

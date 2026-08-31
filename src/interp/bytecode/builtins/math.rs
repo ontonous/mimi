@@ -232,7 +232,7 @@ fn builtin_abs(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
     match &args[0] {
         Value::Int(v) => {
             let abs = v.checked_abs().ok_or_else(|| {
-                InterpError::new("abs: overflow (i64::MIN has no positive equivalent)")
+                InterpError::integer_overflow("E0802: integer absolute value overflow")
             })?;
             Ok(Value::Int(abs))
         }
