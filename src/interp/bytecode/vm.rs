@@ -593,6 +593,22 @@ impl BytecodeVM {
                         frame.regs[rd as usize] = frame.regs[rs as usize].clone();
                     }
                 }
+                Op::Move { rd, rs } => {
+                    if rd != rs {
+                        let frame = self.cur_frame_mut();
+                        let value = std::mem::replace(&mut frame.regs[rs as usize], Value::Unit);
+                        frame.regs[rd as usize] = value;
+                    }
+                }
+                Op::Clone { rd, rs } => {
+                    if rd != rs {
+                        let frame = self.cur_frame_mut();
+                        frame.regs[rd as usize] = frame.regs[rs as usize].clone();
+                    }
+                }
+                Op::Drop { ra } => {
+                    self.cur_frame_mut().regs[ra as usize] = Value::Unit;
+                }
                 Op::DerefValue { rd, ra } => {
                     let val = self.get_reg(ra).clone();
                     let inner = match &val {
@@ -1399,6 +1415,28 @@ impl BytecodeVM {
                     // MutateSetup residue prepared for it must be dropped.
                     match self.push_frame(func, args, Some(rd)) {
                         Ok(()) => {} // Continue loop — new frame is now active.
+                        Err(e) => {
+                            self.clear_mutate_writebacks();
+                            self.route_fault(e)?;
+                        }
+                    }
+                }
+                Op::CallMove {
+                    rd,
+                    func,
+                    args_base,
+                    argc,
+                } => {
+                    let mut args = Vec::with_capacity(argc as usize);
+                    for i in 0..argc {
+                        let value = std::mem::replace(
+                            &mut self.cur_frame_mut().regs[(args_base + i) as usize],
+                            Value::Unit,
+                        );
+                        args.push(value);
+                    }
+                    match self.push_frame(func, args, Some(rd)) {
+                        Ok(()) => {}
                         Err(e) => {
                             self.clear_mutate_writebacks();
                             self.route_fault(e)?;

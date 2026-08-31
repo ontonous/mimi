@@ -2,8 +2,9 @@
 //!
 //! This is intentionally a narrow, fail-closed slice. It proves the
 //! architectural boundary for scalar expressions, structured branch control
-//! flow, and Copy record aggregates. Unsupported shapes return a structured
-//! error and must not silently select the legacy emitter.
+//! flow, Copy record aggregates, and the first Move-owned scalar glue shape
+//! (`string`). Unsupported shapes return a structured error and must not
+//! silently select the legacy emitter.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -45,9 +46,10 @@ impl std::error::Error for MirLoweringError {}
 /// Supported forms are deliberately small: literals, local loads, unary and
 /// binary expressions, calls, casts, binds, expression statements, returns,
 /// and branch/match expressions with explicit MIR blocks. Copy-only tuple and
-/// record construction/projection/update are also represented. Loops,
-/// destructuring, and ownership-bearing aggregate operations remain rejected
-/// until their ownership and effect contracts are represented in MIR.
+/// record construction/projection/update are also represented. Direct local
+/// reads become explicit `Clone` nodes, while root drops become explicit
+/// `Drop` nodes; projected drops and ownership-bearing aggregates remain
+/// rejected until their field-level contracts are represented in MIR.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,
@@ -439,11 +441,24 @@ impl<'a> Lowerer<'a> {
                 ResolvedStmtKind::Continue => {
                     self.lower_continue(&statement.node_id);
                 }
-                ResolvedStmtKind::Drop(_) => {
-                    self.error(
-                        &statement.node_id,
-                        "place drop requires ownership elaboration and is deferred to MIR Phase 2",
-                    );
+                ResolvedStmtKind::Drop(places) => {
+                    for (index, place) in places.iter().enumerate() {
+                        if !place.projections.is_empty() {
+                            self.error(
+                                &statement.node_id,
+                                "projected drop requires aggregate glue and remains fail-closed",
+                            );
+                            continue;
+                        }
+                        match self.local_value(&place.base) {
+                            Ok(value) => self.emit(
+                                &statement.node_id,
+                                &format!("drop.{index}"),
+                                MirInstructionKind::Drop { value },
+                            ),
+                            Err(errors) => self.errors.extend(errors),
+                        }
+                    }
                 }
                 _ => self.error(
                     &statement.node_id,
@@ -483,15 +498,26 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::Load(place) => {
-                if self.local_value(&place.base).is_ok() {
-                    self.emit(
-                        &expression.node_id,
-                        "load",
-                        MirInstructionKind::Load {
-                            result: result.clone(),
-                            place: place.clone(),
-                        },
-                    );
+                if let Ok(local) = self.local_value(&place.base) {
+                    if place.projections.is_empty() {
+                        self.emit(
+                            &expression.node_id,
+                            "clone",
+                            MirInstructionKind::Clone {
+                                result: result.clone(),
+                                source: local,
+                            },
+                        );
+                    } else {
+                        self.emit(
+                            &expression.node_id,
+                            "load",
+                            MirInstructionKind::Load {
+                                result: result.clone(),
+                                place: place.clone(),
+                            },
+                        );
+                    }
                 } else {
                     self.error(
                         &expression.node_id,
@@ -1204,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn parameter_load_is_lowered_with_canonical_local_identity() {
+    fn parameter_read_is_lowered_with_explicit_clone_identity() {
         let source = "func main(x: i32) -> i32 { x + 1 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
@@ -1215,7 +1241,7 @@ mod tests {
             .find(|callable| callable.owner.0.ends_with("main"))
             .expect("main callable");
         let mir = lower_body(&callable.body).expect("MIR lowering");
-        assert!(mir.canonical_text().contains("load"));
+        assert!(mir.canonical_text().contains("clone"));
         assert!(mir.canonical_text().contains("local:"));
     }
 

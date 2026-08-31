@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::types::{MirAbiClass, MirLayout, MirOwnership, MirTypeDesc};
+use crate::core::mir::types::{MirAbiClass, MirGlueKind, MirLayout, MirOwnership, MirTypeDesc};
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
     MirTerminator, MirValueId,
@@ -249,18 +249,28 @@ impl<'a> FunctionEmitter<'a> {
                 MirOwnershipEventKind::Read
                 | MirOwnershipEventKind::Write
                 | MirOwnershipEventKind::Introduce => {}
-                MirOwnershipEventKind::Move
-                | MirOwnershipEventKind::Drop
-                | MirOwnershipEventKind::Return
-                    if desc.ownership == MirOwnership::Copy => {}
-                MirOwnershipEventKind::Move
-                | MirOwnershipEventKind::Drop
-                | MirOwnershipEventKind::Return => self.error(format!(
-                    "ownership event '{}' for '{}' needs runtime {:?} glue",
-                    event.kind.as_str(),
-                    value,
-                    desc.ownership
-                )),
+                MirOwnershipEventKind::Move | MirOwnershipEventKind::Return => {
+                    if desc.ownership != MirOwnership::Copy
+                        && desc.glue.move_out == MirGlueKind::Unsupported
+                    {
+                        self.error(format!(
+                            "ownership event '{}' for '{}' needs canonical move glue",
+                            event.kind.as_str(),
+                            value
+                        ));
+                    }
+                }
+                MirOwnershipEventKind::Drop => {
+                    if desc.ownership != MirOwnership::Copy
+                        && desc.glue.drop == MirGlueKind::Unsupported
+                    {
+                        self.error(format!(
+                            "ownership event '{}' for '{}' needs canonical drop glue",
+                            event.kind.as_str(),
+                            value
+                        ));
+                    }
+                }
                 MirOwnershipEventKind::TransferSession
                 | MirOwnershipEventKind::TransferChild
                 | MirOwnershipEventKind::BorrowShared
@@ -333,36 +343,90 @@ impl<'a> FunctionEmitter<'a> {
             MirInstructionKind::Load { result, place } => {
                 self.emit_load(result, place);
             }
-            MirInstructionKind::Copy { result, source }
-            | MirInstructionKind::Move { result, source }
-            | MirInstructionKind::Clone { result, source } => {
+            MirInstructionKind::Copy { result, source } => {
                 let Some(rd) = self.reg(result) else { return };
                 let Some(rs) = self.reg(source) else { return };
-                if let Some(desc) = self.type_of(source) {
-                    if self.supported_type(&desc.id).is_err() {
-                        self.error(format!(
-                            "value '{}' is not in the canonical bytecode slice",
-                            source
-                        ));
-                        return;
-                    }
-                    if matches!(instruction, MirInstructionKind::Clone { .. })
-                        && desc.ownership == MirOwnership::Linear
-                    {
-                        self.error("linear clone is forbidden by the MIR ownership contract");
-                        return;
-                    }
+                let Some(desc) = self.type_of(source) else {
+                    self.error(format!("value '{}' has no type descriptor", source));
+                    return;
+                };
+                if self.supported_type(&desc.id).is_err() {
+                    self.error(format!(
+                        "value '{}' is not in the canonical bytecode slice",
+                        source
+                    ));
+                    return;
                 }
                 self.proto.emit(Op::Mov { rd, rs });
+            }
+            MirInstructionKind::Move { result, source } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(rs) = self.reg(source) else { return };
+                let Some(desc) = self.type_of(source) else {
+                    self.error(format!("value '{}' has no type descriptor", source));
+                    return;
+                };
+                if self.supported_type(&desc.id).is_err() {
+                    self.error(format!(
+                        "value '{}' is not in the canonical bytecode slice",
+                        source
+                    ));
+                    return;
+                }
+                if desc.ownership == MirOwnership::Copy {
+                    self.proto.emit(Op::Mov { rd, rs });
+                } else if desc.glue.move_out == MirGlueKind::OwnedString {
+                    self.proto.emit(Op::Move { rd, rs });
+                } else {
+                    self.error(format!(
+                        "move of {:?} value '{}' has no canonical move glue",
+                        desc.ownership, source
+                    ));
+                }
+            }
+            MirInstructionKind::Clone { result, source } => {
+                let Some(rd) = self.reg(result) else { return };
+                let Some(rs) = self.reg(source) else { return };
+                let Some(desc) = self.type_of(source) else {
+                    self.error(format!("value '{}' has no type descriptor", source));
+                    return;
+                };
+                if self.supported_type(&desc.id).is_err() {
+                    self.error(format!(
+                        "value '{}' is not in the canonical bytecode slice",
+                        source
+                    ));
+                    return;
+                }
+                if desc.ownership == MirOwnership::Copy {
+                    self.proto.emit(Op::Mov { rd, rs });
+                } else if desc.glue.clone == MirGlueKind::OwnedString {
+                    self.proto.emit(Op::Clone { rd, rs });
+                } else {
+                    self.error(format!(
+                        "clone of {:?} value '{}' has no canonical clone glue",
+                        desc.ownership, source
+                    ));
+                }
             }
             MirInstructionKind::Drop { value } => {
                 let Some(desc) = self.type_of(value) else {
                     self.error(format!("drop value '{}' has no type descriptor", value));
                     return;
                 };
-                if desc.ownership != MirOwnership::Copy {
+                if self.supported_type(&desc.id).is_err() {
                     self.error(format!(
-                        "drop of {:?} value '{}' needs drop glue",
+                        "value '{}' is not in the canonical bytecode slice",
+                        value
+                    ));
+                } else if desc.ownership != MirOwnership::Copy
+                    && desc.glue.drop == MirGlueKind::OwnedString
+                {
+                    let Some(ra) = self.reg(value) else { return };
+                    self.proto.emit(Op::Drop { ra });
+                } else if desc.ownership != MirOwnership::Copy {
+                    self.error(format!(
+                        "drop of {:?} value '{}' has no canonical drop glue",
                         desc.ownership, value
                     ));
                 }
@@ -459,10 +523,29 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         if place.projections.is_empty() {
-            self.proto.emit(Op::Mov {
-                rd,
-                rs: current_reg,
-            });
+            let Some(current_ty_desc) = self.program.type_catalog().get(&current_ty) else {
+                self.error(format!(
+                    "load base type '{}' is absent from TypeDesc",
+                    current_ty.as_str()
+                ));
+                return;
+            };
+            if current_ty_desc.ownership == MirOwnership::Copy {
+                self.proto.emit(Op::Mov {
+                    rd,
+                    rs: current_reg,
+                });
+            } else if current_ty_desc.glue.clone == MirGlueKind::OwnedString {
+                self.proto.emit(Op::Clone {
+                    rd,
+                    rs: current_reg,
+                });
+            } else {
+                self.error(format!(
+                    "load of '{}' has no canonical clone glue",
+                    source_id
+                ));
+            }
             return;
         }
         for (index, projection) in place.projections.iter().enumerate() {
@@ -789,16 +872,36 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(argument) else {
                 return;
             };
-            self.proto.emit(Op::Mov {
-                rd: scratch,
-                rs: source,
-            });
+            let Some(desc) = self.type_of(argument) else {
+                self.error(format!(
+                    "call argument '{}' has no type descriptor",
+                    argument
+                ));
+                return;
+            };
+            if desc.ownership == MirOwnership::Copy {
+                self.proto.emit(Op::Mov {
+                    rd: scratch,
+                    rs: source,
+                });
+            } else if desc.glue.move_out == MirGlueKind::OwnedString {
+                self.proto.emit(Op::Move {
+                    rd: scratch,
+                    rs: source,
+                });
+            } else {
+                self.error(format!(
+                    "call argument '{}' has no canonical move glue",
+                    argument
+                ));
+                return;
+            }
             arg_regs.push(scratch);
         }
         debug_assert!(
             arguments.is_empty() || arg_regs.windows(2).all(|pair| pair[1] == pair[0] + 1)
         );
-        self.proto.emit(Op::Call {
+        self.proto.emit(Op::CallMove {
             rd,
             func,
             args_base,
@@ -1383,6 +1486,14 @@ impl<'a> FunctionEmitter<'a> {
             MirAbiClass::Integer { bits, signed } if signed && bits <= 64 => Ok(()),
             MirAbiClass::Float { bits } if bits == 32 || bits == 64 => Ok(()),
             MirAbiClass::Bool | MirAbiClass::Unit if desc.ownership == MirOwnership::Copy => Ok(()),
+            MirAbiClass::StringHandle
+                if desc.ownership == MirOwnership::Move
+                    && desc.glue.move_out == MirGlueKind::OwnedString
+                    && desc.glue.clone == MirGlueKind::OwnedString
+                    && desc.glue.drop == MirGlueKind::OwnedString =>
+            {
+                Ok(())
+            }
             MirAbiClass::Aggregate => match &desc.layout {
                 MirLayout::Tuple(elements) => {
                     if desc.ownership != MirOwnership::Copy {
@@ -1596,10 +1707,13 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             };
             let scratch = self.proto.alloc_reg();
-            self.proto.emit(Op::Mov {
-                rd: scratch,
-                rs: source,
-            });
+            let Some(argument_info) = self.function.values.get(argument) else {
+                self.error(format!("edge argument '{}' is absent", argument));
+                return;
+            };
+            if !self.emit_value_transfer(scratch, source, &argument_info.ty) {
+                return;
+            }
             sources.push(scratch);
         }
         for binding in bindings {
@@ -1630,10 +1744,13 @@ impl<'a> FunctionEmitter<'a> {
             let Some(destination) = self.reg(&parameter.value) else {
                 return;
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
-            });
+            let Some(parameter_info) = self.function.values.get(&parameter.value) else {
+                self.error(format!("edge parameter '{}' is absent", parameter.value));
+                return;
+            };
+            if !self.emit_value_transfer(destination, source, &parameter_info.ty) {
+                return;
+            }
         }
     }
 
@@ -1656,20 +1773,53 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             };
             let temp = self.proto.alloc_reg();
-            self.proto.emit(Op::Mov {
-                rd: temp,
-                rs: source,
-            });
+            let Some(argument_info) = self.function.values.get(argument) else {
+                self.error(format!("edge argument '{}' is absent", argument));
+                return;
+            };
+            if !self.emit_value_transfer(temp, source, &argument_info.ty) {
+                return;
+            }
             scratch.push(temp);
         }
         for (temp, parameter) in scratch.into_iter().zip(&block.parameters) {
             let Some(destination) = self.reg(&parameter.value) else {
                 return;
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: temp,
-            });
+            let Some(parameter_info) = self.function.values.get(&parameter.value) else {
+                self.error(format!("edge parameter '{}' is absent", parameter.value));
+                return;
+            };
+            if !self.emit_value_transfer(destination, temp, &parameter_info.ty) {
+                return;
+            }
+        }
+    }
+
+    fn emit_value_transfer(&mut self, rd: Reg, rs: Reg, ty: &crate::core::ResolvedTypeId) -> bool {
+        let Some(desc) = self.program.type_catalog().get(ty) else {
+            self.error(format!("transfer type '{}' has no TypeDesc", ty.as_str()));
+            return false;
+        };
+        if let Err(message) = self.supported_type(ty) {
+            self.error(format!(
+                "transfer type '{}' is unsupported: {message}",
+                ty.as_str()
+            ));
+            return false;
+        }
+        if desc.ownership == MirOwnership::Copy {
+            self.proto.emit(Op::Mov { rd, rs });
+            true
+        } else if desc.glue.move_out == MirGlueKind::OwnedString {
+            self.proto.emit(Op::Move { rd, rs });
+            true
+        } else {
+            self.error(format!(
+                "transfer type '{}' has no canonical move glue",
+                ty.as_str()
+            ));
+            false
         }
     }
 
@@ -1693,6 +1843,7 @@ mod tests {
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::{MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::BytecodeVM;
+    use crate::interp::bytecode::Op;
     use crate::interp::value::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -1852,6 +2003,69 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_string_move_through_canonical_mir() {
+        let source = "func main() -> string { let value = \"owned\"; value }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = BytecodeVM::new(compile_mir_program(&mir).expect("MIR bytecode"))
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::String("owned".into()));
+        assert!(matches!(bytecode, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn executes_owned_string_clone_and_drop_glue_through_canonical_mir() {
+        let source = "func main() -> string { let value = \"owned\"; let copy = value; drop(copy); \"done\" }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main.code.iter().any(|op| matches!(op, Op::Move { .. })));
+        assert!(main.code.iter().any(|op| matches!(op, Op::Clone { .. })));
+        assert!(main.code.iter().any(|op| matches!(op, Op::Drop { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::String("done".into()));
+        assert!(matches!(value, Value::String(value) if value.as_str() == "done"));
+    }
+
+    #[test]
+    fn transfers_owned_string_call_arguments_through_canonical_mir() {
+        let source = "func identity(value: string) -> string { value }\nfunc main() -> string { identity(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main.code.iter().any(|op| matches!(op, Op::Move { .. })));
+        assert!(main.code.iter().any(|op| matches!(op, Op::CallMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::String("owned".into()));
+        assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
     fn bytecode_and_reference_agree_on_copy_variant_match() {
         let source =
             "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
@@ -1871,18 +2085,95 @@ mod tests {
     }
 
     #[test]
-    fn rejects_move_variant_payload_until_drop_glue_is_in_the_backend() {
+    fn rejects_move_variant_payload_before_any_backend() {
         let source =
             "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("move payload needs explicit aggregate glue");
+        assert!(format!("{error:?}").contains("no canonical"));
+    }
+
+    #[test]
+    fn rejects_copy_of_owned_string_at_canonical_mir_boundary() {
+        let source = "func main() -> string { let value = \"owned\"; value }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
         let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
-        let errors = compile_mir_program(&mir).expect_err("move payload needs explicit glue");
-        assert!(errors.iter().any(|error| {
-            error.message.contains("needs runtime glue")
-                || error.message.contains("unsupported ABI")
-        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = mir.functions().get(&owner).cloned().expect("main");
+        let instruction = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::Move { .. }
+                )
+            })
+            .expect("string bind move");
+        let crate::core::mir::MirInstructionKind::Move { result, source } =
+            instruction.kind.clone()
+        else {
+            unreachable!();
+        };
+        instruction.kind = crate::core::mir::MirInstructionKind::Copy { result, source };
+        let error = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect_err("owned string cannot be copied");
+        assert!(error
+            .iter()
+            .any(|error| error.message.contains("copy instruction is invalid")));
+    }
+
+    #[test]
+    fn rejects_use_after_drop_before_any_backend() {
+        let source = "func main() -> string { let value = \"owned\"; drop(value); \"done\" }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = mir.functions().get(&owner).cloned().expect("main");
+        let block = function
+            .blocks
+            .values_mut()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        crate::core::mir::MirInstructionKind::Drop { .. }
+                    )
+                })
+            })
+            .expect("drop block");
+        let value = block
+            .instructions
+            .iter()
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Drop { value } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("drop value");
+        block.instructions.push(crate::core::mir::MirInstruction {
+            id: crate::core::mir::MirInstructionId::new("synthetic/second-drop")
+                .expect("instruction id"),
+            kind: crate::core::mir::MirInstructionKind::Drop { value },
+        });
+        let error = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect_err("a non-Copy value cannot be dropped twice");
+        assert!(error
+            .iter()
+            .any(|error| error.message.contains("use after consuming non-Copy value")));
     }
 
     #[test]

@@ -5,12 +5,12 @@
 //! against a third semantic oracle. The supported operation set grows with
 //! MIR lowering; unsupported operations fail explicitly.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
-use super::types::{MirLayout, MirTypeCatalog};
+use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirFunction, MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm,
     MirSwitchCase, MirTerminator, MirValueId,
@@ -180,6 +180,7 @@ impl MirProgram {
                     message: "function result type is absent from MIR type catalog".into(),
                 });
             }
+            errors.extend(validate_linear_consumption(function, &type_catalog));
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
                     match &instruction.kind {
@@ -345,12 +346,66 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::Copy { result, source } => {
+                            let (Some(result_value), Some(source_value)) =
+                                (function.values.get(result), function.values.get(source))
+                            else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_copy(&source_value.ty) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                            if result_value.ty != source_value.ty {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "copy result type disagrees with source type".into(),
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::Move { result, source }
+                        | super::MirInstructionKind::Clone { result, source } => {
+                            let (Some(result_value), Some(source_value)) =
+                                (function.values.get(result), function.values.get(source))
+                            else {
+                                continue;
+                            };
+                            let operation = if matches!(
+                                &instruction.kind,
+                                super::MirInstructionKind::Move { .. }
+                            ) {
+                                MirGlueOperation::MoveOut
+                            } else {
+                                MirGlueOperation::Clone
+                            };
+                            if let Err(message) = type_catalog.validate_value_operation(
+                                &result_value.ty,
+                                &source_value.ty,
+                                operation,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::Drop { value } => {
+                            let Some(value) = function.values.get(value) else {
+                                continue;
+                            };
+                            if let Err(message) =
+                                type_catalog.validate_glue(&value.ty, MirGlueOperation::Drop)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::Const { .. }
                         | super::MirInstructionKind::Call { .. }
-                        | super::MirInstructionKind::Copy { .. }
-                        | super::MirInstructionKind::Move { .. }
-                        | super::MirInstructionKind::Clone { .. }
-                        | super::MirInstructionKind::Drop { .. }
                         | super::MirInstructionKind::Borrow { .. }
                         | super::MirInstructionKind::EndBorrow { .. }
                         | super::MirInstructionKind::Binary { .. }
@@ -452,6 +507,158 @@ impl MirProgram {
     }
 }
 
+/// Validate explicit ownership boundaries before any execution backend sees
+/// MIR. This pass is intentionally conservative: non-Copy values can only be
+/// consumed once along a block-local path, and each mutually exclusive CFG
+/// edge is checked from the same pre-terminator state. Aggregate destructuring
+/// remains fail-closed until its own field-level glue contract is materialized.
+fn validate_linear_consumption(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    for block in function.blocks.values() {
+        let mut consumed = BTreeSet::new();
+        for instruction in &block.instructions {
+            let sources: Vec<&MirValueId> = match &instruction.kind {
+                super::MirInstructionKind::Move { source, .. }
+                | super::MirInstructionKind::Drop { value: source } => vec![source],
+                super::MirInstructionKind::Call { arguments, .. } => arguments.iter().collect(),
+                _ => Vec::new(),
+            };
+            consume_values(
+                function,
+                type_catalog,
+                &mut consumed,
+                &sources,
+                instruction.id.to_string(),
+                &mut errors,
+            );
+        }
+        match &block.terminator {
+            super::MirTerminator::Goto {
+                arguments, edge, ..
+            } => consume_edge_values(
+                function,
+                type_catalog,
+                &consumed,
+                arguments,
+                edge.to_string(),
+                &mut errors,
+            ),
+            super::MirTerminator::Branch {
+                then_arguments,
+                then_edge,
+                else_arguments,
+                else_edge,
+                ..
+            } => {
+                consume_edge_values(
+                    function,
+                    type_catalog,
+                    &consumed,
+                    then_arguments,
+                    then_edge.to_string(),
+                    &mut errors,
+                );
+                consume_edge_values(
+                    function,
+                    type_catalog,
+                    &consumed,
+                    else_arguments,
+                    else_edge.to_string(),
+                    &mut errors,
+                );
+            }
+            super::MirTerminator::Switch {
+                scrutinee, arms, ..
+            } => {
+                if is_non_copy(function, type_catalog, scrutinee) {
+                    errors.push(super::MirValidationError {
+                        subject: block.id.to_string(),
+                        message: format!(
+                            "switch scrutinee '{}' is non-Copy but aggregate match glue is not materialized",
+                            scrutinee
+                        ),
+                    });
+                }
+                for arm in arms {
+                    consume_edge_values(
+                        function,
+                        type_catalog,
+                        &consumed,
+                        &arm.arguments,
+                        arm.edge.to_string(),
+                        &mut errors,
+                    );
+                }
+            }
+            super::MirTerminator::Return { value: Some(value) } => consume_values(
+                function,
+                type_catalog,
+                &mut consumed,
+                &[value],
+                block.id.to_string(),
+                &mut errors,
+            ),
+            super::MirTerminator::Return { value: None }
+            | super::MirTerminator::Trap { .. }
+            | super::MirTerminator::Fault { .. }
+            | super::MirTerminator::Unreachable => {}
+        }
+    }
+    errors
+}
+
+fn consume_edge_values(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    before_edge: &BTreeSet<MirValueId>,
+    values: &[MirValueId],
+    subject: String,
+    errors: &mut Vec<super::MirValidationError>,
+) {
+    let mut consumed = before_edge.clone();
+    let sources = values.iter().collect::<Vec<_>>();
+    consume_values(
+        function,
+        type_catalog,
+        &mut consumed,
+        &sources,
+        subject,
+        errors,
+    );
+}
+
+fn consume_values(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    consumed: &mut BTreeSet<MirValueId>,
+    values: &[&MirValueId],
+    subject: String,
+    errors: &mut Vec<super::MirValidationError>,
+) {
+    for value in values {
+        if !is_non_copy(function, type_catalog, value) {
+            continue;
+        }
+        if !consumed.insert((*value).clone()) {
+            errors.push(super::MirValidationError {
+                subject: subject.clone(),
+                message: format!("use after consuming non-Copy value '{}'", value),
+            });
+        }
+    }
+}
+
+fn is_non_copy(function: &MirFunction, type_catalog: &MirTypeCatalog, value: &MirValueId) -> bool {
+    function
+        .values
+        .get(value)
+        .and_then(|value| type_catalog.get(&value.ty))
+        .is_some_and(|descriptor| descriptor.ownership != super::types::MirOwnership::Copy)
+}
+
 pub struct MirReferenceInterpreter<'a> {
     program: &'a MirProgram,
     max_steps: usize,
@@ -541,7 +748,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 MirTerminator::Goto {
                     target, arguments, ..
                 } => {
-                    incoming = self.read_values(function, &values, arguments)?;
+                    incoming = self.take_transfer_values(function, &mut values, arguments)?;
                     current = target.clone();
                 }
                 MirTerminator::Branch {
@@ -560,21 +767,26 @@ impl<'a> MirReferenceInterpreter<'a> {
                             return Err(self.error(&function.owner, "branch condition is not bool"))
                         }
                     };
-                    incoming = self.read_values(function, &values, arguments)?;
+                    incoming = self.take_transfer_values(function, &mut values, arguments)?;
                     current = target.clone();
                 }
                 MirTerminator::Switch { scrutinee, arms } => {
                     let scrutinee_id = scrutinee.clone();
                     let scrutinee = self.read_value(function, &values, scrutinee)?;
                     let arm = self.select_switch_arm(function, &scrutinee, arms)?;
-                    incoming =
-                        self.switch_arguments(function, &values, &scrutinee_id, &scrutinee, arm)?;
+                    incoming = self.switch_arguments(
+                        function,
+                        &mut values,
+                        &scrutinee_id,
+                        &scrutinee,
+                        arm,
+                    )?;
                     current = arm.target.clone();
                 }
                 MirTerminator::Return { value } => {
                     return value
                         .as_ref()
-                        .map(|value| self.read_value(function, &values, value))
+                        .map(|value| self.take_transfer_value(function, &mut values, value))
                         .unwrap_or(Ok(MirRuntimeValue::Unit));
                 }
                 MirTerminator::Trap { code } => {
@@ -612,16 +824,34 @@ impl<'a> MirReferenceInterpreter<'a> {
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::Move { result, source } => {
-                let value = values.remove(source).ok_or_else(|| {
-                    self.error(
-                        &function.owner,
-                        format!("move source '{}' is unavailable", source),
-                    )
-                })?;
+                let is_copy = function
+                    .values
+                    .get(source)
+                    .and_then(|value| self.program.type_catalog().get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.ownership == super::types::MirOwnership::Copy
+                    });
+                let value = if is_copy {
+                    self.read_value(function, values, source)?
+                } else {
+                    values.remove(source).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!("move source '{}' is unavailable", source),
+                        )
+                    })?
+                };
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::Drop { value } => {
-                if values.remove(value).is_none() {
+                let is_copy = function
+                    .values
+                    .get(value)
+                    .and_then(|value| self.program.type_catalog().get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.ownership == super::types::MirOwnership::Copy
+                    });
+                if !is_copy && values.remove(value).is_none() {
                     return Err(self.error(
                         &function.owner,
                         format!("drop value '{}' is unavailable", value),
@@ -741,7 +971,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 callee,
                 arguments,
             } => {
-                let arguments = self.read_values(function, values, arguments)?;
+                let arguments = self.take_transfer_values(function, values, arguments)?;
                 let ResolvedCallee::Function(owner) = callee else {
                     return Err(self.error(
                         &function.owner,
@@ -1027,6 +1257,47 @@ impl<'a> MirReferenceInterpreter<'a> {
             .collect()
     }
 
+    fn take_transfer_value(
+        &self,
+        function: &MirFunction,
+        values: &mut HashMap<MirValueId, MirRuntimeValue>,
+        id: &MirValueId,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let ty = function
+            .values
+            .get(id)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| self.error(&function.owner, format!("value '{}' is absent", id)))?;
+        let Some(descriptor) = self.program.type_catalog().get(&ty) else {
+            // Hand-written structural MIR tests use `MirProgram::new`, which
+            // intentionally has no catalog. Production MIR always reaches
+            // this path through `with_type_catalog`, where the absence is a
+            // validation error before execution.
+            return self.read_value(function, values, id);
+        };
+        if descriptor.ownership == super::types::MirOwnership::Copy {
+            self.read_value(function, values, id)
+        } else {
+            values.remove(id).ok_or_else(|| {
+                self.error(
+                    &function.owner,
+                    format!("transfer source '{}' is unavailable", id),
+                )
+            })
+        }
+    }
+
+    fn take_transfer_values(
+        &self,
+        function: &MirFunction,
+        values: &mut HashMap<MirValueId, MirRuntimeValue>,
+        ids: &[MirValueId],
+    ) -> Result<Vec<MirRuntimeValue>, MirExecutionError> {
+        ids.iter()
+            .map(|id| self.take_transfer_value(function, values, id))
+            .collect()
+    }
+
     fn select_switch_arm<'b>(
         &self,
         function: &MirFunction,
@@ -1054,12 +1325,12 @@ impl<'a> MirReferenceInterpreter<'a> {
     fn switch_arguments(
         &self,
         function: &MirFunction,
-        values: &HashMap<MirValueId, MirRuntimeValue>,
+        values: &mut HashMap<MirValueId, MirRuntimeValue>,
         scrutinee_id: &MirValueId,
         value: &MirRuntimeValue,
         arm: &MirSwitchArm,
     ) -> Result<Vec<MirRuntimeValue>, MirExecutionError> {
-        let mut incoming = self.read_values(function, values, &arm.arguments)?;
+        let mut incoming = self.take_transfer_values(function, values, &arm.arguments)?;
         let scrutinee_ty = function
             .values
             .get(scrutinee_id)

@@ -66,6 +66,21 @@ pub enum Op {
         rd: Reg,
         rs: Reg,
     },
+    /// rd = rs and consume the source register.  This is the runtime
+    /// realization of canonical MIR `Move` for a non-Copy value.
+    Move {
+        rd: Reg,
+        rs: Reg,
+    },
+    /// rd = clone(rs) using the TypeDesc-selected ownership glue.
+    Clone {
+        rd: Reg,
+        rs: Reg,
+    },
+    /// Release the value held by ra and mark the register unavailable.
+    Drop {
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Integer arithmetic (checked: trap on overflow per SD-7)
@@ -351,6 +366,14 @@ pub enum Op {
     /// Call user function: rd = func[idx](args[0..argc])
     /// Arguments are in registers [args_base .. args_base + argc).
     Call {
+        rd: Reg,
+        func: FuncIdx,
+        args_base: Reg,
+        argc: u16,
+    },
+    /// Canonical-MIR call: consume the materialized argument range into the
+    /// callee frame. Legacy bytecode keeps `Call`'s clone-compatible ABI.
+    CallMove {
         rd: Reg,
         func: FuncIdx,
         args_base: Reg,
@@ -970,6 +993,7 @@ impl Op {
             | WeakNew { rd, .. }
             | DerefValue { rd, .. }
             | Call { rd, .. }
+            | CallMove { rd, .. }
             | CallBuiltin { rd, .. }
             | CallExtern { rd, .. }
             | CallIndirect { rd, .. }
@@ -1064,6 +1088,7 @@ impl Op {
             | Op::WeakNew { rd, .. }
             | Op::DerefValue { rd, .. }
             | Op::Call { rd, .. }
+            | Op::CallMove { rd, .. }
             | Op::CallBuiltin { rd, .. }
             | Op::CallExtern { rd, .. }
             | Op::CallIndirect { rd, .. }
@@ -1102,7 +1127,8 @@ impl Op {
             | Trap { .. }
             | RetUnit
             | FaultRetEarly => false,
-            Mov { rs, .. } => *rs == reg,
+            Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
+            Drop { ra } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
             | MulInt { ra, rb, .. }
@@ -1180,6 +1206,9 @@ impl Op {
             CheckI32 { rd, .. } | WrapI32 { rd, .. } => *rd == reg,
             And { ra, rb, .. } | Or { ra, rb, .. } => *ra == reg || *rb == reg,
             Call {
+                args_base, argc, ..
+            }
+            | CallMove {
                 args_base, argc, ..
             }
             | CallBuiltin {

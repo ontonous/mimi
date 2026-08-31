@@ -104,9 +104,9 @@ pub enum MirAggregateKind {
     },
 }
 
-/// Operations with explicit value and ownership boundaries. This is a
-/// structural contract in Phase 0; semantic lowering and effect checking are
-/// added in later phases.
+/// Operations with explicit value and ownership boundaries. The MIR validator
+/// checks their TypeDesc/glue contract before any backend; effect-bearing
+/// operations remain fail-closed until their own effect summary is materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirInstructionKind {
     Const {

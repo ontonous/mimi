@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-4";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
@@ -47,6 +47,71 @@ pub enum MirAbiClass {
     Pointer,
     Aggregate,
     FunctionPointer,
+}
+
+/// Backend-independent implementation selected for one ownership boundary.
+///
+/// `OwnedString` is a semantic contract, not a VM/LLVM representation: every
+/// consumer must implement the same retain/release/transfer behavior for an
+/// owned Mimi string.  `Unsupported` is deliberately explicit so a backend
+/// cannot turn an unmodelled aggregate into an accidental shallow copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirGlueKind {
+    Noop,
+    OwnedString,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirGlueOperation {
+    MoveOut,
+    Clone,
+    Drop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirGlueContract {
+    pub move_out: MirGlueKind,
+    pub clone: MirGlueKind,
+    pub drop: MirGlueKind,
+}
+
+impl MirGlueContract {
+    fn for_type(kind: &MirTypeKind, ownership: MirOwnership) -> Self {
+        if ownership == MirOwnership::Copy {
+            return Self {
+                move_out: MirGlueKind::Noop,
+                clone: MirGlueKind::Noop,
+                drop: MirGlueKind::Noop,
+            };
+        }
+        if matches!(kind, MirTypeKind::Primitive(PrimitiveType::String))
+            && ownership == MirOwnership::Move
+        {
+            return Self {
+                move_out: MirGlueKind::OwnedString,
+                clone: MirGlueKind::OwnedString,
+                drop: MirGlueKind::OwnedString,
+            };
+        }
+        Self {
+            move_out: MirGlueKind::Unsupported,
+            clone: MirGlueKind::Unsupported,
+            drop: MirGlueKind::Unsupported,
+        }
+    }
+
+    pub fn supports_move_out(self) -> bool {
+        self.move_out != MirGlueKind::Unsupported
+    }
+
+    pub fn supports_clone(self) -> bool {
+        self.clone != MirGlueKind::Unsupported
+    }
+
+    pub fn supports_drop(self) -> bool {
+        self.drop != MirGlueKind::Unsupported
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +201,7 @@ pub struct MirTypeDesc {
     pub abi: MirAbiClass,
     pub needs_drop_glue: bool,
     pub needs_clone_glue: bool,
+    pub glue: MirGlueContract,
 }
 
 impl MirTypeDesc {
@@ -250,6 +316,7 @@ impl MirTypeDesc {
                 MirLayout::Opaque,
             ),
         };
+        let glue = MirGlueContract::for_type(&kind, ownership);
         Self {
             id: id.clone(),
             kind,
@@ -258,6 +325,7 @@ impl MirTypeDesc {
             abi,
             needs_drop_glue: ownership.needs_drop(),
             needs_clone_glue: ownership.needs_clone(),
+            glue,
         }
     }
 }
@@ -392,6 +460,7 @@ impl MirTypeCatalog {
                 descriptor.ownership = ownership;
                 descriptor.needs_drop_glue = ownership.needs_drop();
                 descriptor.needs_clone_glue = ownership.needs_clone();
+                descriptor.glue = MirGlueContract::for_type(&descriptor.kind, ownership);
                 descriptor.layout = MirLayout::Record {
                     nominal: item.clone(),
                     fields,
@@ -407,6 +476,67 @@ impl MirTypeCatalog {
 
     pub fn get(&self, id: &ResolvedTypeId) -> Option<&MirTypeDesc> {
         self.entries.get(id)
+    }
+
+    /// Validate a value boundary against the canonical glue contract.  The
+    /// result/source type equality is checked by the MIR instruction validator;
+    /// this method only answers whether the operation has a materialized
+    /// implementation for the descriptor.
+    pub fn validate_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let supported = match operation {
+            MirGlueOperation::MoveOut => descriptor.glue.supports_move_out(),
+            MirGlueOperation::Clone => descriptor.glue.supports_clone(),
+            MirGlueOperation::Drop => descriptor.glue.supports_drop(),
+        };
+        if supported {
+            Ok(())
+        } else {
+            Err(format!(
+                "type '{}' ownership {:?} has no canonical {:?} glue",
+                ty.as_str(),
+                descriptor.ownership,
+                operation
+            ))
+        }
+    }
+
+    pub fn validate_copy(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.ownership == MirOwnership::Copy {
+            Ok(())
+        } else {
+            Err(format!(
+                "copy instruction is invalid for ownership {:?} type '{}'",
+                descriptor.ownership,
+                ty.as_str()
+            ))
+        }
+    }
+
+    pub fn validate_value_operation(
+        &self,
+        result_ty: &ResolvedTypeId,
+        source_ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        if result_ty != source_ty {
+            return Err(format!(
+                "{:?} result type '{}' disagrees with source type '{}'",
+                operation,
+                result_ty.as_str(),
+                source_ty.as_str()
+            ));
+        }
+        self.validate_glue(source_ty, operation)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&ResolvedTypeId, &MirTypeDesc)> {
@@ -855,12 +985,13 @@ impl MirTypeCatalog {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {
             output.push_str(&format!(
-                "{} kind={:?} layout={:?} ownership={:?} abi={:?} drop={} clone={}\n",
+                "{} kind={:?} layout={:?} ownership={:?} abi={:?} glue={:?} drop={} clone={}\n",
                 id.as_str(),
                 descriptor.kind,
                 descriptor.layout,
                 descriptor.ownership,
                 descriptor.abi,
+                descriptor.glue,
                 descriptor.needs_drop_glue,
                 descriptor.needs_clone_glue,
             ));
@@ -1062,7 +1193,9 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 
 #[cfg(test)]
 mod tests {
-    use super::{MirAbiClass, MirLayout, MirOwnership, MirTypeCatalog};
+    use super::{
+        MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
+    };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
     use crate::core::mir::{MirAggregateKind, MirProjection};
 
@@ -1096,6 +1229,34 @@ mod tests {
         assert_eq!(descriptor.ownership, MirOwnership::Move);
         assert!(descriptor.needs_drop_glue);
         assert!(descriptor.needs_clone_glue);
+        assert_eq!(descriptor.glue.move_out, MirGlueKind::OwnedString);
+        assert_eq!(descriptor.glue.clone, MirGlueKind::OwnedString);
+        assert_eq!(descriptor.glue.drop, MirGlueKind::OwnedString);
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            assert!(catalog.validate_glue(&id, operation).is_ok());
+        }
+    }
+
+    #[test]
+    fn unsupported_move_aggregate_remains_fail_closed_in_glue_contract() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(string_id))
+            .expect("option");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let descriptor = catalog.get(&option_id).expect("descriptor");
+        assert_eq!(descriptor.ownership, MirOwnership::Move);
+        assert_eq!(descriptor.glue.move_out, MirGlueKind::Unsupported);
+        assert!(catalog
+            .validate_glue(&option_id, MirGlueOperation::MoveOut)
+            .is_err());
     }
 
     #[test]

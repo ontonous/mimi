@@ -13,6 +13,9 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::LoadTrue { .. } => "LOAD_TRUE",
         Op::LoadFalse { .. } => "LOAD_FALSE",
         Op::Mov { .. } => "MOV",
+        Op::Move { .. } => "MOVE",
+        Op::Clone { .. } => "CLONE",
+        Op::Drop { .. } => "DROP",
         Op::DerefValue { .. } => "DEREF_VALUE",
         Op::AddInt { .. } => "ADD_INT",
         Op::SubInt { .. } => "SUB_INT",
@@ -60,6 +63,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::JmpIf { .. } => "JMP_IF",
         Op::JmpIfNot { .. } => "JMP_IF_NOT",
         Op::Call { .. } => "CALL",
+        Op::CallMove { .. } => "CALL_MOVE",
         Op::MutateSetup { .. } => "MUTATE_SETUP",
         Op::MutateSetupField { .. } => "MUTATE_SETUP_FIELD",
         Op::CallBuiltin { .. } => "CALL_BUILTIN",
@@ -178,6 +182,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::LoadTrue { rd } => format!("{:04}  {:<16} r{} = true", pc, name, rd),
         Op::LoadFalse { rd } => format!("{:04}  {:<16} r{} = false", pc, name, rd),
         Op::Mov { rd, rs } => format!("{:04}  {:<16} r{} = r{}", pc, name, rd, rs),
+        Op::Move { rd, rs } => format!("{:04}  {:<16} r{} = move(r{})", pc, name, rd, rs),
+        Op::Clone { rd, rs } => format!("{:04}  {:<16} r{} = clone(r{})", pc, name, rd, rs),
+        Op::Drop { ra } => format!("{:04}  {:<16} drop r{}", pc, name, ra),
         Op::DerefValue { rd, ra } => format!("{:04}  {:<16} r{} = *r{}", pc, name, rd, ra),
         Op::CheckI32 { rd, kind } => {
             format!("{:04}  {:<16} check_i32 r{} (kind {})", pc, name, rd, kind)
@@ -244,6 +251,12 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             format!("{:04}  {:<16} r{} -> {}", pc, name, ra, target)
         }
         Op::Call {
+            rd,
+            func,
+            args_base,
+            argc,
+        }
+        | Op::CallMove {
             rd,
             func,
             args_base,
