@@ -41,6 +41,7 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     );
 
     register_libc(module, ctx, i8_ptr, i32, i64, void);
+    register_mir_list_runtime(module, ctx, i8_ptr, i64, void);
     register_map_record_fns(module, ctx, i8_ptr, i32, i64, void);
     register_string_fns(module, ctx, i8_ptr, i32, i64, void);
     register_regex_fns(module, ctx, i8_ptr, i32, i64, void);
@@ -62,6 +63,74 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_atomic_mutex_channel_rt(module, ctx, i8_ptr, i32, i64, void);
     register_quoted_ast_rt(module, ctx, i8_ptr, i32, i64, void);
     register_arithmetic_trap_fns(module, ctx, i8_ptr, void);
+}
+
+/// Runtime declarations for the canonical native MIR scalar List contract.
+///
+/// These helpers intentionally use a thin `i8*` handle to the complete
+/// heap-allocated `MimiList` object.  They are separate from the historical
+/// by-value list-prefix ABI and carry the TypeDesc-proven element kind on
+/// every operation.
+fn register_mir_list_runtime<'ctx>(
+    module: &Module<'ctx>,
+    ctx: &'ctx Context,
+    i8_ptr: inkwell::types::PointerType<'ctx>,
+    i64: inkwell::types::IntType<'ctx>,
+    void: inkwell::types::VoidType<'ctx>,
+) {
+    let i8 = ctx.i8_type();
+    let ptr = i8_ptr;
+    module.add_function(
+        "mimi_mir_list_new_scalar",
+        ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i8)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_push_scalar",
+        i8.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i8),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_clone_scalar",
+        ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i8),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_get_scalar",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i8),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_drop_scalar",
+        void.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i8),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 fn register_libc<'ctx>(

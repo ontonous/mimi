@@ -711,6 +711,235 @@ fn canonical_mir_run_cli_executes_list_index_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_native_build_list_index_matches_reference_and_bytecode() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_index.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical List reference run");
+    assert_eq!(reference.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-index-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical List native build");
+    assert!(
+        build.status.success(),
+        "canonical List native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical List native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_build_bool_list_index_matches_reference() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_bool.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical bool List reference run");
+    assert_eq!(reference.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-bool-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical bool List native build");
+    assert!(
+        build.status.success(),
+        "canonical bool List native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical bool List native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_list_drop_matches_reference() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_drop.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical List drop reference run");
+    assert_eq!(reference.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-drop-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical List drop native build");
+    assert!(
+        build.status.success(),
+        "canonical List drop native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical List drop native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_list_return_abi_matches_reference() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_return.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical List return reference run");
+    assert_eq!(reference.status.code(), Some(20));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-return-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical List return native build");
+    assert!(
+        build.status.success(),
+        "canonical List return native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical List return native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(20));
+}
+
+#[test]
+fn canonical_mir_native_list_index_oob_matches_mir_trap_class() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_oob.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical List OOB reference run");
+    assert_eq!(reference.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&reference.stderr).contains("E0803"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-oob-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical List OOB native build");
+    assert!(
+        build.status.success(),
+        "canonical List OOB native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical List OOB native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&native.stderr).contains("E0803"));
+}
+
+#[test]
+fn canonical_mir_native_rejects_string_list_before_llvm_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_list_string_index_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-string-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical string List build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR build error"));
+    assert!(stderr.contains("Copy scalar"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
 fn canonical_mir_run_cli_rejects_unsupported_list_shape_without_fallback() {
     let fixture = project_root()
         .join("tests")

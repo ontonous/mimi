@@ -1,4 +1,5 @@
-//! AST-free native consumer for the closed scalar/flat-record/flat-variant
+//! AST-free native consumer for the closed scalar/flat-record/flat-variant and
+//! scalar-List
 //! Canonical MIR slice.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
@@ -185,47 +186,69 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        let supported = (matches!(
-            desc.abi,
-            MirAbiClass::Integer {
-                bits: 32 | 64,
-                signed: true,
-            } | MirAbiClass::Bool
-        ) && desc.layout == MirLayout::Scalar)
-            || (allow_unit_result
-                && desc.abi == MirAbiClass::Unit
-                && desc.layout == MirLayout::Unit)
-            || self.validate_flat_copy_record(ty, subject, desc)
-            || self.validate_flat_copy_variant(ty, subject, desc);
+        let is_list = matches!(desc.layout, MirLayout::List { .. });
+        let supported = if is_list {
+            match self
+                .program
+                .type_catalog()
+                .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
+            {
+                Ok(()) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
+        } else {
+            (matches!(
+                desc.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } | MirAbiClass::Bool
+            ) && desc.layout == MirLayout::Scalar)
+                || (allow_unit_result
+                    && desc.abi == MirAbiClass::Unit
+                    && desc.layout == MirLayout::Unit)
+                || self.validate_flat_copy_record(ty, subject, desc)
+                || self.validate_flat_copy_variant(ty, subject, desc)
+        };
         if !supported {
+            let contract = if is_list {
+                "native canonical List contract"
+            } else {
+                "Copy scalar native contract"
+            };
             self.errors.push(NativeMirError::new(
                 subject,
                 format!(
-                    "TypeDesc ABI {:?}, layout {:?}, ownership {:?} is outside the Copy scalar native contract",
-                    desc.abi, desc.layout, desc.ownership
+                    "TypeDesc ABI {:?}, layout {:?}, ownership {:?} is outside the {contract}",
+                    desc.abi, desc.layout, desc.ownership,
                 ),
             ));
         }
-        if desc.ownership != MirOwnership::Copy {
-            self.errors.push(NativeMirError::new(
-                subject,
-                format!(
-                    "ownership {:?} requires explicit native glue and is not in this scalar slice",
-                    desc.ownership
-                ),
-            ));
-        }
-        if desc.glue
-            != (crate::core::mir::types::MirGlueContract {
-                move_out: MirGlueKind::Noop,
-                clone: MirGlueKind::Noop,
-                drop: MirGlueKind::Noop,
-            })
-        {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "Copy scalar TypeDesc does not carry the canonical no-op glue contract",
-            ));
+        if !is_list {
+            if desc.ownership != MirOwnership::Copy {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!(
+                        "ownership {:?} requires explicit native glue and is not in this scalar slice",
+                        desc.ownership
+                    ),
+                ));
+            }
+            if desc.glue
+                != (crate::core::mir::types::MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "Copy scalar TypeDesc does not carry the canonical no-op glue contract",
+                ));
+            }
         }
     }
 
@@ -342,7 +365,45 @@ impl<'a> NativeMirValidator<'a> {
             MirInstructionKind::Copy { result, source }
             | MirInstructionKind::Move { result, source }
             | MirInstructionKind::Clone { result, source } => {
-                self.validate_same_copy_values(function, result, source, subject);
+                self.validate_value(function, result, "result");
+                self.validate_value(function, source, "source");
+                let (Some(result_value), Some(source_value)) =
+                    (function.values.get(result), function.values.get(source))
+                else {
+                    return;
+                };
+                if result_value.ty != source_value.ty {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "result and source types disagree",
+                    ));
+                }
+                if let Some(desc) = catalog.get(&source_value.ty) {
+                    if matches!(desc.layout, MirLayout::List { .. })
+                        && matches!(instruction, MirInstructionKind::Copy { .. })
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "List values require explicit Move or Clone glue; shallow Copy is not permitted",
+                        ));
+                    } else if !matches!(instruction, MirInstructionKind::Copy { .. }) {
+                        let operation = match instruction {
+                            MirInstructionKind::Move { .. } => {
+                                crate::core::mir::types::MirGlueOperation::MoveOut
+                            }
+                            MirInstructionKind::Clone { .. } => {
+                                crate::core::mir::types::MirGlueOperation::Clone
+                            }
+                            _ => unreachable!(),
+                        };
+                        if desc.ownership != MirOwnership::Copy {
+                            if let Err(message) = catalog.validate_glue(&source_value.ty, operation)
+                            {
+                                self.errors.push(NativeMirError::new(subject, message));
+                            }
+                        }
+                    }
+                }
             }
             MirInstructionKind::Convert { result, source } => {
                 self.validate_value(function, result, "conversion result");
@@ -386,6 +447,28 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 projection,
             } => self.validate_project(function, result, base, projection, subject),
+            MirInstructionKind::Drop { value } => {
+                self.validate_value(function, value, "drop value");
+                let Some(value) = function.values.get(value) else {
+                    return;
+                };
+                if let Some(desc) = catalog.get(&value.ty) {
+                    if desc.ownership != MirOwnership::Copy {
+                        if let Err(message) = catalog.validate_glue(
+                            &value.ty,
+                            crate::core::mir::types::MirGlueOperation::Drop,
+                        ) {
+                            self.errors.push(NativeMirError::new(subject, message));
+                        }
+                        if !matches!(desc.layout, MirLayout::List { .. }) {
+                            self.errors.push(NativeMirError::new(
+                                subject,
+                                "only canonical List drop glue is emitted by this native slice",
+                            ));
+                        }
+                    }
+                }
+            }
             MirInstructionKind::Construct {
                 result,
                 kind,
@@ -398,6 +481,27 @@ impl<'a> NativeMirValidator<'a> {
                 fields,
             } => {
                 self.validate_construct_variant(function, result, nominal, variant, fields, subject)
+            }
+            MirInstructionKind::ConstructList { result, elements } => {
+                self.validate_value(function, result, "List result");
+                let element_types = elements
+                    .iter()
+                    .filter_map(|element| {
+                        function.values.get(element).map(|value| value.ty.clone())
+                    })
+                    .collect::<Vec<_>>();
+                if element_types.len() != elements.len() {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List element is absent from MIR value catalog",
+                    ));
+                } else if let Some(result_value) = function.values.get(result) {
+                    if let Err(message) =
+                        catalog.validate_list_construct(&result_value.ty, &element_types)
+                    {
+                        self.errors.push(NativeMirError::new(subject, message));
+                    }
+                }
             }
             MirInstructionKind::BuiltinCall {
                 result,
@@ -505,24 +609,41 @@ impl<'a> NativeMirValidator<'a> {
     ) {
         self.validate_value(function, result, "projection result");
         self.validate_value(function, base, "projection base");
-        if !matches!(projection, MirProjection::Field(_)) {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "only stable record field projection is in the native aggregate contract",
-            ));
-            return;
-        }
         let (Some(base_value), Some(result_value)) =
             (function.values.get(base), function.values.get(result))
         else {
             return;
         };
-        if let Err(message) = self.program.type_catalog().validate_projection(
-            &base_value.ty,
-            &result_value.ty,
-            projection,
-        ) {
-            self.errors.push(NativeMirError::new(subject, message));
+        match projection {
+            MirProjection::Index(index) => {
+                let Some(index_value) = function.values.get(index) else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List index is absent from MIR value catalog",
+                    ));
+                    return;
+                };
+                if let Err(message) = self.program.type_catalog().validate_list_index(
+                    &base_value.ty,
+                    &result_value.ty,
+                    &index_value.ty,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+            MirProjection::Field(_) => {
+                if let Err(message) = self.program.type_catalog().validate_projection(
+                    &base_value.ty,
+                    &result_value.ty,
+                    projection,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+            _ => self.errors.push(NativeMirError::new(
+                subject,
+                "projection shape is outside the native MIR contract",
+            )),
         }
     }
 
@@ -1250,10 +1371,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_const(result, literal, subject)?;
                 self.values.insert(result.clone(), value);
             }
-            MirInstructionKind::Copy { result, source }
-            | MirInstructionKind::Move { result, source }
-            | MirInstructionKind::Clone { result, source } => {
+            MirInstructionKind::Copy { result, source } => {
                 let value = self.value(source, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::Move { result, source } => {
+                let value = self.value(source, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::Clone { result, source } => {
+                let value = if matches!(
+                    self.value_desc(source, subject)?.layout,
+                    MirLayout::List { .. }
+                ) {
+                    self.emit_list_clone(source, subject)?
+                } else {
+                    self.value(source, subject)?
+                };
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::Convert { result, source } => {
@@ -1324,6 +1458,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value =
                     self.emit_construct_variant(result, nominal, variant, fields, subject)?;
                 self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ConstructList { result, elements } => {
+                let value = self.emit_list_construct(result, elements, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::Drop { value } => {
+                self.emit_drop(value, subject)?;
             }
             MirInstructionKind::BuiltinCall {
                 result,
@@ -1512,17 +1653,354 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(aggregate.into())
     }
 
+    fn emit_list_construct(
+        &mut self,
+        result: &MirValueId,
+        elements: &[MirValueId],
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let catalog = self.program.type_catalog();
+        let result_desc = catalog
+            .get(&result_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "List result TypeDesc is absent"))?;
+        let MirLayout::List { element } = &result_desc.layout else {
+            return Err(NativeMirError::new(
+                subject,
+                "List construction result has no canonical List layout",
+            ));
+        };
+        catalog
+            .validate_list_construct(
+                &result_ty,
+                &elements
+                    .iter()
+                    .map(|value| self.value_type(value, subject))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let kind = native_list_kind(catalog, &result_ty)?;
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        let new_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_new_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let list = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    new_fn,
+                    &[BasicMetadataValueEnum::from(kind_value)],
+                    "mir_list_new",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "List constructor returned void"))?
+        .into_pointer_value();
+        self.emit_list_null_abort(list, subject, "canonical MIR List allocation failed")?;
+
+        let push_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_push_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let element_desc = catalog
+            .get(element)
+            .ok_or_else(|| NativeMirError::new(subject, "List element TypeDesc is absent"))?;
+        for value in elements {
+            let scalar = self.emit_list_scalar_as_i64(value, element_desc, subject)?;
+            let status = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        push_fn,
+                        &[
+                            BasicMetadataValueEnum::from(list),
+                            BasicMetadataValueEnum::from(kind_value),
+                            BasicMetadataValueEnum::from(scalar),
+                        ],
+                        "mir_list_push",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "List append returned void"))?
+            .into_int_value();
+            let failed = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    status,
+                    self.generator.context.i8_type().const_zero(),
+                    "mir_list_push_failed",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let fail = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_list_push_abort");
+            let ok = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_list_push_ok");
+            self.generator
+                .builder
+                .build_conditional_branch(failed, fail, ok)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator.builder.position_at_end(fail);
+            self.emit_abort_with_message("[E0800] canonical MIR List append failed", subject)?;
+            self.generator.builder.position_at_end(ok);
+        }
+        Ok(list.into())
+    }
+
+    fn emit_list_clone(
+        &mut self,
+        source: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let source_ty = self.value_type(source, subject)?;
+        let kind = native_list_kind(self.program.type_catalog(), &source_ty)?;
+        let source_value = self.value(source, subject)?.into_pointer_value();
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_clone_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::from(source_value),
+                        BasicMetadataValueEnum::from(kind_value),
+                    ],
+                    "mir_list_clone",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "List clone returned void"))?
+        .into_pointer_value();
+        self.emit_list_null_abort(clone, subject, "canonical MIR List clone failed")?;
+        Ok(clone.into())
+    }
+
+    fn emit_drop(&mut self, value: &MirValueId, subject: &str) -> Result<(), NativeMirError> {
+        let desc = self.value_desc(value, subject)?;
+        if desc.ownership == MirOwnership::Copy {
+            return Ok(());
+        }
+        let ty = self.value_type(value, subject)?;
+        let kind = native_list_kind(self.program.type_catalog(), &ty)?;
+        let function = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_drop_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        self.generator
+            .builder
+            .build_call(
+                function,
+                &[
+                    BasicMetadataValueEnum::from(self.value(value, subject)?.into_pointer_value()),
+                    BasicMetadataValueEnum::from(kind_value),
+                ],
+                "mir_list_drop",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(())
+    }
+
+    fn emit_list_null_abort(
+        &mut self,
+        value: inkwell::values::PointerValue<'ctx>,
+        subject: &str,
+        message: &str,
+    ) -> Result<(), NativeMirError> {
+        let is_null = self
+            .generator
+            .builder
+            .build_is_null(value, "mir_list_is_null")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fail = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_list_null_abort");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_list_nonnull");
+        self.generator
+            .builder
+            .build_conditional_branch(is_null, fail, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(fail);
+        self.emit_abort_with_message(message, subject)?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
+    }
+
+    fn emit_list_scalar_as_i64(
+        &mut self,
+        value: &MirValueId,
+        element_desc: &MirTypeDesc,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        let value = self.value(value, subject)?.into_int_value();
+        match element_desc.abi {
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            } => Ok(value),
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            } => self
+                .generator
+                .builder
+                .build_int_s_extend(value, self.generator.context.i64_type(), "mir_list_i32")
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            MirAbiClass::Bool => self
+                .generator
+                .builder
+                .build_int_z_extend(value, self.generator.context.i64_type(), "mir_list_bool")
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            abi => Err(NativeMirError::new(
+                subject,
+                format!("List element ABI {abi:?} is not scalar native storage"),
+            )),
+        }
+    }
+
     fn emit_project(
         &mut self,
-        _result: &MirValueId,
+        result: &MirValueId,
         base: &MirValueId,
         projection: &MirProjection,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if let MirProjection::Index(index) = projection {
+            let base_ty = self.value_type(base, subject)?;
+            let result_ty = self.value_type(result, subject)?;
+            let index_ty = self.value_type(index, subject)?;
+            let catalog = self.program.type_catalog();
+            catalog
+                .validate_list_index(&base_ty, &result_ty, &index_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let kind = native_list_kind(catalog, &base_ty)?;
+            let index_desc = catalog
+                .get(&index_ty)
+                .ok_or_else(|| NativeMirError::new(subject, "List index TypeDesc is absent"))?;
+            let index_value = self.value(index, subject)?.into_int_value();
+            let index_value = match index_desc.abi {
+                MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                } => index_value,
+                MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                } => self
+                    .generator
+                    .builder
+                    .build_int_s_extend(
+                        index_value,
+                        self.generator.context.i64_type(),
+                        "mir_list_index_i32",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "List index is outside signed integer native storage",
+                    ))
+                }
+            };
+            let kind_value = self
+                .generator
+                .context
+                .i8_type()
+                .const_int(kind as u64, false);
+            let get_fn = self
+                .generator
+                .get_runtime_fn("mimi_mir_list_get_scalar")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let raw = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        get_fn,
+                        &[
+                            BasicMetadataValueEnum::from(
+                                self.value(base, subject)?.into_pointer_value(),
+                            ),
+                            BasicMetadataValueEnum::from(kind_value),
+                            BasicMetadataValueEnum::from(index_value),
+                        ],
+                        "mir_list_get",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "List projection returned void"))?
+            .into_int_value();
+            let result_desc = catalog
+                .get(&result_ty)
+                .ok_or_else(|| NativeMirError::new(subject, "List result TypeDesc is absent"))?;
+            return match result_desc.abi {
+                MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                } => Ok(raw.into()),
+                MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                } => self
+                    .generator
+                    .builder
+                    .build_int_truncate(
+                        raw,
+                        self.generator.context.i32_type(),
+                        "mir_list_i32_result",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string())),
+                MirAbiClass::Bool => self
+                    .generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        raw,
+                        self.generator.context.i64_type().const_zero(),
+                        "mir_list_bool_result",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string())),
+                _ => Err(NativeMirError::new(
+                    subject,
+                    "List projection result is outside scalar native storage",
+                )),
+            };
+        }
         let MirProjection::Field(field_id) = projection else {
             return Err(NativeMirError::new(
                 subject,
-                "only record field projection is emitted by the native aggregate adapter",
+                "projection shape is outside the native aggregate adapter",
             ));
         };
         let base_ty = self.value_type(base, subject)?;
@@ -2436,6 +2914,45 @@ fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
             })
 }
 
+/// Map a TypeDesc-proven canonical scalar List element to the native runtime
+/// tag.  This is the only place where the native ABI names the runtime's
+/// serialized `ListElementKind` values; it never infers the element type from
+/// an LLVM pointer or from surface syntax.
+fn native_list_kind(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<i8, NativeMirError> {
+    catalog
+        .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
+        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+    let desc = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "List TypeDesc is absent"))?;
+    let MirLayout::List { element } = &desc.layout else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native List ABI requested for a non-List TypeDesc",
+        ));
+    };
+    let element_desc = catalog.get(element).ok_or_else(|| {
+        NativeMirError::new(
+            ty.as_str(),
+            format!("List element TypeDesc '{}' is absent", element.as_str()),
+        )
+    })?;
+    match element_desc.abi {
+        MirAbiClass::Integer {
+            bits: 32 | 64,
+            signed: true,
+        } => Ok(1),
+        MirAbiClass::Bool => Ok(3),
+        abi => Err(NativeMirError::new(
+            ty.as_str(),
+            format!("List element ABI {abi:?} is outside the native scalar List ABI"),
+        )),
+    }
+}
+
 /// Return the one native payload type shared by a bounded built-in variant.
 ///
 /// The physical representation is deliberately narrower than the general MIR
@@ -2606,6 +3123,13 @@ fn native_basic_type<'ctx>(
             signed: true,
         } => Ok(context.i64_type().into()),
         MirAbiClass::Bool => Ok(context.bool_type().into()),
+        MirAbiClass::OpaqueHandle => match &desc.layout {
+            MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+            layout => Err(NativeMirError::new(
+                ty.as_str(),
+                format!("opaque-handle layout {layout:?} is outside native contract"),
+            )),
+        },
         MirAbiClass::Aggregate => match &desc.layout {
             MirLayout::Record { fields, .. } if !fields.is_empty() => {
                 let mut field_types = Vec::with_capacity(fields.len());
@@ -2712,6 +3236,44 @@ mod tests {
             generator.module.get_function("main").is_none(),
             "non-Copy aggregate must be rejected before LLVM declarations"
         );
+    }
+
+    #[test]
+    fn canonical_mir_rejects_non_scalar_list_before_any_backend() {
+        let tokens = Lexer::new("func main() -> i32 { let values = [\"x\"]; drop(values); 0 }")
+            .tokenize()
+            .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-scalar List must fail before any backend");
+        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
+            panic!("unexpected canonical List rejection: {error:?}");
+        };
+        assert!(errors
+            .iter()
+            .any(|error| error.message.contains("Copy scalar contract")));
+    }
+
+    #[test]
+    fn native_emitter_accepts_scalar_list_projection_contract() {
+        let program =
+            canonical_program("func main() -> i32 { let values = [10, 20, 30]; values[1] }");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_list_emitter_test");
+
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar List MIR should have a native contract");
+        assert!(generator.module.get_function("main").is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_get_scalar")
+            .is_some());
+        generator
+            .module
+            .verify()
+            .expect("native List module verifies");
     }
 
     #[test]

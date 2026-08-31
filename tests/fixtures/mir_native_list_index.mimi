@@ -1,0 +1,9 @@
+func first(xs: List<i32>) -> i32 {
+    xs[-1]
+}
+
+func main() -> i32 {
+    let xs = [10, 20, 30]
+    let tail = first(xs)
+    if tail == 30 { 42 } else { 0 }
+}

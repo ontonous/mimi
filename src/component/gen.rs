@@ -403,6 +403,40 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(ptr(ptr(prim(U8))))
             .effect("alloc")
     });
+    // Canonical native MIR List ABI: an opaque pointer to the complete
+    // MimiList object plus an explicit ListElementKind tag.  The scalar
+    // payload/index storage is i64 for both I64 and Bool (Bool is normalized
+    // to 0/1 by the MIR emitter/runtime contract).
+    gen.export("mimi_mir_list_new_scalar", |f| {
+        f.param("kind", prim(I8))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_mir_list_push_scalar", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("kind", prim(I8))
+            .param("value", prim(I64))
+            .returns(prim(I8))
+            .effect("alloc")
+    });
+    gen.export("mimi_mir_list_clone_scalar", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("kind", prim(I8))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
+    gen.export("mimi_mir_list_get_scalar", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("kind", prim(I8))
+            .param("index", prim(I64))
+            .returns(prim(I64))
+            .effect("trap")
+    });
+    gen.export("mimi_mir_list_drop_scalar", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("kind", prim(I8))
+            .effect("dealloc")
+    });
 
     // ── Map (runtime/mod.rs:1419-1805; MapHandle = usize, ValueHandle = usize) ──
     gen.export("mimi_map_new", |f| {
@@ -1547,6 +1581,15 @@ mod tests {
         assert_eq!(list_push.params.len(), 2);
         assert!(list_push.ret.is_void());
         assert!(!list_push.is_unsafe);
+
+        let mir_list_get = ir
+            .export("mimi_mir_list_get_scalar")
+            .expect("canonical MIR List get should exist");
+        assert_eq!(mir_list_get.params.len(), 3);
+        assert_eq!(mir_list_get.ret, AbiTypeRef::Primitive(AbiPrimitive::I64));
+        assert_eq!(mir_list_get.effects, vec!["trap".to_string()]);
+        assert_eq!(mir_list_get.params[0].ty, ptr(prim(AbiPrimitive::U8)));
+        assert_eq!(mir_list_get.params[1].ty, prim(AbiPrimitive::I8));
     }
 
     #[test]

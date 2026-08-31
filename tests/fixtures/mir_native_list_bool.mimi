@@ -1,0 +1,4 @@
+func main() -> i32 {
+    let flags = [false, true]
+    if flags[1] { 42 } else { 0 }
+}

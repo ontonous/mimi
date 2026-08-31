@@ -1,0 +1,8 @@
+func make_values() -> List<i32> {
+    [10, 20, 30]
+}
+
+func main() -> i32 {
+    let values = make_values()
+    values[1]
+}

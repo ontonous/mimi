@@ -233,11 +233,12 @@ impl ListElementKind {
 /// `#[repr(C)]` field order is frozen: `{len @0, data @8, owns_data @16,
 /// element_kind @17, has_header @18, string_abi @19}`. `has_header` and
 /// `string_abi` were APPENDED in the pre-existing alignment padding; total
-/// size stays 24 bytes. Native codegen passes its own two-field
-/// `{i64 len, i8* data}` lists through `MimiListAbiPrefix` — never through
-/// this struct — and the Component ABI treats `*mut MimiList` as an opaque
-/// `ListHandle` (component/gen.rs), so the appended fields are invisible to
-/// both ABIs.
+/// size stays 24 bytes. The historical by-value emitter passes its own
+/// two-field `{i64 len, i8* data}` lists through `MimiListAbiPrefix`; the
+/// canonical MIR native consumer intentionally passes a pointer to this full
+/// object through its dedicated opaque `i8*` ABI. The Component ABI treats
+/// `*mut MimiList` as an opaque `ListHandle` (component/gen.rs), so the fields
+/// remain hidden from component clients.
 #[repr(C)]
 pub struct MimiList {
     // Fields are pub(crate) for regression tests (src/tests/audit_fix_*);
@@ -1339,6 +1340,246 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         // all runtime functions (mimi_str_split, mimi_map_keys, etc.).
         // Using libc::free here would be UB on musl/macOS (allocator mismatch).
         drop(Box::from_raw(list));
+    }
+}
+
+// ── Canonical MIR List ABI ────────────────────────────────────────────────
+//
+// The canonical native MIR backend deliberately does not use the historical
+// by-value `{ len, data }` list prefix.  It passes an opaque pointer to the
+// complete, heap-allocated `MimiList` object and supplies the TypeDesc-proven
+// element kind on every operation.  This keeps the runtime metadata and the
+// ownership/glue contract in one explicit ABI instead of making LLVM infer a
+// list layout from a private backend struct.
+
+fn mir_list_kind(raw: i8) -> Option<ListElementKind> {
+    match raw {
+        x if x == ListElementKind::I64 as i8 => Some(ListElementKind::I64),
+        x if x == ListElementKind::Bool as i8 => Some(ListElementKind::Bool),
+        _ => None,
+    }
+}
+
+fn mir_list_abort(message: &'static [u8]) -> ! {
+    // SAFETY: all messages passed here are static NUL-terminated strings.
+    unsafe { mimi_runtime_abort(message.as_ptr() as *const std::ffi::c_char) }
+}
+
+/// Allocate an empty scalar list for canonical native MIR.
+///
+/// `kind` is the serialized `ListElementKind` value proven by the MIR
+/// TypeDesc contract (`I64` or `Bool`). Unsupported kinds return null so the
+/// emitter can turn the failure into a canonical trap rather than guessing an
+/// ABI.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_new_scalar(kind: i8) -> *mut MimiList {
+    let Some(kind) = mir_list_kind(kind) else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(MimiList::new_with_kind(kind)))
+}
+
+/// Append one scalar storage slot to a canonical native MIR list.
+///
+/// The scalar payload is always carried as `i64`; `Bool` uses the same 0/1
+/// storage as the runtime list representation.  A zero return means the
+/// append was rejected (invalid handle/kind or allocation failure).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_push_scalar(
+    list: *mut MimiList,
+    kind: i8,
+    value: i64,
+) -> i8 {
+    let Some(expected) = mir_list_kind(kind) else {
+        return 0;
+    };
+    if list.is_null() {
+        return 0;
+    }
+    // SAFETY: the canonical emitter passes a live MimiList allocated by the
+    // matching constructor; null was checked above.
+    // SAFETY: `list` is a live MimiList pointer under the ABI precondition.
+    let (element_kind, old_len) = unsafe { ((*list).element_kind, (*list).len) };
+    if element_kind != expected || old_len < 0 {
+        return 0;
+    }
+    let Some(new_len) = old_len.checked_add(1) else {
+        return 0;
+    };
+    // SAFETY: the list pointer and scalar payload satisfy the legacy typed
+    // i64 push precondition.  Bool uses i64 storage by contract.
+    unsafe { mimi_list_push_i64(list, value) };
+    let appended = unsafe { (*list).len == new_len };
+    if appended {
+        // mimi_list_push_i64 marks the storage as I64. Restore the semantic
+        // bool tag after the shared growth/write implementation.
+        unsafe { (*list).element_kind = expected };
+    }
+    appended as i8
+}
+
+/// Deep-clone a scalar list for canonical native MIR.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_clone_scalar(
+    list: *const MimiList,
+    kind: i8,
+) -> *mut MimiList {
+    let Some(expected) = mir_list_kind(kind) else {
+        return std::ptr::null_mut();
+    };
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the canonical emitter passes a live MimiList; null was checked.
+    let source = unsafe { &*list };
+    if source.element_kind != expected || source.len < 0 {
+        return std::ptr::null_mut();
+    }
+    if source.len > 0 && source.data.is_null() {
+        return std::ptr::null_mut();
+    }
+    let clone = unsafe { mimi_mir_list_new_scalar(kind) };
+    if clone.is_null() {
+        return std::ptr::null_mut();
+    }
+    for index in 0..source.len as usize {
+        // SAFETY: the source list contract guarantees `data` has `len`
+        // pointer-sized scalar slots; the loop is bounded by that length.
+        let value = unsafe { *(source.data as *const i64).add(index) };
+        if unsafe { mimi_mir_list_push_scalar(clone, kind, value) } == 0 {
+            // SAFETY: clone was allocated by the matching constructor and no
+            // pointer elements are present in this scalar-only contract.
+            unsafe { mimi_list_free(clone, false) };
+            return std::ptr::null_mut();
+        }
+    }
+    // `push_scalar` restores Bool after each write; make the final tag explicit
+    // even for the empty-list case.
+    // SAFETY: clone is non-null and owned by this function until returned.
+    unsafe { (*clone).element_kind = expected };
+    clone
+}
+
+/// Read one scalar slot using canonical negative-index normalization.
+///
+/// Out-of-range indices trap with E0803, matching the reference executor and
+/// bytecode List projection. Invalid handles/kinds are E0800 contract traps.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_get_scalar(
+    list: *const MimiList,
+    kind: i8,
+    raw_index: i64,
+) -> i64 {
+    let Some(expected) = mir_list_kind(kind) else {
+        mir_list_abort(b"[E0800] canonical MIR List kind is invalid\0");
+    };
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List handle is null\0");
+    }
+    // SAFETY: the canonical emitter passes a live MimiList; null was checked.
+    let source = unsafe { &*list };
+    if source.element_kind != expected || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical MIR List kind disagrees\0");
+    }
+    let len = source.len;
+    let index = if raw_index < 0 {
+        let distance = raw_index.unsigned_abs();
+        if distance > len as u64 {
+            mir_list_abort(b"[E0803] canonical MIR List index out of bounds\0");
+        }
+        len - distance as i64
+    } else if raw_index >= len {
+        mir_list_abort(b"[E0803] canonical MIR List index out of bounds\0");
+    } else {
+        raw_index
+    };
+    if source.data.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List data is null\0");
+    }
+    // SAFETY: `index` is normalized into `[0, len)` and the canonical list
+    // stores both I64 and Bool elements in i64-sized slots.
+    unsafe { *(source.data as *const i64).add(index as usize) }
+}
+
+/// Drop a scalar list allocated by canonical native MIR.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
+    let Some(expected) = mir_list_kind(kind) else {
+        mir_list_abort(b"[E0800] canonical MIR List kind is invalid\0");
+    };
+    if list.is_null() {
+        return;
+    }
+    // SAFETY: the canonical emitter passes a live MimiList; null was checked.
+    if unsafe { (*list).element_kind } != expected {
+        mir_list_abort(b"[E0800] canonical MIR List kind disagrees\0");
+    }
+    // SAFETY: scalar lists contain no individually-owned pointer elements.
+    unsafe { mimi_list_free(list, false) };
+}
+
+#[cfg(test)]
+mod canonical_mir_list_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_scalar_list_clone_and_drop_preserve_i64_storage() {
+        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!list.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(list, ListElementKind::I64 as i8, 10),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(list, ListElementKind::I64 as i8, 20),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_get_scalar(list, ListElementKind::I64 as i8, -1),
+                20
+            );
+        }
+        let clone = unsafe { mimi_mir_list_clone_scalar(list, ListElementKind::I64 as i8) };
+        assert!(!clone.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_get_scalar(clone, ListElementKind::I64 as i8, 0),
+                10
+            );
+            mimi_mir_list_drop_scalar(clone, ListElementKind::I64 as i8);
+            mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_scalar_list_normalizes_bool_storage() {
+        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::Bool as i8) };
+        assert!(!list.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(list, ListElementKind::Bool as i8, 0),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(list, ListElementKind::Bool as i8, 1),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_get_scalar(list, ListElementKind::Bool as i8, 1),
+                1
+            );
+            mimi_mir_list_drop_scalar(list, ListElementKind::Bool as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_scalar_list_rejects_unknown_kind_without_guessing_abi() {
+        unsafe {
+            assert!(mimi_mir_list_new_scalar(99).is_null());
+            assert_eq!(mimi_mir_list_push_scalar(std::ptr::null_mut(), 99, 1), 0);
+            assert!(mimi_mir_list_clone_scalar(std::ptr::null(), 99).is_null());
+        }
     }
 }
 
