@@ -757,6 +757,20 @@ impl<'a> Lowerer<'a> {
                     },
                 );
             }
+            ResolvedExprKind::Set(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.lower_expr(element))
+                    .collect();
+                self.emit(
+                    &expression.node_id,
+                    "construct_set",
+                    MirInstructionKind::ConstructSet {
+                        result: result.clone(),
+                        elements,
+                    },
+                );
+            }
             ResolvedExprKind::Record {
                 nominal,
                 fields,
@@ -833,6 +847,25 @@ impl<'a> Lowerer<'a> {
                         }
                     };
                     self.emit(&expression.node_id, "construct_variant", instruction);
+                } else if is_set_builtin(call) {
+                    if let Some((operation, set, argument)) = set_builtin_contract(call, &arguments)
+                    {
+                        self.emit(
+                            &expression.node_id,
+                            "set_op",
+                            MirInstructionKind::SetOp {
+                                result: result.clone(),
+                                operation,
+                                set,
+                                argument,
+                            },
+                        );
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "Set builtin arity does not match its canonical MIR operation",
+                        );
+                    }
                 } else if let Some(contract) = call_builtin_contract(call) {
                     self.emit(
                         &expression.node_id,
@@ -1494,6 +1527,56 @@ fn call_builtin_contract(call: &ResolvedCall) -> Option<super::types::MirBuiltin
         return None;
     };
     super::types::MirBuiltinContract::from_builtin(builtin)
+}
+
+fn set_builtin_contract(
+    call: &ResolvedCall,
+    arguments: &[MirValueId],
+) -> Option<(super::MirSetOperation, MirValueId, Option<MirValueId>)> {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    let operation = match builtin.as_str() {
+        "builtin.method.set.size" | "builtin.method.set.len" => super::MirSetOperation::Size,
+        "builtin.method.set.is_empty" => super::MirSetOperation::IsEmpty,
+        "builtin.method.set.contains" => super::MirSetOperation::Contains,
+        "builtin.method.set.insert" => super::MirSetOperation::Insert,
+        "builtin.method.set.remove" => super::MirSetOperation::Remove,
+        // Keep this identity visible but outside this slice's contract: the
+        // result needs a canonical List payload/equality/ownership contract.
+        "builtin.method.set.to_list" => super::MirSetOperation::ToList,
+        _ => return None,
+    };
+    let expected_arity = match operation {
+        super::MirSetOperation::Size
+        | super::MirSetOperation::IsEmpty
+        | super::MirSetOperation::ToList => 1,
+        super::MirSetOperation::Contains
+        | super::MirSetOperation::Insert
+        | super::MirSetOperation::Remove => 2,
+    };
+    if arguments.len() != expected_arity {
+        return None;
+    }
+    let set = arguments.first()?.clone();
+    let argument = arguments.get(1).cloned();
+    Some((operation, set, argument))
+}
+
+fn is_set_builtin(call: &ResolvedCall) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    matches!(
+        builtin.as_str(),
+        "builtin.method.set.size"
+            | "builtin.method.set.len"
+            | "builtin.method.set.is_empty"
+            | "builtin.method.set.contains"
+            | "builtin.method.set.insert"
+            | "builtin.method.set.remove"
+            | "builtin.method.set.to_list"
+    )
 }
 
 #[cfg(test)]

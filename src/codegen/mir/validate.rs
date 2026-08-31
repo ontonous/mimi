@@ -145,6 +145,7 @@ impl<'a> NativeMirValidator<'a> {
             return;
         };
         let is_list = matches!(desc.layout, MirLayout::List { .. });
+        let is_set = matches!(desc.layout, MirLayout::Set { .. });
         let is_reference = matches!(&desc.kind, MirTypeKind::Reference { mutable: false });
         let is_owned_string = matches!(
             &desc.kind,
@@ -176,6 +177,18 @@ impl<'a> NativeMirValidator<'a> {
                 .program
                 .type_catalog()
                 .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
+            {
+                Ok(()) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
+        } else if is_set {
+            match self
+                .program
+                .type_catalog()
+                .validate_set_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
             {
                 Ok(()) => true,
                 Err(message) => {
@@ -235,6 +248,8 @@ impl<'a> NativeMirValidator<'a> {
                 "native canonical owned String contract"
             } else if is_list {
                 "native canonical List contract"
+            } else if is_set {
+                "native canonical Set<T> contract"
             } else if matches!(desc.layout, MirLayout::Tuple(_)) {
                 "native canonical recursive tuple contract"
             } else if is_record {
@@ -257,6 +272,7 @@ impl<'a> NativeMirValidator<'a> {
             ));
         }
         if !is_list
+            && !is_set
             && !is_reference
             && !is_owned_string
             && !matches!(desc.layout, MirLayout::Tuple(_))
@@ -445,6 +461,8 @@ impl<'a> NativeMirValidator<'a> {
                     {
                         let message = if matches!(desc.layout, MirLayout::List { .. }) {
                             "List values require explicit Move or Clone glue; shallow Copy is not permitted"
+                        } else if matches!(desc.layout, MirLayout::Set { .. }) {
+                            "Set values require explicit Move or Clone glue; shallow Copy is not permitted"
                         } else if matches!(
                             &desc.kind,
                             MirTypeKind::Primitive(crate::core::PrimitiveType::String)
@@ -561,6 +579,7 @@ impl<'a> NativeMirValidator<'a> {
                             self.errors.push(NativeMirError::new(subject, message));
                         }
                         if !matches!(desc.layout, MirLayout::List { .. })
+                            && !matches!(desc.layout, MirLayout::Set { .. })
                             && !matches!(desc.layout, MirLayout::Tuple(_))
                             && !matches!(desc.layout, MirLayout::Record { .. })
                             && !matches!(
@@ -574,7 +593,7 @@ impl<'a> NativeMirValidator<'a> {
                         {
                             self.errors.push(NativeMirError::new(
                                 subject,
-                                "only canonical owned String/List/tuple/variant drop glue is emitted by this native slice",
+                                "only canonical owned String/List/Set/tuple/variant drop glue is emitted by this native slice",
                             ));
                         }
                     }
@@ -626,6 +645,56 @@ impl<'a> NativeMirValidator<'a> {
                     {
                         self.errors.push(NativeMirError::new(subject, message));
                     }
+                }
+            }
+            MirInstructionKind::ConstructSet { result, elements } => {
+                self.validate_value(function, result, "Set result");
+                let element_types = elements
+                    .iter()
+                    .filter_map(|element| {
+                        function.values.get(element).map(|value| value.ty.clone())
+                    })
+                    .collect::<Vec<_>>();
+                if element_types.len() != elements.len() {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "Set element is absent from MIR value catalog",
+                    ));
+                } else if let Some(result_value) = function.values.get(result) {
+                    if let Err(message) =
+                        catalog.validate_set_construct(&result_value.ty, &element_types)
+                    {
+                        self.errors.push(NativeMirError::new(subject, message));
+                    }
+                }
+            }
+            MirInstructionKind::SetOp {
+                result,
+                operation,
+                set,
+                argument,
+            } => {
+                self.validate_value(function, result, "Set operation result");
+                self.validate_value(function, set, "Set operation receiver");
+                if let Some(argument) = argument {
+                    self.validate_value(function, argument, "Set operation argument");
+                }
+                let (Some(result_value), Some(set_value)) =
+                    (function.values.get(result), function.values.get(set))
+                else {
+                    return;
+                };
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| &value.ty);
+                if let Err(message) = catalog.validate_set_operation(
+                    &result_value.ty,
+                    &set_value.ty,
+                    argument_ty,
+                    *operation,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
                 }
             }
             MirInstructionKind::BuiltinCall {

@@ -19172,6 +19172,30 @@ pub extern "C" fn mimi_set_new() -> SetHandle {
     })
 }
 
+/// Clone the scalar Set contract used by canonical MIR. String-backed Sets
+/// are intentionally rejected here: their payload release/equality contract
+/// is a separate shape and must not be smuggled through a shallow handle copy.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_set_clone_scalar(handle: SetHandle) -> SetHandle {
+    if handle == 0 {
+        return 0;
+    }
+    let source = match handle::set_acquire(handle) {
+        Ok(source) => source,
+        Err(error) => {
+            handle::set_handle_error(error);
+            return 0;
+        }
+    };
+    if !source.string_values.is_empty() {
+        return 0;
+    }
+    handle::set_new_handle(MimiSet {
+        inner: source.inner.clone(),
+        string_values: std::collections::HashSet::new(),
+    })
+}
+
 /// Serialize Option<i64> layout `{disc:i1/i64, payload:i64}` to match interp:
 /// Some → `{"Some":[n]}`, None → `"None"`.
 #[no_mangle]

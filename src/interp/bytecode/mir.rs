@@ -19,7 +19,7 @@ use crate::core::mir::types::{
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
-    MirTerminator, MirValueId,
+    MirSetOperation, MirTerminator, MirValueId,
 };
 use crate::core::NodeId;
 
@@ -381,7 +381,10 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::Mov { rd, rs });
                 } else if matches!(
                     desc.glue.move_out,
-                    MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
+                    MirGlueKind::OwnedString
+                        | MirGlueKind::List
+                        | MirGlueKind::Set
+                        | MirGlueKind::Aggregate
                 ) {
                     self.proto.emit(Op::Move { rd, rs });
                 } else {
@@ -409,7 +412,10 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::Mov { rd, rs });
                 } else if matches!(
                     desc.glue.clone,
-                    MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
+                    MirGlueKind::OwnedString
+                        | MirGlueKind::List
+                        | MirGlueKind::Set
+                        | MirGlueKind::Aggregate
                 ) {
                     self.proto.emit(Op::Clone { rd, rs });
                 } else {
@@ -430,7 +436,10 @@ impl<'a> FunctionEmitter<'a> {
                         value
                     ));
                 } else if desc.ownership != MirOwnership::Copy
-                    && matches!(desc.glue.drop, MirGlueKind::OwnedString | MirGlueKind::List)
+                    && matches!(
+                        desc.glue.drop,
+                        MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Set
+                    )
                 {
                     let Some(ra) = self.reg(value) else { return };
                     self.proto.emit(Op::Drop { ra });
@@ -497,6 +506,15 @@ impl<'a> FunctionEmitter<'a> {
             MirInstructionKind::ConstructList { result, elements } => {
                 self.emit_list_construct(result, elements)
             }
+            MirInstructionKind::ConstructSet { result, elements } => {
+                self.emit_set_construct(result, elements)
+            }
+            MirInstructionKind::SetOp {
+                result,
+                operation,
+                set,
+                argument,
+            } => self.emit_set_op(result, *operation, set, argument.as_ref()),
             MirInstructionKind::Construct {
                 result,
                 kind: MirAggregateKind::Record { nominal, fields },
@@ -715,7 +733,10 @@ impl<'a> FunctionEmitter<'a> {
                 });
             } else if matches!(
                 current_ty_desc.glue.clone,
-                MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
+                MirGlueKind::OwnedString
+                    | MirGlueKind::List
+                    | MirGlueKind::Set
+                    | MirGlueKind::Aggregate
             ) {
                 self.proto.emit(Op::Clone {
                     rd,
@@ -1067,7 +1088,10 @@ impl<'a> FunctionEmitter<'a> {
                 });
             } else if matches!(
                 desc.glue.move_out,
-                MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
+                MirGlueKind::OwnedString
+                    | MirGlueKind::List
+                    | MirGlueKind::Set
+                    | MirGlueKind::Aggregate
             ) {
                 self.proto.emit(Op::Move {
                     rd: scratch,
@@ -1427,6 +1451,128 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
             self.proto.emit(Op::ListPush { ra: rd, rb });
+        }
+    }
+
+    fn emit_set_construct(&mut self, result: &MirValueId, elements: &[MirValueId]) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(result_desc) = self.type_of(result).cloned() else {
+            self.error(format!("Set result '{}' has no type descriptor", result));
+            return;
+        };
+        let MirLayout::Set { element } = &result_desc.layout else {
+            self.error(format!("Set result '{}' has no Set<T> layout", result));
+            return;
+        };
+        let Some(element_types) = elements
+            .iter()
+            .map(|value| {
+                self.function
+                    .values
+                    .get(value)
+                    .map(|value| value.ty.clone())
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            self.error("Set construction element is absent from MIR value catalog");
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_set_construct(&result_desc.id, &element_types)
+        {
+            self.error(format!("Set construction is unsupported: {message}"));
+            return;
+        }
+        self.proto.emit(Op::MirSetNew { rd });
+        for (index, value) in elements.iter().enumerate() {
+            let Some(rb) = self.reg(value) else { return };
+            let Some(value_info) = self.function.values.get(value) else {
+                self.error(format!("Set element {} is absent from MIR values", index));
+                return;
+            };
+            if &value_info.ty != element {
+                self.error(format!(
+                    "Set element {} type '{}' disagrees with layout element type '{}'",
+                    index,
+                    value_info.ty.as_str(),
+                    element.as_str()
+                ));
+                return;
+            }
+            self.proto.emit(Op::MirSetInsert { rd, ra: rd, rb });
+        }
+    }
+
+    fn emit_set_op(
+        &mut self,
+        result: &MirValueId,
+        operation: MirSetOperation,
+        set: &MirValueId,
+        argument: Option<&MirValueId>,
+    ) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(ra) = self.reg(set) else { return };
+        let Some(result_info) = self.function.values.get(result) else {
+            self.error(format!("Set operation result '{}' is absent", result));
+            return;
+        };
+        let Some(set_info) = self.function.values.get(set) else {
+            self.error(format!("Set operation receiver '{}' is absent", set));
+            return;
+        };
+        let argument_ty = argument
+            .and_then(|value| self.function.values.get(value))
+            .map(|value| &value.ty);
+        if let Err(message) = self.program.type_catalog().validate_set_operation(
+            &result_info.ty,
+            &set_info.ty,
+            argument_ty,
+            operation,
+        ) {
+            self.error(format!("Set operation is unsupported: {message}"));
+            return;
+        }
+        match operation {
+            MirSetOperation::Size => {
+                self.proto.emit(Op::MirSetSize { rd, ra });
+            }
+            MirSetOperation::IsEmpty => {
+                self.proto.emit(Op::MirSetIsEmpty { rd, ra });
+            }
+            MirSetOperation::Contains => {
+                let Some(argument) = argument.and_then(|value| self.reg(value)) else {
+                    return;
+                };
+                self.proto.emit(Op::MirSetContains {
+                    rd,
+                    ra,
+                    rb: argument,
+                });
+            }
+            MirSetOperation::Insert | MirSetOperation::Remove => {
+                let Some(argument) = argument.and_then(|value| self.reg(value)) else {
+                    return;
+                };
+                let op = if operation == MirSetOperation::Insert {
+                    Op::MirSetInsert {
+                        rd,
+                        ra,
+                        rb: argument,
+                    }
+                } else {
+                    Op::MirSetRemove {
+                        rd,
+                        ra,
+                        rb: argument,
+                    }
+                };
+                self.proto.emit(op);
+            }
+            MirSetOperation::ToList => {
+                self.error("Set.to_list is outside the canonical Set production island")
+            }
         }
     }
 
@@ -1938,6 +2084,18 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 self.supported_type(element)
             }
+            MirAbiClass::SetHandle => {
+                self.program
+                    .type_catalog()
+                    .validate_set_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
+                let MirLayout::Set { element } = &desc.layout else {
+                    return Err(format!(
+                        "Set ABI class has non-Set layout for type '{}'",
+                        ty.as_str()
+                    ));
+                };
+                self.supported_type(element)
+            }
             MirAbiClass::Pointer
                 if matches!(&desc.kind, MirTypeKind::Reference { mutable: false }) =>
             {
@@ -2292,6 +2450,9 @@ impl<'a> FunctionEmitter<'a> {
                 // handle release is the complete canonical drop operation.
                 self.proto.emit(Op::Drop { ra: register });
             }
+            MirGlueKind::Set => {
+                self.proto.emit(Op::Drop { ra: register });
+            }
             MirGlueKind::Aggregate => match &descriptor.layout {
                 MirLayout::Tuple(elements) => {
                     self.proto.emit(Op::DropAggregate {
@@ -2450,7 +2611,10 @@ impl<'a> FunctionEmitter<'a> {
             true
         } else if matches!(
             desc.glue.move_out,
-            MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
+            MirGlueKind::OwnedString
+                | MirGlueKind::List
+                | MirGlueKind::Set
+                | MirGlueKind::Aggregate
         ) {
             self.proto.emit(Op::Move { rd, rs });
             true
@@ -2577,6 +2741,12 @@ mod tests {
                 .map(normalize_value)
                 .collect::<Result<Vec<_>, _>>()
                 .map(MirRuntimeValue::List),
+            Value::Set(values) => values
+                .iter()
+                .cloned()
+                .map(normalize_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(MirRuntimeValue::Set),
             other => Err(format!(
                 "differential value normalization is not materialized for {other:?}"
             )),
@@ -2822,6 +2992,40 @@ mod tests {
                 MirRuntimeValue::Bool(true),
             ]))
         );
+    }
+
+    #[test]
+    fn canonical_mir_differential_covers_scalar_set_handle_island() {
+        let report = run_canonical_differential(
+            "func make_values() -> Set<i32> { let values: Set<i32> = {1, 2, 1}; values }\nfunc main() -> i32 { let values = make_values(); let inserted = values.insert(3); let present = inserted.contains(2); let nonempty = !inserted.is_empty(); let removed = inserted.remove(1); let size = removed.size(); size }",
+        )
+        .expect("Copy-scalar Set handle differential");
+        assert!(report.mir_text.contains("construct_set"));
+        assert!(report.mir_text.contains("set_op"));
+        assert!(report.type_desc_text.contains("layout=Set"));
+        assert!(report.type_desc_text.contains("SetHandle"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(2))
+        );
+        assert!(matches!(
+            report.mir_bytecode.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(2))
+        ));
+    }
+
+    #[test]
+    fn canonical_mir_rejects_non_scalar_set_before_backend() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let values: Set<string> = {\"owned\", \"other\"}; drop(values); 0 }",
+        )
+        .expect_err("Set<string> is outside the scalar Set production island");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(message.contains("Set") && message.contains("Copy scalar"));
+            }
+            other => panic!("unsupported Set shape crossed the canonical gate: {other:?}"),
+        }
     }
 
     #[test]

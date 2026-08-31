@@ -78,6 +78,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         }
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_clone_value(value, subject),
+            MirGlueKind::Set => self.emit_set_clone_value(value, ty, subject),
             MirGlueKind::Aggregate => {
                 if matches!(layout, MirLayout::Option { .. } | MirLayout::Result { .. }) {
                     return self.emit_clone_variant_value(value, ty, subject);
@@ -125,6 +126,61 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("clone glue {glue:?} is outside the recursive tuple ABI"),
             )),
         }
+    }
+
+    fn emit_set_clone_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        self.program
+            .type_catalog()
+            .validate_set_glue(ty, crate::core::mir::types::MirGlueOperation::Clone)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_set_clone_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[BasicMetadataValueEnum::from(value.into_int_value())],
+                    "mir_set_clone",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "Set clone returned void"))?
+        .into_int_value();
+        let is_null = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                clone,
+                self.generator.context.i64_type().const_zero(),
+                "mir_set_clone_failed",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fail = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_clone_abort");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_clone_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(is_null, fail, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(fail);
+        self.emit_abort_with_message("[E0800] canonical MIR Set clone failed", subject)?;
+        self.generator.builder.position_at_end(ok);
+        Ok(clone.into())
     }
 
     pub(super) fn emit_clone_variant_value(

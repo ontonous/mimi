@@ -2482,6 +2482,83 @@ impl BytecodeVM {
                     }
                 }
 
+                // ── Canonical MIR Set ─────────────────────────
+                // These operations are intentionally distinct from the
+                // legacy SetAdd/SetContains family below. The canonical
+                // adapter has already proved Set<T> and its ownership glue;
+                // insert/remove therefore consume the source register and
+                // write the transformed value to the destination.
+                Op::MirSetNew { rd } => {
+                    self.set_reg(rd, Value::Set(Vec::new()));
+                }
+                Op::MirSetSize { rd, ra } => {
+                    let size = match self.get_reg(ra) {
+                        Value::Set(values) => values.len() as i64,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical Set.size: expected Set, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, Value::Int(size));
+                }
+                Op::MirSetIsEmpty { rd, ra } => {
+                    let empty = match self.get_reg(ra) {
+                        Value::Set(values) => values.is_empty(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical Set.is_empty: expected Set, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, Value::Bool(empty));
+                }
+                Op::MirSetContains { rd, ra, rb } => {
+                    let needle = self.get_reg(rb).clone();
+                    let contains = match self.get_reg(ra) {
+                        Value::Set(values) => values.iter().any(|value| value == &needle),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical Set.contains: expected Set, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, Value::Bool(contains));
+                }
+                Op::MirSetInsert { rd, ra, rb } => {
+                    let needle = self.get_reg(rb).clone();
+                    let value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::Set(mut values) = value else {
+                        return Err(InterpError::new(
+                            "canonical Set.insert: expected Set receiver",
+                        ));
+                    };
+                    if !values.iter().any(|value| value == &needle) {
+                        values.push(needle);
+                    }
+                    self.set_reg(rd, Value::Set(values));
+                }
+                Op::MirSetRemove { rd, ra, rb } => {
+                    let needle = self.get_reg(rb).clone();
+                    let value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::Set(mut values) = value else {
+                        return Err(InterpError::new(
+                            "canonical Set.remove: expected Set receiver",
+                        ));
+                    };
+                    values.retain(|value| value != &needle);
+                    self.set_reg(rd, Value::Set(values));
+                }
+
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {
                     self.set_reg(rd, Value::Record(None, std::collections::HashMap::new()));

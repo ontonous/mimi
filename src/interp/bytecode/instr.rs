@@ -719,6 +719,35 @@ pub enum Op {
         ra: Reg,
         rb: Reg,
     },
+    /// Canonical MIR Set operations. These are separate from the legacy
+    /// in-place SetAdd path: insert/remove consume the receiver register and
+    /// return the transformed owned Set in `rd`.
+    MirSetNew {
+        rd: Reg,
+    },
+    MirSetSize {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirSetIsEmpty {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirSetContains {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    MirSetInsert {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
+    MirSetRemove {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1174,6 +1203,7 @@ impl Op {
             | None { .. }
             | NewMap { .. }
             | NewSet { .. }
+            | MirSetNew { .. }
             | NewCap { .. }
             | Nop
             | Jmp { .. }
@@ -1227,6 +1257,8 @@ impl Op {
             | MapContains { ra, rb, .. }
             | SetAdd { ra, rb, .. }
             | SetContains { ra, rb, .. }
+            | MirSetInsert { ra, rb, .. }
+            | MirSetRemove { ra, rb, .. }
             | RecordSet { ra, rb, .. }
             | TupleSet { ra, rb, .. }
             | SharedSet { ra, rb, .. } => *ra == reg || *rb == reg,
@@ -1255,6 +1287,9 @@ impl Op {
             | RecordMoveGet { ra, .. }
             | Len { ra, .. }
             | ListPop { ra, .. }
+            | MirSetSize { ra, .. }
+            | MirSetIsEmpty { ra, .. }
+            | MirSetContains { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
             | Ret { ra, .. }

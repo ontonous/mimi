@@ -1,6 +1,7 @@
 //! Runtime-backed List and aggregate glue used by the native MIR emitter.
 
 use super::*;
+use crate::core::mir::types::MirGlueOperation;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     pub(super) fn emit_list_construct(
@@ -146,6 +147,129 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(clone.into())
     }
 
+    pub(super) fn emit_set_construct(
+        &mut self,
+        result: &MirValueId,
+        elements: &[MirValueId],
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let element_types = elements
+            .iter()
+            .map(|value| self.value_type(value, subject))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.program
+            .type_catalog()
+            .validate_set_construct(&result_ty, &element_types)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let element = match self
+            .program
+            .type_catalog()
+            .get(&result_ty)
+            .map(|descriptor| &descriptor.layout)
+        {
+            Some(MirLayout::Set { element }) => element.clone(),
+            _ => {
+                return Err(NativeMirError::new(
+                    subject,
+                    "Set construction result has no canonical Set<T> layout",
+                ))
+            }
+        };
+        let new_fn = self
+            .generator
+            .get_runtime_fn("mimi_set_new")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let set = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(new_fn, &[], "mir_set_new")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "Set constructor returned void"))?
+        .into_int_value();
+        self.emit_set_handle_null_abort(set, subject, "canonical MIR Set allocation failed")?;
+
+        let insert_fn = self
+            .generator
+            .get_runtime_fn("mimi_set_insert")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let element_desc = self
+            .program
+            .type_catalog()
+            .get(&element)
+            .ok_or_else(|| NativeMirError::new(subject, "Set element TypeDesc is absent"))?;
+        for value in elements {
+            let scalar = self.emit_set_scalar_as_i64(value, element_desc, subject)?;
+            self.generator
+                .builder
+                .build_call(
+                    insert_fn,
+                    &[
+                        BasicMetadataValueEnum::from(set),
+                        BasicMetadataValueEnum::from(scalar),
+                    ],
+                    "mir_set_insert",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
+        Ok(set.into())
+    }
+
+    pub(super) fn emit_set_clone(
+        &mut self,
+        source: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let source_ty = self.value_type(source, subject)?;
+        self.program
+            .type_catalog()
+            .validate_set_glue(&source_ty, MirGlueOperation::Clone)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_set_clone_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[BasicMetadataValueEnum::from(
+                        self.value(source, subject)?.into_int_value(),
+                    )],
+                    "mir_set_clone",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "Set clone returned void"))?
+        .into_int_value();
+        self.emit_set_handle_null_abort(clone, subject, "canonical MIR Set clone failed")?;
+        Ok(clone.into())
+    }
+
+    pub(super) fn emit_set_drop_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let destroy_fn = self
+            .generator
+            .get_runtime_fn("mimi_set_destroy")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                destroy_fn,
+                &[BasicMetadataValueEnum::from(value.into_int_value())],
+                "mir_set_drop",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(())
+    }
+
     pub(super) fn emit_drop_value(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -170,6 +294,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         }
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_drop_value(value, subject),
+            MirGlueKind::Set => self.emit_set_drop_value(value, subject),
             MirGlueKind::Aggregate => {
                 if matches!(layout, MirLayout::Option { .. } | MirLayout::Result { .. }) {
                     return self.emit_drop_variant_value(value, ty, subject);
@@ -362,6 +487,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if glue == MirGlueKind::OwnedString {
             return self.emit_owned_string_drop_value(self.value(value, subject)?, subject);
         }
+        if glue == MirGlueKind::Set {
+            self.program
+                .type_catalog()
+                .validate_set_glue(&ty, MirGlueOperation::Drop)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            return self.emit_set_drop_value(self.value(value, subject)?, subject);
+        }
         if glue == MirGlueKind::Aggregate {
             return self.emit_drop_value(self.value(value, subject)?, &ty, subject);
         }
@@ -448,5 +580,48 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("List element ABI {abi:?} is not scalar native storage"),
             )),
         }
+    }
+
+    pub(super) fn emit_set_scalar_as_i64(
+        &mut self,
+        value: &MirValueId,
+        element_desc: &MirTypeDesc,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        self.emit_list_scalar_as_i64(value, element_desc, subject)
+    }
+
+    fn emit_set_handle_null_abort(
+        &mut self,
+        value: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+        message: &str,
+    ) -> Result<(), NativeMirError> {
+        let is_null = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                value,
+                self.generator.context.i64_type().const_zero(),
+                "mir_set_is_null",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fail = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_null_abort");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_nonnull");
+        self.generator
+            .builder
+            .build_conditional_branch(is_null, fail, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(fail);
+        self.emit_abort_with_message(message, subject)?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
     }
 }

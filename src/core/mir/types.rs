@@ -12,9 +12,10 @@ use crate::core::ir::{
     BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
     ResolvedTypeId, ResolvedTypeTable,
 };
+use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-10";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-11";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -64,11 +65,20 @@ impl MirOwnership {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirAbiClass {
     Unit,
-    Integer { bits: u16, signed: bool },
-    Float { bits: u16 },
+    Integer {
+        bits: u16,
+        signed: bool,
+    },
+    Float {
+        bits: u16,
+    },
     Bool,
     Char,
     StringHandle,
+    /// A move-owned Set runtime handle.  The element contract remains in the
+    /// accompanying `MirLayout::Set`; this ABI class is intentionally
+    /// distinct from Map and other opaque handles.
+    SetHandle,
     OpaqueHandle,
     Pointer,
     Aggregate,
@@ -295,6 +305,7 @@ pub enum MirGlueKind {
     Noop,
     OwnedString,
     List,
+    Set,
     Aggregate,
     Unsupported,
 }
@@ -366,6 +377,13 @@ impl MirGlueContract {
                 drop: MirGlueKind::List,
             };
         }
+        if matches!(kind, MirTypeKind::Set) && ownership == MirOwnership::Move {
+            return Self {
+                move_out: MirGlueKind::Set,
+                clone: MirGlueKind::Set,
+                drop: MirGlueKind::Set,
+            };
+        }
         Self {
             move_out: MirGlueKind::Unsupported,
             clone: MirGlueKind::Unsupported,
@@ -392,20 +410,34 @@ pub enum MirTypeKind {
     GenericParameter,
     Nominal,
     List,
+    /// A parameterized, move-owned Set whose element is a concrete Copy
+    /// scalar in the currently materialized production island.
+    Set,
     FlowStateSet,
-    Reference { mutable: bool },
+    Reference {
+        mutable: bool,
+    },
     Option,
     Result,
-    Tuple { arity: usize },
-    Function { abi: FunctionTypeAbi, arity: usize },
+    Tuple {
+        arity: usize,
+    },
+    Function {
+        abi: FunctionTypeAbi,
+        arity: usize,
+    },
     CBuffer,
     Capability,
     Ownership(OwnershipTypeKind),
     Newtype,
-    Array { length: usize },
+    Array {
+        length: usize,
+    },
     Slice,
     Trait,
-    RawPointer { mutable: bool },
+    RawPointer {
+        mutable: bool,
+    },
     DynamicAny,
 }
 
@@ -451,6 +483,12 @@ pub enum MirLayout {
     /// canonical MIR facts. The first production slice admits only a
     /// concrete Copy scalar element.
     List {
+        element: ResolvedTypeId,
+    },
+    /// Variable-length Set storage.  The runtime uses an opaque i64 handle;
+    /// the element identity is nevertheless retained here so construction,
+    /// operation arguments, and glue are checked before any backend.
+    Set {
         element: ResolvedTypeId,
     },
     Opaque,
@@ -510,6 +548,15 @@ impl MirTypeDesc {
                 MirTypeKind::List,
                 MirAbiClass::OpaqueHandle,
                 MirLayout::List {
+                    element: arguments[0].clone(),
+                },
+            ),
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:Set" && arguments.len() == 1 => (
+                MirTypeKind::Set,
+                MirAbiClass::SetHandle,
+                MirLayout::Set {
                     element: arguments[0].clone(),
                 },
             ),
@@ -839,6 +886,9 @@ impl MirTypeCatalog {
         if operation_glue == MirGlueKind::List {
             self.validate_list_glue(ty, operation)?;
         }
+        if operation_glue == MirGlueKind::Set {
+            self.validate_set_glue(ty, operation)?;
+        }
         Ok(())
     }
 
@@ -960,6 +1010,216 @@ impl MirTypeCatalog {
                 ty.as_str(),
                 operation
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate the first Set production island. Set values are move-owned
+    /// runtime handles, but the element identity is still part of the
+    /// canonical contract. The island admits only `Set<T>` with a concrete
+    /// Copy scalar `T`; erased `Set` and string/aggregate elements remain
+    /// fail-closed until their own payload and equality/drop contracts exist.
+    pub fn validate_set_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::Set { element } = &descriptor.layout else {
+            return Err(format!(
+                "set glue type '{}' has no canonical Set<T> layout",
+                ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Set
+            || descriptor.abi != MirAbiClass::SetHandle
+            || descriptor.ownership != MirOwnership::Move
+        {
+            return Err(format!(
+                "type '{}' Set TypeDesc has an inconsistent ABI/ownership contract",
+                ty.as_str()
+            ));
+        }
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::Set,
+            clone: MirGlueKind::Set,
+            drop: MirGlueKind::Set,
+        };
+        if descriptor.glue != expected
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+        {
+            return Err(format!(
+                "type '{}' Set glue contract is not fully materialized",
+                ty.as_str()
+            ));
+        }
+        let element_desc = self.get(element).ok_or_else(|| {
+            format!(
+                "Set '{}' element type '{}' is absent from MIR type catalog",
+                ty.as_str(),
+                element.as_str()
+            )
+        })?;
+        if element_desc.ownership != MirOwnership::Copy
+            || element_desc.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || !matches!(element_desc.layout, MirLayout::Scalar)
+            || !matches!(
+                element_desc.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } | MirAbiClass::Bool
+            )
+        {
+            return Err(format!(
+                "Set '{}' element type '{}' is outside the canonical Copy scalar contract",
+                ty.as_str(),
+                element.as_str()
+            ));
+        }
+        let operation_glue = match operation {
+            MirGlueOperation::MoveOut => descriptor.glue.move_out,
+            MirGlueOperation::Clone => descriptor.glue.clone,
+            MirGlueOperation::Drop => descriptor.glue.drop,
+        };
+        if operation_glue != MirGlueKind::Set {
+            return Err(format!(
+                "Set '{}' operation {:?} is missing Set glue",
+                ty.as_str(),
+                operation
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate a canonical Set literal. All elements must agree with the
+    /// Set<T> layout; duplicate elimination is a runtime semantic, not a
+    /// backend-specific construction rule.
+    pub fn validate_set_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        element_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        self.validate_set_glue(result_ty, MirGlueOperation::MoveOut)?;
+        let descriptor = self
+            .get(result_ty)
+            .ok_or_else(|| format!("Set result type '{}' is absent", result_ty.as_str()))?;
+        let MirLayout::Set { element } = &descriptor.layout else {
+            return Err(format!(
+                "Set result type '{}' has no canonical Set<T> layout",
+                result_ty.as_str()
+            ));
+        };
+        for (index, actual) in element_types.iter().enumerate() {
+            if actual != element {
+                return Err(format!(
+                    "Set element {} type '{}' disagrees with layout element type '{}'",
+                    index,
+                    actual.as_str(),
+                    element.as_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate one canonical Set operation. Read operations preserve the
+    /// receiver; insert/remove consume the receiver and return a fresh
+    /// move-owned Set value. This distinction is carried by the MIR node and
+    /// is not inferred from a backend's in-place handle implementation.
+    pub fn validate_set_operation(
+        &self,
+        result_ty: &ResolvedTypeId,
+        set_ty: &ResolvedTypeId,
+        argument_ty: Option<&ResolvedTypeId>,
+        operation: crate::core::mir::MirSetOperation,
+    ) -> Result<(), String> {
+        self.validate_set_glue(set_ty, MirGlueOperation::MoveOut)?;
+        let set_desc = self
+            .get(set_ty)
+            .ok_or_else(|| format!("Set operand type '{}' is absent", set_ty.as_str()))?;
+        let MirLayout::Set { element } = &set_desc.layout else {
+            return Err(format!(
+                "Set operand type '{}' has no canonical Set<T> layout",
+                set_ty.as_str()
+            ));
+        };
+        if result_ty != set_ty
+            && matches!(
+                operation,
+                crate::core::mir::MirSetOperation::Insert
+                    | crate::core::mir::MirSetOperation::Remove
+            )
+        {
+            return Err(format!(
+                "Set operation {:?} result type '{}' disagrees with receiver type '{}'",
+                operation,
+                result_ty.as_str(),
+                set_ty.as_str()
+            ));
+        }
+        let result_desc = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "Set operation result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        match operation {
+            crate::core::mir::MirSetOperation::Size => {
+                if result_desc.abi
+                    != (MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    })
+                    || result_desc.layout != MirLayout::Scalar
+                    || result_desc.ownership != MirOwnership::Copy
+                {
+                    return Err("Set.size result must be a Copy i32 scalar".into());
+                }
+                if argument_ty.is_some() {
+                    return Err("Set.size does not accept an argument".into());
+                }
+            }
+            MirSetOperation::IsEmpty | MirSetOperation::Contains => {
+                if result_desc.abi != MirAbiClass::Bool
+                    || result_desc.layout != MirLayout::Scalar
+                    || result_desc.ownership != MirOwnership::Copy
+                {
+                    return Err(format!(
+                        "Set.{:?} result must be a Copy bool scalar",
+                        operation
+                    ));
+                }
+                if operation == crate::core::mir::MirSetOperation::IsEmpty {
+                    if argument_ty.is_some() {
+                        return Err("Set.is_empty does not accept an argument".into());
+                    }
+                } else if argument_ty != Some(element) {
+                    return Err("Set.contains argument must match the Set<T> element type".into());
+                }
+            }
+            MirSetOperation::Insert | MirSetOperation::Remove => {
+                if result_desc.ownership != MirOwnership::Move {
+                    return Err(format!("Set.{:?} result must remain move-owned", operation));
+                }
+                if argument_ty != Some(element) {
+                    return Err(format!(
+                        "Set.{:?} argument must match the Set<T> element type",
+                        operation
+                    ));
+                }
+            }
+            MirSetOperation::ToList => {
+                return Err("Set.to_list is outside the canonical Set production island".into());
+            }
         }
         Ok(())
     }
@@ -2489,9 +2749,10 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 mod tests {
     use super::{
         MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
+        MirTypeKind,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
-    use crate::core::mir::{MirAggregateKind, MirProjection};
+    use crate::core::mir::{MirAggregateKind, MirProjection, MirSetOperation};
 
     #[test]
     fn materializes_scalar_abi_and_copy_ownership() {
@@ -2584,6 +2845,91 @@ mod tests {
             assert!(catalog.validate_glue(&id, operation).is_ok());
         }
         assert!(catalog.validate_owned_string(&id).is_ok());
+    }
+
+    #[test]
+    fn materializes_parameterized_set_handle_contract() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("Set<i32>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let descriptor = catalog.get(&set_id).expect("Set descriptor");
+        assert_eq!(descriptor.kind, MirTypeKind::Set);
+        assert_eq!(descriptor.abi, MirAbiClass::SetHandle);
+        assert_eq!(
+            descriptor.layout,
+            MirLayout::Set {
+                element: i32_id.clone()
+            }
+        );
+        assert_eq!(descriptor.ownership, MirOwnership::Move);
+        assert_eq!(descriptor.glue.move_out, MirGlueKind::Set);
+        assert_eq!(descriptor.glue.clone, MirGlueKind::Set);
+        assert_eq!(descriptor.glue.drop, MirGlueKind::Set);
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            assert!(catalog.validate_set_glue(&set_id, operation).is_ok());
+        }
+        assert!(catalog
+            .validate_set_construct(&set_id, &[i32_id.clone(), i32_id.clone()])
+            .is_ok());
+        assert!(catalog
+            .validate_set_operation(&set_id, &set_id, Some(&i32_id), MirSetOperation::Insert,)
+            .is_ok());
+        assert!(catalog
+            .validate_set_operation(&bool_id, &set_id, None, MirSetOperation::IsEmpty,)
+            .is_ok());
+        assert!(catalog
+            .validate_set_operation(&set_id, &set_id, None, MirSetOperation::ToList,)
+            .is_err());
+    }
+
+    #[test]
+    fn set_handle_contract_rejects_wrong_element_and_erased_set() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("Set<i32>");
+        let erased_set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: Vec::new(),
+                is_linear: false,
+            })
+            .expect("erased Set");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let wrong_element = catalog
+            .validate_set_construct(&set_id, &[bool_id])
+            .expect_err("Set<bool> element must not enter Set<i32>");
+        assert!(wrong_element.contains("disagrees with layout element"));
+        let erased = catalog
+            .validate_set_glue(&erased_set_id, MirGlueOperation::MoveOut)
+            .expect_err("erased Set has no payload contract");
+        assert!(erased.contains("Set<T>") || erased.contains("canonical"));
     }
 
     #[test]

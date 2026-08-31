@@ -24,6 +24,7 @@ pub enum MirRuntimeValue {
     String(String),
     Tuple(Vec<MirRuntimeValue>),
     List(Vec<MirRuntimeValue>),
+    Set(Vec<MirRuntimeValue>),
     Record {
         nominal: crate::core::ir::NominalTypeId,
         fields: Vec<MirRuntimeValue>,
@@ -367,6 +368,69 @@ impl MirProgram {
                             if let Err(message) = type_catalog
                                 .validate_list_construct(&result_value.ty, &element_types)
                             {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::ConstructSet { result, elements } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let element_types = elements
+                                .iter()
+                                .filter_map(|element| {
+                                    function.values.get(element).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            if element_types.len() != elements.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "Set element is absent from MIR value catalog".into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog
+                                .validate_set_construct(&result_value.ty, &element_types)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::SetOp {
+                            result,
+                            operation,
+                            set,
+                            argument,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(set_value) = function.values.get(set) else {
+                                continue;
+                            };
+                            let argument_ty = argument
+                                .as_ref()
+                                .and_then(|value| function.values.get(value))
+                                .map(|value| &value.ty);
+                            if argument.is_some() && argument_ty.is_none() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "Set operation argument is absent from MIR value catalog"
+                                            .into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog.validate_set_operation(
+                                &result_value.ty,
+                                &set_value.ty,
+                                argument_ty,
+                                *operation,
+                            ) {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -1204,6 +1268,23 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
             fields: arguments, ..
         } => arguments.clone(),
         super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
+        super::MirInstructionKind::ConstructSet { elements, .. } => elements.clone(),
+        super::MirInstructionKind::SetOp {
+            operation,
+            set,
+            argument,
+            ..
+        } if matches!(
+            operation,
+            super::MirSetOperation::Insert | super::MirSetOperation::Remove
+        ) =>
+        {
+            let mut sources = vec![set.clone()];
+            if let Some(argument) = argument {
+                sources.push(argument.clone());
+            }
+            sources
+        }
         super::MirInstructionKind::ConstructVariant { fields, .. }
         | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
             fields.iter().map(|(_, value)| value.clone()).collect()
@@ -1338,6 +1419,12 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
+        super::MirInstructionKind::ConstructSet { elements, .. } => {
+            elements.iter().any(|v| v == needle)
+        }
+        super::MirInstructionKind::SetOp { set, argument, .. } => {
+            set == needle || argument.as_ref() == Some(needle)
+        }
         super::MirInstructionKind::ConstructVariant { fields, .. }
         | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
             fields.iter().any(|(_, v)| v == needle)
@@ -1393,6 +1480,8 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::MoveProject { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
+        | super::MirInstructionKind::ConstructSet { result, .. }
+        | super::MirInstructionKind::SetOp { result, .. }
         | super::MirInstructionKind::ConstructVariant { result, .. }
         | super::MirInstructionKind::ConstructVariantMove { result, .. }
         | super::MirInstructionKind::UpdateRecord { result, .. }
@@ -1844,6 +1933,123 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .map_err(|message| self.error(&function.owner, message))?;
                 let elements = self.take_transfer_values(function, values, elements)?;
                 values.insert(result.clone(), MirRuntimeValue::List(elements));
+            }
+            MirInstructionKind::ConstructSet { result, elements } => {
+                let element_types = elements
+                    .iter()
+                    .map(|element| {
+                        function
+                            .values
+                            .get(element)
+                            .map(|value| value.ty.clone())
+                            .ok_or_else(|| {
+                                self.error(&function.owner, "Set element has no MIR type")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| self.error(&function.owner, "Set result has no MIR type"))?;
+                self.program
+                    .type_catalog()
+                    .validate_set_construct(&result_ty, &element_types)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let elements = self.take_transfer_values(function, values, elements)?;
+                values.insert(result.clone(), MirRuntimeValue::Set(elements));
+            }
+            MirInstructionKind::SetOp {
+                result,
+                operation,
+                set,
+                argument,
+            } => {
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "Set operation result has no MIR type")
+                    })?;
+                let set_ty = function
+                    .values
+                    .get(set)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "Set operation receiver has no MIR type")
+                    })?;
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| &value.ty);
+                self.program
+                    .type_catalog()
+                    .validate_set_operation(&result_ty, &set_ty, argument_ty, *operation)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let output = match operation {
+                    super::MirSetOperation::Size => {
+                        let MirRuntimeValue::Set(set) = self.read_value(function, values, set)?
+                        else {
+                            return Err(
+                                self.error(&function.owner, "Set.size receiver is not a Set")
+                            );
+                        };
+                        MirRuntimeValue::Int(set.len() as i64)
+                    }
+                    super::MirSetOperation::IsEmpty => {
+                        let MirRuntimeValue::Set(set) = self.read_value(function, values, set)?
+                        else {
+                            return Err(
+                                self.error(&function.owner, "Set.is_empty receiver is not a Set")
+                            );
+                        };
+                        MirRuntimeValue::Bool(set.is_empty())
+                    }
+                    super::MirSetOperation::Contains => {
+                        let MirRuntimeValue::Set(set) = self.read_value(function, values, set)?
+                        else {
+                            return Err(
+                                self.error(&function.owner, "Set.contains receiver is not a Set")
+                            );
+                        };
+                        let argument = argument.as_ref().ok_or_else(|| {
+                            self.error(&function.owner, "Set.contains argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        MirRuntimeValue::Bool(set.iter().any(|value| value == &argument))
+                    }
+                    super::MirSetOperation::Insert | super::MirSetOperation::Remove => {
+                        let mut set = match self.take_transfer_value(function, values, set)? {
+                            MirRuntimeValue::Set(set) => set,
+                            _ => {
+                                return Err(self.error(
+                                    &function.owner,
+                                    "Set transformation receiver is not a Set",
+                                ))
+                            }
+                        };
+                        let argument = argument.as_ref().ok_or_else(|| {
+                            self.error(&function.owner, "Set transformation argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        if *operation == super::MirSetOperation::Insert {
+                            if !set.iter().any(|value| value == &argument) {
+                                set.push(argument);
+                            }
+                        } else {
+                            set.retain(|value| value != &argument);
+                        }
+                        MirRuntimeValue::Set(set)
+                    }
+                    super::MirSetOperation::ToList => {
+                        return Err(self.error(
+                            &function.owner,
+                            "Set.to_list is outside the canonical Set production island",
+                        ));
+                    }
+                };
+                values.insert(result.clone(), output);
             }
             MirInstructionKind::ConstructVariant {
                 result,
@@ -2428,6 +2634,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let MirRuntimeValue::List(elements) = value else {
                     return Err(
                         self.error(&function.owner, "List drop value is not a canonical List")
+                    );
+                };
+                for element_value in elements {
+                    self.drop_runtime_value(function, element, element_value)?;
+                }
+                Ok(())
+            }
+            MirLayout::Set { element } => {
+                let MirRuntimeValue::Set(elements) = value else {
+                    return Err(
+                        self.error(&function.owner, "Set drop value is not a canonical Set")
                     );
                 };
                 for element_value in elements {

@@ -109,6 +109,21 @@ pub enum MirAggregateKind {
     },
 }
 
+/// Closed semantic operations for the first Set production island. The
+/// receiver and result ownership rules live in TypeDesc; consumers only map
+/// this enum to their physical runtime operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirSetOperation {
+    Size,
+    IsEmpty,
+    Contains,
+    Insert,
+    Remove,
+    /// Kept explicit so the adapter cannot accidentally treat `to_list` as a
+    /// generic builtin before its List/result ownership contract is ready.
+    ToList,
+}
+
 /// Operations with explicit value and ownership boundaries. The MIR validator
 /// checks their TypeDesc/glue contract before any backend; effect-bearing
 /// operations remain fail-closed until their own effect summary is materialized.
@@ -170,6 +185,21 @@ pub enum MirInstructionKind {
     ConstructList {
         result: MirValueId,
         elements: Vec<MirValueId>,
+    },
+    /// Construct a move-owned Set from concrete Copy-scalar elements. The
+    /// Set<T> layout, equality representation, and handle glue are supplied
+    /// by the TypeDesc catalog.
+    ConstructSet {
+        result: MirValueId,
+        elements: Vec<MirValueId>,
+    },
+    /// Execute one closed Set operation. `Insert` and `Remove` consume the
+    /// receiver and return a new move-owned Set; read operations preserve it.
+    SetOp {
+        result: MirValueId,
+        operation: MirSetOperation,
+        set: MirValueId,
+        argument: Option<MirValueId>,
     },
     /// Construct a canonical Option/Result variant. Payload identities are
     /// checker-owned; discriminant and physical payload encoding come from
@@ -558,6 +588,21 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         MirInstructionKind::ConstructList { result, elements } => {
             format!("construct_list {result} = [{}]", format_values(elements))
         }
+        MirInstructionKind::ConstructSet { result, elements } => {
+            format!("construct_set {result} = {{{}}}", format_values(elements))
+        }
+        MirInstructionKind::SetOp {
+            result,
+            operation,
+            set,
+            argument,
+        } => format!(
+            "set_op {result} = {operation:?} {set}{}",
+            argument
+                .as_ref()
+                .map(|value| format!(", {value}"))
+                .unwrap_or_default()
+        ),
         MirInstructionKind::ConstructVariant {
             result,
             nominal,
@@ -951,6 +996,22 @@ impl<'a> MirValidator<'a> {
             }
             ConstructList { result, elements } => {
                 self.values(elements);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            ConstructSet { result, elements } => {
+                self.values(elements);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            SetOp {
+                result,
+                set,
+                argument,
+                ..
+            } => {
+                self.use_value(set);
+                if let Some(argument) = argument {
+                    self.use_value(argument);
+                }
                 self.result_at(result, &instruction.id, block, index);
             }
             ConstructVariant { result, fields, .. }
@@ -1359,6 +1420,15 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::ConstructList { elements, .. } => {
                 uses.extend(elements.iter().cloned());
+            }
+            MirInstructionKind::ConstructSet { elements, .. } => {
+                uses.extend(elements.iter().cloned());
+            }
+            MirInstructionKind::SetOp { set, argument, .. } => {
+                uses.push(set.clone());
+                if let Some(argument) = argument {
+                    uses.push(argument.clone());
+                }
             }
             MirInstructionKind::ConstructVariant { fields, .. }
             | MirInstructionKind::ConstructVariantMove { fields, .. } => {

@@ -607,6 +607,12 @@ pub(super) fn native_basic_type<'ctx>(
                 format!("opaque-handle layout {layout:?} is outside native contract"),
             )),
         },
+        MirAbiClass::SetHandle => {
+            catalog
+                .validate_set_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
+                .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+            Ok(context.i64_type().into())
+        }
         MirAbiClass::Aggregate => match &desc.layout {
             MirLayout::Tuple(elements) => {
                 validate_native_recursive_tuple_type(catalog, ty)

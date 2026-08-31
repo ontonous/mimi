@@ -27,8 +27,8 @@ use crate::core::mir::types::{
     MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirSwitchArm,
-    MirSwitchCase, MirTerminator, MirValueId,
+    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirSetOperation,
+    MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -67,6 +67,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     }
 
     fn compile(mut self) -> Result<(), NativeMirError> {
+        self.declare_canonical_runtime_helpers();
         self.declare_functions()?;
         let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
         for owner in owners {
@@ -93,6 +94,26 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             .verify()
             .map_err(|error| NativeMirError::new("LLVM module", error.to_string()))?;
         Ok(())
+    }
+
+    /// Canonical-only runtime declarations belong to the MIR adapter, not to
+    /// the legacy builtin registry.  Keeping this declaration local prevents
+    /// an otherwise unrelated legacy LLVM golden from changing merely because
+    /// a new MIR glue operation was added.
+    fn declare_canonical_runtime_helpers(&self) {
+        if self
+            .generator
+            .module
+            .get_function("mimi_set_clone_scalar")
+            .is_none()
+        {
+            let i64 = self.generator.context.i64_type();
+            self.generator.module.add_function(
+                "mimi_set_clone_scalar",
+                i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                Some(Linkage::External),
+            );
+        }
     }
 
     fn declare_functions(&mut self) -> Result<(), NativeMirError> {
@@ -263,8 +284,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .type_catalog()
                     .get(&source_ty)
                     .is_some_and(|desc| matches!(desc.layout, MirLayout::List { .. }));
+                let is_set = self
+                    .program
+                    .type_catalog()
+                    .get(&source_ty)
+                    .is_some_and(|desc| matches!(desc.layout, MirLayout::Set { .. }));
                 let value = if is_list {
                     self.emit_list_clone(source, subject)?
+                } else if is_set {
+                    self.emit_set_clone(source, subject)?
                 } else {
                     self.emit_clone_value(self.value(source, subject)?, &source_ty, subject)?
                 };
@@ -379,6 +407,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             MirInstructionKind::ConstructList { result, elements } => {
                 let value = self.emit_list_construct(result, elements, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ConstructSet { result, elements } => {
+                let value = self.emit_set_construct(result, elements, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::SetOp {
+                result,
+                operation,
+                set,
+                argument,
+            } => {
+                let value =
+                    self.emit_set_op(result, *operation, set, argument.as_ref(), subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::Drop { value } => {
@@ -880,6 +922,65 @@ mod tests {
         assert!(generator.module.get_function("consume_named").is_some());
         assert!(generator.module.get_function("mimi_str_clone").is_some());
         assert!(generator.module.get_function("mimi_string_free").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_scalar_set_handle_island() {
+        let program = canonical_program(
+            "func make_values() -> Set<i32> { let values: Set<i32> = {1, 2, 1}; values }\nfunc main() -> i32 { let values = make_values(); let inserted = values.insert(3); let present = inserted.contains(2); let nonempty = !inserted.is_empty(); let removed = inserted.remove(1); let size = removed.size(); let _present = present; let _nonempty = nonempty; size }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference scalar Set execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("scalar Set MIR bytecode"))
+                .run_value()
+                .expect("bytecode scalar Set execution");
+        assert_eq!(reference, MirRuntimeValue::Int(2));
+        assert!(matches!(bytecode, Value::Int(2)));
+
+        let set_ops = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::ConstructSet { .. }
+                        | crate::core::mir::MirInstructionKind::SetOp { .. }
+                )
+            })
+            .count();
+        assert!(
+            set_ops >= 5,
+            "fixture must exercise construct and Set operations"
+        );
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_scalar_set_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar Set MIR should have a native handle contract");
+        generator
+            .module
+            .verify()
+            .expect("native scalar Set module verifies");
+        for runtime in [
+            "mimi_set_new",
+            "mimi_set_clone_scalar",
+            "mimi_set_insert",
+            "mimi_set_remove",
+            "mimi_set_size",
+            "mimi_set_contains",
+            "mimi_set_destroy",
+        ] {
+            assert!(
+                generator.module.get_function(runtime).is_some(),
+                "native Set island must declare {runtime}"
+            );
+        }
     }
 
     #[test]

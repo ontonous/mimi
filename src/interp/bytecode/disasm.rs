@@ -96,6 +96,12 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MapContains { .. } => "MAP_CONTAINS",
         Op::SetAdd { .. } => "SET_ADD",
         Op::SetContains { .. } => "SET_CONTAINS",
+        Op::MirSetNew { .. } => "MIR_SET_NEW",
+        Op::MirSetSize { .. } => "MIR_SET_SIZE",
+        Op::MirSetIsEmpty { .. } => "MIR_SET_IS_EMPTY",
+        Op::MirSetContains { .. } => "MIR_SET_CONTAINS",
+        Op::MirSetInsert { .. } => "MIR_SET_INSERT",
+        Op::MirSetRemove { .. } => "MIR_SET_REMOVE",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
@@ -609,6 +615,28 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::SetAdd { ra, rb } => format!("{:04}  {:<16} r{}.add(r{})", pc, name, ra, rb),
         Op::SetContains { rd, ra, rb } => format!(
             "{:04}  {:<16} r{} = contains(r{}, r{})",
+            pc, name, rd, ra, rb
+        ),
+        Op::MirSetNew { rd } => format!("{:04}  {:<16} r{} = mir_set()", pc, name, rd),
+        Op::MirSetSize { rd, ra } => {
+            format!("{:04}  {:<16} r{} = mir_set_size(r{})", pc, name, rd, ra)
+        }
+        Op::MirSetIsEmpty { rd, ra } => {
+            format!(
+                "{:04}  {:<16} r{} = mir_set_is_empty(r{})",
+                pc, name, rd, ra
+            )
+        }
+        Op::MirSetContains { rd, ra, rb } => format!(
+            "{:04}  {:<16} r{} = mir_set_contains(r{}, r{})",
+            pc, name, rd, ra, rb
+        ),
+        Op::MirSetInsert { rd, ra, rb } => format!(
+            "{:04}  {:<16} r{} = mir_set_insert_move(r{}, r{})",
+            pc, name, rd, ra, rb
+        ),
+        Op::MirSetRemove { rd, ra, rb } => format!(
+            "{:04}  {:<16} r{} = mir_set_remove_move(r{}, r{})",
             pc, name, rd, ra, rb
         ),
         Op::NewVariant {

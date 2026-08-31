@@ -3,6 +3,206 @@
 use super::*;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
+    pub(super) fn emit_set_op(
+        &mut self,
+        result: &MirValueId,
+        operation: MirSetOperation,
+        set: &MirValueId,
+        argument: Option<&MirValueId>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let set_ty = self.value_type(set, subject)?;
+        let argument_ty = argument
+            .map(|value| self.value_type(value, subject))
+            .transpose()?;
+        self.program
+            .type_catalog()
+            .validate_set_operation(&result_ty, &set_ty, argument_ty.as_ref(), operation)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let set_handle = self.value(set, subject)?.into_int_value();
+        let set_desc = self
+            .program
+            .type_catalog()
+            .get(&set_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "Set TypeDesc is absent"))?;
+        let element_ty = match &set_desc.layout {
+            MirLayout::Set { element } => element.clone(),
+            layout => {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!("Set operation receiver has non-Set layout {layout:?}"),
+                ))
+            }
+        };
+        let element_desc = self
+            .program
+            .type_catalog()
+            .get(&element_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "Set element TypeDesc is absent"))?;
+        let size_fn = || {
+            self.generator
+                .get_runtime_fn("mimi_set_size")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))
+        };
+        match operation {
+            MirSetOperation::Size => {
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            size_fn()?,
+                            &[BasicMetadataValueEnum::from(set_handle)],
+                            "mir_set_size",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "Set.size returned void"))?
+                .into_int_value();
+                self.generator
+                    .builder
+                    .build_int_truncate(
+                        value,
+                        self.generator.context.i32_type(),
+                        "mir_set_size_i32",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
+            MirSetOperation::IsEmpty => {
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            size_fn()?,
+                            &[BasicMetadataValueEnum::from(set_handle)],
+                            "mir_set_size",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "Set.is_empty returned void"))?
+                .into_int_value();
+                self.generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        value,
+                        self.generator.context.i64_type().const_zero(),
+                        "mir_set_is_empty",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
+            MirSetOperation::Contains => {
+                let argument = argument.ok_or_else(|| {
+                    NativeMirError::new(subject, "Set.contains argument is absent")
+                })?;
+                let scalar = self.emit_set_scalar_as_i64(argument, element_desc, subject)?;
+                let function = self
+                    .generator
+                    .get_runtime_fn("mimi_set_contains")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            function,
+                            &[
+                                BasicMetadataValueEnum::from(set_handle),
+                                BasicMetadataValueEnum::from(scalar),
+                            ],
+                            "mir_set_contains",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "Set.contains returned void"))?
+                .into_int_value();
+                self.generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        value,
+                        self.generator.context.i64_type().const_zero(),
+                        "mir_set_contains_bool",
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
+            MirSetOperation::Insert | MirSetOperation::Remove => {
+                let argument = argument.ok_or_else(|| {
+                    NativeMirError::new(subject, "Set transformation argument is absent")
+                })?;
+                let scalar = self.emit_set_scalar_as_i64(argument, element_desc, subject)?;
+                let name = if operation == MirSetOperation::Insert {
+                    "mimi_set_insert"
+                } else {
+                    "mimi_set_remove"
+                };
+                let function = self
+                    .generator
+                    .get_runtime_fn(name)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            function,
+                            &[
+                                BasicMetadataValueEnum::from(set_handle),
+                                BasicMetadataValueEnum::from(scalar),
+                            ],
+                            "mir_set_transform",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "Set transformation returned void"))?;
+                self.emit_set_handle_result_abort(value.into_int_value(), subject)?;
+                Ok(value)
+            }
+            MirSetOperation::ToList => Err(NativeMirError::new(
+                subject,
+                "Set.to_list is outside the canonical Set production island",
+            )),
+        }
+    }
+
+    fn emit_set_handle_result_abort(
+        &mut self,
+        value: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let failed = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                value,
+                self.generator.context.i64_type().const_zero(),
+                "mir_set_transform_failed",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fail = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_transform_abort");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_set_transform_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(failed, fail, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(fail);
+        self.emit_abort_with_message("[E0800] canonical MIR Set operation failed", subject)?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
+    }
+
     pub(super) fn emit_builtin(
         &mut self,
         result: &MirValueId,

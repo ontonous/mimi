@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::types::{MirAbiClass, MirBuiltinKind, MirLayout, MirOwnership};
+use crate::core::mir::types::{
+    MirAbiClass, MirBuiltinKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeKind,
+};
 use crate::core::mir::{
     MirAggregateKind, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
     MirFunction, MirInstructionKind, MirProjection, MirSwitchCase, MirTerminator, MirValueId,
@@ -18,8 +20,9 @@ use crate::core::mir::{
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
 };
-use z3::ast::{Bool, Int};
+use z3::ast::{Bool, Int, Set as Z3Set};
 use z3::SatResult;
+use z3::Sort;
 
 #[derive(Debug, Clone)]
 enum SymbolicValue {
@@ -29,6 +32,15 @@ enum SymbolicValue {
     Record {
         nominal: crate::core::ir::NominalTypeId,
         fields: BTreeMap<crate::core::NodeId, SymbolicValue>,
+    },
+    /// A scalar Set is modeled as a Z3 set plus an explicitly tracked size.
+    /// The size is part of the MIR/runtime contract because Z3's Set sort has
+    /// no cardinality operator.  Insert/remove update it through the member
+    /// predicate, while the non-negative invariant is carried as a solver
+    /// constraint.
+    Set {
+        elements: Z3Set,
+        size: Int,
     },
     /// A symbolic built-in Option/Result value.  The tag is constrained to
     /// the canonical TypeDesc discriminants when the value is introduced;
@@ -312,6 +324,25 @@ fn symbolic_value_for_type(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.kind == MirTypeKind::Set {
+        catalog.validate_set_glue(ty, MirGlueOperation::MoveOut)?;
+        let MirLayout::Set { element } = &descriptor.layout else {
+            return Err(format!(
+                "MIR verifier Set TypeDesc '{}' has no canonical Set<T> layout",
+                ty.as_str()
+            ));
+        };
+        let sort = set_element_sort(catalog, element)?;
+        let elements = Z3Set::new_const(format!("{name}.elements"), &sort);
+        let size = Int::new_const(format!("{name}.size"));
+        return Ok((
+            SymbolicValue::Set {
+                elements,
+                size: size.clone(),
+            },
+            vec![size.ge(Int::from_i64(0))],
+        ));
+    }
     if descriptor.ownership != MirOwnership::Copy
         || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
         || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
@@ -425,6 +456,64 @@ fn symbolic_value_for_type(
             "MIR verifier layout {:?} is outside the Copy aggregate contract",
             layout
         )),
+    }
+}
+
+fn set_element_sort(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    element: &crate::core::ir::ResolvedTypeId,
+) -> Result<Sort, String> {
+    let descriptor = catalog.get(element).ok_or_else(|| {
+        format!(
+            "MIR verifier Set element TypeDesc '{}' is absent",
+            element.as_str()
+        )
+    })?;
+    if descriptor.ownership != MirOwnership::Copy
+        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
+        || descriptor.layout != MirLayout::Scalar
+    {
+        return Err(format!(
+            "MIR verifier Set element '{}' is outside the Copy scalar contract",
+            element.as_str()
+        ));
+    }
+    match descriptor.abi {
+        MirAbiClass::Integer {
+            bits: 32 | 64,
+            signed: true,
+        } => Ok(Sort::int()),
+        MirAbiClass::Bool => Ok(Sort::bool()),
+        abi => Err(format!(
+            "MIR verifier Set element ABI {:?} is outside the checked scalar contract",
+            abi
+        )),
+    }
+}
+
+fn set_member(elements: &Z3Set, value: &SymbolicValue) -> Result<Bool, String> {
+    match value {
+        SymbolicValue::Int(value) => Ok(elements.member(value)),
+        SymbolicValue::Bool(value) => Ok(elements.member(value)),
+        _ => Err("MIR verifier Set operation requires a scalar element".into()),
+    }
+}
+
+fn set_add(elements: &Z3Set, value: &SymbolicValue) -> Result<Z3Set, String> {
+    match value {
+        SymbolicValue::Int(value) => Ok(elements.add(value)),
+        SymbolicValue::Bool(value) => Ok(elements.add(value)),
+        _ => Err("MIR verifier Set construction requires a scalar element".into()),
+    }
+}
+
+fn set_del(elements: &Z3Set, value: &SymbolicValue) -> Result<Z3Set, String> {
+    match value {
+        SymbolicValue::Int(value) => Ok(elements.del(value)),
+        SymbolicValue::Bool(value) => Ok(elements.del(value)),
+        _ => Err("MIR verifier Set operation requires a scalar element".into()),
     }
 }
 
@@ -846,7 +935,20 @@ fn eval_instruction(
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Drop { value } => {
-            ensure_copy_value(function, catalog, value)?;
+            let ty = function
+                .values
+                .get(value)
+                .ok_or_else(|| format!("MIR drop value '{}' is absent", value))?
+                .ty
+                .clone();
+            if catalog
+                .get(&ty)
+                .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Set)
+            {
+                catalog.validate_glue(&ty, MirGlueOperation::Drop)?;
+            } else {
+                ensure_copy_value(function, catalog, value)?;
+            }
             if !state.values.contains_key(value) {
                 return Err(format!("MIR drop value '{}' is not defined", value));
             }
@@ -1032,6 +1134,150 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
+        MirInstructionKind::ConstructSet { result, elements } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR Set result '{}' is absent", result))?
+                .ty
+                .clone();
+            let element_types = elements
+                .iter()
+                .map(|value| {
+                    function
+                        .values
+                        .get(value)
+                        .map(|info| info.ty.clone())
+                        .ok_or_else(|| format!("MIR Set element '{}' is absent", value))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            catalog.validate_set_construct(&result_ty, &element_types)?;
+            let element_ty = match &catalog
+                .get(&result_ty)
+                .ok_or_else(|| format!("MIR Set result '{}' TypeDesc is absent", result))?
+                .layout
+            {
+                MirLayout::Set { element } => element.clone(),
+                _ => return Err("MIR Set construction has no canonical Set layout".into()),
+            };
+            let sort = set_element_sort(catalog, &element_ty)?;
+            let mut set = Z3Set::empty(&sort);
+            let mut size = Int::from_i64(0);
+            for value in elements {
+                let value = state
+                    .values
+                    .get(value)
+                    .cloned()
+                    .ok_or_else(|| format!("MIR Set element '{}' is not defined", value))?;
+                let present = set_member(&set, &value)?;
+                let increment = present.ite(&Int::from_i64(0), &Int::from_i64(1));
+                size = Int::add(&[&size, &increment]);
+                set = set_add(&set, &value)?;
+            }
+            let value = SymbolicValue::Set {
+                elements: set,
+                size,
+            };
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::SetOp {
+            result,
+            operation,
+            set,
+            argument,
+        } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR Set operation result '{}' is absent", result))?
+                .ty
+                .clone();
+            let set_ty = function
+                .values
+                .get(set)
+                .ok_or_else(|| format!("MIR Set operation receiver '{}' is absent", set))?
+                .ty
+                .clone();
+            let argument_ty = argument
+                .as_ref()
+                .map(|value| {
+                    function
+                        .values
+                        .get(value)
+                        .map(|info| info.ty.clone())
+                        .ok_or_else(|| format!("MIR Set operation argument '{}' is absent", value))
+                })
+                .transpose()?;
+            catalog.validate_set_operation(
+                &result_ty,
+                &set_ty,
+                argument_ty.as_ref(),
+                *operation,
+            )?;
+            let SymbolicValue::Set { elements, size } = state
+                .values
+                .get(set)
+                .cloned()
+                .ok_or_else(|| format!("MIR Set receiver '{}' is not defined", set))?
+            else {
+                return Err("MIR Set operation receiver is not a symbolic Set".into());
+            };
+            let output = match operation {
+                crate::core::mir::MirSetOperation::Size => SymbolicValue::Int(size),
+                crate::core::mir::MirSetOperation::IsEmpty => {
+                    SymbolicValue::Bool(size.eq(Int::from_i64(0)))
+                }
+                crate::core::mir::MirSetOperation::Contains => {
+                    let argument = argument
+                        .as_ref()
+                        .ok_or_else(|| "MIR Set.contains argument is absent".to_string())?;
+                    let value = state.values.get(argument).cloned().ok_or_else(|| {
+                        format!("MIR Set.contains argument '{}' is not defined", argument)
+                    })?;
+                    SymbolicValue::Bool(set_member(&elements, &value)?)
+                }
+                crate::core::mir::MirSetOperation::Insert
+                | crate::core::mir::MirSetOperation::Remove => {
+                    let argument = argument
+                        .as_ref()
+                        .ok_or_else(|| "MIR Set mutation argument is absent".to_string())?;
+                    let value = state.values.get(argument).cloned().ok_or_else(|| {
+                        format!("MIR Set mutation argument '{}' is not defined", argument)
+                    })?;
+                    let present = set_member(&elements, &value)?;
+                    let delta = if *operation == crate::core::mir::MirSetOperation::Insert {
+                        present.ite(&Int::from_i64(0), &Int::from_i64(1))
+                    } else {
+                        state
+                            .constraints
+                            .push(present.implies(size.ge(Int::from_i64(1))));
+                        present.ite(&Int::from_i64(1), &Int::from_i64(0))
+                    };
+                    let next_size = if *operation == crate::core::mir::MirSetOperation::Insert {
+                        Int::add(&[&size, &delta])
+                    } else {
+                        Int::sub(&[&size, &delta])
+                    };
+                    let next_elements = if *operation == crate::core::mir::MirSetOperation::Insert {
+                        set_add(&elements, &value)?
+                    } else {
+                        set_del(&elements, &value)?
+                    };
+                    SymbolicValue::Set {
+                        elements: next_elements,
+                        size: next_size,
+                    }
+                }
+                crate::core::mir::MirSetOperation::ToList => {
+                    return Err(
+                        "MIR verifier Set.to_list is outside the canonical Set contract".into(),
+                    )
+                }
+            };
+            ensure_result_shape(function, catalog, result, &output)?;
+            state.values.insert(result.clone(), output);
+        }
         MirInstructionKind::MoveProject { .. }
         | MirInstructionKind::ConstructList { .. }
         | MirInstructionKind::ConstructVariantMove { .. }
@@ -1212,6 +1458,9 @@ fn symbolic_matches_type(
                         .is_some_and(|value| symbolic_matches_type(catalog, &field.ty, value))
                 })
         }
+        (MirLayout::Set { .. }, MirAbiClass::SetHandle, SymbolicValue::Set { .. }) => catalog
+            .validate_set_glue(ty, MirGlueOperation::MoveOut)
+            .is_ok(),
         (
             MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. },
             MirAbiClass::Aggregate,
@@ -1452,6 +1701,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
         SymbolicValue::Int(_)
         | SymbolicValue::Tuple(_)
         | SymbolicValue::Record { .. }
+        | SymbolicValue::Set { .. }
         | SymbolicValue::Variant { .. } => Err(format!("{context} is not boolean")),
     }
 }
@@ -1766,6 +2016,67 @@ mod tests {
             .expect("borrow function")
             .canonical_text()
             .contains("borrow"));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_materialize_scalar_set_contract() {
+        let source = r#"
+            func size_of(values: Set<i32>) -> i32 {
+                ensures: result >= 0
+                values.size()
+            }
+
+            func normalize() -> i32 {
+                ensures: result == 2
+                let values: Set<i32> = {1, 2, 1}
+                let inserted = values.insert(3)
+                let removed = inserted.remove(1)
+                removed.size()
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let size_owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("size_of"))
+            .cloned()
+            .expect("size_of MIR function");
+        let normalize_owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("normalize"))
+            .cloned()
+            .expect("normalize MIR function");
+
+        let size = MirReferenceInterpreter::new(&program)
+            .execute(
+                &size_owner,
+                &[MirRuntimeValue::Set(vec![
+                    MirRuntimeValue::Int(1),
+                    MirRuntimeValue::Int(2),
+                    MirRuntimeValue::Int(3),
+                ])],
+            )
+            .expect("reference Set parameter execution");
+        assert_eq!(size, MirRuntimeValue::Int(3));
+        let normalized = MirReferenceInterpreter::new(&program)
+            .execute(&normalize_owner, &[])
+            .expect("reference Set construction execution");
+        assert_eq!(normalized, MirRuntimeValue::Int(2));
+
+        let results = verify_program(&program, "set-source-hash".into()).expect("verify MIR");
+        for owner in [size_owner, normalize_owner] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner.0)
+                .expect("Set contract verification result");
+            assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        }
     }
 
     #[test]
