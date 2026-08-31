@@ -560,6 +560,11 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 projection,
             } => self.validate_project(function, result, base, projection, subject),
+            MirInstructionKind::MoveProject {
+                result,
+                base,
+                projection,
+            } => self.validate_move_project(function, result, base, projection, subject),
             MirInstructionKind::Borrow {
                 result,
                 source,
@@ -817,6 +822,36 @@ impl<'a> NativeMirValidator<'a> {
                 subject,
                 "projection shape is outside the native MIR contract",
             )),
+        }
+    }
+
+    fn validate_move_project(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "move projection result");
+        self.validate_value(function, base, "move projection base");
+        let (Some(base_value), Some(result_value)) =
+            (function.values.get(base), function.values.get(result))
+        else {
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_move_projection(
+            &base_value.ty,
+            &result_value.ty,
+            projection,
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+            return;
+        }
+        if let Err(message) =
+            validate_native_non_copy_record_type(self.program.type_catalog(), &base_value.ty)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
         }
     }
 
@@ -1686,6 +1721,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 projection,
             } => {
                 let value = self.emit_project(result, base, projection, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::MoveProject {
+                result,
+                base,
+                projection,
+            } => {
+                let value = self.emit_move_project(result, base, projection, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::Borrow {
@@ -2562,6 +2605,56 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         self.generator
             .builder
             .build_extract_value(aggregate, index as u32, "mir_record_project")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
+    /// Consume a concrete record and transfer its one owned String field.
+    /// The canonical validator proves that every sibling is Copy, so the
+    /// extracted `{ptr, len}` value is a move boundary rather than a clone;
+    /// the source record must not be used again along any valid MIR path.
+    fn emit_move_project(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let base_ty = self.value_type(base, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        self.program
+            .type_catalog()
+            .validate_move_projection(&base_ty, &result_ty, projection)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let MirProjection::Field(field_id) = projection else {
+            return Err(NativeMirError::new(
+                subject,
+                "native MoveProject requires a direct record field",
+            ));
+        };
+        let descriptor = self.program.type_catalog().get(&base_ty).ok_or_else(|| {
+            NativeMirError::new(subject, "move projection base TypeDesc is absent")
+        })?;
+        let MirLayout::Record { fields, .. } = &descriptor.layout else {
+            return Err(NativeMirError::new(
+                subject,
+                "move projection base has no canonical record layout",
+            ));
+        };
+        let index = fields
+            .iter()
+            .position(|field| field.id == *field_id)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    format!("record field '{}' is absent from TypeDesc", field_id.0),
+                )
+            })?;
+        let aggregate = self.value(base, subject)?.into_struct_value();
+        self.generator
+            .builder
+            .build_extract_value(aggregate, index as u32, "mir_record_move_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
@@ -4354,6 +4447,39 @@ mod tests {
             generator.module.get_function("main").is_none(),
             "non-Copy aggregate must be rejected before LLVM declarations"
         );
+    }
+
+    #[test]
+    fn native_emitter_materializes_move_project_before_llvm_declarations() {
+        let program = canonical_program(
+            "type Named { name: string, count: i32 }\nfunc main() -> i32 { let value = Named { name: \"x\", count: 41 }; let name = value.name; drop(name); 42 }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference MoveProject execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("MoveProject MIR bytecode"))
+                .run_value()
+                .expect("MIR bytecode MoveProject execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_move_project_test");
+
+        generator
+            .compile_mir_native(&program)
+            .expect("MoveProject should have a native transfer contract");
+        assert!(
+            generator.module.get_function("main").is_some(),
+            "MoveProject native function should be declared"
+        );
+        assert!(generator.module.get_function("mimi_string_free").is_some());
+        generator
+            .module
+            .verify()
+            .expect("native MoveProject module verifies");
     }
 
     #[test]

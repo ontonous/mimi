@@ -352,6 +352,83 @@ fn canonical_mir_native_non_copy_record_glue_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_record_move_project_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_move_project.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record MoveProject reference run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(42),
+        "canonical MIR record MoveProject reference run failed:\n{}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-move-project-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR record MoveProject native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR record MoveProject native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR record MoveProject native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native_run.status.code(),
+        Some(42),
+        "canonical MIR record MoveProject native run failed:\n{}",
+        String::from_utf8_lossy(&native_run.stderr)
+    );
+}
+
+#[test]
+fn canonical_mir_record_move_project_rejects_non_copy_sibling_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_move_project_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-move-project-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR record MoveProject build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(stderr.contains("canonical MIR build error"));
+    assert!(stderr.contains("non-Copy") && stderr.contains("explicit move projection contract"));
+    assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
 fn canonical_mir_native_abs_overflow_matches_mir_trap_class() {
     let fixture = project_root()
         .join("tests")

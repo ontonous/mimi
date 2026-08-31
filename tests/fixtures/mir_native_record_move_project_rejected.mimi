@@ -1,0 +1,14 @@
+type Pair {
+    left: string,
+    right: string
+}
+
+func consume_name(value: string) -> i32 {
+    drop(value)
+    42
+}
+
+func main() -> i32 {
+    let value = Pair { left: "left", right: "right" }
+    consume_name(value.left)
+}

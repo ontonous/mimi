@@ -1,0 +1,14 @@
+type Named {
+    name: string,
+    count: i32
+}
+
+func consume_name(value: string) -> i32 {
+    drop(value)
+    42
+}
+
+func main() -> i32 {
+    let value = Named { count: 41, name: "owned" }
+    consume_name(value.name)
+}
