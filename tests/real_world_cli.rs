@@ -324,6 +324,88 @@ fn canonical_mir_native_build_record_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_record_update_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_update.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record update reference run");
+    assert_eq!(mir_run.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-update-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR record update native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR record update native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR record update native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_record_update_preserves_checked_trap() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_update_overflow.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR record update trap oracle");
+    assert_eq!(mir_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&mir_run.stderr).contains("E0802"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-record-update-trap-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR record update trap build");
+    assert!(
+        build.status.success(),
+        "canonical MIR record update trap build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR record update trap binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&native_run.stderr).contains("E0802"));
+}
+
+#[test]
 fn canonical_mir_native_builds_copy_option_and_result_variants() {
     for (fixture_name, expected_status) in [
         ("mir_native_option_bool.mimi", 42),

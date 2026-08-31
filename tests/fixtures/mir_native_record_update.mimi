@@ -1,0 +1,14 @@
+type Point {
+    x: i32,
+    enabled: bool
+}
+
+func main() -> i32 {
+    let point = Point { enabled: true, x: 40 }
+    let updated = Point { x: 42, ..point }
+    if updated.enabled {
+        updated.x
+    } else {
+        0
+    }
+}

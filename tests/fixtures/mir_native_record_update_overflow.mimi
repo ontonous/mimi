@@ -1,0 +1,10 @@
+type Point {
+    x: i32,
+    enabled: bool
+}
+
+func main() -> i32 {
+    let point = Point { enabled: true, x: 2147483647 }
+    let updated = Point { x: 2147483647, ..point }
+    updated.x + 1
+}

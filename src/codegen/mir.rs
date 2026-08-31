@@ -474,6 +474,12 @@ impl<'a> NativeMirValidator<'a> {
                 kind,
                 fields,
             } => self.validate_construct(function, result, kind, fields, subject),
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind,
+                fields,
+            } => self.validate_update_record(function, result, base, kind, fields, subject),
             MirInstructionKind::ConstructVariant {
                 result,
                 nominal,
@@ -681,6 +687,49 @@ impl<'a> NativeMirValidator<'a> {
                 .type_catalog()
                 .validate_aggregate(&result_value.ty, kind, &field_types)
         {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_update_record(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        kind: &MirAggregateKind,
+        fields: &[MirValueId],
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "record update result");
+        self.validate_value(function, base, "record update base");
+        for field in fields {
+            self.validate_value(function, field, "record update field value");
+        }
+        let (Some(result_value), Some(base_value)) =
+            (function.values.get(result), function.values.get(base))
+        else {
+            return;
+        };
+        if result_value.ty != base_value.ty {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "record update base and result types disagree",
+            ));
+            return;
+        }
+        let field_types = fields
+            .iter()
+            .filter_map(|field| function.values.get(field).map(|value| value.ty.clone()))
+            .collect::<Vec<_>>();
+        if field_types.len() != fields.len() {
+            return;
+        }
+        if let Err(message) = self.program.type_catalog().validate_record_update(
+            &result_value.ty,
+            &base_value.ty,
+            kind,
+            &field_types,
+        ) {
             self.errors.push(NativeMirError::new(subject, message));
         }
     }
@@ -1449,6 +1498,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_construct(result, kind, fields, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind,
+                fields,
+            } => {
+                let value = self.emit_update_record(result, base, kind, fields, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::ConstructVariant {
                 result,
                 nominal,
@@ -1553,6 +1611,98 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .generator
                 .builder
                 .build_insert_value(aggregate, value, index as u32, "mir_record_insert")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+        }
+        Ok(aggregate.into())
+    }
+
+    fn emit_update_record(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        kind: &MirAggregateKind,
+        fields: &[MirValueId],
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let MirAggregateKind::Record {
+            nominal,
+            fields: field_ids,
+        } = kind
+        else {
+            return Err(NativeMirError::new(
+                subject,
+                "record update reached the flat record emitter with a non-record kind",
+            ));
+        };
+        let result_ty = self.value_type(result, subject)?;
+        let base_ty = self.value_type(base, subject)?;
+        if result_ty != base_ty {
+            return Err(NativeMirError::new(
+                subject,
+                "record update base and result types disagree",
+            ));
+        }
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(&result_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "record update TypeDesc is absent"))?;
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err(NativeMirError::new(
+                subject,
+                "record update has no canonical record layout",
+            ));
+        };
+        if nominal != expected_nominal || field_ids.len() != fields.len() {
+            return Err(NativeMirError::new(
+                subject,
+                "record update does not match its TypeDesc layout",
+            ));
+        }
+        let mut aggregate = self.value(base, subject)?.into_struct_value();
+        for (field_id, source) in field_ids.iter().zip(fields) {
+            let field = layout_fields
+                .iter()
+                .find(|field| field.id == *field_id)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        format!(
+                            "record update field '{}' is absent from TypeDesc",
+                            field_id.0
+                        ),
+                    )
+                })?;
+            let source_ty = self.value_type(source, subject)?;
+            if source_ty != field.ty {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!(
+                        "record update field '{}' type '{}' disagrees with layout type '{}'",
+                        field_id.0,
+                        source_ty.as_str(),
+                        field.ty.as_str()
+                    ),
+                ));
+            }
+            let index = layout_fields
+                .iter()
+                .position(|candidate| candidate.id == *field_id)
+                .expect("record update field was found above");
+            aggregate = self
+                .generator
+                .builder
+                .build_insert_value(
+                    aggregate,
+                    self.value(source, subject)?,
+                    index as u32,
+                    "mir_record_update",
+                )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_struct_value();
         }
@@ -3176,7 +3326,9 @@ fn native_basic_type<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::CodeGenerator;
-    use crate::core::mir::reference::MirProgram;
+    use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
+    use crate::interp::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use inkwell::context::Context;
@@ -3236,6 +3388,67 @@ mod tests {
             generator.module.get_function("main").is_none(),
             "non-Copy aggregate must be rejected before LLVM declarations"
         );
+    }
+
+    #[test]
+    fn native_validator_rejects_non_copy_record_update_before_llvm_declarations() {
+        let program = canonical_program(
+            "type Box { text: string, count: i32 }\nfunc main() -> i32 { let value = Box { count: 1, text: \"x\" }; let updated = Box { count: 2, ..value }; drop(updated); 0 }",
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_record_update_validator_test");
+
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("non-Copy record update must fail closed in native slice");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("flat Copy record contract") }));
+        assert!(
+            generator.module.get_function("main").is_none(),
+            "non-Copy record update must be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
+    fn native_record_update_matches_reference_and_mir_bytecode() {
+        let source = "type Point { x: i32, enabled: bool }\nfunc main() -> i32 { let point = Point { enabled: true, x: 40 }; let updated = Point { x: 42, ..point }; if updated.enabled { updated.x } else { 0 } }";
+        let program = canonical_program(source);
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference record update execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("record update MIR bytecode"))
+                .run_value()
+                .expect("MIR bytecode record update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_record_update_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("flat Copy record update should have a native contract");
+        assert!(generator.module.get_function("main").is_some());
+        generator
+            .module
+            .verify()
+            .expect("native record update module verifies");
+        let update_count = program
+            .functions()
+            .get(&owner)
+            .into_iter()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::UpdateRecord { .. }
+                )
+            })
+            .count();
+        assert_eq!(update_count, 1, "fixture must exercise UpdateRecord");
     }
 
     #[test]
