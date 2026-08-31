@@ -338,8 +338,9 @@ pub enum ResolvedExprKind {
     /// A callable used as a first-class value. Its declaration identity is
     /// closed here; subsequent calls through a binding use `LocalClosure`.
     Callable(ResolvedCallee),
-    /// Projection from an rvalue aggregate. Lvalue projections remain a
-    /// `Load(ResolvedPlace)` and therefore always have a stable local base.
+    /// Projection from a typed value. Field/tuple lvalue projections may still
+    /// use `Load(ResolvedPlace)`, but indexing is always explicit here so the
+    /// index operand can cross into canonical MIR without AST re-inspection.
     Project {
         value: Box<ResolvedExpr>,
         projection: ResolvedValueProjection,

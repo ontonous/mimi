@@ -341,6 +341,48 @@ fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
 }
 
 #[test]
+fn list_index_contract_rejects_non_integer_operand_before_backend() {
+    let source = "func main() -> i32 { let values = [10, 20]; values[0] }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut function = canonical.functions().get(&owner).cloned().expect("main");
+    let index = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                projection: MirProjection::Index(index),
+                ..
+            } => Some(index.clone()),
+            _ => None,
+        })
+        .expect("List index projection");
+    let bool_ty = canonical
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi == crate::core::mir::types::MirAbiClass::Bool).then(|| id.clone())
+        })
+        .expect("bool type");
+    function.values.get_mut(&index).expect("index value").ty = bool_ty;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, function)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("non-integer List index must fail before a backend");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("List index operand") && error.message.contains("Copy scalar")
+    }));
+}
+
+#[test]
 fn non_copy_record_projection_lowers_to_explicit_move_project() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

@@ -1,0 +1,7 @@
+func first(xs: List<string>) -> string {
+    xs[0]
+}
+
+func main() -> i32 {
+    0
+}

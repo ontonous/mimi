@@ -690,11 +690,32 @@ fn canonical_mir_run_cli_executes_imported_user_call_graph() {
 }
 
 #[test]
-fn canonical_mir_run_cli_rejects_unlowered_shape_without_fallback() {
+fn canonical_mir_run_cli_executes_list_index_without_fallback() {
     let fixture = project_root()
         .join("tests")
         .join("real_world")
         .join("core_list_index.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical List index program");
+    assert!(
+        output.status.success(),
+        "canonical List index program failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn canonical_mir_run_cli_rejects_unsupported_list_shape_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_list_string_index_rejected.mimi");
     let output = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
@@ -708,9 +729,7 @@ fn canonical_mir_run_cli_rejects_unlowered_shape_without_fallback() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("canonical MIR build error")
-            && (stderr.contains("indexed place projection")
-                || stderr.contains("indexed projection")),
+        stderr.contains("canonical MIR build error") && stderr.contains("Copy scalar"),
         "unexpected canonical rejection:\n{stderr}"
     );
     assert!(

@@ -1494,6 +1494,82 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate a read-only List index projection. The List root is borrowed
+    /// by `Project`; only the selected element is copied out. Every index,
+    /// including a source-level constant, is represented by an explicit
+    /// signed `i32`/`i64` scalar MIR value operand.
+    pub fn validate_list_index(
+        &self,
+        base_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        index_ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        let base = self
+            .get(base_ty)
+            .ok_or_else(|| format!("List index base type '{}' is absent", base_ty.as_str()))?;
+        let MirLayout::List { element } = &base.layout else {
+            return Err(format!(
+                "List index base type '{}' has no canonical List layout",
+                base_ty.as_str()
+            ));
+        };
+        self.validate_list_glue(base_ty, MirGlueOperation::MoveOut)?;
+        if element != result_ty {
+            return Err(format!(
+                "List index result type '{}' disagrees with element type '{}'",
+                result_ty.as_str(),
+                element.as_str()
+            ));
+        }
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "List index result type '{}' is absent from MIR type catalog",
+                result_ty.as_str()
+            )
+        })?;
+        if result.ownership != MirOwnership::Copy
+            || result.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(format!(
+                "List index result type '{}' is not a Copy/no-op element",
+                result_ty.as_str()
+            ));
+        }
+        let index = self.get(index_ty).ok_or_else(|| {
+            format!(
+                "List index operand type '{}' is absent from MIR type catalog",
+                index_ty.as_str()
+            )
+        })?;
+        if index.ownership != MirOwnership::Copy
+            || index.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || !matches!(index.layout, MirLayout::Scalar)
+            || !matches!(
+                index.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                }
+            )
+        {
+            return Err(format!(
+                "List index operand type '{}' is outside the signed Copy scalar contract",
+                index_ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate one value projection against the canonical semantic layout.
     /// Field names are intentionally unavailable here: the stable field ID is
     /// the only identity that crosses the MIR/backend boundary.
@@ -1517,8 +1593,11 @@ impl MirTypeCatalog {
                     .map(|candidate| candidate.ty.clone())
                     .ok_or_else(|| format!("record projection field '{}' is absent", field.0))
             }
+            (MirLayout::List { element }, crate::core::mir::MirProjection::Index(_)) => {
+                Ok(element.clone())
+            }
             (_, crate::core::mir::MirProjection::Index(_)) => {
-                Err("indexed projection has no canonical MIR layout contract".into())
+                Err("indexed projection requires a canonical List layout".into())
             }
             (_, crate::core::mir::MirProjection::Dereference) => {
                 Err("dereference projection has no canonical MIR layout contract".into())
@@ -1583,8 +1662,24 @@ impl MirTypeCatalog {
                 }
                 Ok(())
             }
+            (MirLayout::List { element }, crate::core::mir::MirProjection::Index(_)) => {
+                if element != result_ty {
+                    return Err(format!(
+                        "List index result type '{}' disagrees with element type '{}'",
+                        result_ty.as_str(),
+                        element.as_str()
+                    ));
+                }
+                if result.ownership != MirOwnership::Copy {
+                    return Err(format!(
+                        "List index result type '{}' is non-Copy",
+                        result_ty.as_str()
+                    ));
+                }
+                Ok(())
+            }
             (_, crate::core::mir::MirProjection::Index(_)) => {
-                Err("indexed projection has no canonical MIR layout contract".into())
+                Err("indexed projection requires a canonical List layout".into())
             }
             (_, crate::core::mir::MirProjection::Dereference) => {
                 Err("dereference projection has no canonical MIR layout contract".into())

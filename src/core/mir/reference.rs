@@ -222,11 +222,29 @@ impl MirProgram {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
                             };
-                            if let Err(message) = type_catalog.validate_projection(
-                                &base_value.ty,
-                                &result_value.ty,
-                                projection,
-                            ) {
+                            let validation = match projection {
+                                super::MirProjection::Index(index) => {
+                                    let Some(index_value) = function.values.get(index) else {
+                                        errors.push(super::MirValidationError {
+                                            subject: instruction.id.to_string(),
+                                            message: "List index is absent from MIR value catalog"
+                                                .into(),
+                                        });
+                                        continue;
+                                    };
+                                    type_catalog.validate_list_index(
+                                        &base_value.ty,
+                                        &result_value.ty,
+                                        &index_value.ty,
+                                    )
+                                }
+                                _ => type_catalog.validate_projection(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    projection,
+                                ),
+                            };
+                            if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -1550,11 +1568,16 @@ impl<'a> MirReferenceInterpreter<'a> {
             } => {
                 let value = self.read_value(function, values, base)?;
                 let base_ty = function.values.get(base).map(|value| &value.ty);
+                let index_value = match projection {
+                    MirProjection::Index(index) => Some(self.read_value(function, values, index)?),
+                    _ => None,
+                };
                 let projected = project_value(
                     &function.owner,
                     value,
                     base_ty,
                     projection,
+                    index_value.as_ref(),
                     self.program.type_catalog(),
                 )?;
                 values.insert(result.clone(), projected);
@@ -1867,6 +1890,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 value,
                 Some(&current_ty),
                 &mir_projection,
+                None,
                 self.program.type_catalog(),
             )?;
             current_ty = projection.ty().clone();
@@ -2556,6 +2580,7 @@ fn project_value(
     value: MirRuntimeValue,
     base_ty: Option<&crate::core::ResolvedTypeId>,
     projection: &MirProjection,
+    index_value: Option<&MirRuntimeValue>,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     match (value, projection) {
@@ -2607,15 +2632,60 @@ fn project_value(
                 .ok_or_else(|| execution_error(function, "record field vector is too short"))
         }
         (value, MirProjection::Dereference) => Ok(value),
+        (MirRuntimeValue::List(values), MirProjection::Index(_)) => {
+            let raw = match (projection, index_value) {
+                (MirProjection::Index(_), Some(MirRuntimeValue::Int(index))) => *index,
+                _ => {
+                    return Err(execution_error(
+                        function,
+                        "List index runtime value is not a signed integer",
+                    ))
+                }
+            };
+            let index = canonical_list_index(function, raw, values.len())?;
+            values.get(index).cloned().ok_or_else(|| {
+                execution_error(
+                    function,
+                    "List index E0803 bounds check lost selected element",
+                )
+            })
+        }
         (_, MirProjection::Index(_)) => Err(execution_error(
             function,
-            "indexed projection is not implemented by the reference slice",
+            "indexed projection requires a canonical List value",
         )),
         _ => Err(execution_error(
             function,
             "projection does not match aggregate value",
         )),
     }
+}
+
+fn canonical_list_index(
+    function: &NodeId,
+    raw: i64,
+    length: usize,
+) -> Result<usize, MirExecutionError> {
+    let index = if raw < 0 {
+        let distance = raw.unsigned_abs();
+        if distance > length as u64 {
+            return Err(execution_error(
+                function,
+                format!("index E0803 out of bounds (index {raw}, len {length})"),
+            ));
+        }
+        length - distance as usize
+    } else {
+        let index = raw as u64;
+        if index >= length as u64 {
+            return Err(execution_error(
+                function,
+                format!("index E0803 out of bounds (index {raw}, len {length})"),
+            ));
+        }
+        index as usize
+    };
+    Ok(index)
 }
 
 fn move_project_value(

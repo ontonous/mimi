@@ -1133,7 +1133,11 @@ impl<'a> FunctionEmitter<'a> {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
         };
-        for value in [result, base] {
+        let index_value = match projection {
+            MirProjection::Index(index) => Some(index),
+            _ => None,
+        };
+        for value in [result, base].into_iter().chain(index_value) {
             if let Err(message) = self.supported_type_for_value(value) {
                 self.error(format!(
                     "projection value '{}' is unsupported: {message}",
@@ -1205,8 +1209,32 @@ impl<'a> FunctionEmitter<'a> {
                     field: field_idx,
                 });
             }
+            (MirLayout::List { element }, MirProjection::Index(index)) => {
+                let Some(index_value) = self.function.values.get(index) else {
+                    self.error("List index is absent from MIR value catalog");
+                    return;
+                };
+                if let Err(message) = self.program.type_catalog().validate_list_index(
+                    &base_desc.id,
+                    &result_desc.id,
+                    &index_value.ty,
+                ) {
+                    self.error(format!("List index is unsupported: {message}"));
+                    return;
+                }
+                if element != &result_desc.id {
+                    self.error(format!(
+                        "List index result '{}' disagrees with element type '{}'",
+                        result_desc.id.as_str(),
+                        element.as_str()
+                    ));
+                    return;
+                }
+                let Some(rb) = self.reg(index) else { return };
+                self.proto.emit(Op::ListGet { rd, ra, rb });
+            }
             (_, MirProjection::Index(_)) => {
-                self.error("indexed projection has no canonical MIR layout contract");
+                self.error("indexed projection requires a canonical List layout");
             }
             (_, MirProjection::Dereference) => {
                 self.error("dereference projection has no canonical MIR layout contract");
@@ -2532,6 +2560,9 @@ mod tests {
         if message.contains("overflow") {
             return "runtime:E0802".into();
         }
+        if message.contains("E0803") || message.contains("index out of bounds") {
+            return "runtime:E0803".into();
+        }
         "runtime:E0800".into()
     }
 
@@ -2766,16 +2797,77 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mir_differential_rejects_unmaterialized_shape_without_fallback() {
-        let error = run_canonical_differential(
-            "func main() -> i32 { let values = [10, 20, 30]; values[0] }",
+    fn canonical_mir_differential_covers_static_list_index_projection() {
+        let report = run_canonical_differential(
+            "func main() -> i32 { let values = [10, 20, 30]; values[1] }",
         )
-        .expect_err("list literal must remain outside this canonical slice");
+        .expect("static List index differential");
+        assert!(report.mir_text.contains("project"));
+        assert!(report.mir_text.contains("Index("));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(20))
+        );
+    }
+
+    #[test]
+    fn canonical_mir_differential_covers_dynamic_list_index_projection() {
+        let report = run_canonical_differential(
+            "func main() -> i32 { let values = [10, 20, 30]; let index = 2; values[index] }",
+        )
+        .expect("dynamic List index differential");
+        assert!(report.mir_text.contains("Index("));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(30))
+        );
+    }
+
+    #[test]
+    fn canonical_mir_differential_preserves_negative_list_index_semantics() {
+        let report = run_canonical_differential(
+            "func main() -> i32 { let values = [10, 20, 30]; values[-1] }",
+        )
+        .expect("negative List index differential");
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(30))
+        );
+    }
+
+    #[test]
+    fn canonical_mir_differential_preserves_list_index_trap_class() {
+        let report = run_canonical_differential(
+            "func main() -> i32 { let values = [10, 20, 30]; values[3] }",
+        )
+        .expect("List index trap differential");
+        for observation in [
+            &report.reference,
+            &report.mir_bytecode,
+            &report.legacy_bytecode,
+        ] {
+            assert!(matches!(
+                &observation.outcome,
+                DifferentialOutcome::Error { class, .. } if class == "runtime:E0803"
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_mir_rejects_indexed_assignment_without_fallback() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let mut values = [10, 20, 30]; values[0] = 99; 0 }",
+        )
+        .expect_err("indexed assignment is outside the read-only List index slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
-                assert!(message.contains("indexed") || message.contains("projection"));
+                assert!(
+                    message.contains("structured control flow")
+                        || message.contains("indexed place projection"),
+                    "unexpected canonical rejection: {message}"
+                );
             }
-            other => panic!("unsupported shape crossed the canonical gate: {other:?}"),
+            other => panic!("unsupported indexed assignment crossed the canonical gate: {other:?}"),
         }
     }
 

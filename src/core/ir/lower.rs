@@ -46,10 +46,14 @@ fn nominal_display(item: &str) -> String {
 fn is_local_place(expression: &Expr) -> bool {
     match expression.unlocated() {
         Expr::Ident(_) => true,
-        Expr::Field(base, _)
-        | Expr::TupleIndex(base, _)
-        | Expr::Index(base, _)
-        | Expr::Unary(UnOp::Deref, base) => is_local_place(base),
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) | Expr::Unary(UnOp::Deref, base) => {
+            is_local_place(base)
+        }
+        // Read-only indexing is a value projection so the resolved index
+        // expression becomes an explicit MIR operand. Indexed assignment
+        // still calls lower_place directly and remains a separate place
+        // contract.
+        Expr::Index(_, _) => false,
         _ => false,
     }
 }
@@ -7138,7 +7142,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_index_is_retained_as_a_typed_place_input() {
+    fn dynamic_index_is_retained_as_a_typed_value_projection() {
         let file = parse("func read(values: List<i32>, index: i32) -> i32 {\n  values[index]\n}");
         let program = crate::core::check_program(&file).expect("check");
         let resolved = program.function("read").expect("resolved function");
@@ -7171,20 +7175,22 @@ mod tests {
         })
         .expect("lower body");
 
-        assert_eq!(body.place_inputs.len(), 1);
+        assert!(body.place_inputs.is_empty());
         let result = body.root.result.as_ref().expect("tail result");
-        let ResolvedExprKind::Load(place) = &result.kind else {
-            panic!("index expression must lower to a place load");
+        let ResolvedExprKind::Project { value, projection } = &result.kind else {
+            panic!("index expression must lower to a value projection");
         };
-        assert!(matches!(
-            place.projections.as_slice(),
-            [ResolvedProjection::Index {
-                index: crate::core::ResolvedIndex::Dynamic(_),
-                ..
-            }]
-        ));
+        assert!(
+            matches!(&value.kind, ResolvedExprKind::Load(place) if place.projections.is_empty())
+        );
+        let ResolvedValueProjection::Index(index) = projection else {
+            panic!("index expression must retain its typed index operand");
+        };
+        assert!(
+            matches!(&index.kind, ResolvedExprKind::Load(place) if place.projections.is_empty())
+        );
         body.validate(program.resolved_types(), program.resolved_type_targets())
-            .expect("place input is a body node");
+            .expect("value projection is a body node");
     }
 
     #[test]
