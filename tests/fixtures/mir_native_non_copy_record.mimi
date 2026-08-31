@@ -1,0 +1,20 @@
+type Named {
+    name: string,
+    count: i32
+}
+
+func make_named() -> Named {
+    Named { count: 41, name: "owned" }
+}
+
+func consume_named(value: Named) -> i32 {
+    drop(value)
+    42
+}
+
+func main() -> i32 {
+    let value = make_named()
+    let cloned = value
+    drop(cloned)
+    consume_named(value)
+}

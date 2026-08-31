@@ -1,5 +1,6 @@
 //! AST-free native consumer for the closed scalar/owned-String,
-//! recursive-tuple, flat-record/flat-variant, scalar-List, and local immutable-borrow
+//! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List,
+//! and local immutable-borrow
 //! Canonical MIR slices.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
@@ -218,6 +219,7 @@ impl<'a> NativeMirValidator<'a> {
             &desc.kind,
             MirTypeKind::Primitive(crate::core::PrimitiveType::String)
         );
+        let is_record = matches!(desc.layout, MirLayout::Record { .. });
         let supported = if is_reference {
             match self.program.type_catalog().validate_reference_type(ty) {
                 Ok(_) => true,
@@ -254,6 +256,18 @@ impl<'a> NativeMirValidator<'a> {
                     false
                 }
             }
+        } else if is_record {
+            if desc.ownership == MirOwnership::Copy {
+                self.validate_flat_copy_record(ty, subject, desc)
+            } else {
+                match validate_native_non_copy_record_type(self.program.type_catalog(), ty) {
+                    Ok(()) => true,
+                    Err(message) => {
+                        self.errors.push(NativeMirError::new(subject, message));
+                        false
+                    }
+                }
+            }
         } else {
             (matches!(
                 desc.abi,
@@ -275,6 +289,8 @@ impl<'a> NativeMirValidator<'a> {
                 "native canonical List contract"
             } else if matches!(desc.layout, MirLayout::Tuple(_)) {
                 "native canonical recursive tuple contract"
+            } else if is_record {
+                "native canonical non-Copy record contract"
             } else {
                 "Copy scalar native contract"
             };
@@ -290,6 +306,7 @@ impl<'a> NativeMirValidator<'a> {
             && !is_reference
             && !is_owned_string
             && !matches!(desc.layout, MirLayout::Tuple(_))
+            && !is_record
         {
             if desc.ownership != MirOwnership::Copy {
                 self.errors.push(NativeMirError::new(
@@ -324,6 +341,22 @@ impl<'a> NativeMirValidator<'a> {
         let MirLayout::Record { fields, .. } = &desc.layout else {
             return false;
         };
+        if desc.ownership != MirOwnership::Copy
+            || desc.needs_drop_glue
+            || desc.needs_clone_glue
+            || desc.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "record TypeDesc is not in the flat Copy record contract",
+            ));
+            return false;
+        }
         if desc.abi != MirAbiClass::Aggregate {
             return false;
         }
@@ -569,6 +602,7 @@ impl<'a> NativeMirValidator<'a> {
                         }
                         if !matches!(desc.layout, MirLayout::List { .. })
                             && !matches!(desc.layout, MirLayout::Tuple(_))
+                            && !matches!(desc.layout, MirLayout::Record { .. })
                             && !matches!(
                                 &desc.kind,
                                 MirTypeKind::Primitive(crate::core::PrimitiveType::String)
@@ -758,6 +792,17 @@ impl<'a> NativeMirValidator<'a> {
                 ) {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
+                if self
+                    .program
+                    .type_catalog()
+                    .get(&base_value.ty)
+                    .is_some_and(|desc| desc.ownership != MirOwnership::Copy)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "non-Copy record field projection requires an explicit MoveProject contract",
+                    ));
+                }
             }
             MirProjection::Dereference => {
                 if let Err(message) = self
@@ -835,6 +880,18 @@ impl<'a> NativeMirValidator<'a> {
         else {
             return;
         };
+        if self
+            .program
+            .type_catalog()
+            .get(&result_value.ty)
+            .is_some_and(|desc| desc.ownership != MirOwnership::Copy)
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "non-Copy record update requires an explicit transfer/update contract",
+            ));
+            return;
+        }
         if result_value.ty != base_value.ty {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -2179,23 +2236,30 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_drop_value(value, subject),
             MirGlueKind::Aggregate => {
-                validate_native_recursive_tuple_type(self.program.type_catalog(), ty)
+                validate_native_product_type(self.program.type_catalog(), ty)
                     .map_err(|message| NativeMirError::new(subject, message))?;
-                if !matches!(layout, MirLayout::Tuple(_)) {
+                let plan = plan.ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        "aggregate drop TypeDesc has no canonical drop plan",
+                    )
+                })?;
+                if !matches!(layout, MirLayout::Tuple(_) | MirLayout::Record { .. }) {
                     return Err(NativeMirError::new(
                         subject,
-                        "aggregate drop layout is outside the recursive tuple ABI",
+                        "aggregate drop layout is outside the native product ABI",
                     ));
                 }
-                let plan = plan.ok_or_else(|| {
-                    NativeMirError::new(subject, "tuple drop TypeDesc has no canonical drop plan")
-                })?;
                 let aggregate = value.into_struct_value();
                 for field in plan.fields {
                     let child = self
                         .generator
                         .builder
-                        .build_extract_value(aggregate, field.index as u32, "mir_tuple_drop_field")
+                        .build_extract_value(
+                            aggregate,
+                            field.index as u32,
+                            "mir_product_drop_field",
+                        )
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
                     self.emit_drop_value(child, &field.ty, subject)?;
                 }
@@ -2649,15 +2713,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_clone_value(value, subject),
             MirGlueKind::Aggregate => {
-                validate_native_recursive_tuple_type(self.program.type_catalog(), ty)
+                validate_native_product_type(self.program.type_catalog(), ty)
                     .map_err(|message| NativeMirError::new(subject, message))?;
                 let elements = match layout {
                     MirLayout::Tuple(elements) => elements.clone(),
+                    MirLayout::Record { fields, .. } => {
+                        fields.into_iter().map(|field| field.ty).collect()
+                    }
                     layout => {
                         return Err(NativeMirError::new(
                             subject,
                             format!(
-                            "aggregate clone layout {layout:?} is outside the recursive tuple ABI"
+                            "aggregate clone layout {layout:?} is outside the native product ABI"
                         ),
                         ))
                     }
@@ -2667,7 +2734,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     let field = self
                         .generator
                         .builder
-                        .build_extract_value(aggregate, index as u32, "mir_tuple_clone_field")
+                        .build_extract_value(aggregate, index as u32, "mir_product_clone_field")
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
                     let cloned = self.emit_clone_value(field, element_ty, subject)?;
                     aggregate = self
@@ -2677,7 +2744,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             aggregate,
                             cloned,
                             index as u32,
-                            "mir_tuple_clone_insert",
+                            "mir_product_clone_insert",
                         )
                         .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                         .into_struct_value();
@@ -3659,13 +3726,133 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     }
 }
 
-/// Validate the native recursive tuple ABI before LLVM sees a declaration.
+/// Validate the native recursive product ABI before LLVM sees a declaration.
 ///
 /// This is deliberately narrower than the backend-independent aggregate glue
-/// contract: this slice materializes only scalar leaves, owned Strings, and
-/// more tuples.  A tuple containing a List, record, variant, reference, or
-/// another unmodelled shape remains fail-closed even when another consumer
-/// could represent it.
+/// contract: this slice materializes only scalar leaves, owned Strings, tuples,
+/// and concrete records with those children.  A product containing a List,
+/// variant, reference, generic, or another unmodelled shape remains fail-closed
+/// even when another consumer could represent it.
+fn validate_native_product_type(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(), String> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+    match &descriptor.layout {
+        MirLayout::Tuple(_) => validate_native_recursive_tuple_type(catalog, ty),
+        MirLayout::Record { .. } => validate_native_non_copy_record_type(catalog, ty),
+        layout => Err(format!(
+            "type '{}' layout {layout:?} is outside the native product ABI",
+            ty.as_str()
+        )),
+    }
+}
+
+/// Validate the native concrete non-Copy record ABI before LLVM sees a
+/// declaration.  Stable field identities and declaration order remain MIR
+/// facts; the native side only chooses the final anonymous struct shape after
+/// this contract succeeds.
+fn validate_native_non_copy_record_type(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(), String> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+    let MirLayout::Record { fields, .. } = &descriptor.layout else {
+        return Err(format!(
+            "type '{}' is not a canonical record layout",
+            ty.as_str()
+        ));
+    };
+    if !matches!(&descriptor.kind, MirTypeKind::Nominal) {
+        return Err(format!(
+            "record TypeDesc '{}' has non-nominal kind {:?}",
+            ty.as_str(),
+            descriptor.kind
+        ));
+    }
+    if fields.is_empty() {
+        return Err(format!(
+            "record TypeDesc '{}' has no fields in the native ABI",
+            ty.as_str()
+        ));
+    }
+    if descriptor.abi != MirAbiClass::Aggregate {
+        return Err(format!(
+            "record TypeDesc '{}' has ABI {:?}, expected Aggregate",
+            ty.as_str(),
+            descriptor.abi
+        ));
+    }
+    if descriptor.ownership != MirOwnership::Move {
+        return Err(format!(
+            "record TypeDesc '{}' ownership {:?} is outside the native non-Copy record contract",
+            ty.as_str(),
+            descriptor.ownership
+        ));
+    }
+    let expected = MirGlueContract {
+        move_out: MirGlueKind::Aggregate,
+        clone: MirGlueKind::Aggregate,
+        drop: MirGlueKind::Aggregate,
+    };
+    if descriptor.glue != expected
+        || !descriptor.needs_drop_glue
+        || !descriptor.needs_clone_glue
+        || descriptor.drop_plan.is_none()
+    {
+        return Err(format!(
+            "record TypeDesc '{}' aggregate glue/drop plan is incomplete",
+            ty.as_str()
+        ));
+    }
+    for operation in [
+        crate::core::mir::types::MirGlueOperation::MoveOut,
+        crate::core::mir::types::MirGlueOperation::Clone,
+        crate::core::mir::types::MirGlueOperation::Drop,
+    ] {
+        catalog.validate_glue(ty, operation)?;
+    }
+
+    let mut field_ids = BTreeSet::new();
+    for field in fields {
+        if !field_ids.insert(field.id.clone()) {
+            return Err(format!(
+                "record field identity '{}' is duplicated in the native non-Copy record contract",
+                field.id.0
+            ));
+        }
+        let field_desc = catalog.get(&field.ty).ok_or_else(|| {
+            format!(
+                "record field '{}' TypeDesc '{}' is absent",
+                field.name,
+                field.ty.as_str()
+            )
+        })?;
+        let is_owned_string = matches!(
+            &field_desc.kind,
+            MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+        );
+        let supported = is_native_scalar_descriptor(field_desc)
+            || (is_owned_string && catalog.validate_owned_string(&field.ty).is_ok())
+            || (matches!(field_desc.layout, MirLayout::Tuple(_))
+                && validate_native_recursive_tuple_type(catalog, &field.ty).is_ok());
+        if !supported {
+            return Err(format!(
+                "record '{}' field '{}' type '{}' is outside the scalar/String/tuple ABI",
+                ty.as_str(),
+                field.name,
+                field.ty.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the native recursive tuple ABI before LLVM sees a declaration.
 fn validate_native_recursive_tuple_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
@@ -4050,6 +4237,13 @@ fn native_basic_type<'ctx>(
                 Ok(context.struct_type(&field_types, false).into())
             }
             MirLayout::Record { fields, .. } if !fields.is_empty() => {
+                let non_copy = catalog
+                    .get(ty)
+                    .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy);
+                if non_copy {
+                    validate_native_non_copy_record_type(catalog, ty)
+                        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                }
                 let mut field_types = Vec::with_capacity(fields.len());
                 for field in fields {
                     let field_desc = catalog.get(&field.ty).ok_or_else(|| {
@@ -4058,10 +4252,20 @@ fn native_basic_type<'ctx>(
                             "record field TypeDesc is absent from native catalog",
                         )
                     })?;
-                    if !is_native_scalar_descriptor(field_desc) {
+                    let supported = if non_copy {
+                        is_native_scalar_descriptor(field_desc)
+                            || (matches!(
+                                &field_desc.kind,
+                                MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                            ) && catalog.validate_owned_string(&field.ty).is_ok())
+                            || matches!(field_desc.layout, MirLayout::Tuple(_))
+                    } else {
+                        is_native_scalar_descriptor(field_desc)
+                    };
+                    if !supported {
                         return Err(NativeMirError::new(
                             field.name.clone(),
-                            "record field is outside the flat Copy record ABI",
+                            "record field is outside the native product ABI",
                         ));
                     }
                     field_types.push(native_basic_type(context, catalog, &field.ty)?);
@@ -4130,27 +4334,21 @@ mod tests {
     }
 
     #[test]
-    fn native_validator_rejects_non_copy_record_before_llvm_declarations() {
+    fn native_validator_rejects_record_with_unsupported_child_before_llvm_declarations() {
         let program = canonical_program(
-            "type Box { text: string }\nfunc main() -> i32 { let value = Box { text: \"x\" }; drop(value); 0 }",
+            "type Box { text: string, values: List<i32> }\nfunc main() -> i32 { let value = Box { text: \"x\", values: [1] }; drop(value); 0 }",
         );
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_record_validator_test");
 
         let diagnostics = generator
             .compile_mir_native(&program)
-            .expect_err("non-Copy record must fail closed in scalar native slice");
+            .expect_err("record with an unsupported child must fail closed in native slice");
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("flat Copy record contract")),
-            "missing flat-record rejection: {diagnostics:?}"
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("ownership Move")),
-            "missing ownership rejection: {diagnostics:?}"
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("outside the scalar/String/tuple ABI")),
+            "missing unsupported-child rejection: {diagnostics:?}"
         );
         assert!(
             generator.module.get_function("main").is_none(),
@@ -4169,9 +4367,11 @@ mod tests {
         let diagnostics = generator
             .compile_mir_native(&program)
             .expect_err("non-Copy record update must fail closed in native slice");
-        assert!(diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("flat Copy record contract") }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("non-Copy record update requires an explicit transfer/update contract")
+        }));
         assert!(
             generator.module.get_function("main").is_none(),
             "non-Copy record update must be rejected before LLVM declarations"
@@ -4315,6 +4515,37 @@ mod tests {
             .expect("native recursive tuple module verifies");
         assert!(generator.module.get_function("make_nested").is_some());
         assert!(generator.module.get_function("consume_nested").is_some());
+        assert!(generator.module.get_function("mimi_str_clone").is_some());
+        assert!(generator.module.get_function("mimi_string_free").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_non_copy_record_clone_move_and_drop() {
+        let program = canonical_program(
+            "type Named { name: string, count: i32 }\nfunc make_named() -> Named { Named { count: 41, name: \"owned\" } }\nfunc consume_named(value: Named) -> i32 { drop(value); 42 }\nfunc main() -> i32 { let value = make_named(); let cloned = value; drop(cloned); consume_named(value) }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference non-Copy record execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("non-Copy record MIR bytecode"))
+                .run_value()
+                .expect("MIR bytecode non-Copy record execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_non_copy_record_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("non-Copy record MIR should have a native glue contract");
+        generator
+            .module
+            .verify()
+            .expect("native non-Copy record module verifies");
+        assert!(generator.module.get_function("make_named").is_some());
+        assert!(generator.module.get_function("consume_named").is_some());
         assert!(generator.module.get_function("mimi_str_clone").is_some());
         assert!(generator.module.get_function("mimi_string_free").is_some());
     }

@@ -1,9 +1,10 @@
 type Box {
-    text: string
+    text: string,
+    values: List<i32>
 }
 
 func main() -> i32 {
-    let value = Box { text: "x" }
+    let value = Box { text: "x", values: [1] }
     drop(value)
     0
 }
