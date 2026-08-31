@@ -13,7 +13,7 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{MirAbiClass, MirBuiltinKind, MirLayout, MirOwnership};
 use crate::core::mir::{
     MirAggregateKind, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
-    MirFunction, MirInstructionKind, MirProjection, MirTerminator, MirValueId,
+    MirFunction, MirInstructionKind, MirProjection, MirSwitchCase, MirTerminator, MirValueId,
 };
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
@@ -29,6 +29,15 @@ enum SymbolicValue {
     Record {
         nominal: crate::core::ir::NominalTypeId,
         fields: BTreeMap<crate::core::NodeId, SymbolicValue>,
+    },
+    /// A symbolic built-in Option/Result value.  The tag is constrained to
+    /// the canonical TypeDesc discriminants when the value is introduced;
+    /// payloads are keyed by stable field identity so switch bindings never
+    /// infer a payload slot from source-pattern position.
+    Variant {
+        nominal: crate::core::ir::NominalTypeId,
+        tag: Int,
+        payload: BTreeMap<crate::core::NodeId, SymbolicValue>,
     },
 }
 
@@ -365,6 +374,53 @@ fn symbolic_value_for_type(
                 constraints,
             ))
         }
+        MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => {
+            let expected_nominal = if matches!(&descriptor.layout, MirLayout::Option { .. }) {
+                "builtin:type:Option"
+            } else {
+                "builtin:type:Result"
+            };
+            let tag = Int::new_const(format!("{name}.tag"));
+            let mut constraints = Vec::new();
+            let allowed = variants
+                .iter()
+                .map(|variant| tag.eq(Int::from_i64(variant.discriminant as i64)))
+                .collect::<Vec<_>>();
+            if !allowed.is_empty() {
+                let allowed_refs = allowed.iter().collect::<Vec<_>>();
+                constraints.push(Bool::or(&allowed_refs));
+            }
+            let mut payload = BTreeMap::new();
+            for variant in variants {
+                for field in &variant.fields {
+                    let (value, nested) = symbolic_value_for_type(
+                        catalog,
+                        &field.ty,
+                        &format!(
+                            "{name}.variant.{}.field.{}",
+                            variant.id.0.as_str(),
+                            field.id.0.as_str()
+                        ),
+                    )?;
+                    if payload.insert(field.id.clone(), value).is_some() {
+                        return Err(format!(
+                            "MIR verifier variant payload field '{}' is duplicated",
+                            field.id.0
+                        ));
+                    }
+                    constraints.extend(nested);
+                }
+            }
+            Ok((
+                SymbolicValue::Variant {
+                    nominal: crate::core::ir::NominalTypeId::new(expected_nominal)
+                        .map_err(|error| error.to_string())?,
+                    tag,
+                    payload,
+                },
+                constraints,
+            ))
+        }
         layout => Err(format!(
             "MIR verifier layout {:?} is outside the Copy aggregate contract",
             layout
@@ -459,6 +515,66 @@ fn symbolic_project(
     }
 }
 
+fn symbolic_variant_construct(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ir::ResolvedTypeId,
+    nominal: &crate::core::ir::NominalTypeId,
+    variant: &crate::core::NodeId,
+    fields: &[(crate::core::NodeId, SymbolicValue)],
+) -> Result<SymbolicValue, String> {
+    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
+        return Err("MIR verifier variant construction has no canonical layout".into());
+    };
+    if nominal.as_str() != expected_nominal {
+        return Err("MIR verifier variant construction nominal disagrees with TypeDesc".into());
+    }
+    let Some(expected_variant) = variants.iter().find(|candidate| candidate.id == *variant) else {
+        return Err("MIR verifier variant construction case is absent from TypeDesc".into());
+    };
+    if expected_variant.fields.len() != fields.len() {
+        return Err(
+            "MIR verifier variant construction payload arity disagrees with TypeDesc".into(),
+        );
+    }
+    let mut payload = BTreeMap::new();
+    for (field_id, value) in fields {
+        let Some(expected_field) = expected_variant
+            .fields
+            .iter()
+            .find(|field| field.id == *field_id)
+        else {
+            return Err("MIR verifier variant construction field is absent from TypeDesc".into());
+        };
+        if !symbolic_matches_type(catalog, &expected_field.ty, value) {
+            return Err("MIR verifier variant payload disagrees with TypeDesc".into());
+        }
+        if payload.insert(field_id.clone(), value.clone()).is_some() {
+            return Err("MIR verifier variant construction repeats a field".into());
+        }
+    }
+    if payload.len() != expected_variant.fields.len() {
+        return Err("MIR verifier variant construction is missing a payload field".into());
+    }
+    Ok(SymbolicValue::Variant {
+        nominal: crate::core::ir::NominalTypeId::new(expected_nominal)
+            .map_err(|error| error.to_string())?,
+        tag: Int::from_i64(expected_variant.discriminant as i64),
+        payload,
+    })
+}
+
+fn symbolic_default_guard(previous_cases: &[Bool]) -> Bool {
+    if previous_cases.is_empty() {
+        return Bool::from_bool(true);
+    }
+    let negated = previous_cases
+        .iter()
+        .map(|condition| condition.not())
+        .collect::<Vec<_>>();
+    let refs = negated.iter().collect::<Vec<_>>();
+    Bool::and(&refs)
+}
+
 fn explore_block(
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
@@ -523,6 +639,115 @@ fn explore_block(
                 traps,
             )?;
         }
+        MirTerminator::Switch { scrutinee, arms } => {
+            let value = state
+                .values
+                .get(scrutinee)
+                .cloned()
+                .ok_or_else(|| format!("switch scrutinee '{}' is not defined", scrutinee))?;
+            let SymbolicValue::Variant {
+                nominal,
+                tag,
+                payload,
+            } = value
+            else {
+                return Err(
+                    "canonical MIR verifier variant switch requires a symbolic Option/Result value"
+                        .into(),
+                );
+            };
+            let scrutinee_ty = function
+                .values
+                .get(scrutinee)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
+            let Some((expected_nominal, variants)) = catalog.variant_layout(&scrutinee_ty) else {
+                return Err(
+                    "canonical MIR verifier variant switch has no canonical TypeDesc layout".into(),
+                );
+            };
+            if nominal.as_str() != expected_nominal {
+                return Err(
+                    "canonical MIR verifier variant switch nominal disagrees with TypeDesc".into(),
+                );
+            }
+            let mut previous_cases = Vec::new();
+            for arm in arms {
+                let (guard, bindings) = match &arm.case {
+                    MirSwitchCase::Variant(variant_id) => {
+                        let variant = variants
+                            .iter()
+                            .find(|variant| variant.id == *variant_id)
+                            .ok_or_else(|| {
+                                format!(
+                                    "canonical MIR verifier switch variant '{}' is absent from TypeDesc",
+                                    variant_id.0
+                                )
+                            })?;
+                        let guard = tag.eq(Int::from_i64(variant.discriminant as i64));
+                        previous_cases.push(guard.clone());
+                        let mut bindings = Vec::new();
+                        for binding in &arm.bindings {
+                            let field = variant
+                                .fields
+                                .iter()
+                                .find(|field| field.id == binding.field)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "canonical MIR verifier switch binding field '{}' is absent from TypeDesc",
+                                        binding.field.0
+                                    )
+                                })?;
+                            let value = payload.get(&field.id).cloned().ok_or_else(|| {
+                                format!(
+                                    "canonical MIR verifier switch payload field '{}' is absent",
+                                    field.id.0
+                                )
+                            })?;
+                            let parameter = function
+                                .values
+                                .get(&binding.parameter)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "canonical MIR verifier switch binding parameter '{}' is absent",
+                                        binding.parameter
+                                    )
+                                })?;
+                            if !symbolic_matches_type(catalog, &parameter.ty, &value) {
+                                return Err(format!(
+                                    "canonical MIR verifier switch binding '{}' disagrees with payload TypeDesc",
+                                    binding.parameter
+                                ));
+                            }
+                            bindings.push((binding.parameter.clone(), value));
+                        }
+                        (guard, bindings)
+                    }
+                    MirSwitchCase::Default => {
+                        (symbolic_default_guard(&previous_cases), Vec::new())
+                    }
+                    MirSwitchCase::Literal(_) => {
+                        return Err(
+                            "canonical MIR verifier variant switch cannot use a literal case".into(),
+                        )
+                    }
+                };
+                let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
+                next.constraints.push(guard);
+                for (parameter, value) in bindings {
+                    next.values.insert(parameter, value);
+                }
+                explore_block(
+                    function,
+                    catalog,
+                    &mut next,
+                    &arm.target,
+                    &mut active.clone(),
+                    returns,
+                    traps,
+                )?;
+            }
+        }
         MirTerminator::Return { value } => {
             let value = value
                 .as_ref()
@@ -542,11 +767,10 @@ fn explore_block(
             });
         }
         MirTerminator::Unreachable => {}
-        MirTerminator::Switch { .. }
-        | MirTerminator::SwitchMove { .. }
+        MirTerminator::SwitchMove { .. }
         | MirTerminator::Fault { .. } => {
             return Err(
-                "canonical MIR verifier currently supports only scalar Goto/Branch CFG".into(),
+                "canonical MIR verifier currently supports scalar Goto/Branch and Copy variant Switch CFG".into(),
             )
         }
     }
@@ -751,11 +975,43 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
+        MirInstructionKind::ConstructVariant {
+            result,
+            nominal,
+            variant,
+            fields,
+        } => {
+            let values = fields
+                .iter()
+                .map(|(field, value)| {
+                    state
+                        .values
+                        .get(value)
+                        .cloned()
+                        .map(|value| (field.clone(), value))
+                        .ok_or_else(|| {
+                            format!("MIR variant payload value '{}' is not defined", value)
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let value = symbolic_variant_construct(
+                catalog,
+                &function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| format!("MIR variant result '{}' is absent", result))?
+                    .ty,
+                nominal,
+                variant,
+                &values,
+            )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
         MirInstructionKind::MoveProject { .. }
         | MirInstructionKind::ConstructList { .. }
         | MirInstructionKind::Borrow { .. }
         | MirInstructionKind::EndBorrow { .. }
-        | MirInstructionKind::ConstructVariant { .. }
         | MirInstructionKind::ConstructVariantMove { .. }
         | MirInstructionKind::UpdateRecord { .. }
         | MirInstructionKind::Call { .. } => {
@@ -783,7 +1039,11 @@ fn ensure_copy_value(
         || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
         || !matches!(
             descriptor.layout,
-            MirLayout::Scalar | MirLayout::Tuple(_) | MirLayout::Record { .. }
+            MirLayout::Scalar
+                | MirLayout::Tuple(_)
+                | MirLayout::Record { .. }
+                | MirLayout::Option { .. }
+                | MirLayout::Result { .. }
         )
     {
         return Err(format!(
@@ -856,6 +1116,35 @@ fn symbolic_matches_type(
                         .get(&field.id)
                         .is_some_and(|value| symbolic_matches_type(catalog, &field.ty, value))
                 })
+        }
+        (
+            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. },
+            MirAbiClass::Aggregate,
+            SymbolicValue::Variant {
+                nominal: actual_nominal,
+                tag: _,
+                payload,
+            },
+        ) => {
+            let expected_nominal = if matches!(&descriptor.layout, MirLayout::Option { .. }) {
+                "builtin:type:Option"
+            } else {
+                "builtin:type:Result"
+            };
+            actual_nominal.as_str() == expected_nominal
+                && payload.len()
+                    == variants
+                        .iter()
+                        .map(|variant| variant.fields.len())
+                        .sum::<usize>()
+                && variants
+                    .iter()
+                    .flat_map(|variant| &variant.fields)
+                    .all(|field| {
+                        payload
+                            .get(&field.id)
+                            .is_some_and(|value| symbolic_matches_type(catalog, &field.ty, value))
+                    })
         }
         _ => false,
     }
@@ -994,9 +1283,10 @@ fn add_definedness(state: &mut SymbolicState, defined: Bool, code: &str) -> Resu
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
-        SymbolicValue::Int(_) | SymbolicValue::Tuple(_) | SymbolicValue::Record { .. } => {
-            Err(format!("{context} is not boolean"))
-        }
+        SymbolicValue::Int(_)
+        | SymbolicValue::Tuple(_)
+        | SymbolicValue::Record { .. }
+        | SymbolicValue::Variant { .. } => Err(format!("{context} is not boolean")),
     }
 }
 
@@ -1208,5 +1498,141 @@ mod tests {
             .expect("record function")
             .canonical_text()
             .contains("project("));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_copy_option_result_switch() {
+        let source = r#"
+            func classify_option(value: Option<i32>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Some(v) => if v >= 0 { 1 } else { 0 },
+                    None => 0
+                }
+            }
+
+            func classify_result(value: Result<i32, i32>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Ok(v) => if v >= 0 { 1 } else { 0 },
+                    Err(e) => if e >= 0 { 1 } else { 0 }
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let option_owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("classify_option"))
+            .cloned()
+            .expect("Option classifier MIR function");
+        let result_owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("classify_result"))
+            .cloned()
+            .expect("Result classifier MIR function");
+
+        let option_nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
+        let result_nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Result").expect("Result nominal");
+        let option_some = crate::core::NodeId("builtin:variant:Option::Some".into());
+        let result_err = crate::core::NodeId("builtin:variant:Result::Err".into());
+        let option_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &option_owner,
+                &[MirRuntimeValue::Variant {
+                    nominal: option_nominal,
+                    variant: option_some,
+                    payload: vec![MirRuntimeValue::Int(41)],
+                }],
+            )
+            .expect("reference Option execution");
+        assert_eq!(option_value, MirRuntimeValue::Int(1));
+        let result_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &result_owner,
+                &[MirRuntimeValue::Variant {
+                    nominal: result_nominal,
+                    variant: result_err,
+                    payload: vec![MirRuntimeValue::Int(-1)],
+                }],
+            )
+            .expect("reference Result execution");
+        assert_eq!(result_value, MirRuntimeValue::Int(0));
+
+        let results = verify_program(&program, "variant-source-hash".into()).expect("verify MIR");
+        for owner in [option_owner, result_owner] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner.0)
+                .expect("variant contract verification result");
+            assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_non_copy_variant_switch_without_fallback() {
+        let source = r#"
+            func consume(value: Option<string>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Some(_) => 1,
+                    None => 0
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR gate");
+        let results = verify_program(&program, "non-copy-variant-source-hash".into())
+            .expect("verifier should return a classified result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("consume"))
+            .expect("consume verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result
+            .message
+            .contains("outside the Copy/no-op aggregate contract"));
+    }
+
+    #[test]
+    fn verifier_preserves_checked_trap_class_through_copy_variant_switch() {
+        let source = r#"
+            func overflow(value: Option<i32>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Some(v) => v + 2147483647,
+                    None => 0
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results =
+            verify_program(&program, "variant-trap-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("overflow"))
+            .expect("overflow verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
+        assert!(result.message.contains("can reach trap 'E0802'"));
     }
 }

@@ -1047,6 +1047,67 @@ fn canonical_mir_record_contract_matches_reference_native_and_verifier() {
 }
 
 #[test]
+fn canonical_mir_variant_contract_matches_reference_native_and_verifier() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_variant_contract.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR variant reference run");
+    assert_eq!(reference.status.code(), Some(0));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-variant-contract-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR variant native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR variant native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR variant native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR variant verifier");
+    assert!(
+        verification.status.success(),
+        "canonical MIR variant verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&verification.stdout);
+    assert_eq!(
+        stdout
+            .matches("canonical MIR ensures contract proven")
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn canonical_mir_record_contract_rejects_move_owned_projection() {
     let fixture = project_root()
         .join("tests")
