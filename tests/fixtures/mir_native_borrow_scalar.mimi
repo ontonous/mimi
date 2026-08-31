@@ -1,0 +1,4 @@
+func main() -> i32 {
+    let value = 41;
+    if *(&value) == 41 { 42 } else { 0 }
+}

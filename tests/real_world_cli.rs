@@ -364,6 +364,56 @@ fn canonical_mir_native_record_update_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_borrow_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_borrow_scalar.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR borrow reference run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(42),
+        "canonical MIR borrow reference run failed:\n{}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-borrow-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR borrow native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR borrow native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR borrow native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native_run.status.code(),
+        Some(42),
+        "canonical MIR borrow native run failed:\n{}",
+        String::from_utf8_lossy(&native_run.stderr)
+    );
+}
+
+#[test]
 fn canonical_mir_native_record_update_preserves_checked_trap() {
     let fixture = project_root()
         .join("tests")

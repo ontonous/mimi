@@ -3053,6 +3053,82 @@ mod tests {
     }
 
     #[test]
+    fn canonical_gate_rejects_borrow_escape_before_any_backend() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let value = 41; let borrowed = &value; 42 }",
+        )
+        .expect_err("a borrowed pointer cannot escape its local MIR use contract");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(
+                    message.contains("borrow value") && message.contains("escapes"),
+                    "unexpected canonical rejection: {message}"
+                );
+            }
+            other => panic!("borrow escape crossed the canonical gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_gate_rejects_use_after_end_borrow_before_any_backend() {
+        let source = "func main() -> i32 { let value = 41; *(&value) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = canonical.functions().get(&owner).cloned().expect("main");
+        let borrow = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Borrow { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("borrow instruction");
+        let mut inserted = false;
+        for block in function.blocks.values_mut() {
+            let Some(project_index) = block.instructions.iter().position(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::Project {
+                        base,
+                        projection: crate::core::mir::MirProjection::Dereference,
+                        ..
+                    } if base == &borrow
+                )
+            }) else {
+                continue;
+            };
+            block.instructions.insert(
+                project_index,
+                crate::core::mir::MirInstruction {
+                    id: crate::core::mir::MirInstructionId::new("test:end-borrow")
+                        .expect("instruction id"),
+                    kind: crate::core::mir::MirInstructionKind::EndBorrow {
+                        borrow: borrow.clone(),
+                    },
+                },
+            );
+            inserted = true;
+            break;
+        }
+        assert!(inserted, "dereference projection");
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            canonical.type_catalog().clone(),
+        )
+        .expect_err("a dereference after EndBorrow must fail the canonical gate");
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.message.contains("used after EndBorrow") }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn executes_first_class_abs_through_ast_free_bytecode() {
         let source = "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }";
         let program = compile(source);

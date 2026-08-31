@@ -1,6 +1,5 @@
-//! AST-free native consumer for the closed scalar/flat-record/flat-variant and
-//! scalar-List
-//! Canonical MIR slice.
+//! AST-free native consumer for the closed scalar/flat-record/flat-variant,
+//! scalar-List, and local immutable-borrow Canonical MIR slices.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
 //! surface AST or `CheckedProgram`, and it never calls the legacy emitter.  A
@@ -23,7 +22,7 @@ use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, Resolve
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirBuiltinContract, MirBuiltinKind, MirConversionKind, MirGlueContract,
-    MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc,
+    MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
     MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirSwitchArm,
@@ -117,8 +116,10 @@ impl<'a> NativeMirValidator<'a> {
         let catalog = self.program.type_catalog();
         for parameter in &function.parameters {
             self.validate_value(function, parameter, "parameter");
+            self.reject_reference_callable_boundary(function, parameter, "reference parameter");
         }
         self.validate_signature_type(&function.result, "result", true);
+        self.reject_reference_type(&function.result, "reference result");
 
         for block in function.blocks.values() {
             for parameter in &block.parameters {
@@ -139,9 +140,7 @@ impl<'a> NativeMirValidator<'a> {
                 event.kind,
                 crate::core::mir::MirOwnershipEventKind::TransferSession
                     | crate::core::mir::MirOwnershipEventKind::TransferChild
-                    | crate::core::mir::MirOwnershipEventKind::BorrowShared
                     | crate::core::mir::MirOwnershipEventKind::BorrowMut
-                    | crate::core::mir::MirOwnershipEventKind::BorrowEnd
             ) {
                 self.errors.push(NativeMirError::new(
                     function.owner.0.clone(),
@@ -160,6 +159,32 @@ impl<'a> NativeMirValidator<'a> {
         // explicit: the native backend never reconstructs ownership from an
         // LLVM type.  The detailed operation checks below use the same catalog.
         let _ = catalog;
+    }
+
+    fn reject_reference_callable_boundary(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+    ) {
+        let Some(info) = function.values.get(value) else {
+            return;
+        };
+        self.reject_reference_type(&info.ty, subject);
+    }
+
+    fn reject_reference_type(&mut self, ty: &crate::core::ResolvedTypeId, subject: &str) {
+        if self
+            .program
+            .type_catalog()
+            .get(ty)
+            .is_some_and(|desc| matches!(&desc.kind, MirTypeKind::Reference { .. }))
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "borrowed pointer cannot cross the native callable ABI in the local-borrow contract",
+            ));
+        }
     }
 
     fn validate_value(&mut self, function: &MirFunction, value: &MirValueId, subject: &str) {
@@ -187,7 +212,16 @@ impl<'a> NativeMirValidator<'a> {
             return;
         };
         let is_list = matches!(desc.layout, MirLayout::List { .. });
-        let supported = if is_list {
+        let is_reference = matches!(&desc.kind, MirTypeKind::Reference { mutable: false });
+        let supported = if is_reference {
+            match self.program.type_catalog().validate_reference_type(ty) {
+                Ok(_) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
+        } else if is_list {
             match self
                 .program
                 .type_catalog()
@@ -227,7 +261,7 @@ impl<'a> NativeMirValidator<'a> {
                 ),
             ));
         }
-        if !is_list {
+        if !is_list && !is_reference {
             if desc.ownership != MirOwnership::Copy {
                 self.errors.push(NativeMirError::new(
                     subject,
@@ -447,6 +481,33 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 projection,
             } => self.validate_project(function, result, base, projection, subject),
+            MirInstructionKind::Borrow {
+                result,
+                source,
+                mutable,
+            } => {
+                self.validate_value(function, result, "borrow result");
+                self.validate_value(function, source, "borrow source");
+                let (Some(result_value), Some(source_value)) =
+                    (function.values.get(result), function.values.get(source))
+                else {
+                    return;
+                };
+                if let Err(message) =
+                    catalog.validate_borrow(&source_value.ty, &result_value.ty, *mutable)
+                {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+            MirInstructionKind::EndBorrow { borrow } => {
+                self.validate_value(function, borrow, "end-borrow value");
+                let Some(value) = function.values.get(borrow) else {
+                    return;
+                };
+                if let Err(message) = catalog.validate_reference_type(&value.ty) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
             MirInstructionKind::Drop { value } => {
                 self.validate_value(function, value, "drop value");
                 let Some(value) = function.values.get(value) else {
@@ -643,6 +704,15 @@ impl<'a> NativeMirValidator<'a> {
                     &result_value.ty,
                     projection,
                 ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+            MirProjection::Dereference => {
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_dereference(&base_value.ty, &result_value.ty)
+                {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
@@ -1490,6 +1560,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_project(result, base, projection, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::Borrow {
+                result,
+                source,
+                mutable,
+            } => {
+                let value = self.emit_borrow(result, source, *mutable, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::EndBorrow { borrow } => {
+                self.emit_end_borrow(borrow, subject)?;
+            }
             MirInstructionKind::Construct {
                 result,
                 kind,
@@ -2044,6 +2125,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         projection: &MirProjection,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if matches!(projection, MirProjection::Dereference) {
+            let base_ty = self.value_type(base, subject)?;
+            let result_ty = self.value_type(result, subject)?;
+            self.program
+                .type_catalog()
+                .validate_dereference(&base_ty, &result_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let result_llvm = native_basic_type(
+                self.generator.context,
+                self.program.type_catalog(),
+                &result_ty,
+            )?;
+            let pointer = self.value(base, subject)?.into_pointer_value();
+            return self
+                .generator
+                .builder
+                .build_load(result_llvm, pointer, "mir_dereference")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()));
+        }
         if let MirProjection::Index(index) = projection {
             let base_ty = self.value_type(base, subject)?;
             let result_ty = self.value_type(result, subject)?;
@@ -2178,6 +2278,58 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_extract_value(aggregate, index as u32, "mir_record_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
+    fn emit_borrow(
+        &mut self,
+        result: &MirValueId,
+        source: &MirValueId,
+        mutable: bool,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let source_ty = self.value_type(source, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        self.program
+            .type_catalog()
+            .validate_borrow(&source_ty, &result_ty, mutable)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let target_ty = self
+            .program
+            .type_catalog()
+            .validate_reference_type(&result_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let target_llvm = native_basic_type(
+            self.generator.context,
+            self.program.type_catalog(),
+            &target_ty,
+        )?;
+        let slot = self
+            .generator
+            .builder
+            .build_alloca(target_llvm, "mir_borrow_slot")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(slot, self.value(source, subject)?)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(slot.into())
+    }
+
+    fn emit_end_borrow(
+        &mut self,
+        borrow: &MirValueId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let ty = self.value_type(borrow, subject)?;
+        self.program
+            .type_catalog()
+            .validate_reference_type(&ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        // The canonical reference storage is an entry-local alloca.  Its
+        // lifetime is bounded by the native function, while the MIR
+        // EndBorrow effect remains explicit and validated above.  We do not
+        // emit a runtime call or infer ownership glue from the pointer.
+        Ok(())
     }
 
     fn emit_const(
@@ -3273,6 +3425,12 @@ fn native_basic_type<'ctx>(
             signed: true,
         } => Ok(context.i64_type().into()),
         MirAbiClass::Bool => Ok(context.bool_type().into()),
+        MirAbiClass::Pointer if matches!(&desc.kind, MirTypeKind::Reference { mutable: false }) => {
+            catalog
+                .validate_reference_type(ty)
+                .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+            Ok(context.ptr_type(inkwell::AddressSpace::default()).into())
+        }
         MirAbiClass::OpaqueHandle => match &desc.layout {
             MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
             layout => Err(NativeMirError::new(

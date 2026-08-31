@@ -205,6 +205,7 @@ impl MirProgram {
                 });
             }
             errors.extend(validate_linear_consumption(function, &type_catalog));
+            errors.extend(validate_borrow_usage(function));
             errors.extend(validate_builtin_calls(function, &type_catalog));
             errors.extend(validate_conversions(function, &type_catalog));
             errors.extend(super::contracts::validate_contracts(
@@ -612,11 +613,21 @@ impl MirProgram {
                         super::MirInstructionKind::Const { .. }
                         | super::MirInstructionKind::Call { .. }
                         | super::MirInstructionKind::BuiltinCall { .. }
-                        | super::MirInstructionKind::EndBorrow { .. }
                         | super::MirInstructionKind::Binary { .. }
                         | super::MirInstructionKind::Unary { .. }
                         | super::MirInstructionKind::Convert { .. }
                         | super::MirInstructionKind::Nop => {}
+                        super::MirInstructionKind::EndBorrow { borrow } => {
+                            let Some(value) = function.values.get(borrow) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_reference_type(&value.ty) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                     }
                 }
                 if let super::MirTerminator::Switch { scrutinee, arms }
@@ -1208,6 +1219,165 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
             sources
         }
         _ => Vec::new(),
+    }
+}
+
+fn validate_borrow_usage(function: &MirFunction) -> Vec<super::MirValidationError> {
+    let borrow_values = function
+        .blocks
+        .values()
+        .flat_map(|block| {
+            block
+                .instructions
+                .iter()
+                .map(move |instruction| (block, instruction))
+        })
+        .filter_map(|(block, instruction)| match &instruction.kind {
+            super::MirInstructionKind::Borrow { result, .. } => {
+                Some((result.clone(), instruction.id.to_string(), block.id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    for (borrow, definition, definition_block) in borrow_values {
+        for block in function.blocks.values() {
+            let mut ended = false;
+            for instruction in &block.instructions {
+                if produced_value(&instruction.kind) == Some(&borrow) {
+                    continue;
+                }
+                if !instruction_uses_value(&instruction.kind, &borrow) {
+                    continue;
+                }
+                if block.id != definition_block {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "borrow value '{}' from '{}' escapes through a basic block; only same-block Dereference or EndBorrow may use it",
+                            borrow, definition
+                        ),
+                    });
+                    continue;
+                }
+                match &instruction.kind {
+                    super::MirInstructionKind::Project {
+                        base,
+                        projection: super::MirProjection::Dereference,
+                        ..
+                    } if base == &borrow => {
+                        if ended {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "borrow value '{}' from '{}' is used after EndBorrow",
+                                    borrow, definition
+                                ),
+                            });
+                        }
+                    }
+                    super::MirInstructionKind::EndBorrow { borrow: value }
+                        if value == &borrow =>
+                    {
+                        if ended {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "borrow value '{}' from '{}' has more than one EndBorrow",
+                                    borrow, definition
+                                ),
+                            });
+                        }
+                        ended = true;
+                    }
+                    _ => errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "borrow value '{}' from '{}' escapes; only Dereference or EndBorrow may use it",
+                            borrow, definition
+                        ),
+                    }),
+                }
+            }
+            if terminator_uses_value(&block.terminator, &borrow) {
+                errors.push(super::MirValidationError {
+                    subject: block.id.to_string(),
+                    message: format!(
+                        "borrow value '{}' from '{}' escapes through a control-flow edge or terminator",
+                        borrow, definition
+                    ),
+                });
+            }
+        }
+    }
+    errors
+}
+
+fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId) -> bool {
+    match kind {
+        super::MirInstructionKind::Const { .. }
+        | super::MirInstructionKind::Load { .. }
+        | super::MirInstructionKind::Nop => false,
+        super::MirInstructionKind::Copy { source, .. }
+        | super::MirInstructionKind::Move { source, .. }
+        | super::MirInstructionKind::Clone { source, .. }
+        | super::MirInstructionKind::Convert { source, .. } => source == needle,
+        super::MirInstructionKind::Drop { value }
+        | super::MirInstructionKind::EndBorrow { borrow: value } => value == needle,
+        super::MirInstructionKind::Borrow { source, .. } => source == needle,
+        super::MirInstructionKind::Project {
+            base, projection, ..
+        }
+        | super::MirInstructionKind::MoveProject {
+            base, projection, ..
+        } => {
+            base == needle
+                || matches!(projection, super::MirProjection::Index(index) if index == needle)
+        }
+        super::MirInstructionKind::Construct { fields, .. } => fields.iter().any(|v| v == needle),
+        super::MirInstructionKind::ConstructList { elements, .. } => {
+            elements.iter().any(|v| v == needle)
+        }
+        super::MirInstructionKind::ConstructVariant { fields, .. }
+        | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
+            fields.iter().any(|(_, v)| v == needle)
+        }
+        super::MirInstructionKind::UpdateRecord { base, fields, .. } => {
+            base == needle || fields.iter().any(|v| v == needle)
+        }
+        super::MirInstructionKind::Binary { left, right, .. } => left == needle || right == needle,
+        super::MirInstructionKind::Unary { operand, .. } => operand == needle,
+        super::MirInstructionKind::Call { arguments, .. }
+        | super::MirInstructionKind::BuiltinCall { arguments, .. } => {
+            arguments.iter().any(|v| v == needle)
+        }
+    }
+}
+
+fn terminator_uses_value(terminator: &super::MirTerminator, needle: &MirValueId) -> bool {
+    match terminator {
+        super::MirTerminator::Goto { arguments, .. } => arguments.iter().any(|v| v == needle),
+        super::MirTerminator::Branch {
+            condition,
+            then_arguments,
+            else_arguments,
+            ..
+        } => {
+            condition == needle
+                || then_arguments.iter().any(|v| v == needle)
+                || else_arguments.iter().any(|v| v == needle)
+        }
+        super::MirTerminator::Switch { scrutinee, arms }
+        | super::MirTerminator::SwitchMove { scrutinee, arms } => {
+            scrutinee == needle
+                || arms
+                    .iter()
+                    .any(|arm| arm.arguments.iter().any(|v| v == needle))
+        }
+        super::MirTerminator::Return { value } | super::MirTerminator::Fault { value } => {
+            value.as_ref() == Some(needle)
+        }
+        super::MirTerminator::Trap { .. } | super::MirTerminator::Unreachable => false,
     }
 }
 
