@@ -605,6 +605,10 @@ declare i64 @mimi_set_insert(i64, i64)
 
 declare i64 @mimi_set_contains(i64, i64)
 
+declare i64 @mimi_set_insert_string(i64, ptr, i64)
+
+declare i64 @mimi_set_contains_string(i64, ptr, i64)
+
 declare i64 @mimi_set_remove(i64, i64)
 
 declare i64 @mimi_set_size(i64)

@@ -528,6 +528,19 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("value", prim(I64))
             .returns(prim(I64))
     });
+    gen.export("mimi_set_insert_string", |f| {
+        f.param("set", prim(I64))
+            .param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+            .effect("alloc")
+    });
+    gen.export("mimi_set_contains_string", |f| {
+        f.param("set", prim(I64))
+            .param("ptr", ptr(prim(U8)))
+            .param("len", prim(I64))
+            .returns(prim(I64))
+    });
     gen.export("mimi_set_remove", |f| {
         f.param("set", prim(I64))
             .param("value", prim(I64))

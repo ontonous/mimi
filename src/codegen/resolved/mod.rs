@@ -2424,15 +2424,19 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     let set_insert = self.generator.get_runtime_fn("mimi_set_insert")?;
                     for elem in elements {
                         let val = self.emit_expr(elem, frame)?;
-                        let val_i64 = self.generator.any_value_to_handle(val)?;
-                        self.generator.build_call(
-                            set_insert,
-                            &[
-                                BasicMetadataValueEnum::IntValue(set_handle),
-                                BasicMetadataValueEnum::IntValue(val_i64),
-                            ],
-                            "set_insert_call",
-                        )?;
+                        if resolved_type_display_name(self.program, &elem.ty) == "string" {
+                            self.generator.compile_set_insert_string(set_handle, val)?;
+                        } else {
+                            let val_i64 = self.generator.any_value_to_handle(val)?;
+                            self.generator.build_call(
+                                set_insert,
+                                &[
+                                    BasicMetadataValueEnum::IntValue(set_handle),
+                                    BasicMetadataValueEnum::IntValue(val_i64),
+                                ],
+                                "set_insert_call",
+                            )?;
+                        }
                     }
                 }
                 Ok(BasicValueEnum::IntValue(set_handle))
@@ -2589,23 +2593,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // local-binding form (`let out = f(); out[0]`) is fully
                         // supported. Scalar and string elements are ownership-safe
                         // and fall through to convert_list_elem_i64.
-                        if let BasicTypeEnum::StructType(sty) = result_llvm_ty {
-                            let fields = sty.get_field_types();
-                            let is_string = fields.len() == 2
-                                && matches!(&fields[0], BasicTypeEnum::PointerType(_))
-                                && matches!(
-                                    &fields[1],
-                                    BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
-                                );
-                            if !is_string {
-                                return Err(CompileError::Unsupported(
-                                    "indexing a record element directly from a list returned by a \
-                                     function call is not yet supported by the resolved native \
-                                     slice (ownership of the element heap box is not claimed). Bind \
-                                     the list to a local first, e.g. `let out = f(); out[0]`. \
-                                     Tracked as F-018."
-                                        .into(),
-                                ));
+                        if matches!(&value.kind, ResolvedExprKind::Call(_)) {
+                            if let BasicTypeEnum::StructType(sty) = result_llvm_ty {
+                                let fields = sty.get_field_types();
+                                let is_string = fields.len() == 2
+                                    && matches!(&fields[0], BasicTypeEnum::PointerType(_))
+                                    && matches!(
+                                        &fields[1],
+                                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 64
+                                    );
+                                if !is_string {
+                                    return Err(CompileError::Unsupported(
+                                        "indexing a record element directly from a list returned by a \
+                                         function call is not yet supported by the resolved native \
+                                         slice (ownership of the element heap box is not claimed). Bind \
+                                         the list to a local first, e.g. `let out = f(); out[0]`. \
+                                         Tracked as F-018."
+                                            .into(),
+                                    ));
+                                }
                             }
                         }
                         self.convert_list_elem_i64(elem_int, result_llvm_ty)
@@ -2620,13 +2626,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // Look up field name from type definitions.
                         let field_name = self.lookup_field_name(field_id)?;
                         let field_index = self.lookup_field_index(field_id, &field_name)?;
-                        let field =
-                            struct_val.get_field_at_index(field_index).ok_or_else(|| {
-                                CompileError::LlvmError(format!(
-                                    "record field {field_index} absent"
-                                ))
-                            })?;
-                        Ok(field)
+                        // `get_field_at_index` is a const-value accessor and
+                        // returns None for runtime SSA aggregates. Use the
+                        // builder form so a record loaded from a List slot is
+                        // projected from the actual value (the same rule as
+                        // the tuple projection above).
+                        self.generator
+                            .builder
+                            .build_extract_value(struct_val, field_index, "record_proj")
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!("record field {field_index}: {e}"))
+                            })
                     }
                     other => Err(CompileError::Unsupported(format!(
                         "value projection {other:?} escaped resolved native eligibility"
@@ -3289,9 +3299,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         "str_contains expects 2 arguments".into(),
                                     ));
                                 }
-                                return self
-                                    .generator
-                                    .compile_set_contains_fn(arguments[0], arguments[1]);
+                                return self.generator.compile_set_contains_fn(
+                                    arguments[0],
+                                    arguments[1],
+                                    resolved_type_display_name(
+                                        self.program,
+                                        &call.arguments[1].value.ty,
+                                    ) == "string",
+                                );
                             }
                             if hay_ty.starts_with("List") {
                                 name = "contains";
@@ -3331,9 +3346,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         "contains expects 2 arguments".into(),
                                     ));
                                 }
-                                return self
-                                    .generator
-                                    .compile_set_contains_fn(arguments[0], arguments[1]);
+                                return self.generator.compile_set_contains_fn(
+                                    arguments[0],
+                                    arguments[1],
+                                    resolved_type_display_name(
+                                        self.program,
+                                        &call.arguments[1].value.ty,
+                                    ) == "string",
+                                );
                             }
                             if hay_ty == "string" {
                                 name = "str_contains";

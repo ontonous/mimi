@@ -1802,7 +1802,8 @@ func main() -> i32 {
         let resolved = checked_codegen_compile_and_run(src).expect("resolved contains(Set, int)");
         assert_eq!(resolved, expected, "resolved must match VM (audit 1j)");
     }
-    // String elements: Set<string> probe must also match (handle = ptrtoint).
+    // String elements: Set<string> probe must use logical string content, not
+    // the address of the source literal.
     let str_src = r#"
 func main() -> i32 {
     let s = {"a", "b"}

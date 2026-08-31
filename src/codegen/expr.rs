@@ -2262,18 +2262,57 @@ impl<'ctx> CodeGenerator<'ctx> {
 
         for elem in elems {
             let val = self.compile_expr(elem, vars)?;
-            let val_i64 = self.any_value_to_handle(val)?;
-            self.build_call(
-                set_insert,
-                &[
-                    BasicMetadataValueEnum::IntValue(set_handle),
-                    BasicMetadataValueEnum::IntValue(val_i64),
-                ],
-                "set_insert_call",
-            )?;
+            let is_string =
+                self.expr_is_string(elem) || self.infer_object_type(elem, vars) == "string";
+            if is_string {
+                self.compile_set_insert_string(set_handle, val)?;
+            } else {
+                let val_i64 = self.any_value_to_handle(val)?;
+                self.build_call(
+                    set_insert,
+                    &[
+                        BasicMetadataValueEnum::IntValue(set_handle),
+                        BasicMetadataValueEnum::IntValue(val_i64),
+                    ],
+                    "set_insert_call",
+                )?;
+            }
         }
 
         Ok(BasicValueEnum::IntValue(set_handle))
+    }
+
+    /// Insert a string into a Set using the runtime's content-equality ABI.
+    /// Raw string literals have distinct LLVM global addresses even when their
+    /// contents are equal, so ptrtoint is not a valid Set<string> key.
+    pub(super) fn compile_set_insert_string(
+        &self,
+        set_handle: IntValue<'ctx>,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        let metadata = match value {
+            BasicValueEnum::IntValue(iv) => BasicMetadataValueEnum::IntValue(iv),
+            BasicValueEnum::FloatValue(fv) => BasicMetadataValueEnum::FloatValue(fv),
+            BasicValueEnum::PointerValue(pv) => BasicMetadataValueEnum::PointerValue(pv),
+            BasicValueEnum::StructValue(sv) => BasicMetadataValueEnum::StructValue(sv),
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "Set<string> element is not a string value".into(),
+                ))
+            }
+        };
+        let (ptr, len) = self.extract_raw_str_ptr_len(&metadata)?;
+        let func = self.get_runtime_fn("mimi_set_insert_string")?;
+        self.build_call(
+            func,
+            &[
+                BasicMetadataValueEnum::IntValue(set_handle),
+                BasicMetadataValueEnum::PointerValue(ptr),
+                BasicMetadataValueEnum::IntValue(len),
+            ],
+            "set_insert_string",
+        )?;
+        Ok(())
     }
 
     /// Convert any basic value to an i64 ValueHandle for map/set storage.
@@ -2329,6 +2368,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         set_val: BasicMetadataValueEnum<'ctx>,
         target_val: BasicMetadataValueEnum<'ctx>,
+        target_is_string: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let i64_ty = self.context.i64_type();
         let set_handle = match set_val {
@@ -2342,8 +2382,35 @@ impl<'ctx> CodeGenerator<'ctx> {
                 ))
             }
         };
+        if target_is_string {
+            let (ptr, len) = self.extract_raw_str_ptr_len(&target_val)?;
+            let func = self.get_runtime_fn("mimi_set_contains_string")?;
+            let result = self.build_call(
+                func,
+                &[
+                    BasicMetadataValueEnum::IntValue(set_handle),
+                    BasicMetadataValueEnum::PointerValue(ptr),
+                    BasicMetadataValueEnum::IntValue(len),
+                ],
+                "set_contains_string",
+            )?;
+            let iv = self
+                .expect_basic_value(&result, "set_contains_string")?
+                .into_int_value();
+            let one = i64_ty.const_int(1, false);
+            return Ok(self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    iv,
+                    one,
+                    "set_contains_string_bool",
+                )
+                .map_err(|e| CompileError::LlvmError(format!("set contains string compare: {e}")))?
+                .into());
+        }
         // Mirror any_value_to_handle over the metadata form (int sext /
-        // ptrtoint / struct field 0 / float bitcast).
+        // ptrtoint / struct field 0 / float bitcast) for scalar/opaque values.
         let arg_handle = match target_val {
             BasicMetadataValueEnum::IntValue(iv) => {
                 if iv.get_type().get_bit_width() < 64 {

@@ -475,6 +475,29 @@ fn audit_expr1_deref_list_slot_borrow_dual() {
 }
 
 #[test]
+fn audit_expr1_mut_borrow_list_slot_writes_back_dual() {
+    if !can_link() {
+        return;
+    }
+    // An indexed mutable borrow must retain the canonical List element place,
+    // not a temporary copy.  This is the L1 regression behind
+    // tests/real_world/ownership_cfg.mimi (native previously printed 34 vs
+    // the VM's 42 after `&mut values[1]` was updated).
+    dual_eq!(
+        r#"
+        func main() -> i32 {
+            let mut values = [2, 4, 6]
+            let slot = &mut values[1]
+            *slot = 9 as i32
+            println(values[1])
+            0
+        }
+        "#,
+        "9"
+    );
+}
+
+#[test]
 fn audit_expr1_deref_unknown_pointee_fails_closed() {
     if !can_link() {
         return;

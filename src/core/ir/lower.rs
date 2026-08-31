@@ -58,6 +58,23 @@ fn is_local_place(expression: &Expr) -> bool {
     }
 }
 
+// A borrow operand is an addressable place even when an index is kept as an
+// explicit value projection for ordinary reads.  Preserve that distinction in
+// the canonical body: `&mut values[i]` must lower to a place load so the
+// resolved emitter can mutate the list's real element slot, while
+// `&make_values()[i]` remains an rvalue temporary and is handled by the generic
+// borrow lowering path.
+fn is_borrow_place(expression: &Expr) -> bool {
+    match expression.unlocated() {
+        Expr::Ident(_) => true,
+        Expr::Field(base, _)
+        | Expr::TupleIndex(base, _)
+        | Expr::Index(base, _)
+        | Expr::Unary(UnOp::Deref, base) => is_borrow_place(base),
+        _ => false,
+    }
+}
+
 /// Inputs already finalized by the checker and stable resolved walker.
 pub struct FunctionBodyInput<'a> {
     pub function: &'a FuncDef,
@@ -1683,6 +1700,22 @@ impl BodyLowerer<'_> {
                 ResolvedExprKind::Project {
                     value: Box::new(self.lower_expr(operand, &format!("{role}.inner"))?),
                     projection: ResolvedValueProjection::Dereference,
+                }
+            }
+            Expr::Unary(op @ (UnOp::Ref | UnOp::RefMut), operand) if is_borrow_place(operand) => {
+                let operand_role = format!("{role}.inner");
+                let operand_node_id = self.expr_id(operand, &operand_role)?;
+                let operand_expr = ResolvedExpr {
+                    node_id: operand_node_id.clone(),
+                    origin: self.origin(&operand_node_id)?,
+                    ty: self.expression_type(&operand_node_id)?,
+                    effects: Vec::new(),
+                    backend_requirements: Vec::new(),
+                    kind: ResolvedExprKind::Load(self.lower_place(operand, &operand_role)?),
+                };
+                ResolvedExprKind::Unary {
+                    op: self.lower_unary(*op),
+                    operand: Box::new(operand_expr),
                 }
             }
             Expr::Field(base, name)

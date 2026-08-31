@@ -6829,6 +6829,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .compile_set_contains_fn(
                             types::basic_value_to_metadata_value(&compiled_args[0], i64_ty),
                             types::basic_value_to_metadata_value(&compiled_args[1], i64_ty),
+                            self.expr_is_string(&args[1])
+                                || self.infer_object_type(&args[1], vars) == "string",
                         )
                         .map_err(|e| CompileError::Generic(e.to_string()));
                 }
@@ -6874,6 +6876,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .compile_set_contains_fn(
                             types::basic_value_to_metadata_value(&compiled_args[0], i64_ty),
                             types::basic_value_to_metadata_value(&compiled_args[1], i64_ty),
+                            self.expr_is_string(&args[1])
+                                || self.infer_object_type(&args[1], vars) == "string",
                         )
                         .map_err(|e| CompileError::Generic(e.to_string()));
                 }

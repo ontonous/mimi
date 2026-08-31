@@ -3192,6 +3192,34 @@ fn register_set_fns<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // String Set operations use content equality and the length-aware string
+    // ABI. The generic i64 operation above remains the scalar/opaque-handle
+    // contract; these entry points keep Set<string> from comparing distinct
+    // global literal addresses.
+    module.add_function(
+        "mimi_set_insert_string",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_set_contains_string",
+        i64.fn_type(
+            &[
+                BasicMetadataTypeEnum::IntType(i64),
+                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
     // mimi_set_remove(handle: i64, value: i64) -> i64 (handle)
     module.add_function(
         "mimi_set_remove",

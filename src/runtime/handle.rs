@@ -351,7 +351,12 @@ fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) {
 
 fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
     let slot = &mut t.slots[index as usize];
-    slot.obj.take();
+    if let Some(set) = slot.obj.take() {
+        for value in &set.string_values {
+            super::mimi_free(*value as *mut std::ffi::c_void);
+        }
+        drop(set);
+    }
     slot.generation = slot.generation.wrapping_add(1);
     if slot.generation == 0 {
         slot.generation = 1;

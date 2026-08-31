@@ -19142,6 +19142,10 @@ const _: () = {
 
 pub(super) struct MimiSet {
     pub(super) inner: std::collections::HashSet<SetValueHandle>,
+    // Handles allocated by the content-aware string Set ABI. Keeping this
+    // side table makes ownership explicit without changing the scalar i64
+    // representation used by existing Set values.
+    pub(super) string_values: std::collections::HashSet<SetValueHandle>,
 }
 
 /// S4: Return raw pointer instead of &'static mut to avoid aliasing UB.
@@ -19164,6 +19168,7 @@ fn set_from_handle(handle: SetHandle) -> handle::SetLease {
 pub extern "C" fn mimi_set_new() -> SetHandle {
     handle::set_new_handle(MimiSet {
         inner: std::collections::HashSet::new(),
+        string_values: std::collections::HashSet::new(),
     })
 }
 
@@ -20901,10 +20906,12 @@ pub unsafe extern "C" fn mimi_set_from_json_string(json: *const std::ffi::c_char
         let es = unsafe { cstr_to_string(elem) };
         // Strip surrounding quotes if present (json_get_element may return quoted).
         let body = es.trim().trim_matches('"');
-        let v =
-            unsafe { mimi_str_clone(body.as_ptr() as *const std::ffi::c_char, body.len() as i64) };
         mimi_free(elem as *mut std::ffi::c_void);
-        mimi_set_insert(handle, v as SetValueHandle);
+        mimi_set_insert_string(
+            handle,
+            body.as_ptr() as *const std::ffi::c_char,
+            body.len() as i64,
+        );
     }
     let _ = s;
     handle
@@ -20992,6 +20999,37 @@ pub unsafe extern "C" fn mimi_set_insert(handle: SetHandle, value: SetValueHandl
     handle
 }
 
+/// Insert a string by content, not by the address of its LLVM literal.
+/// String handles are owned by the Set and released with the Set.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_set_insert_string(
+    handle: SetHandle,
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> SetHandle {
+    if handle == 0 {
+        return handle;
+    }
+    let needle = str_from_ptr_len(ptr, len);
+    {
+        let set = set_from_handle(handle);
+        if set.string_values.iter().any(|value| {
+            safe_c_string_from_handle(*value as ValueHandle).as_deref() == Some(&needle)
+        }) {
+            return handle;
+        }
+    }
+    let value = alloc_c_string_from_bytes(needle.as_bytes());
+    if value.is_null() {
+        return handle;
+    }
+    let value = value as SetValueHandle;
+    let mut set = set_from_handle(handle);
+    set.inner.insert(value);
+    set.string_values.insert(value);
+    handle
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHandle) -> i64 {
     if handle == 0 {
@@ -21001,6 +21039,26 @@ pub unsafe extern "C" fn mimi_set_contains(handle: SetHandle, value: SetValueHan
     unsafe { set_from_handle(handle).inner.contains(&value) as i64 }
 }
 
+/// Probe a string Set by logical content. This is the string counterpart to
+/// `mimi_set_contains(handle, i64)`; ptrtoint would compare distinct global
+/// addresses instead of Mimi string values.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_set_contains_string(
+    handle: SetHandle,
+    ptr: *const std::ffi::c_char,
+    len: i64,
+) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+    let needle = str_from_ptr_len(ptr, len);
+    let set = set_from_handle(handle);
+    set.string_values
+        .iter()
+        .any(|value| safe_c_string_from_handle(*value as ValueHandle).as_deref() == Some(&needle))
+        as i64
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandle) -> SetHandle {
     if handle == 0 {
@@ -21008,7 +21066,11 @@ pub unsafe extern "C" fn mimi_set_remove(handle: SetHandle, value: SetValueHandl
     }
     // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe {
-        set_from_handle(handle).inner.remove(&value);
+        let mut set = set_from_handle(handle);
+        set.inner.remove(&value);
+        if set.string_values.remove(&value) {
+            mimi_free(value as *mut std::ffi::c_void);
+        }
     }
     handle
 }
