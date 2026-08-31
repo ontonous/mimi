@@ -762,6 +762,7 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 callee,
                 arguments,
+                ..
             } => self.validate_call(function, result.as_ref(), callee, arguments, subject),
             MirInstructionKind::Nop => {}
             _ => self.errors.push(NativeMirError::new(

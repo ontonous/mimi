@@ -438,6 +438,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 callee,
                 arguments,
+                ..
             } => {
                 self.emit_call(result.as_ref(), callee, arguments, subject)?;
             }
@@ -981,6 +982,28 @@ mod tests {
                 "native Set island must declare {runtime}"
             );
         }
+    }
+
+    #[test]
+    fn native_emitter_consumes_materialized_scalar_generic_identity() {
+        let program = canonical_program(
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }",
+        );
+        assert_eq!(program.instances().len(), 1);
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_identity_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native backend must consume the specialized MIR target");
+        generator
+            .module
+            .verify()
+            .expect("native generic identity module verifies");
     }
 
     #[test]

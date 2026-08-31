@@ -845,6 +845,51 @@ impl MirTypeCatalog {
         self.entries.get(id)
     }
 
+    /// Validate the argument side of the first concrete generic MIR
+    /// instance contract.  This is deliberately narrower than the complete
+    /// scalar universe: native and MIR verifier must agree on signed i32/i64
+    /// and bool, with Copy/no-op glue and no ownership transfer at the call
+    /// boundary.
+    pub fn validate_scalar_generic_arguments(
+        &self,
+        arguments: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        if arguments.len() != 1 {
+            return Err(format!(
+                "scalar generic identity contract requires one type argument, got {}",
+                arguments.len()
+            ));
+        }
+        let ty = &arguments[0];
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        let supported_abi = matches!(
+            descriptor.abi,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } | MirAbiClass::Bool
+        );
+        if !supported_abi
+            || descriptor.kind == MirTypeKind::GenericParameter
+            || descriptor.layout != MirLayout::Scalar
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(format!(
+                "type '{}' is not a Copy signed scalar/bool with no-op glue",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate a value boundary against the canonical glue contract.  The
     /// result/source type equality is checked by the MIR instruction validator;
     /// this method only answers whether the operation has a materialized

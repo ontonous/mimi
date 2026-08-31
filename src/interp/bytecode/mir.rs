@@ -556,6 +556,7 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 callee,
                 arguments,
+                ..
             } => self.emit_call(result.as_ref(), callee, arguments),
             MirInstructionKind::BuiltinCall {
                 result,
@@ -3182,6 +3183,28 @@ mod tests {
         );
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_materialized_scalar_generic_identity_through_mir_bytecode() {
+        let source =
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert_eq!(mir.instances().len(), 1);
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("generic identity MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic identity bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
     }
 
     #[test]

@@ -59,6 +59,39 @@ mir_id!(MirBlockId, "block");
 mir_id!(MirEdgeId, "edge");
 mir_id!(MirValueId, "value");
 mir_id!(MirInstructionId, "instruction");
+mir_id!(MirInstanceId, "instance");
+
+impl MirInstanceId {
+    /// Stable identity for one checker-selected concrete generic instance.
+    /// The type arguments are canonical `ResolvedTypeId`s, never source names
+    /// or backend ABI spellings.
+    pub fn for_template(
+        template: &NodeId,
+        arguments: &[ResolvedTypeId],
+    ) -> Result<Self, MirIdError> {
+        let mut identity = format!("instance:{}<", template.0);
+        for (index, argument) in arguments.iter().enumerate() {
+            if index != 0 {
+                identity.push(',');
+            }
+            identity.push_str(argument.as_str());
+        }
+        identity.push('>');
+        Self::new(identity)
+    }
+}
+
+/// Checker-selected concrete generic instantiation recorded in canonical MIR.
+/// The executable function referenced by `function` is already specialized;
+/// the table keeps the template identity and argument proof attached so no
+/// backend has to rediscover monomorphization from a callee name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirInstance {
+    pub id: MirInstanceId,
+    pub template: NodeId,
+    pub arguments: Vec<ResolvedTypeId>,
+    pub function: NodeId,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirIdError {
@@ -242,6 +275,9 @@ pub enum MirInstructionKind {
     Call {
         result: Option<MirValueId>,
         callee: ResolvedCallee,
+        /// Checker-finalized generic arguments in binder order.  An empty
+        /// list is the canonical marker for a non-generic call.
+        type_arguments: Vec<ResolvedTypeId>,
         arguments: Vec<MirValueId>,
     },
     /// A builtin whose ABI, trap behavior, and ownership boundary have been
@@ -652,14 +688,27 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         MirInstructionKind::Call {
             result,
             callee,
+            type_arguments,
             arguments,
         } => format!(
-            "call {} {:?}({})",
+            "call {} {:?}{}({})",
             result
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "_".into()),
             callee,
+            if type_arguments.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<{}>",
+                    type_arguments
+                        .iter()
+                        .map(|argument| argument.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            },
             arguments
                 .iter()
                 .map(ToString::to_string)

@@ -12,8 +12,8 @@ use crate::core::{NodeId, ResolvedPlace};
 
 use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
 use super::{
-    MirAggregateKind, MirFunction, MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm,
-    MirSwitchCase, MirTerminator, MirValueId,
+    MirAggregateKind, MirFunction, MirInstance, MirInstanceId, MirInstruction, MirInstructionKind,
+    MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +87,7 @@ impl std::error::Error for MirProgramBuildError {}
 pub struct MirProgram {
     functions: BTreeMap<NodeId, MirFunction>,
     type_catalog: MirTypeCatalog,
+    instances: BTreeMap<MirInstanceId, MirInstance>,
 }
 
 impl MirProgram {
@@ -98,9 +99,16 @@ impl MirProgram {
     ) -> Result<Self, MirProgramBuildError> {
         let type_catalog =
             MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
-        let functions = super::lower::lower_program_with_type_catalog(program, &type_catalog)
+        let mut functions = super::lower::lower_program_with_type_catalog(program, &type_catalog)
             .map_err(MirProgramBuildError::Lowering)?;
-        Self::with_type_catalog(functions, type_catalog).map_err(MirProgramBuildError::Validation)
+        let instances = super::lower::materialize_concrete_generic_instances(
+            program,
+            &type_catalog,
+            &mut functions,
+        )
+        .map_err(MirProgramBuildError::Lowering)?;
+        Self::with_type_catalog_and_instances(functions, type_catalog, instances)
+            .map_err(MirProgramBuildError::Validation)
     }
 
     /// Build canonical MIR while excluding checker callables whose origin is
@@ -141,7 +149,15 @@ impl MirProgram {
         if !lowering_errors.is_empty() {
             return Err(MirProgramBuildError::Lowering(lowering_errors));
         }
-        Self::with_type_catalog(functions, type_catalog).map_err(MirProgramBuildError::Validation)
+        let instances = super::lower::materialize_concrete_generic_instances_excluding_sources(
+            program,
+            &type_catalog,
+            &mut functions,
+            excluded_sources,
+        )
+        .map_err(MirProgramBuildError::Lowering)?;
+        Self::with_type_catalog_and_instances(functions, type_catalog, instances)
+            .map_err(MirProgramBuildError::Validation)
     }
 
     /// Internal constructor retained for structural/unit tests that build
@@ -161,6 +177,7 @@ impl MirProgram {
             Ok(Self {
                 functions,
                 type_catalog: MirTypeCatalog::default(),
+                instances: BTreeMap::new(),
             })
         } else {
             Err(errors)
@@ -171,7 +188,20 @@ impl MirProgram {
         functions: BTreeMap<NodeId, MirFunction>,
         type_catalog: MirTypeCatalog,
     ) -> Result<Self, Vec<super::MirValidationError>> {
+        Self::with_type_catalog_and_instances(functions, type_catalog, BTreeMap::new())
+    }
+
+    pub fn with_type_catalog_and_instances(
+        functions: BTreeMap<NodeId, MirFunction>,
+        type_catalog: MirTypeCatalog,
+        instances: BTreeMap<MirInstanceId, MirInstance>,
+    ) -> Result<Self, Vec<super::MirValidationError>> {
         let mut errors = Vec::new();
+        errors.extend(validate_instance_table(
+            &functions,
+            &type_catalog,
+            &instances,
+        ));
         for function in functions.values() {
             if let Err(mut function_errors) = function.validate() {
                 errors.append(&mut function_errors);
@@ -781,12 +811,13 @@ impl MirProgram {
             }
         }
         if errors.is_empty() {
-            errors.extend(validate_call_graph(&functions));
+            errors.extend(validate_call_graph(&functions, &instances));
         }
         if errors.is_empty() {
             Ok(Self {
                 functions,
                 type_catalog,
+                instances,
             })
         } else {
             Err(errors)
@@ -805,6 +836,10 @@ impl MirProgram {
 
     pub fn type_catalog(&self) -> &MirTypeCatalog {
         &self.type_catalog
+    }
+
+    pub fn instances(&self) -> &BTreeMap<MirInstanceId, MirInstance> {
+        &self.instances
     }
 }
 
@@ -963,6 +998,142 @@ fn validate_builtin_calls(
     errors
 }
 
+fn validate_instance_table(
+    functions: &BTreeMap<NodeId, MirFunction>,
+    type_catalog: &MirTypeCatalog,
+    instances: &BTreeMap<MirInstanceId, MirInstance>,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    let mut executable_functions = BTreeSet::new();
+    for (id, instance) in instances {
+        let expected_id = match MirInstanceId::for_template(&instance.template, &instance.arguments)
+        {
+            Ok(expected) => expected,
+            Err(error) => {
+                errors.push(super::MirValidationError {
+                    subject: id.to_string(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if &expected_id != id || instance.id != *id {
+            errors.push(super::MirValidationError {
+                subject: id.to_string(),
+                message: "generic MIR instance identity disagrees with its template/arguments"
+                    .into(),
+            });
+        }
+        if let Err(message) = type_catalog.validate_scalar_generic_arguments(&instance.arguments) {
+            errors.push(super::MirValidationError {
+                subject: id.to_string(),
+                message: format!("generic MIR instance TypeDesc contract is invalid: {message}"),
+            });
+        }
+        let Some(function) = functions.get(&instance.function) else {
+            errors.push(super::MirValidationError {
+                subject: id.to_string(),
+                message: format!(
+                    "generic MIR instance executable function '{}' is absent",
+                    instance.function.0
+                ),
+            });
+            continue;
+        };
+        if !executable_functions.insert(instance.function.clone()) {
+            errors.push(super::MirValidationError {
+                subject: id.to_string(),
+                message: format!(
+                    "generic MIR instance executable function '{}' is bound by multiple instance entries",
+                    instance.function.0
+                ),
+            });
+        }
+        if function.owner != instance.function {
+            errors.push(super::MirValidationError {
+                subject: id.to_string(),
+                message: "generic MIR instance function owner disagrees with its table entry"
+                    .into(),
+            });
+        }
+        errors.extend(validate_generic_identity_instance_function(
+            id,
+            function,
+            &instance.arguments,
+        ));
+    }
+    errors
+}
+
+fn validate_generic_identity_instance_function(
+    instance_id: &MirInstanceId,
+    function: &MirFunction,
+    arguments: &[crate::core::ResolvedTypeId],
+) -> Vec<super::MirValidationError> {
+    let subject = instance_id.to_string();
+    let error = |message: &str| super::MirValidationError {
+        subject: subject.clone(),
+        message: message.into(),
+    };
+    let Some(concrete) = arguments.first() else {
+        return vec![error(
+            "generic MIR identity instance has no concrete argument",
+        )];
+    };
+    let mut errors = Vec::new();
+    let Some([parameter]) = function.parameters.get(..) else {
+        return vec![error(
+            "generic MIR identity instance function must have exactly one parameter",
+        )];
+    };
+    if function.result != *concrete
+        || !function
+            .values
+            .get(parameter)
+            .is_some_and(|value| value.ty == *concrete)
+    {
+        errors.push(error(
+            "generic MIR identity instance function parameter/result types disagree with its argument",
+        ));
+    }
+    if function.blocks.len() != 1 {
+        errors.push(error(
+            "generic MIR identity instance function must have exactly one block",
+        ));
+        return errors;
+    }
+    let Some(block) = function.blocks.get(&function.entry) else {
+        return vec![error("generic MIR identity instance entry block is absent")];
+    };
+    let Some([instruction]) = block.instructions.get(..) else {
+        errors.push(error(
+            "generic MIR identity instance body must contain exactly one Clone",
+        ));
+        return errors;
+    };
+    let MirInstructionKind::Clone { result, source } = &instruction.kind else {
+        errors.push(error(
+            "generic MIR identity instance body must use Clone from its parameter",
+        ));
+        return errors;
+    };
+    if source != parameter
+        || !function
+            .values
+            .get(result)
+            .is_some_and(|value| value.ty == *concrete)
+        || !matches!(
+            &block.terminator,
+            MirTerminator::Return { value: Some(value) } if value == result
+        )
+    {
+        errors.push(error(
+            "generic MIR identity instance body must return its cloned parameter",
+        ));
+    }
+    errors
+}
+
 /// Validate the canonical intra-program call ABI before a backend sees MIR.
 ///
 /// A MIR `Call` is deliberately narrower than the surface callable universe
@@ -974,6 +1145,7 @@ fn validate_builtin_calls(
 /// effect and ABI contracts are materialized.
 fn validate_call_graph(
     functions: &BTreeMap<NodeId, MirFunction>,
+    instances: &BTreeMap<MirInstanceId, MirInstance>,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
     for function in functions.values() {
@@ -982,6 +1154,7 @@ fn validate_call_graph(
                 let super::MirInstructionKind::Call {
                     result,
                     callee,
+                    type_arguments,
                     arguments,
                 } = &instruction.kind
                 else {
@@ -1004,6 +1177,47 @@ fn validate_call_graph(
                     });
                     continue;
                 };
+
+                let target_instance = instances
+                    .values()
+                    .find(|instance| instance.function == *target_owner);
+                if type_arguments.is_empty() {
+                    if target_instance.is_some() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call to generic MIR instance '{}' omits its canonical type arguments",
+                                target_owner.0
+                            ),
+                        });
+                    }
+                } else {
+                    let Some(instance) = target_instance else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call to non-instance MIR function '{}' carries generic type arguments",
+                                target_owner.0
+                            ),
+                        });
+                        continue;
+                    };
+                    if instance.arguments != *type_arguments {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call generic arguments disagree with MIR instance '{}', expected [{}]",
+                                target_owner.0,
+                                instance
+                                    .arguments
+                                    .iter()
+                                    .map(|argument| argument.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                        });
+                    }
+                }
 
                 if arguments.len() != target.parameters.len() {
                     errors.push(super::MirValidationError {
@@ -2237,6 +2451,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 callee,
                 arguments,
+                ..
             } => {
                 let arguments = self.take_transfer_values(function, values, arguments)?;
                 let ResolvedCallee::Function(owner) = callee else {
@@ -3701,21 +3916,65 @@ mod tests {
     }
 
     #[test]
-    fn call_to_unmaterialized_generic_template_fails_closed() {
+    fn concrete_scalar_generic_identity_is_an_executable_mir_instance() {
         let source =
             "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("a supported concrete generic call must materialize in MIR");
+        assert_eq!(program.instances().len(), 1);
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("identity instance");
+        assert_eq!(instance.template, NodeId("function:identity".into()));
+        assert!(program.functions().contains_key(&instance.function));
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR function");
+        let (callee, type_arguments) = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    callee,
+                    type_arguments,
+                    ..
+                } => Some((callee, type_arguments)),
+                _ => None,
+            })
+            .expect("identity call");
+        assert_eq!(
+            callee,
+            &crate::core::ir::ResolvedCallee::Function(instance.function.clone())
+        );
+        assert_eq!(type_arguments, &instance.arguments);
+
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn unsupported_non_scalar_generic_identity_fails_closed_before_backend() {
+        let source =
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> string { identity(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("generic calls require a concrete MIR instance");
+            .expect_err("non-scalar generic identity must remain outside this MIR island");
         match error {
-            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
-                error
-                    .message
-                    .contains("absent from the canonical MIR program")
-            })),
-            other => panic!("generic template escaped the shared call-graph gate: {other:?}"),
+            MirProgramBuildError::Lowering(errors) => assert!(errors
+                .iter()
+                .any(|error| { error.message.contains("outside scalar contract") })),
+            other => panic!("unsupported generic shape crossed the MIR gate: {other:?}"),
         }
     }
 

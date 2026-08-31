@@ -9,7 +9,7 @@
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::core::ir::{
     NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
@@ -21,10 +21,10 @@ use crate::core::{
 
 use super::types::MirTypeCatalog;
 use super::{
-    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
-    MirInstruction, MirInstructionId, MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind,
-    MirOwnershipSummary, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue,
-    MirValueId,
+    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction, MirInstance,
+    MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirOwnershipEvent,
+    MirOwnershipEventKind, MirOwnershipSummary, MirSwitchArm, MirSwitchBinding, MirSwitchCase,
+    MirTerminator, MirValue, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +249,330 @@ pub fn lower_program_with_type_catalog(
     } else {
         Err(errors)
     }
+}
+
+/// Materialize the first concrete generic MIR instance family.
+///
+/// This is intentionally a closed identity contract, not a backend-specific
+/// monomorphization shortcut: checker-selected type arguments are carried by
+/// the MIR `Call`, the instance table records the template/arguments proof,
+/// and the executable function is already specialized MIR. Only
+/// `identity<T>(T) -> T` instantiated with a Copy signed scalar or bool is
+/// admitted in this slice. All other generic bodies remain fail-closed.
+pub fn materialize_concrete_generic_instances(
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    functions: &mut BTreeMap<NodeId, MirFunction>,
+) -> Result<BTreeMap<MirInstanceId, MirInstance>, Vec<MirLoweringError>> {
+    materialize_concrete_generic_instances_excluding_sources(
+        program,
+        type_catalog,
+        functions,
+        &HashSet::new(),
+    )
+}
+
+/// Compatibility-source variant. A generic callable from an excluded source
+/// cannot become an executable MIR instance by accident.
+pub fn materialize_concrete_generic_instances_excluding_sources(
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    functions: &mut BTreeMap<NodeId, MirFunction>,
+    excluded_sources: &HashSet<crate::span::SourceId>,
+) -> Result<BTreeMap<MirInstanceId, MirInstance>, Vec<MirLoweringError>> {
+    let mut requests: BTreeMap<
+        (NodeId, Vec<crate::core::ResolvedTypeId>),
+        Vec<(NodeId, MirBlockId, usize, MirInstructionId)>,
+    > = BTreeMap::new();
+    let mut errors = Vec::new();
+
+    for (caller, function) in functions.iter() {
+        for (block_id, block) in &function.blocks {
+            for (index, instruction) in block.instructions.iter().enumerate() {
+                let MirInstructionKind::Call {
+                    callee: ResolvedCallee::Function(template),
+                    type_arguments,
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                if type_arguments.is_empty() {
+                    continue;
+                }
+                let Some(callable) = program.callable(template) else {
+                    continue;
+                };
+                if callable.signature.generic_parameters.is_empty() {
+                    continue;
+                }
+                if excluded_sources.contains(&callable.body.root.origin.user_span().source_id) {
+                    errors.push(MirLoweringError {
+                        node_id: NodeId(instruction.id.as_str().to_owned()),
+                        message: format!(
+                            "generic callee '{}' belongs to an excluded source and has no canonical MIR instance",
+                            template.0
+                        ),
+                    });
+                    continue;
+                }
+                requests
+                    .entry((template.clone(), type_arguments.clone()))
+                    .or_default()
+                    .push((
+                        caller.clone(),
+                        block_id.clone(),
+                        index,
+                        instruction.id.clone(),
+                    ));
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    let mut instances = BTreeMap::new();
+    for ((template, arguments), sites) in requests {
+        let callable = program.callable(&template).ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: sites
+                    .first()
+                    .map(|(_, _, _, instruction)| NodeId(instruction.as_str().to_owned()))
+                    .unwrap_or_else(|| template.clone()),
+                message: format!(
+                    "generic template '{}' is absent from checker catalog",
+                    template.0
+                ),
+            }]
+        })?;
+        let (instance, function) = materialize_identity_instance(
+            callable,
+            &template,
+            &arguments,
+            program,
+            type_catalog,
+            sites.first().map(|(_, _, _, instruction)| instruction),
+        )?;
+        let target = instance.function.clone();
+        if functions.insert(target.clone(), function).is_some() {
+            return Err(vec![MirLoweringError {
+                node_id: template.clone(),
+                message: format!(
+                    "generic MIR instance '{}' conflicts with an existing executable function",
+                    instance.id
+                ),
+            }]);
+        }
+        instances.insert(instance.id.clone(), instance);
+
+        for (caller, block_id, index, instruction_id) in sites {
+            let Some(function) = functions.get_mut(&caller) else {
+                return Err(vec![MirLoweringError {
+                    node_id: NodeId(instruction_id.as_str().to_owned()),
+                    message: format!(
+                        "generic call caller '{}' is absent from MIR graph",
+                        caller.0
+                    ),
+                }]);
+            };
+            let Some(instruction) = function
+                .blocks
+                .get_mut(&block_id)
+                .and_then(|block| block.instructions.get_mut(index))
+            else {
+                return Err(vec![MirLoweringError {
+                    node_id: NodeId(instruction_id.as_str().to_owned()),
+                    message: "generic call site disappeared before instance rewrite".into(),
+                }]);
+            };
+            let MirInstructionKind::Call { callee, .. } = &mut instruction.kind else {
+                return Err(vec![MirLoweringError {
+                    node_id: NodeId(instruction_id.as_str().to_owned()),
+                    message: "generic call site is no longer a MIR Call".into(),
+                }]);
+            };
+            *callee = ResolvedCallee::Function(target.clone());
+        }
+    }
+    Ok(instances)
+}
+
+fn materialize_identity_instance(
+    callable: &crate::core::ResolvedCallable,
+    template: &NodeId,
+    arguments: &[crate::core::ResolvedTypeId],
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    instruction: Option<&MirInstructionId>,
+) -> Result<(MirInstance, MirFunction), Vec<MirLoweringError>> {
+    let subject = || {
+        instruction
+            .map(|instruction| NodeId(instruction.as_str().to_owned()))
+            .unwrap_or_else(|| template.clone())
+    };
+    if callable.signature.generic_parameters.len() != 1
+        || callable.signature.parameters.len() != 1
+        || arguments.len() != 1
+    {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: "only one-parameter scalar generic identity instances are materialized".into(),
+        }]);
+    }
+    type_catalog
+        .validate_scalar_generic_arguments(arguments)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: format!(
+                    "generic MIR instance argument is outside scalar contract: {message}"
+                ),
+            }]
+        })?;
+    let generic_id = generic_parameter_type_id(program, &callable.signature.generic_parameters[0])
+        .ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic signature parameter has no canonical ResolvedTypeId".into(),
+            }]
+        })?;
+    if callable.signature.parameters[0].ty != generic_id || callable.signature.result != generic_id
+    {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic instance is not the canonical identity signature T -> T".into(),
+        }]);
+    }
+    let mut function = lower_callable(callable).map_err(|mut errors| {
+        for error in &mut errors {
+            error.node_id = subject();
+        }
+        errors
+    })?;
+    validate_identity_mir_shape(&function, &generic_id, &subject())?;
+    let concrete = arguments.first().cloned().ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic instance has no concrete scalar argument".into(),
+        }]
+    })?;
+    let instance_id = MirInstanceId::for_template(template, arguments).map_err(|error| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: error.to_string(),
+        }]
+    })?;
+    let function_owner = NodeId(format!("function:mir:{}", instance_id.as_str()));
+    function.owner = function_owner.clone();
+    function.result = concrete.clone();
+    for value in function.values.values_mut() {
+        if value.ty == generic_id {
+            value.ty = concrete.clone();
+        }
+    }
+    function.validate().map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| MirLoweringError {
+                node_id: subject(),
+                message: error.to_string(),
+            })
+            .collect::<Vec<_>>()
+    })?;
+    type_catalog
+        .validate_scalar_generic_arguments(arguments)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: format!(
+                    "specialized generic TypeDesc is outside scalar contract: {message}"
+                ),
+            }]
+        })?;
+    let instance = MirInstance {
+        id: instance_id,
+        template: template.clone(),
+        arguments: arguments.to_vec(),
+        function: function_owner,
+    };
+    Ok((instance, function))
+}
+
+fn validate_identity_mir_shape(
+    function: &MirFunction,
+    generic_id: &crate::core::ResolvedTypeId,
+    subject: &NodeId,
+) -> Result<(), Vec<MirLoweringError>> {
+    let error = |message: &str| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: message.into(),
+        }]
+    };
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(error(
+            "generic MIR instance body must have exactly one parameter",
+        ));
+    };
+    if function.result != *generic_id
+        || !function
+            .values
+            .get(parameter)
+            .is_some_and(|value| value.ty == *generic_id)
+        || function.blocks.len() != 1
+    {
+        return Err(error(
+            "generic MIR instance body must preserve one canonical T parameter and result",
+        ));
+    }
+    let Some(block) = function.blocks.get(&function.entry) else {
+        return Err(error("generic MIR instance entry block is absent"));
+    };
+    let [instruction] = block.instructions.as_slice() else {
+        return Err(error(
+            "generic MIR identity body must contain exactly one Clone instruction",
+        ));
+    };
+    let MirInstructionKind::Clone { result, source } = &instruction.kind else {
+        return Err(error(
+            "generic MIR identity body must use canonical Clone from its parameter",
+        ));
+    };
+    if source != parameter
+        || !function
+            .values
+            .get(result)
+            .is_some_and(|value| value.ty == *generic_id)
+    {
+        return Err(error(
+            "generic MIR identity Clone must copy the canonical T parameter",
+        ));
+    }
+    if !matches!(
+        &block.terminator,
+        MirTerminator::Return { value: Some(value) } if value == result
+    ) {
+        return Err(error(
+            "generic MIR identity body must return the Clone result",
+        ));
+    }
+    Ok(())
+}
+
+fn generic_parameter_type_id(
+    program: &CheckedProgram,
+    parameter: &NodeId,
+) -> Option<crate::core::ResolvedTypeId> {
+    program
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| match ty {
+            crate::core::ResolvedType::GenericParameter(candidate) if candidate == parameter => {
+                Some(id.clone())
+            }
+            _ => None,
+        })
 }
 
 fn is_concrete_callable(callable: &crate::core::ResolvedCallable) -> bool {
@@ -903,6 +1227,7 @@ impl<'a> Lowerer<'a> {
                         MirInstructionKind::Call {
                             result: Some(result.clone()),
                             callee: call.callee.clone(),
+                            type_arguments: call.type_arguments.clone(),
                             arguments,
                         },
                     );

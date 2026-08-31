@@ -142,6 +142,22 @@ fn canonical_mir_hash(program: &MirProgram) -> String {
     let mut text = String::new();
     text.push_str("mimi-canonical-mir-verifier-v1\n");
     text.push_str(&program.type_catalog().canonical_text());
+    for instance in program.instances().values() {
+        text.push_str("mir.instance ");
+        text.push_str(instance.id.as_str());
+        text.push(' ');
+        text.push_str(instance.template.0.as_str());
+        text.push_str(" -> ");
+        text.push_str(instance.function.0.as_str());
+        text.push('<');
+        for (index, argument) in instance.arguments.iter().enumerate() {
+            if index != 0 {
+                text.push(',');
+            }
+            text.push_str(argument.as_str());
+        }
+        text.push_str(">\n");
+    }
     for function in program.functions().values() {
         text.push_str(&function.canonical_text());
     }
@@ -192,6 +208,7 @@ fn verify_function(
     let mut traps = Vec::new();
     explore_block(
         function,
+        program,
         catalog,
         &mut initial,
         &function.entry,
@@ -666,6 +683,7 @@ fn symbolic_default_guard(previous_cases: &[Bool]) -> Bool {
 
 fn explore_block(
     function: &MirFunction,
+    program: &MirProgram,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     state: &mut SymbolicState,
     block_id: &crate::core::mir::MirBlockId,
@@ -681,14 +699,14 @@ fn explore_block(
         .get(block_id)
         .ok_or_else(|| format!("MIR verifier block '{}' is absent", block_id))?;
     for instruction in &block.instructions {
-        eval_instruction(function, catalog, state, &instruction.kind)?;
+        eval_instruction(function, program, catalog, state, &instruction.kind)?;
     }
     match &block.terminator {
         MirTerminator::Goto {
             target, arguments, ..
         } => {
             let mut next = edge_state(state, function, target, arguments)?;
-            explore_block(function, catalog, &mut next, target, active, returns, traps)?;
+            explore_block(function, program, catalog, &mut next, target, active, returns, traps)?;
         }
         MirTerminator::Branch {
             condition,
@@ -709,6 +727,7 @@ fn explore_block(
             then_state.constraints.push(condition.clone());
             explore_block(
                 function,
+                program,
                 catalog,
                 &mut then_state,
                 then_target,
@@ -720,6 +739,7 @@ fn explore_block(
             else_state.constraints.push(condition.not());
             explore_block(
                 function,
+                program,
                 catalog,
                 &mut else_state,
                 else_target,
@@ -828,6 +848,7 @@ fn explore_block(
                 }
                 explore_block(
                     function,
+                    program,
                     catalog,
                     &mut next,
                     &arm.target,
@@ -890,6 +911,7 @@ fn edge_state(
 
 fn eval_instruction(
     function: &MirFunction,
+    program: &MirProgram,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     state: &mut SymbolicState,
     instruction: &MirInstructionKind,
@@ -1280,9 +1302,25 @@ fn eval_instruction(
         }
         MirInstructionKind::MoveProject { .. }
         | MirInstructionKind::ConstructList { .. }
-        | MirInstructionKind::ConstructVariantMove { .. }
-        | MirInstructionKind::Call { .. } => {
+        | MirInstructionKind::ConstructVariantMove { .. } => {
             return Err("MIR instruction is outside scalar verifier contract".into())
+        }
+        MirInstructionKind::Call {
+            result,
+            callee,
+            type_arguments,
+            arguments,
+        } => {
+            eval_materialized_identity_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                callee,
+                type_arguments,
+                arguments,
+            )?;
         }
         MirInstructionKind::Borrow {
             result,
@@ -1392,6 +1430,139 @@ fn ensure_copy_value(
             value
         ));
     }
+    Ok(())
+}
+
+/// Symbolically consume the one generic call family admitted by this slice.
+///
+/// The verifier does not infer a callee body from a template name.  It first
+/// requires the call to name an instance in the canonical instance table,
+/// then checks that the executable target still has the exact specialized
+/// `Clone(parameter) -> Return` shape produced by MIR lowering.  This keeps
+/// the proof tied to the same TypeDesc, instance identity, and ownership
+/// contract consumed by the reference, bytecode, and native backends.
+fn eval_materialized_identity_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err("MIR verifier generic call callee is not a canonical function instance".into());
+    };
+    if type_arguments.len() != 1 || arguments.len() != 1 {
+        return Err("MIR verifier only admits one-argument scalar generic identity calls".into());
+    }
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| instance.function == *target_owner)
+        .ok_or_else(|| {
+            format!(
+                "MIR verifier generic call target '{}' is absent from the instance table",
+                target_owner.0
+            )
+        })?;
+    if instance.arguments != type_arguments {
+        return Err(format!(
+            "MIR verifier generic call target '{}' disagrees with its instance arguments",
+            target_owner.0
+        ));
+    }
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+
+    let target = program
+        .functions()
+        .get(target_owner)
+        .ok_or_else(|| format!("MIR verifier generic target '{}' is absent", target_owner.0))?;
+    let [target_parameter] = target.parameters.as_slice() else {
+        return Err("MIR verifier generic identity target must have one parameter".into());
+    };
+    let concrete = type_arguments
+        .first()
+        .expect("validated one generic type argument");
+    let target_parameter_ty = target
+        .values
+        .get(target_parameter)
+        .ok_or_else(|| {
+            format!(
+                "MIR verifier generic target parameter '{}' is absent",
+                target_parameter
+            )
+        })?
+        .ty
+        .clone();
+    if target_parameter_ty != *concrete || target.result != *concrete {
+        return Err(
+            "MIR verifier generic identity target is not specialized to its instance argument"
+                .into(),
+        );
+    }
+    let block = target
+        .blocks
+        .get(&target.entry)
+        .filter(|_| target.blocks.len() == 1)
+        .ok_or_else(|| {
+            "MIR verifier generic identity target must have one entry block".to_string()
+        })?;
+    let [instruction] = block.instructions.as_slice() else {
+        return Err("MIR verifier generic identity target must contain exactly one Clone".into());
+    };
+    let MirInstructionKind::Clone {
+        result: cloned_value,
+        source,
+    } = &instruction.kind
+    else {
+        return Err("MIR verifier generic identity target must use Clone".into());
+    };
+    if source != target_parameter
+        || !target
+            .values
+            .get(cloned_value)
+            .is_some_and(|value| value.ty == *concrete)
+        || !matches!(
+            &block.terminator,
+            MirTerminator::Return { value: Some(value) } if value == cloned_value
+        )
+    {
+        return Err("MIR verifier generic identity target must return its cloned parameter".into());
+    }
+
+    let argument = arguments
+        .first()
+        .expect("validated one generic call argument");
+    let argument_info = function
+        .values
+        .get(argument)
+        .ok_or_else(|| format!("MIR generic call argument '{}' is absent", argument))?;
+    if argument_info.ty != target_parameter_ty {
+        return Err("MIR verifier generic call argument disagrees with target TypeDesc".into());
+    }
+    let symbolic = state
+        .values
+        .get(argument)
+        .cloned()
+        .ok_or_else(|| format!("MIR generic call argument '{}' is not defined", argument))?;
+    value_scalar_kind(function, catalog, argument)?;
+    if !symbolic_matches_type(catalog, concrete, &symbolic) {
+        return Err("MIR verifier generic call argument has the wrong scalar shape".into());
+    }
+    let result = result.as_ref().ok_or_else(|| {
+        "MIR verifier generic identity call must produce its canonical result".to_string()
+    })?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err("MIR verifier generic call result disagrees with target TypeDesc".into());
+    }
+    ensure_result_shape(function, catalog, result, &symbolic)?;
+    state.values.insert(result.clone(), symbolic);
     Ok(())
 }
 
@@ -1852,6 +2023,94 @@ mod tests {
             .expect("function")
             .canonical_text()
             .contains("contract"));
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_identity_call() {
+        let source = r#"
+            func identity<T>(value: T) -> T { value }
+
+            func checked() -> i32 {
+                ensures: result == 41
+                identity(41)
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert_eq!(program.instances().len(), 1);
+
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let results =
+            verify_program(&program, "generic-identity-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("generic contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_rejects_tampered_generic_identity_target_shape() {
+        let source = r#"
+            func identity<T>(value: T) -> T { value }
+
+            func checked() -> i32 {
+                ensures: result == 41
+                identity(41)
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let instance = canonical
+            .instances()
+            .values()
+            .next()
+            .expect("identity instance");
+        let mut target = canonical
+            .functions()
+            .get(&instance.function)
+            .cloned()
+            .expect("identity target");
+        let entry = target.entry.clone();
+        target
+            .blocks
+            .get_mut(&entry)
+            .expect("identity entry")
+            .instructions
+            .clear();
+        let mut functions = canonical.functions().clone();
+        functions.insert(instance.function.clone(), target);
+        let error = MirProgram::with_type_catalog_and_instances(
+            functions,
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+        )
+        .expect_err("tampered generic target must fail before verifier");
+        assert!(
+            error.iter().any(|error| {
+                error.subject == instance.id.to_string()
+                    && error.message.contains("exactly one Clone")
+            }),
+            "{error:?}"
+        );
     }
 
     #[test]
