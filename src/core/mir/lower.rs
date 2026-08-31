@@ -196,6 +196,15 @@ pub fn lower_program(
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
+        // A generic callable declaration is a checker-owned template, not an
+        // executable MIR function. Until concrete MIR instantiation exists,
+        // putting its unresolved GenericParameter values into the executable
+        // graph would make the graph look complete while TypeDesc cannot
+        // prove its ABI/glue. Calls to such a template remain visible as
+        // calls and are rejected by the canonical call-graph validator.
+        if !is_concrete_callable(callable) {
+            continue;
+        }
         match lower_callable(callable) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -221,6 +230,13 @@ pub fn lower_program_with_type_catalog(
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
+        // Do not lower a polymorphic template as if it were a concrete
+        // function. A concrete instance table is a separate MIR contract;
+        // until it exists, the only sound behavior is to omit the template
+        // and let any call to it fail closed in validate_call_graph().
+        if !is_concrete_callable(callable) {
+            continue;
+        }
         match lower_callable_with_type_catalog(callable, type_catalog) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -233,6 +249,10 @@ pub fn lower_program_with_type_catalog(
     } else {
         Err(errors)
     }
+}
+
+fn is_concrete_callable(callable: &crate::core::ResolvedCallable) -> bool {
+    callable.signature.generic_parameters.is_empty()
 }
 
 fn ownership_summary(analysis: &ResourceAnalysis) -> MirOwnershipSummary {

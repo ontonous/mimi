@@ -122,6 +122,15 @@ impl MirProgram {
             if excluded_sources.contains(&callable.body.root.origin.user_span().source_id) {
                 continue;
             }
+            // Generic declarations are templates, not executable MIR
+            // functions. They are intentionally omitted until the MIR
+            // instance table materializes a concrete body and ABI. A call
+            // that still targets the template is rejected by the shared
+            // call-graph validator below; it must never fall back to an AST
+            // or legacy monomorphization path.
+            if !callable.signature.generic_parameters.is_empty() {
+                continue;
+            }
             match super::lower::lower_callable_with_type_catalog(callable, &type_catalog) {
                 Ok(function) => {
                     functions.insert(owner.clone(), function);
@@ -3354,6 +3363,7 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
+    use crate::core::NodeId;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -3671,6 +3681,42 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         assert!(!program.type_catalog().is_empty());
+    }
+
+    #[test]
+    fn generic_templates_are_not_executable_mir_functions() {
+        let source = "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("an unused generic template must not poison executable MIR");
+        assert!(program
+            .functions()
+            .keys()
+            .all(|owner| !owner.0.ends_with("identity")));
+        assert!(program
+            .functions()
+            .contains_key(&NodeId("function:main".into())));
+    }
+
+    #[test]
+    fn call_to_unmaterialized_generic_template_fails_closed() {
+        let source =
+            "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("generic calls require a concrete MIR instance");
+        match error {
+            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("absent from the canonical MIR program")
+            })),
+            other => panic!("generic template escaped the shared call-graph gate: {other:?}"),
+        }
     }
 
     #[test]
