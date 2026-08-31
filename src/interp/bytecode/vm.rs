@@ -609,6 +609,18 @@ impl BytecodeVM {
                 Op::Drop { ra } => {
                     self.cur_frame_mut().regs[ra as usize] = Value::Unit;
                 }
+                Op::DropAggregate { ra, arity } => {
+                    let frame = self.cur_frame_mut();
+                    let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
+                    if !matches!(&value, Value::Tuple(items) if items.len() == arity as usize) {
+                        return Err(InterpError::new(format!(
+                            "aggregate drop: expected tuple of arity {}, got {}",
+                            arity, value
+                        )));
+                    }
+                    // Dropping the owned tuple recursively drops its fields;
+                    // the MIR emitter already proved the TypeDesc schedule.
+                }
                 Op::DerefValue { rd, ra } => {
                     let val = self.get_reg(ra).clone();
                     let inner = match &val {
@@ -2089,6 +2101,15 @@ impl BytecodeVM {
                     let elems: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
                     self.set_reg(rd, Value::Tuple(elems));
+                }
+                Op::NewTupleMove { rd, base, arity } => {
+                    let frame = self.cur_frame_mut();
+                    let elems: Vec<Value> = (0..arity)
+                        .map(|i| {
+                            std::mem::replace(&mut frame.regs[(base + i) as usize], Value::Unit)
+                        })
+                        .collect();
+                    frame.regs[rd as usize] = Value::Tuple(elems);
                 }
                 Op::TupleGet { rd, ra, idx } => {
                     let v = self.get_reg(ra).clone();

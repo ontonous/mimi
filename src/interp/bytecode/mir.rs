@@ -4,7 +4,8 @@
 //! once a `MirProgram` exists, bytecode emission no longer sees the AST,
 //! resolver, or checker.  Unsupported MIR shapes are reported explicitly
 //! instead of falling back to the legacy compiler.  The supported slice is
-//! scalar values, calls, branches, and loop-shaped CFG edges.
+//! scalar values, calls, branches, loop-shaped CFG edges, and recursively
+//! glued tuple products.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -375,7 +376,10 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 if desc.ownership == MirOwnership::Copy {
                     self.proto.emit(Op::Mov { rd, rs });
-                } else if desc.glue.move_out == MirGlueKind::OwnedString {
+                } else if matches!(
+                    desc.glue.move_out,
+                    MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                ) {
                     self.proto.emit(Op::Move { rd, rs });
                 } else {
                     self.error(format!(
@@ -400,7 +404,10 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 if desc.ownership == MirOwnership::Copy {
                     self.proto.emit(Op::Mov { rd, rs });
-                } else if desc.glue.clone == MirGlueKind::OwnedString {
+                } else if matches!(
+                    desc.glue.clone,
+                    MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                ) {
                     self.proto.emit(Op::Clone { rd, rs });
                 } else {
                     self.error(format!(
@@ -410,7 +417,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
             MirInstructionKind::Drop { value } => {
-                let Some(desc) = self.type_of(value) else {
+                let Some(desc) = self.type_of(value).cloned() else {
                     self.error(format!("drop value '{}' has no type descriptor", value));
                     return;
                 };
@@ -424,6 +431,25 @@ impl<'a> FunctionEmitter<'a> {
                 {
                     let Some(ra) = self.reg(value) else { return };
                     self.proto.emit(Op::Drop { ra });
+                } else if desc.ownership != MirOwnership::Copy
+                    && desc.glue.drop == MirGlueKind::Aggregate
+                {
+                    let Some(ra) = self.reg(value) else { return };
+                    let MirLayout::Tuple(elements) = &desc.layout else {
+                        self.error(format!(
+                            "aggregate drop value '{}' has no tuple layout",
+                            value
+                        ));
+                        return;
+                    };
+                    if elements.len() > u16::MAX as usize {
+                        self.error("aggregate drop arity exceeds bytecode ABI");
+                        return;
+                    }
+                    self.proto.emit(Op::DropAggregate {
+                        ra,
+                        arity: elements.len() as u16,
+                    });
                 } else if desc.ownership != MirOwnership::Copy {
                     self.error(format!(
                         "drop of {:?} value '{}' has no canonical drop glue",
@@ -535,7 +561,10 @@ impl<'a> FunctionEmitter<'a> {
                     rd,
                     rs: current_reg,
                 });
-            } else if current_ty_desc.glue.clone == MirGlueKind::OwnedString {
+            } else if matches!(
+                current_ty_desc.glue.clone,
+                MirGlueKind::OwnedString | MirGlueKind::Aggregate
+            ) {
                 self.proto.emit(Op::Clone {
                     rd,
                     rs: current_reg,
@@ -884,7 +913,10 @@ impl<'a> FunctionEmitter<'a> {
                     rd: scratch,
                     rs: source,
                 });
-            } else if desc.glue.move_out == MirGlueKind::OwnedString {
+            } else if matches!(
+                desc.glue.move_out,
+                MirGlueKind::OwnedString | MirGlueKind::Aggregate
+            ) {
                 self.proto.emit(Op::Move {
                     rd: scratch,
                     rs: source,
@@ -1035,7 +1067,7 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
         let Some(rd) = self.reg(result) else { return };
-        let Some(result_desc) = self.type_of(result) else {
+        let Some(result_desc) = self.type_of(result).cloned() else {
             self.error(format!("tuple result '{}' has no type descriptor", result));
             return;
         };
@@ -1091,16 +1123,23 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.proto.alloc_reg()
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
+            if !self.emit_value_transfer(destination, source, &elements[index]) {
+                return;
+            }
+        }
+        if result_desc.ownership == MirOwnership::Copy {
+            self.proto.emit(Op::NewTuple {
+                rd,
+                base,
+                arity: fields.len() as u16,
+            });
+        } else {
+            self.proto.emit(Op::NewTupleMove {
+                rd,
+                base,
+                arity: fields.len() as u16,
             });
         }
-        self.proto.emit(Op::NewTuple {
-            rd,
-            base,
-            arity: fields.len() as u16,
-        });
     }
 
     fn emit_record_construct(
@@ -1496,9 +1535,14 @@ impl<'a> FunctionEmitter<'a> {
             }
             MirAbiClass::Aggregate => match &desc.layout {
                 MirLayout::Tuple(elements) => {
-                    if desc.ownership != MirOwnership::Copy {
+                    if desc.ownership != MirOwnership::Copy
+                        && (desc.glue.move_out != MirGlueKind::Aggregate
+                            || desc.glue.clone != MirGlueKind::Aggregate
+                            || desc.glue.drop != MirGlueKind::Aggregate
+                            || desc.drop_plan.is_none())
+                    {
                         return Err(format!(
-                            "type '{}' has ownership {:?} and needs runtime glue",
+                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
                             ty.as_str(),
                             desc.ownership
                         ));
@@ -1811,7 +1855,10 @@ impl<'a> FunctionEmitter<'a> {
         if desc.ownership == MirOwnership::Copy {
             self.proto.emit(Op::Mov { rd, rs });
             true
-        } else if desc.glue.move_out == MirGlueKind::OwnedString {
+        } else if matches!(
+            desc.glue.move_out,
+            MirGlueKind::OwnedString | MirGlueKind::Aggregate
+        ) {
             self.proto.emit(Op::Move { rd, rs });
             true
         } else {
@@ -2063,6 +2110,120 @@ mod tests {
             .expect("bytecode execution");
         assert_eq!(reference, MirRuntimeValue::String("owned".into()));
         assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn bytecode_and_reference_agree_on_owned_tuple_return() {
+        let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewTupleMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            MirRuntimeValue::Tuple(vec![
+                MirRuntimeValue::String("owned".into()),
+                MirRuntimeValue::Int(41),
+            ])
+        );
+        assert!(matches!(
+            value,
+            Value::Tuple(items)
+                if items.as_slice()
+                    == [
+                        Value::String(std::sync::Arc::new("owned".to_string())),
+                        Value::Int(41),
+                    ]
+        ));
+    }
+
+    #[test]
+    fn executes_recursive_owned_tuple_clone_and_drop_glue() {
+        let source =
+            "func main() -> i32 { let pair = (\"owned\", 41); let copy = pair; drop(copy); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::NewTupleMove { .. })));
+        assert!(main.code.iter().any(|op| matches!(op, Op::Clone { .. })));
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DropAggregate { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_nested_owned_tuple_glue_through_both_oracles() {
+        let source = "func main() -> ((string, i32), bool) { ((\"inner\", 41), true) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert_eq!(
+            main.code
+                .iter()
+                .filter(|op| matches!(op, Op::NewTupleMove { .. }))
+                .count(),
+            2
+        );
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            MirRuntimeValue::Tuple(vec![
+                MirRuntimeValue::Tuple(vec![
+                    MirRuntimeValue::String("inner".into()),
+                    MirRuntimeValue::Int(41),
+                ]),
+                MirRuntimeValue::Bool(true),
+            ])
+        );
+        assert!(matches!(
+            value,
+            Value::Tuple(items)
+                if items.as_slice() == [
+                    Value::Tuple(vec![
+                        Value::String(std::sync::Arc::new("inner".to_string())),
+                        Value::Int(41),
+                    ]),
+                    Value::Bool(true)
+                ]
+        ));
     }
 
     #[test]

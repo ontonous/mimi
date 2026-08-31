@@ -81,6 +81,12 @@ pub enum Op {
     Drop {
         ra: Reg,
     },
+    /// Release a canonical aggregate after the MIR TypeDesc validator has
+    /// proved its recursive drop plan and physical arity.
+    DropAggregate {
+        ra: Reg,
+        arity: u16,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Integer arithmetic (checked: trap on overflow per SD-7)
@@ -598,6 +604,14 @@ pub enum Op {
 
     /// rd = new Tuple with `arity` elements from [base .. base+arity)
     NewTuple {
+        rd: Reg,
+        base: Reg,
+        arity: u16,
+    },
+    /// rd = new Tuple by consuming elements from [base .. base+arity).
+    /// Canonical MIR uses this op for non-Copy product construction; the
+    /// legacy `NewTuple` keeps its clone-compatible behavior.
+    NewTupleMove {
         rd: Reg,
         base: Reg,
         arity: u16,
@@ -1128,7 +1142,7 @@ impl Op {
             | RetUnit
             | FaultRetEarly => false,
             Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
-            Drop { ra } => *ra == reg,
+            Drop { ra } | DropAggregate { ra, .. } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
             | MulInt { ra, rb, .. }
@@ -1243,9 +1257,9 @@ impl Op {
             | MutateSetupField {
                 regs_base, count, ..
             } => reads_range(*regs_base, *count, reg),
-            NewTuple { base, arity, .. } | NewVariant { base, arity, .. } => {
-                reads_range(*base, *arity, reg)
-            }
+            NewTuple { base, arity, .. }
+            | NewTupleMove { base, arity, .. }
+            | NewVariant { base, arity, .. } => reads_range(*base, *arity, reg),
             NewRecord { base, count, .. } => reads_range(*base, *count, reg),
             UpdateRecord {
                 ra, base, count, ..

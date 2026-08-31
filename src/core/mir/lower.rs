@@ -2,8 +2,8 @@
 //!
 //! This is intentionally a narrow, fail-closed slice. It proves the
 //! architectural boundary for scalar expressions, structured branch control
-//! flow, Copy record aggregates, and the first Move-owned scalar glue shape
-//! (`string`). Unsupported shapes return a structured error and must not
+//! flow, Copy record aggregates, and the first recursive Move-owned tuple
+//! product glue shape (for example `(string, i32)`). Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
 use std::collections::{BTreeMap, HashMap};
@@ -46,10 +46,12 @@ impl std::error::Error for MirLoweringError {}
 /// Supported forms are deliberately small: literals, local loads, unary and
 /// binary expressions, calls, casts, binds, expression statements, returns,
 /// and branch/match expressions with explicit MIR blocks. Copy-only tuple and
-/// record construction/projection/update are also represented. Direct local
-/// reads become explicit `Clone` nodes, while root drops become explicit
-/// `Drop` nodes; projected drops and ownership-bearing aggregates remain
-/// rejected until their field-level contracts are represented in MIR.
+/// record construction/projection/update are also represented, as is the
+/// materialized recursive tuple product `(string, i32)` ownership shape.
+/// Direct local reads become explicit `Clone` nodes, while root drops become
+/// explicit `Drop` nodes; projected drops and ownership-bearing records,
+/// variants, and containers remain rejected until their field-level contracts
+/// are represented in MIR.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,

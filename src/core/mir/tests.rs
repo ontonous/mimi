@@ -288,3 +288,151 @@ fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
         error.message.contains("projection") && error.message.contains("disagrees")
     }));
 }
+
+#[test]
+fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
+    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("tuple glue must be materialized");
+    let tuple_id = canonical
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            matches!(descriptor.layout, crate::core::mir::types::MirLayout::Tuple(ref fields) if fields.len() == 2)
+                .then(|| id.clone())
+        })
+        .expect("tuple descriptor");
+    let descriptor = canonical
+        .type_catalog()
+        .get(&tuple_id)
+        .expect("tuple TypeDesc");
+    assert_eq!(
+        descriptor.glue,
+        crate::core::mir::types::MirGlueContract {
+            move_out: crate::core::mir::types::MirGlueKind::Aggregate,
+            clone: crate::core::mir::types::MirGlueKind::Aggregate,
+            drop: crate::core::mir::types::MirGlueKind::Aggregate,
+        }
+    );
+    assert_eq!(
+        descriptor
+            .drop_plan
+            .as_ref()
+            .expect("drop plan")
+            .fields
+            .iter()
+            .map(|field| field.index)
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+}
+
+#[test]
+fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
+    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).cloned().expect("main");
+    let tuple_id = function
+        .values
+        .values()
+        .map(|value| value.ty.clone())
+        .find(|ty| {
+            canonical
+                .type_catalog()
+                .get(ty)
+                .is_some_and(|descriptor| descriptor.drop_plan.is_some())
+        })
+        .expect("tuple value");
+    let mut catalog = canonical.type_catalog().clone();
+    let descriptor = catalog
+        .iter()
+        .find_map(|(id, descriptor)| (id == &tuple_id).then(|| descriptor.clone()))
+        .expect("tuple descriptor");
+    let mut malformed = descriptor.drop_plan.clone().expect("tuple drop plan");
+    malformed.fields.reverse();
+    catalog.replace_for_test_only(
+        tuple_id,
+        crate::core::mir::types::MirTypeDesc {
+            drop_plan: Some(malformed),
+            ..descriptor
+        },
+    );
+    let error = crate::core::mir::reference::MirProgram::with_type_catalog(
+        std::collections::BTreeMap::from([(owner, function)]),
+        catalog,
+    )
+    .expect_err("malformed drop plan must fail closed");
+    assert!(error
+        .iter()
+        .any(|error| error.message.contains("drop plan")));
+}
+
+#[test]
+fn rejects_reuse_of_tuple_field_after_aggregate_construction() {
+    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut function = canonical.functions().get(&owner).cloned().expect("main");
+    let block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Construct { .. }
+                )
+            })
+        })
+        .expect("tuple construction block");
+    let field = block
+        .instructions
+        .iter()
+        .find_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Construct { fields, .. } => fields
+                .iter()
+                .find(|field| {
+                    function
+                        .values
+                        .get(*field)
+                        .and_then(|value| canonical.type_catalog().get(&value.ty))
+                        .is_some_and(|descriptor| {
+                            descriptor.ownership == crate::core::mir::types::MirOwnership::Move
+                        })
+                })
+                .cloned(),
+            _ => None,
+        })
+        .expect("owned tuple field");
+    block.instructions.push(crate::core::mir::MirInstruction {
+        id: crate::core::mir::MirInstructionId::new("synthetic/reuse-tuple-field")
+            .expect("instruction id"),
+        kind: crate::core::mir::MirInstructionKind::Drop { value: field },
+    });
+    let error = crate::core::mir::reference::MirProgram::with_type_catalog(
+        std::collections::BTreeMap::from([(owner, function)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("an aggregate construction must consume each owned field once");
+    assert!(error
+        .iter()
+        .any(|error| error.message.contains("use after consuming non-Copy value")));
+}

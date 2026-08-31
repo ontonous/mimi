@@ -16,6 +16,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::Move { .. } => "MOVE",
         Op::Clone { .. } => "CLONE",
         Op::Drop { .. } => "DROP",
+        Op::DropAggregate { .. } => "DROP_AGGREGATE",
         Op::DerefValue { .. } => "DEREF_VALUE",
         Op::AddInt { .. } => "ADD_INT",
         Op::SubInt { .. } => "SUB_INT",
@@ -78,6 +79,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::ListSet { .. } => "LIST_SET",
         Op::Len { .. } => "LEN",
         Op::NewTuple { .. } => "NEW_TUPLE",
+        Op::NewTupleMove { .. } => "NEW_TUPLE_MOVE",
         Op::TupleGet { .. } => "TUPLE_GET",
         Op::NewRecord { .. } => "NEW_RECORD",
         Op::UpdateRecord { .. } => "UPDATE_RECORD",
@@ -456,6 +458,18 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             rd,
             base,
             *base as u16 + arity.saturating_sub(1)
+        ),
+        Op::NewTupleMove { rd, base, arity } => format!(
+            "{:04}  {:<16} r{} = tuple_move(r{}..r{})",
+            pc,
+            name,
+            rd,
+            base,
+            *base as u16 + arity.saturating_sub(1)
+        ),
+        Op::DropAggregate { ra, arity } => format!(
+            "{:04}  {:<16} drop_aggregate r{} (arity={})",
+            pc, name, ra, arity
         ),
         Op::TupleGet { rd, ra, idx } => {
             format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx)

@@ -174,6 +174,26 @@ impl MirProgram {
                     });
                 }
             }
+            for value in function.values.values() {
+                let Some(descriptor) = type_catalog.get(&value.ty) else {
+                    continue;
+                };
+                if descriptor.ownership == super::types::MirOwnership::Copy {
+                    continue;
+                }
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    if let Err(message) = type_catalog.validate_glue(&value.ty, operation) {
+                        errors.push(super::MirValidationError {
+                            subject: value.id.to_string(),
+                            message,
+                        });
+                    }
+                }
+            }
             if type_catalog.get(&function.result).is_none() {
                 errors.push(super::MirValidationError {
                     subject: function.owner.0.clone(),
@@ -267,6 +287,14 @@ impl MirProgram {
                                     message,
                                 });
                             }
+                            if let Err(message) = type_catalog
+                                .validate_glue(&result_value.ty, MirGlueOperation::MoveOut)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
                         }
                         super::MirInstructionKind::ConstructVariant {
                             result,
@@ -302,6 +330,14 @@ impl MirProgram {
                                 &field_ids,
                                 &field_types,
                             ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                            if let Err(message) = type_catalog
+                                .validate_glue(&result_value.ty, MirGlueOperation::MoveOut)
+                            {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -511,7 +547,8 @@ impl MirProgram {
 /// MIR. This pass is intentionally conservative: non-Copy values can only be
 /// consumed once along a block-local path, and each mutually exclusive CFG
 /// edge is checked from the same pre-terminator state. Aggregate destructuring
-/// remains fail-closed until its own field-level glue contract is materialized.
+/// and partial moves remain fail-closed until their own field-level contract
+/// is materialized.
 fn validate_linear_consumption(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -523,7 +560,23 @@ fn validate_linear_consumption(
             let sources: Vec<&MirValueId> = match &instruction.kind {
                 super::MirInstructionKind::Move { source, .. }
                 | super::MirInstructionKind::Drop { value: source } => vec![source],
-                super::MirInstructionKind::Call { arguments, .. } => arguments.iter().collect(),
+                super::MirInstructionKind::Call { arguments, .. }
+                | super::MirInstructionKind::Construct {
+                    fields: arguments, ..
+                } => arguments.iter().collect(),
+                super::MirInstructionKind::ConstructVariant { fields, .. } => {
+                    fields.iter().map(|(_, value)| value).collect()
+                }
+                super::MirInstructionKind::UpdateRecord {
+                    base,
+                    fields: arguments,
+                    ..
+                } => {
+                    let mut sources = Vec::with_capacity(arguments.len() + 1);
+                    sources.push(base);
+                    sources.extend(arguments.iter());
+                    sources
+                }
                 _ => Vec::new(),
             };
             consume_values(
@@ -844,18 +897,28 @@ impl<'a> MirReferenceInterpreter<'a> {
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::Drop { value } => {
-                let is_copy = function
+                let ty = function
                     .values
                     .get(value)
-                    .and_then(|value| self.program.type_catalog().get(&value.ty))
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, format!("drop value '{}' is absent", value))
+                    })?;
+                let is_copy = self
+                    .program
+                    .type_catalog()
+                    .get(&ty)
                     .is_some_and(|descriptor| {
                         descriptor.ownership == super::types::MirOwnership::Copy
                     });
-                if !is_copy && values.remove(value).is_none() {
-                    return Err(self.error(
-                        &function.owner,
-                        format!("drop value '{}' is unavailable", value),
-                    ));
+                if !is_copy {
+                    let runtime_value = values.remove(value).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!("drop value '{}' is unavailable", value),
+                        )
+                    })?;
+                    self.drop_runtime_value(function, &ty, runtime_value)?;
                 }
             }
             MirInstructionKind::Borrow { result, source, .. } => {
@@ -886,7 +949,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 kind,
                 fields,
             } => {
-                let fields = self.read_values(function, values, fields)?;
+                let fields = self.take_transfer_values(function, values, fields)?;
                 let value = match kind {
                     MirAggregateKind::Tuple => MirRuntimeValue::Tuple(fields),
                     MirAggregateKind::Record {
@@ -908,7 +971,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .collect::<Vec<_>>();
                 let field_values = fields
                     .iter()
-                    .map(|(_, value)| self.read_value(function, values, value))
+                    .map(|(_, value)| self.take_transfer_value(function, values, value))
                     .collect::<Result<Vec<_>, _>>()?;
                 let value = self.construct_variant(
                     function,
@@ -926,8 +989,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                 kind: MirAggregateKind::Record { nominal, fields },
                 fields: update_values,
             } => {
-                let base_value = self.read_value(function, values, base)?;
-                let update_values = self.read_values(function, values, update_values)?;
+                let base_value = self.take_transfer_value(function, values, base)?;
+                let update_values = self.take_transfer_values(function, values, update_values)?;
                 let value = self.update_record(
                     function,
                     result,
@@ -1246,17 +1309,6 @@ impl<'a> MirReferenceInterpreter<'a> {
             .ok_or_else(|| self.error(&function.owner, format!("value '{}' is unavailable", value)))
     }
 
-    fn read_values(
-        &self,
-        function: &MirFunction,
-        values: &HashMap<MirValueId, MirRuntimeValue>,
-        ids: &[MirValueId],
-    ) -> Result<Vec<MirRuntimeValue>, MirExecutionError> {
-        ids.iter()
-            .map(|id| self.read_value(function, values, id))
-            .collect()
-    }
-
     fn take_transfer_value(
         &self,
         function: &MirFunction,
@@ -1296,6 +1348,63 @@ impl<'a> MirReferenceInterpreter<'a> {
         ids.iter()
             .map(|id| self.take_transfer_value(function, values, id))
             .collect()
+    }
+
+    fn drop_runtime_value(
+        &self,
+        function: &MirFunction,
+        ty: &crate::core::ResolvedTypeId,
+        value: MirRuntimeValue,
+    ) -> Result<(), MirExecutionError> {
+        self.program
+            .type_catalog()
+            .validate_glue(ty, MirGlueOperation::Drop)
+            .map_err(|message| self.error(&function.owner, message))?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(ty)
+            .ok_or_else(|| self.error(&function.owner, "drop value has no TypeDesc"))?;
+        if descriptor.ownership == super::types::MirOwnership::Copy {
+            return Ok(());
+        }
+        match &descriptor.layout {
+            MirLayout::Tuple(elements) => {
+                let MirRuntimeValue::Tuple(mut fields) = value else {
+                    return Err(self.error(&function.owner, "aggregate drop value is not a tuple"));
+                };
+                let Some(plan) = &descriptor.drop_plan else {
+                    return Err(
+                        self.error(&function.owner, "aggregate drop value has no drop plan")
+                    );
+                };
+                if fields.len() != elements.len() || plan.fields.len() != elements.len() {
+                    return Err(self.error(
+                        &function.owner,
+                        "aggregate drop value disagrees with TypeDesc arity",
+                    ));
+                }
+                for field in &plan.fields {
+                    let child = std::mem::replace(
+                        fields.get_mut(field.index).ok_or_else(|| {
+                            self.error(&function.owner, "aggregate drop field is out of bounds")
+                        })?,
+                        MirRuntimeValue::Unit,
+                    );
+                    self.drop_runtime_value(function, &field.ty, child)?;
+                }
+                Ok(())
+            }
+            MirLayout::Handle if matches!(&value, MirRuntimeValue::String(_)) => Ok(()),
+            MirLayout::Opaque => Err(self.error(
+                &function.owner,
+                "non-Copy opaque value has no canonical drop implementation",
+            )),
+            _ => Err(self.error(
+                &function.owner,
+                "non-Copy value has no canonical reference drop implementation",
+            )),
+        }
     }
 
     fn select_switch_arm<'b>(
