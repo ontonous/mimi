@@ -1013,9 +1013,45 @@ fn eval_instruction(
         | MirInstructionKind::Borrow { .. }
         | MirInstructionKind::EndBorrow { .. }
         | MirInstructionKind::ConstructVariantMove { .. }
-        | MirInstructionKind::UpdateRecord { .. }
         | MirInstructionKind::Call { .. } => {
             return Err("MIR instruction is outside scalar verifier contract".into())
+        }
+        MirInstructionKind::UpdateRecord {
+            result,
+            base,
+            kind: MirAggregateKind::Record { nominal, fields },
+            fields: update_values,
+        } => {
+            ensure_copy_value(function, catalog, base)?;
+            for value in update_values {
+                ensure_copy_value(function, catalog, value)?;
+            }
+            let base_value = state
+                .values
+                .get(base)
+                .cloned()
+                .ok_or_else(|| format!("MIR record update base '{}' is not defined", base))?;
+            let update_values = update_values
+                .iter()
+                .map(|value| {
+                    state.values.get(value).cloned().ok_or_else(|| {
+                        format!("MIR record update value '{}' is not defined", value)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let value = symbolic_update_record(
+                function,
+                catalog,
+                result,
+                base_value,
+                nominal,
+                fields,
+                update_values,
+            )?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::UpdateRecord { .. } => {
+            return Err("MIR record update requires a record aggregate kind".into())
         }
     }
     Ok(())
@@ -1196,6 +1232,77 @@ fn symbolic_construct(
         }
         _ => Err("MIR aggregate construction disagrees with canonical TypeDesc".into()),
     }
+}
+
+fn symbolic_update_record(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result: &MirValueId,
+    base: SymbolicValue,
+    nominal: &crate::core::ir::NominalTypeId,
+    fields: &[crate::core::NodeId],
+    update_values: Vec<SymbolicValue>,
+) -> Result<SymbolicValue, String> {
+    ensure_copy_value(function, catalog, result)?;
+
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| format!("MIR record update result '{}' is absent", result))?
+        .ty
+        .clone();
+    let descriptor = catalog
+        .get(&result_ty)
+        .ok_or_else(|| format!("MIR record update result '{}' TypeDesc is absent", result))?;
+    let MirLayout::Record {
+        nominal: expected_nominal,
+        fields: layout_fields,
+    } = &descriptor.layout
+    else {
+        return Err("MIR record update result has no canonical record layout".into());
+    };
+    let SymbolicValue::Record {
+        nominal: base_nominal,
+        fields: mut base_fields,
+    } = base
+    else {
+        return Err("MIR record update base is not a symbolic record".into());
+    };
+    if nominal != expected_nominal || &base_nominal != expected_nominal {
+        return Err("MIR record update nominal disagrees with TypeDesc".into());
+    }
+    if fields.len() != update_values.len() {
+        return Err("MIR record update field/value arity disagrees".into());
+    }
+    if base_fields.len() != layout_fields.len()
+        || layout_fields
+            .iter()
+            .any(|field| !base_fields.contains_key(&field.id))
+    {
+        return Err("MIR record update base disagrees with TypeDesc fields".into());
+    }
+
+    let mut seen = BTreeSet::new();
+    for (field, value) in fields.iter().zip(update_values) {
+        if !seen.insert(field) {
+            return Err(format!("MIR record update repeats field '{}'", field.0));
+        }
+        let expected = layout_fields
+            .iter()
+            .find(|candidate| candidate.id == *field)
+            .ok_or_else(|| format!("MIR record update field '{}' is absent", field.0))?;
+        if !symbolic_matches_type(catalog, &expected.ty, &value) {
+            return Err(format!(
+                "MIR record update field '{}' disagrees with TypeDesc",
+                field.0
+            ));
+        }
+        base_fields.insert(field.clone(), value);
+    }
+    Ok(SymbolicValue::Record {
+        nominal: expected_nominal.clone(),
+        fields: base_fields,
+    })
 }
 
 fn eval_binary(
@@ -1498,6 +1605,94 @@ mod tests {
             .expect("record function")
             .canonical_text()
             .contains("project("));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_copy_record_update() {
+        let source = r#"
+            type Point { x: i32, enabled: bool }
+
+            func advance(p: Point, next_x: i32) -> Point {
+                requires: next_x >= 0 && next_x <= 100
+                ensures: result.x == next_x && result.enabled == old(p.enabled)
+                let updated = Point { x: next_x, ..p };
+                updated
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("advance"))
+            .cloned()
+            .expect("advance MIR function");
+        let point = crate::core::ir::NominalTypeId::new("type:Point").expect("Point nominal");
+
+        let reference_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &owner,
+                &[
+                    MirRuntimeValue::Record {
+                        nominal: point,
+                        fields: vec![MirRuntimeValue::Int(7), MirRuntimeValue::Bool(true)],
+                    },
+                    MirRuntimeValue::Int(42),
+                ],
+            )
+            .expect("reference record update execution");
+        assert_eq!(
+            reference_value,
+            MirRuntimeValue::Record {
+                nominal: crate::core::ir::NominalTypeId::new("type:Point").expect("Point nominal"),
+                fields: vec![MirRuntimeValue::Int(42), MirRuntimeValue::Bool(true)],
+            }
+        );
+
+        let results =
+            verify_program(&program, "record-update-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("record update contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        assert!(program
+            .functions()
+            .get(&owner)
+            .expect("record update function")
+            .canonical_text()
+            .contains("update_record"));
+    }
+
+    #[test]
+    fn mir_gate_rejects_non_copy_record_update_without_transfer_contract() {
+        let source = r#"
+            type Box { text: string, count: i32 }
+
+            func rewrite(value: Box, next_count: i32) -> Box {
+                ensures: result.count == next_count
+                let updated = Box { count: next_count, ..value };
+                updated
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-Copy record contract must fail before verifier");
+        assert!(matches!(
+            error,
+            crate::core::mir::reference::MirProgramBuildError::Validation(errors)
+                if errors.iter().any(|error| error
+                    .message
+                    .contains("outside the canonical Copy aggregate contract"))
+        ));
     }
 
     #[test]
