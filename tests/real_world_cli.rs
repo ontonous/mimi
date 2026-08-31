@@ -719,6 +719,86 @@ fn canonical_mir_run_cli_rejects_unlowered_shape_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_verifier_proves_branch_contract() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_branch_contract.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR verifier");
+    assert!(
+        output.status.success(),
+        "canonical MIR verifier failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_verifier_reports_ensures_counterexample() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_disproven_contract.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR verifier");
+    assert!(!output.status.success(), "disproven contract must fail CLI");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("canonical MIR ensures contract is disproven"));
+    assert!(!stdout.contains("flow_ast"));
+}
+
+#[test]
+fn canonical_mir_verifier_reports_reachable_checked_arithmetic_trap() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_trap_contract.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR verifier");
+    assert!(!output.status.success(), "reachable trap must fail CLI");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("can reach trap 'E0802'"));
+}
+
+#[test]
+fn canonical_mir_verifier_rejects_unsupported_abi_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_f64_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR verifier");
+    assert!(!output.status.success(), "unsupported ABI must fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canonical MIR verifier input rejected"));
+    assert!(stderr.contains("outside the canonical scalar verifier contract"));
+    assert!(!stderr.contains("flow_ast"));
+}
+
+#[test]
 fn real_world_cli_suite() {
     let root = project_root().join("tests").join("real_world");
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)

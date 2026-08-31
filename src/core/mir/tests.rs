@@ -75,6 +75,7 @@ fn fixture() -> MirFunction {
                 },
             ),
         ]),
+        contracts: Vec::new(),
         ownership: MirOwnershipSummary::default(),
     }
 }

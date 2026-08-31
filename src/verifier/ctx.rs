@@ -153,7 +153,8 @@ pub struct Counterexample {
 /// v0.31.25: Proof artifact — binds a verification result to its semantic
 /// context for replay and tamper detection.
 ///
-/// Cache key: `(semantics_version, solver_version, integer_model, vir_hash)`.
+/// Cache key: `(semantics_version, solver_version, integer_model, engine,
+/// program_identity)` where MIR artifacts use `mir_hash`.
 /// A proof is only valid if the artifact matches the current compilation.
 #[derive(Debug, Clone)]
 pub struct ProofArtifact {
@@ -169,6 +170,10 @@ pub struct ProofArtifact {
     pub source_hash: String,
     /// BLAKE3 hash of the Resolved IR (semantic identity).
     pub resolved_ir_hash: String,
+    /// BLAKE3 hash of the canonical MIR (semantic identity for the MIR
+    /// verifier). It is separate from Resolved IR because proof reuse across
+    /// frontend and canonicalization stages must be explicit.
+    pub mir_hash: String,
     /// BLAKE3 hash of the VIR (verification-ir identity, span-free).
     pub vir_hash: String,
     /// 0.34.44 (ADR-008 §2): engine identity. Proof cache entries are only
@@ -190,6 +195,9 @@ impl ProofArtifact {
     /// verifies from CheckedProgram's Resolved IR — the primary engine per
     /// ADR-008 and the only engine the LSP may read/write proof cache for).
     pub const ENGINE_RESOLVED: &'static str = "resolved";
+    /// Engine identity: canonical MIR verifier. Its proof identity is carried
+    /// by `mir_hash`, never by a source/Resolved AST hash.
+    pub const ENGINE_MIR: &'static str = "mir";
 
     /// Create a new artifact with the current semantics version.
     pub fn new(solver_version: String, source_hash: String) -> Self {
@@ -203,6 +211,7 @@ impl ProofArtifact {
             solver_version,
             source_hash,
             resolved_ir_hash: String::new(),
+            mir_hash: String::new(),
             vir_hash: String::new(),
             // 0.34.44 (ADR-008 §2): this constructor serves the flow/VIR
             // paths (the resolved engine builds its artifact inline).
@@ -215,15 +224,15 @@ impl ProofArtifact {
         // Program identity: the resolved engine uses resolved_ir_hash, the
         // flow engine uses vir_hash; an artifact from a different program
         // must never be reused (batch4-08 P2-4).
-        let self_identity = if self.vir_hash.is_empty() {
-            &self.resolved_ir_hash
-        } else {
-            &self.vir_hash
+        let self_identity = match self.engine.as_str() {
+            Self::ENGINE_MIR => &self.mir_hash,
+            _ if self.vir_hash.is_empty() => &self.resolved_ir_hash,
+            _ => &self.vir_hash,
         };
-        let current_identity = if current.vir_hash.is_empty() {
-            &current.resolved_ir_hash
-        } else {
-            &current.vir_hash
+        let current_identity = match current.engine.as_str() {
+            Self::ENGINE_MIR => &current.mir_hash,
+            _ if current.vir_hash.is_empty() => &current.resolved_ir_hash,
+            _ => &current.vir_hash,
         };
         self.semantics_version == current.semantics_version
             && self.integer_model == current.integer_model
@@ -233,6 +242,7 @@ impl ProofArtifact {
             // a flow_ast proof is never compatible with a resolved obligation.
             && self.engine == current.engine
             && self_identity == current_identity
+            && self.mir_hash == current.mir_hash
             && self.vir_hash == current.vir_hash
     }
 
@@ -246,10 +256,10 @@ impl ProofArtifact {
     /// same engine proving the same program. Two proofs with the same key are
     /// interchangeable; anything else is a fail-loud cache miss.
     pub fn cache_key(&self) -> String {
-        let program_identity = if self.vir_hash.is_empty() {
-            &self.resolved_ir_hash
-        } else {
-            &self.vir_hash
+        let program_identity = match self.engine.as_str() {
+            Self::ENGINE_MIR => &self.mir_hash,
+            _ if self.vir_hash.is_empty() => &self.resolved_ir_hash,
+            _ => &self.vir_hash,
         };
         format!(
             "v{}:{}:{}:{}:{}",
@@ -1829,6 +1839,7 @@ impl Verifier {
                 solver_version: format!("z3 {}", z3::full_version()),
                 source_hash: self.ctx.source_hash.clone(),
                 resolved_ir_hash: self.ctx.resolved_ir_hash.clone(),
+                mir_hash: String::new(),
                 vir_hash: String::new(),
                 // 0.34.44 (ADR-008 §2): this is the resolved engine.
                 engine: ProofArtifact::ENGINE_RESOLVED.to_string(),

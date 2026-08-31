@@ -1,0 +1,10 @@
+// Canonical MIR verifier: scalar requires/ensures over a branching CFG.
+func monotone_step(x: i32, choose_step: bool) -> i32 {
+    requires: x < 2147483647
+    ensures: result >= x
+    if choose_step { x + 1 } else { x }
+}
+
+func main() -> i32 {
+    0
+}

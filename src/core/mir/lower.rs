@@ -127,6 +127,7 @@ fn lower_body_impl(
         entry: entry.clone(),
         values: lowerer.values,
         blocks,
+        contracts: Vec::new(),
         ownership: MirOwnershipSummary::default(),
     };
     function.validate().map_err(|errors| {
@@ -149,6 +150,7 @@ pub fn lower_callable(
     callable: &crate::core::ResolvedCallable,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body(&callable.body)?;
+    function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.ownership = ownership_summary(&callable.resources);
     function.validate().map_err(|errors| {
         errors
@@ -169,6 +171,7 @@ pub fn lower_callable_with_type_catalog(
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body_with_type_catalog(&callable.body, type_catalog)?;
+    function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.ownership = ownership_summary(&callable.resources);
     function.validate().map_err(|errors| {
         errors

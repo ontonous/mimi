@@ -203,6 +203,10 @@ impl MirProgram {
             errors.extend(validate_linear_consumption(function, &type_catalog));
             errors.extend(validate_builtin_calls(function, &type_catalog));
             errors.extend(validate_conversions(function, &type_catalog));
+            errors.extend(super::contracts::validate_contracts(
+                function,
+                &type_catalog,
+            ));
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
                     match &instruction.kind {

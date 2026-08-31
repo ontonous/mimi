@@ -1,0 +1,10 @@
+// Canonical MIR verifier must account for checked arithmetic trap paths.
+func overflowing_step(x: i32) -> i32 {
+    requires: true
+    ensures: result >= x
+    x + 1
+}
+
+func main() -> i32 {
+    0
+}

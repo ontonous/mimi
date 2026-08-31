@@ -3,6 +3,7 @@ mod expr;
 mod flow;
 mod func;
 mod helpers;
+mod mir;
 pub(crate) mod resolved_expr;
 pub mod vir;
 
@@ -19,6 +20,16 @@ pub use flow::{
     flow_verify_ffi_call_sites, flow_verify_ffi_call_sites_or_mock, FlowAcc, FlowEvent,
     VerifierState,
 };
+
+/// Verify a previously validated canonical MIR program with the experimental
+/// MIR-only scalar contract engine.  The input boundary intentionally has no
+/// AST/ResolvedBody parameter and never falls back to another verifier.
+pub fn verify_mir(
+    program: &crate::core::mir::reference::MirProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    mir::verify_program(program, source_hash)
+}
 
 fn parse_memory_source(source: &str, label: &str) -> Result<crate::ast::File, String> {
     let tokens = crate::lexer::Lexer::new(source).tokenize()?;

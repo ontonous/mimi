@@ -206,6 +206,9 @@ enum Command {
         /// Dump Z3 SMT-LIB2 assertions to stderr for debugging
         #[arg(long)]
         dump_z3: bool,
+        /// Verify through canonical MIR only (experimental; fails closed)
+        #[arg(long)]
+        mir: bool,
     },
     /// Compile a .mimi file to native code
     Build {
@@ -594,7 +597,8 @@ fn main() {
             path,
             stats,
             dump_z3,
-        } => verify::verify(path.as_deref(), stats, dump_z3),
+            mir,
+        } => verify::verify(path.as_deref(), stats, dump_z3, mir),
         Command::Build {
             path,
             output,

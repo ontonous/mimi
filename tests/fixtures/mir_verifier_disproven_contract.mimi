@@ -1,0 +1,10 @@
+// Canonical MIR verifier must report a satisfiable ensures counterexample.
+func broken_step(x: i32) -> i32 {
+    requires: x < 2147483647
+    ensures: result == x
+    x + 1
+}
+
+func main() -> i32 {
+    0
+}

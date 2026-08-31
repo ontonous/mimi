@@ -27,7 +27,12 @@ fn verification_blocks_success(
         || (status.is_inconclusive() && !no_contracts && !body_level_not_in_subset)
 }
 
-pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Result<(), String> {
+pub(crate) fn verify(
+    path: Option<&Path>,
+    show_stats: bool,
+    dump_z3: bool,
+    mir: bool,
+) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
     let tokens = lexer::Lexer::new(&source).tokenize()?;
@@ -71,7 +76,15 @@ pub(crate) fn verify(path: Option<&Path>, show_stats: bool, dump_z3: bool) -> Re
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
-    let results = if dump_z3 {
+    let results = if mir {
+        if dump_z3 {
+            return Err("--dump-z3 is not available with --mir".into());
+        }
+        let canonical =
+            mimi::core::mir::reference::MirProgram::from_checked_program(&checked_program)
+                .map_err(|error| format!("canonical MIR verifier input rejected: {error:?}"))?;
+        mimi::verifier::verify_mir(&canonical, source_hash)?
+    } else if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
         // which the Flow state machine doesn't expose. Keep direct for this case.
         let mut verifier = mimi::verifier::Verifier::new()?;

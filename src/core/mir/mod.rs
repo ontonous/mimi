@@ -16,9 +16,14 @@ use crate::core::ir::{
 };
 use crate::core::{NodeId, ResolvedPlace};
 
+mod contracts;
 pub mod lower;
 pub mod reference;
 pub mod types;
+
+pub use contracts::{
+    MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
+};
 
 macro_rules! mir_id {
     ($name:ident, $label:literal) => {
@@ -307,6 +312,9 @@ pub struct MirFunction {
     pub entry: MirBlockId,
     pub values: BTreeMap<MirValueId, MirValue>,
     pub blocks: BTreeMap<MirBlockId, MirBlock>,
+    /// Canonical scalar contract predicates.  Conditions use MIR value
+    /// identities rather than source expressions or display names.
+    pub contracts: Vec<MirContract>,
     /// Checker-owned resource facts projected into a backend-neutral event
     /// stream.  Consumers must use this stream together with TypeDesc rather
     /// than infer ownership from a physical register or pointer shape.
@@ -491,6 +499,9 @@ impl MirFunction {
                 );
             }
             let _ = writeln!(output, "    -> {}", format_terminator(&block.terminator));
+        }
+        for contract in &self.contracts {
+            let _ = writeln!(output, "{}", contract.canonical_text());
         }
         output.push_str(&self.ownership.canonical_text());
         output

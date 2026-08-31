@@ -1,0 +1,10 @@
+// f64 contracts are intentionally outside the first MIR verifier subset.
+func unsupported_float(x: f64) -> f64 {
+    requires: true
+    ensures: result == x
+    x
+}
+
+func main() -> i32 {
+    0
+}
