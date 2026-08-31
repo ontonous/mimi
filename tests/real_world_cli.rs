@@ -161,6 +161,59 @@ fn canonical_mir_run_cli_smoke() {
 }
 
 #[test]
+fn canonical_mir_run_cli_executes_imported_user_call_graph() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("projects")
+        .join("consumer")
+        .join("main.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn imported canonical MIR program");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "imported canonical MIR run failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn canonical_mir_run_cli_rejects_unlowered_shape_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("core_list_index.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn unsupported canonical MIR program");
+    assert!(
+        !output.status.success(),
+        "unsupported MIR shape must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("canonical MIR build error")
+            && stderr.contains("expression shape is not lowered"),
+        "unexpected canonical rejection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bytecode runtime error"),
+        "canonical rejection must not fall back to the legacy runtime:\n{stderr}"
+    );
+}
+
+#[test]
 fn real_world_cli_suite() {
     let root = project_root().join("tests").join("real_world");
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)

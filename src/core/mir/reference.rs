@@ -622,6 +622,9 @@ impl MirProgram {
             }
         }
         if errors.is_empty() {
+            errors.extend(validate_call_graph(&functions));
+        }
+        if errors.is_empty() {
             Ok(Self {
                 functions,
                 type_catalog,
@@ -644,6 +647,124 @@ impl MirProgram {
     pub fn type_catalog(&self) -> &MirTypeCatalog {
         &self.type_catalog
     }
+}
+
+/// Validate the canonical intra-program call ABI before a backend sees MIR.
+///
+/// A MIR `Call` is deliberately narrower than the surface callable universe
+/// in this migration slice: it must target another materialized MIR function,
+/// and its argument/result value types must match that function's canonical
+/// signature exactly.  This keeps missing targets, builtin/actor/effect calls,
+/// and ABI drift from being rediscovered independently by reference, bytecode,
+/// or native consumers.  Such shapes remain fail-closed until their own MIR
+/// effect and ABI contracts are materialized.
+fn validate_call_graph(
+    functions: &BTreeMap<NodeId, MirFunction>,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    for function in functions.values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let super::MirInstructionKind::Call {
+                    result,
+                    callee,
+                    arguments,
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let ResolvedCallee::Function(target_owner) = callee else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!("callee '{callee:?}' is not a materialized MIR function"),
+                    });
+                    continue;
+                };
+                let Some(target) = functions.get(target_owner) else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "callee '{}' is absent from the canonical MIR program",
+                            target_owner.0
+                        ),
+                    });
+                    continue;
+                };
+
+                if arguments.len() != target.parameters.len() {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "call to '{}' supplies {} arguments but its MIR signature requires {}",
+                            target_owner.0,
+                            arguments.len(),
+                            target.parameters.len()
+                        ),
+                    });
+                }
+                for (index, (argument, parameter)) in
+                    arguments.iter().zip(target.parameters.iter()).enumerate()
+                {
+                    let Some(argument_value) = function.values.get(argument) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call argument {index} value '{}' is absent from the caller",
+                                argument
+                            ),
+                        });
+                        continue;
+                    };
+                    let Some(parameter_value) = target.values.get(parameter) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "callee '{}' parameter {index} value '{}' is absent from its MIR value catalog",
+                                target_owner.0, parameter
+                            ),
+                        });
+                        continue;
+                    };
+                    if argument_value.ty != parameter_value.ty {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call argument {index} type '{}' disagrees with callee '{}' parameter type '{}'",
+                                argument_value.ty.as_str(),
+                                target_owner.0,
+                                parameter_value.ty.as_str()
+                            ),
+                        });
+                    }
+                }
+
+                if let Some(result) = result {
+                    let Some(result_value) = function.values.get(result) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call result value '{}' is absent from the caller",
+                                result
+                            ),
+                        });
+                        continue;
+                    };
+                    if result_value.ty != target.result {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "call result type '{}' disagrees with callee '{}' result type '{}'",
+                                result_value.ty.as_str(),
+                                target_owner.0,
+                                target.result.as_str()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    errors
 }
 
 /// Validate explicit ownership boundaries before any execution backend sees
@@ -2429,6 +2550,84 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         assert!(!program.type_catalog().is_empty());
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_an_absent_call_target_before_backend() {
+        let source =
+            "func add_one(value: i32) -> i32 { value + 1 }\nfunc main() -> i32 { add_one(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut main = canonical.functions().get(&owner).cloned().expect("main");
+        let call = main
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find_map(|instruction| match &mut instruction.kind {
+                crate::core::mir::MirInstructionKind::Call { callee, .. } => Some(callee),
+                _ => None,
+            })
+            .expect("call instruction");
+        *call = crate::core::ir::ResolvedCallee::Function(crate::core::NodeId(
+            "function:missing".into(),
+        ));
+
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, main)]),
+            canonical.type_catalog().clone(),
+        )
+        .expect_err("an absent call target must fail before a backend");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("absent from the canonical MIR program")
+        }));
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_call_signature_drift_before_backend() {
+        let source =
+            "func add_one(value: i32) -> i32 { value + 1 }\nfunc main() -> i32 { add_one(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut main = canonical.functions().get(&owner).cloned().expect("main");
+        let bool_ty = canonical
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.abi == crate::core::mir::types::MirAbiClass::Bool).then(|| id.clone())
+            })
+            .expect("bool TypeDesc");
+        let argument = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call { arguments, .. } => {
+                    arguments.first().cloned()
+                }
+                _ => None,
+            })
+            .expect("call argument");
+        main.values.get_mut(&argument).expect("argument value").ty = bool_ty;
+
+        let mut functions = canonical.functions().clone();
+        functions.insert(owner, main);
+        let errors = MirProgram::with_type_catalog(functions, canonical.type_catalog().clone())
+            .expect_err("call signature drift must fail before a backend");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("call argument 0 type")
+                    && error.message.contains("disagrees with callee")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]

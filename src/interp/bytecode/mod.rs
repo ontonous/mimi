@@ -1,12 +1,17 @@
 //! Mimi bytecode compilation and register-based VM.
 //!
-//! Architecture:
+//! Architecture during the MIR migration:
 //! ```text
-//! AST (CheckedProgram) → BytecodeCompiler → BytecodeProgram → BytecodeVM → Value
+//! CheckedProgram → Canonical Mimi MIR → compile_mir_program → AST-free BytecodeProgram → BytecodeVM
+//! CheckedProgram → BytecodeCompiler → compatibility BytecodeProgram → BytecodeVM
 //! ```
 //!
-//! The bytecode VM replaces the tree-walking interpreter for eligible functions.
-//! It provides 10-30x speedup by eliminating AST match dispatch, HashMap scope
+//! The first line is the canonical production backend for the explicit
+//! `mimi run --mir` slice.  It must receive a validated `MirProgram` and emits
+//! `ast: None`; unsupported shapes fail before emission.  The second line is a
+//! compatibility/comparison path retained until its source compiler is
+//! migrated or removed.  The bytecode VM replaces the tree-walking interpreter
+//! for eligible functions and eliminates AST match dispatch, HashMap scope
 //! lookups, and per-expression recursion overhead.
 
 pub mod builtins;
