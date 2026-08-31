@@ -1507,6 +1507,68 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate a consuming switch over a non-Copy built-in variant.  Every
+    /// active payload field is either moved into an arm binding or released
+    /// by the variant drop plan; a backend must not treat this as a read-only
+    /// tag dispatch.
+    pub fn validate_switch_move(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+    ) -> Result<(), String> {
+        let descriptor = self.get(scrutinee_ty).ok_or_else(|| {
+            format!(
+                "switch-move scrutinee type '{}' is absent from TypeDesc",
+                scrutinee_ty.as_str()
+            )
+        })?;
+        if descriptor.ownership == MirOwnership::Copy {
+            return Err(format!(
+                "switch-move scrutinee type '{}' is Copy; use Switch",
+                scrutinee_ty.as_str()
+            ));
+        }
+        if !matches!(
+            descriptor.layout,
+            MirLayout::Option { .. } | MirLayout::Result { .. }
+        ) {
+            return Err(format!(
+                "switch-move scrutinee type '{}' has no canonical Option/Result layout",
+                scrutinee_ty.as_str()
+            ));
+        }
+        self.validate_glue(scrutinee_ty, MirGlueOperation::MoveOut)?;
+        self.validate_glue(scrutinee_ty, MirGlueOperation::Drop)?;
+        self.validate_switch(scrutinee_ty, arms)?;
+        for arm in arms {
+            let crate::core::mir::MirSwitchCase::Variant(variant_id) = &arm.case else {
+                continue;
+            };
+            let variant = self.variant(scrutinee_ty, variant_id).ok_or_else(|| {
+                format!(
+                    "switch-move case '{}' is absent from TypeDesc",
+                    variant_id.0
+                )
+            })?;
+            let mut bound_fields = BTreeSet::new();
+            for binding in &arm.bindings {
+                if !bound_fields.insert(&binding.field) {
+                    return Err(format!(
+                        "switch-move binding field '{}' is repeated",
+                        binding.field.0
+                    ));
+                }
+                if !variant.fields.iter().any(|field| field.id == binding.field) {
+                    return Err(format!(
+                        "switch-move binding field '{}' is absent from variant '{}'",
+                        binding.field.0, variant.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn canonical_text(&self) -> String {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {

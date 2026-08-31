@@ -739,6 +739,14 @@ pub enum Op {
         base: Reg,
         arity: u16,
     },
+    /// Consume a tagged Variant and move all payload fields into
+    /// `base..base+arity`. The canonical MIR SwitchMove adapter then drops
+    /// unbound fields and transfers bound fields to block parameters.
+    DestructureVariantMove {
+        ra: Reg,
+        base: Reg,
+        arity: u16,
+    },
     /// rd = variant_tag(ra) — extract tag as Int
     VariantTag {
         rd: Reg,
@@ -1178,6 +1186,7 @@ impl Op {
             | FaultRetEarly => false,
             Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
             Drop { ra } | DropAggregate { ra, .. } | DropVariant { ra } => *ra == reg,
+            DestructureVariantMove { ra, .. } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
             | MulInt { ra, rb, .. }

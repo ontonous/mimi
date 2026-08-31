@@ -1,0 +1,7 @@
+func main() -> i32 {
+    let value: Option<string> = Some("owned")
+    match value {
+        Some(_) => 42,
+        None => 0
+    }
+}

@@ -544,11 +544,20 @@ impl MirProgram {
                         | super::MirInstructionKind::Nop => {}
                     }
                 }
-                if let super::MirTerminator::Switch { scrutinee, arms } = &block.terminator {
+                if let super::MirTerminator::Switch { scrutinee, arms }
+                | super::MirTerminator::SwitchMove { scrutinee, arms } = &block.terminator
+                {
                     let Some(scrutinee_value) = function.values.get(scrutinee) else {
                         continue;
                     };
-                    if let Err(message) = type_catalog.validate_switch(&scrutinee_value.ty, arms) {
+                    let move_scrutinee =
+                        matches!(&block.terminator, super::MirTerminator::SwitchMove { .. });
+                    let validation = if move_scrutinee {
+                        type_catalog.validate_switch_move(&scrutinee_value.ty, arms)
+                    } else {
+                        type_catalog.validate_switch(&scrutinee_value.ty, arms)
+                    };
+                    if let Err(message) = validation {
                         errors.push(super::MirValidationError {
                             subject: block.id.to_string(),
                             message,
@@ -731,6 +740,28 @@ fn validate_linear_consumption(
                         ),
                     });
                 }
+                for arm in arms {
+                    consume_edge_values(
+                        function,
+                        type_catalog,
+                        &consumed,
+                        &arm.arguments,
+                        arm.edge.to_string(),
+                        &mut errors,
+                    );
+                }
+            }
+            super::MirTerminator::SwitchMove {
+                scrutinee, arms, ..
+            } => {
+                consume_values(
+                    function,
+                    type_catalog,
+                    &mut consumed,
+                    &[scrutinee],
+                    block.id.to_string(),
+                    &mut errors,
+                );
                 for arm in arms {
                     consume_edge_values(
                         function,
@@ -930,6 +961,14 @@ impl<'a> MirReferenceInterpreter<'a> {
                         &scrutinee,
                         arm,
                     )?;
+                    current = arm.target.clone();
+                }
+                MirTerminator::SwitchMove { scrutinee, arms } => {
+                    let scrutinee_id = scrutinee.clone();
+                    let scrutinee = self.read_value(function, &values, scrutinee)?;
+                    let arm = self.select_switch_arm(function, &scrutinee, arms)?;
+                    incoming =
+                        self.switch_move_arguments(function, &mut values, &scrutinee_id, arm)?;
                     current = arm.target.clone();
                 }
                 MirTerminator::Return { value } => {
@@ -1757,6 +1796,139 @@ impl<'a> MirReferenceInterpreter<'a> {
         Ok(incoming)
     }
 
+    fn switch_move_arguments(
+        &self,
+        function: &MirFunction,
+        values: &mut HashMap<MirValueId, MirRuntimeValue>,
+        scrutinee_id: &MirValueId,
+        arm: &MirSwitchArm,
+    ) -> Result<Vec<MirRuntimeValue>, MirExecutionError> {
+        let mut incoming = self.take_transfer_values(function, values, &arm.arguments)?;
+        let scrutinee_ty = function
+            .values
+            .get(scrutinee_id)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| self.error(&function.owner, "switch-move scrutinee has no MIR type"))?;
+        let scrutinee = values.remove(scrutinee_id).ok_or_else(|| {
+            self.error(
+                &function.owner,
+                format!("switch-move source '{}' is unavailable", scrutinee_id),
+            )
+        })?;
+        let MirRuntimeValue::Variant {
+            nominal: actual_nominal,
+            variant: actual_variant,
+            mut payload,
+        } = scrutinee
+        else {
+            return Err(self.error(
+                &function.owner,
+                "switch-move scrutinee is not a canonical Variant",
+            ));
+        };
+        let Some((expected_nominal, _)) = self.program.type_catalog().variant_layout(&scrutinee_ty)
+        else {
+            return Err(self.error(
+                &function.owner,
+                "switch-move scrutinee has no canonical variant layout",
+            ));
+        };
+        if actual_nominal.as_str() != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "switch-move variant nominal disagrees with TypeDesc",
+            ));
+        }
+        let variant = self
+            .program
+            .type_catalog()
+            .variant(&scrutinee_ty, &actual_variant)
+            .cloned()
+            .ok_or_else(|| {
+                self.error(
+                    &function.owner,
+                    "switch-move variant is absent from TypeDesc",
+                )
+            })?;
+        if payload.len() != variant.fields.len() {
+            return Err(self.error(
+                &function.owner,
+                "switch-move payload arity disagrees with TypeDesc",
+            ));
+        }
+        if !matches!(&arm.case, MirSwitchCase::Variant(case) if case == &actual_variant)
+            && !matches!(&arm.case, MirSwitchCase::Default)
+        {
+            return Err(self.error(
+                &function.owner,
+                "switch-move arm disagrees with runtime variant",
+            ));
+        }
+        if matches!(&arm.case, MirSwitchCase::Default) || arm.bindings.is_empty() {
+            let value = MirRuntimeValue::Variant {
+                nominal: actual_nominal,
+                variant: actual_variant,
+                payload,
+            };
+            self.drop_runtime_value(function, &scrutinee_ty, value)?;
+            return Ok(incoming);
+        }
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(&scrutinee_ty)
+            .ok_or_else(|| self.error(&function.owner, "switch-move has no TypeDesc"))?;
+        let plan = descriptor
+            .variant_drop_plan
+            .as_ref()
+            .and_then(|plans| plans.iter().find(|plan| plan.variant == actual_variant))
+            .cloned()
+            .ok_or_else(|| self.error(&function.owner, "switch-move variant has no drop plan"))?;
+        let mut bound_indices = BTreeMap::new();
+        for binding in &arm.bindings {
+            let index = variant
+                .fields
+                .iter()
+                .position(|field| field.id == binding.field)
+                .ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "switch-move binding field is absent from TypeDesc",
+                    )
+                })?;
+            if bound_indices.insert(binding.field.clone(), index).is_some() {
+                return Err(self.error(&function.owner, "switch-move binding field is repeated"));
+            }
+        }
+        let mut bound_values = BTreeMap::new();
+        for field in plan.fields {
+            let child = std::mem::replace(
+                payload.get_mut(field.index).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "switch-move payload field is out of bounds",
+                    )
+                })?,
+                MirRuntimeValue::Unit,
+            );
+            if bound_indices.values().any(|index| *index == field.index) {
+                bound_values.insert(field.index, child);
+            } else {
+                self.drop_runtime_value(function, &field.ty, child)?;
+            }
+        }
+        for binding in &arm.bindings {
+            let index = *bound_indices.get(&binding.field).ok_or_else(|| {
+                self.error(&function.owner, "switch-move binding index is absent")
+            })?;
+            let value = bound_values.remove(&index).ok_or_else(|| {
+                self.error(&function.owner, "switch-move binding was consumed twice")
+            })?;
+            incoming.push(value);
+        }
+        Ok(incoming)
+    }
+
     fn error(&self, function: &NodeId, message: impl Into<String>) -> MirExecutionError {
         MirExecutionError {
             function: function.clone(),
@@ -2309,6 +2481,37 @@ mod tests {
     }
 
     #[test]
+    fn executes_move_option_and_result_payloads_from_canonical_mir() {
+        for (source, expected) in [
+            (
+                "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }",
+                "owned",
+            ),
+            (
+                "func main() -> string { let value: Result<string, string> = Err(\"error\"); match value { Ok(v) => v, Err(e) => e } }",
+                "error",
+            ),
+        ] {
+            let (owner, program) = canonical_program_with_main(source);
+            let value = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("reference execution");
+            assert_eq!(value, MirRuntimeValue::String(expected.into()));
+        }
+    }
+
+    #[test]
+    fn consuming_switch_drops_unbound_variant_payload() {
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
+        let (owner, program) = canonical_program_with_main(source);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
     fn canonical_program_gate_rejects_duplicate_variant_switch_case() {
         let source =
             "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v, None => 0 } }";
@@ -2337,6 +2540,75 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.message.contains("repeated")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_unknown_consuming_switch_binding() {
+        let source =
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let (_, program) = canonical_program_with_main(source);
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = program.functions().get(&owner).cloned().expect("main");
+        function
+            .blocks
+            .values_mut()
+            .find_map(|block| match &mut block.terminator {
+                crate::core::mir::MirTerminator::SwitchMove { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .expect("consuming variant switch")
+            .first_mut()
+            .expect("Some arm")
+            .bindings
+            .first_mut()
+            .expect("payload binding")
+            .field = crate::core::NodeId("builtin:variant:Option::Some/missing".into());
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            program.type_catalog().clone(),
+        )
+        .expect_err("unknown consuming binding must fail before execution");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("absent from variant")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_copy_only_switch_for_non_copy_variant() {
+        let source =
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let (_, program) = canonical_program_with_main(source);
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = program.functions().get(&owner).cloned().expect("main");
+        let mut replaced = false;
+        for block in function.blocks.values_mut() {
+            let replacement = match &block.terminator {
+                crate::core::mir::MirTerminator::SwitchMove { scrutinee, arms } => {
+                    Some((scrutinee.clone(), arms.clone()))
+                }
+                _ => None,
+            };
+            if let Some((scrutinee, arms)) = replacement {
+                block.terminator = crate::core::mir::MirTerminator::Switch { scrutinee, arms };
+                replaced = true;
+                break;
+            }
+        }
+        assert!(replaced, "consuming variant switch");
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            program.type_catalog().clone(),
+        )
+        .expect_err("non-Copy variant must not use read-only Switch");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("non-Copy") || error.message.contains("aggregate match glue")
+            }),
             "{errors:?}"
         );
     }

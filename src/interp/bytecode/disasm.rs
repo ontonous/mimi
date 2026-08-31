@@ -98,6 +98,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SetContains { .. } => "SET_CONTAINS",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
+        Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
         Op::VariantTag { .. } => "VARIANT_TAG",
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
         Op::IsVariant { .. } => "IS_VARIANT",
@@ -662,6 +663,14 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 *base as u16 + arity.saturating_sub(1)
             )
         }
+        Op::DestructureVariantMove { ra, base, arity } => format!(
+            "{:04}  {:<16} destructure_variant_move r{} -> r{}..r{}",
+            pc,
+            name,
+            ra,
+            base,
+            *base as u16 + arity.saturating_sub(1)
+        ),
         Op::VariantTag { rd, ra } => format!("{:04}  {:<16} r{} = tag(r{})", pc, name, rd, ra),
         Op::VariantPayload { rd, ra, idx } => format!(
             "{:04}  {:<16} r{} = payload(r{}, {})",

@@ -237,6 +237,14 @@ pub enum MirTerminator {
         scrutinee: MirValueId,
         arms: Vec<MirSwitchArm>,
     },
+    /// Consume a non-Copy Option/Result scrutinee and route its active
+    /// payload into the selected arm.  Unbound payload fields are released
+    /// by the variant glue contract; bound fields become target block
+    /// parameters.  This is deliberately distinct from Copy-only `Switch`.
+    SwitchMove {
+        scrutinee: MirValueId,
+        arms: Vec<MirSwitchArm>,
+    },
     Return {
         value: Option<MirValueId>,
     },
@@ -611,25 +619,12 @@ fn format_terminator(terminator: &MirTerminator) -> String {
             format_values(then_arguments),
             format_values(else_arguments)
         ),
-        MirTerminator::Switch { scrutinee, arms } => format!(
-            "switch {scrutinee} [{}]",
-            arms.iter()
-                .map(|arm| {
-                    format!(
-                        "{:?}:{:?}:{}({}; bind={:?})",
-                        arm.case,
-                        arm.edge,
-                        arm.target,
-                        format_values(&arm.arguments),
-                        arm.bindings
-                            .iter()
-                            .map(|binding| format!("{}<-{:?}", binding.parameter, binding.field))
-                            .collect::<Vec<_>>()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        MirTerminator::Switch { scrutinee, arms } => {
+            format_switch_terminator("switch", scrutinee, arms)
+        }
+        MirTerminator::SwitchMove { scrutinee, arms } => {
+            format_switch_terminator("switch_move", scrutinee, arms)
+        }
         MirTerminator::Return { value } => format!(
             "return {}",
             value
@@ -647,6 +642,28 @@ fn format_terminator(terminator: &MirTerminator) -> String {
         ),
         MirTerminator::Unreachable => "unreachable".into(),
     }
+}
+
+fn format_switch_terminator(name: &str, scrutinee: &MirValueId, arms: &[MirSwitchArm]) -> String {
+    format!(
+        "{name} {scrutinee} [{}]",
+        arms.iter()
+            .map(|arm| {
+                format!(
+                    "{:?}:{:?}:{}({}; bind={:?})",
+                    arm.case,
+                    arm.edge,
+                    arm.target,
+                    format_values(&arm.arguments),
+                    arm.bindings
+                        .iter()
+                        .map(|binding| format!("{}<-{:?}", binding.parameter, binding.field))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn format_values(values: &[MirValueId]) -> String {
@@ -987,7 +1004,8 @@ impl<'a> MirValidator<'a> {
                 self.check_arity(then_target, then_arguments, &[]);
                 self.check_arity(else_target, else_arguments, &[]);
             }
-            MirTerminator::Switch { scrutinee, arms } => {
+            MirTerminator::Switch { scrutinee, arms }
+            | MirTerminator::SwitchMove { scrutinee, arms } => {
                 self.use_value(scrutinee);
                 let mut has_default = false;
                 for arm in arms {
@@ -1236,7 +1254,7 @@ impl<'a> MirValidator<'a> {
                 else_target,
                 ..
             } => vec![then_target.clone(), else_target.clone()],
-            MirTerminator::Switch { arms, .. } => {
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
                 arms.iter().map(|arm| arm.target.clone()).collect()
             }
             MirTerminator::Return { .. }
@@ -1329,7 +1347,8 @@ impl<'a> MirValidator<'a> {
                 uses.extend(then_arguments.iter().cloned());
                 uses.extend(else_arguments.iter().cloned());
             }
-            MirTerminator::Switch { scrutinee, arms } => {
+            MirTerminator::Switch { scrutinee, arms }
+            | MirTerminator::SwitchMove { scrutinee, arms } => {
                 uses.push(scrutinee.clone());
                 for arm in arms {
                     uses.extend(arm.arguments.iter().cloned());

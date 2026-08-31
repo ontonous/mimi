@@ -1766,7 +1766,10 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::RetUnit);
                 }
             },
-            MirTerminator::Switch { scrutinee, arms } => self.emit_switch(scrutinee, arms),
+            MirTerminator::Switch { scrutinee, arms } => self.emit_switch(scrutinee, arms, false),
+            MirTerminator::SwitchMove { scrutinee, arms } => {
+                self.emit_switch(scrutinee, arms, true)
+            }
             MirTerminator::Trap { code } => {
                 self.error(format!("trap terminator '{code}' is not lowered"))
             }
@@ -1779,7 +1782,12 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn emit_switch(&mut self, scrutinee: &MirValueId, arms: &[crate::core::mir::MirSwitchArm]) {
+    fn emit_switch(
+        &mut self,
+        scrutinee: &MirValueId,
+        arms: &[crate::core::mir::MirSwitchArm],
+        consume_scrutinee: bool,
+    ) {
         let Some(scrutinee_reg) = self.reg(scrutinee) else {
             return;
         };
@@ -1800,6 +1808,19 @@ impl<'a> FunctionEmitter<'a> {
         };
         if let Err(message) = self.supported_type(&scrutinee_info.ty) {
             self.error(format!("switch scrutinee is unsupported: {message}"));
+            return;
+        }
+        let validation = if consume_scrutinee {
+            self.program
+                .type_catalog()
+                .validate_switch_move(&scrutinee_info.ty, arms)
+        } else {
+            self.program
+                .type_catalog()
+                .validate_switch(&scrutinee_info.ty, arms)
+        };
+        if let Err(message) = validation {
+            self.error(format!("switch is invalid: {message}"));
             return;
         }
         let mut has_default = false;
@@ -1828,13 +1849,23 @@ impl<'a> FunctionEmitter<'a> {
                         offset: 0,
                         ra: condition,
                     });
-                    self.emit_variant_edge_arguments(
-                        arm.target.clone(),
-                        &arm.arguments,
-                        &arm.bindings,
-                        scrutinee_reg,
-                        variant_desc,
-                    );
+                    if consume_scrutinee {
+                        self.emit_variant_move_edge_arguments(
+                            arm.target.clone(),
+                            &arm.arguments,
+                            &arm.bindings,
+                            scrutinee_reg,
+                            variant_desc,
+                        );
+                    } else {
+                        self.emit_variant_edge_arguments(
+                            arm.target.clone(),
+                            &arm.arguments,
+                            &arm.bindings,
+                            scrutinee_reg,
+                            variant_desc,
+                        );
+                    }
                     let jump = self.proto.emit(Op::Jmp { offset: 0 });
                     self.pending_jumps.push((jump, arm.target.clone()));
                     self.proto.patch_jump_to(next_arm, self.proto.code.len());
@@ -1842,6 +1873,9 @@ impl<'a> FunctionEmitter<'a> {
                 crate::core::mir::MirSwitchCase::Default => {
                     has_default = true;
                     self.emit_edge_arguments(&arm.target, &arm.arguments);
+                    if consume_scrutinee {
+                        self.proto.emit(Op::DropVariant { ra: scrutinee_reg });
+                    }
                     let jump = self.proto.emit(Op::Jmp { offset: 0 });
                     self.pending_jumps.push((jump, arm.target.clone()));
                 }
@@ -1856,6 +1890,130 @@ impl<'a> FunctionEmitter<'a> {
         }
         if !has_default && arms.is_empty() {
             self.error("variant switch has no arms");
+        }
+    }
+
+    fn emit_variant_move_edge_arguments(
+        &mut self,
+        target: crate::core::mir::MirBlockId,
+        arguments: &[MirValueId],
+        bindings: &[crate::core::mir::MirSwitchBinding],
+        scrutinee: Reg,
+        variant: &crate::core::mir::types::MirVariantDesc,
+    ) {
+        if bindings.is_empty() {
+            self.emit_edge_arguments(&target, arguments);
+            self.proto.emit(Op::DropVariant { ra: scrutinee });
+            return;
+        }
+        let Some(block) = self.function.blocks.get(&target) else {
+            self.error(format!("edge target '{}' is absent", target));
+            return;
+        };
+        if block.parameters.len() != arguments.len() + bindings.len() {
+            self.error(format!("edge to '{}' has wrong argument arity", target));
+            return;
+        }
+        let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
+        for argument in arguments {
+            let Some(source) = self.reg(argument) else {
+                return;
+            };
+            let scratch = self.proto.alloc_reg();
+            let Some(argument_info) = self.function.values.get(argument) else {
+                self.error(format!("edge argument '{}' is absent", argument));
+                return;
+            };
+            if !self.emit_value_transfer(scratch, source, &argument_info.ty) {
+                return;
+            }
+            sources.push(scratch);
+        }
+        if variant.fields.len() > u16::MAX as usize {
+            self.error("variant payload arity exceeds bytecode field ABI");
+            return;
+        }
+        let payload_base = self.proto.alloc_reg();
+        for _ in 1..variant.fields.len() {
+            self.proto.alloc_reg();
+        }
+        self.proto.emit(Op::DestructureVariantMove {
+            ra: scrutinee,
+            base: payload_base,
+            arity: variant.fields.len() as u16,
+        });
+        for (index, field) in variant.fields.iter().enumerate().rev() {
+            if !bindings.iter().any(|binding| binding.field == field.id) {
+                self.emit_drop_register(payload_base + index as u16, &field.ty);
+            }
+        }
+        for binding in bindings {
+            let Some(index) = variant
+                .fields
+                .iter()
+                .position(|field| field.id == binding.field)
+            else {
+                self.error(format!(
+                    "switch-move binding field '{}' is absent",
+                    binding.field.0
+                ));
+                return;
+            };
+            sources.push(payload_base + index as u16);
+        }
+        for (source, parameter) in sources.into_iter().zip(&block.parameters) {
+            let Some(destination) = self.reg(&parameter.value) else {
+                return;
+            };
+            let Some(parameter_info) = self.function.values.get(&parameter.value) else {
+                self.error(format!("edge parameter '{}' is absent", parameter.value));
+                return;
+            };
+            if !self.emit_value_transfer(destination, source, &parameter_info.ty) {
+                return;
+            }
+        }
+    }
+
+    fn emit_drop_register(&mut self, register: Reg, ty: &crate::core::ResolvedTypeId) {
+        let Some(descriptor) = self.program.type_catalog().get(ty) else {
+            self.error(format!("drop register type '{}' is absent", ty.as_str()));
+            return;
+        };
+        if descriptor.ownership == MirOwnership::Copy {
+            return;
+        }
+        match descriptor.glue.drop {
+            MirGlueKind::OwnedString => {
+                self.proto.emit(Op::Drop { ra: register });
+            }
+            MirGlueKind::Aggregate => match &descriptor.layout {
+                MirLayout::Tuple(elements) => {
+                    self.proto.emit(Op::DropAggregate {
+                        ra: register,
+                        arity: elements.len() as u16,
+                    });
+                }
+                MirLayout::Record { fields, .. } => {
+                    self.proto.emit(Op::DropAggregate {
+                        ra: register,
+                        arity: fields.len() as u16,
+                    });
+                }
+                MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                    self.proto.emit(Op::DropVariant { ra: register });
+                }
+                layout => self.error(format!(
+                    "drop register type '{}' has unsupported aggregate layout {:?}",
+                    ty.as_str(),
+                    layout
+                )),
+            },
+            MirGlueKind::Noop => {}
+            MirGlueKind::Unsupported => self.error(format!(
+                "drop register type '{}' has no canonical drop glue",
+                ty.as_str()
+            )),
         }
     }
 
@@ -2579,16 +2737,87 @@ mod tests {
     }
 
     #[test]
-    fn rejects_move_variant_switch_before_any_backend() {
+    fn executes_move_variant_switch_before_any_backend() {
         let source =
             "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("move payload needs explicit aggregate glue");
-        let message = format!("{error:?}");
-        assert!(message.contains("no canonical") || message.contains("switch scrutinee"));
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DestructureVariantMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            crate::core::mir::reference::MirRuntimeValue::String("owned".into())
+        );
+        assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn bytecode_and_reference_agree_when_consuming_switch_drops_unbound_payload() {
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DropVariant { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            crate::core::mir::reference::MirRuntimeValue::Int(42)
+        );
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn bytecode_and_reference_agree_on_consuming_result_payload() {
+        let source =
+            "func main() -> string { let value: Result<string, string> = Err(\"error\"); match value { Ok(v) => v, Err(e) => e } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DestructureVariantMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(
+            reference,
+            crate::core::mir::reference::MirRuntimeValue::String("error".into())
+        );
+        assert!(matches!(value, Value::String(value) if value.as_str() == "error"));
     }
 
     #[test]

@@ -859,7 +859,16 @@ impl<'a> Lowerer<'a> {
             self.error(node, "match expression has no arms");
             return;
         }
-        let scrutinee = self.lower_expr(scrutinee);
+        let consume_scrutinee = self.type_catalog.is_some_and(|catalog| {
+            catalog
+                .get(&scrutinee.ty)
+                .is_some_and(|descriptor| descriptor.ownership != super::types::MirOwnership::Copy)
+        });
+        let scrutinee = if consume_scrutinee {
+            self.lower_consuming_expr(scrutinee)
+        } else {
+            self.lower_expr(scrutinee)
+        };
         let Some(join_id) = self.block_id("match.join", node) else {
             return;
         };
@@ -917,10 +926,18 @@ impl<'a> Lowerer<'a> {
             self.error(node, "match has no MIR-lowerable arms");
             return;
         }
-        self.terminate(MirTerminator::Switch {
-            scrutinee,
-            arms: switch_arms,
-        });
+        let terminator = if consume_scrutinee {
+            MirTerminator::SwitchMove {
+                scrutinee: scrutinee.clone(),
+                arms: switch_arms,
+            }
+        } else {
+            MirTerminator::Switch {
+                scrutinee: scrutinee.clone(),
+                arms: switch_arms,
+            }
+        };
+        self.terminate(terminator);
 
         for (block_id, join_edge, body) in arm_blocks {
             self.switch_to(block_id);
@@ -934,6 +951,35 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.switch_to(join_id);
+    }
+
+    /// Lower a match scrutinee that is consumed by `SwitchMove`.  Direct local
+    /// loads are moved into the terminator value so the original local is not
+    /// silently cloned and left alive beside the consumed variant.  Rvalues
+    /// and already ownership-aware projections keep their ordinary lowering;
+    /// their result is fresh and is consumed by the terminator.
+    fn lower_consuming_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        if let ResolvedExprKind::Load(place) = &expression.kind {
+            if place.projections.is_empty() {
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return self.fallback_value(expression);
+                };
+                self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+                match self.local_value(&place.base) {
+                    Ok(source) => self.emit(
+                        &expression.node_id,
+                        "move",
+                        MirInstructionKind::Move {
+                            result: result.clone(),
+                            source,
+                        },
+                    ),
+                    Err(errors) => self.errors.extend(errors),
+                }
+                return result;
+            }
+        }
+        self.lower_expr(expression)
     }
 
     fn lower_switch_bindings(
@@ -1365,7 +1411,9 @@ fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<No
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_body, lower_program};
+    use super::{lower_body, lower_body_with_type_catalog, lower_program};
+    use crate::core::mir::types::MirTypeCatalog;
+    use crate::core::mir::{MirInstructionKind, MirTerminator};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -1507,6 +1555,39 @@ mod tests {
         assert!(text.contains("construct_variant"));
         assert!(text.contains("Variant"));
         assert!(text.contains("bind="), "{text}");
+        assert!(mir.validate().is_ok(), "{:?}", mir.validate());
+    }
+
+    #[test]
+    fn non_copy_option_match_lowers_to_consuming_switch_move() {
+        let source =
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("TypeDesc");
+        let callable = program
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .expect("main callable");
+        let mir = lower_body_with_type_catalog(&callable.body, &catalog)
+            .expect("consuming Option match lowering");
+        let switch = mir
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                MirTerminator::SwitchMove { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .expect("non-Copy match must use SwitchMove");
+        assert_eq!(switch.len(), 2);
+        assert_eq!(switch[0].bindings.len(), 1);
+        assert!(mir
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Move { .. })));
         assert!(mir.validate().is_ok(), "{:?}", mir.validate());
     }
 }
