@@ -196,6 +196,92 @@ impl MirBuiltinContract {
     }
 }
 
+/// The closed set of conversion shapes currently materialized in canonical
+/// MIR.  A surface cast remains a `Convert` node, but it cannot reach a
+/// backend until its source/target TypeDesc pair resolves to one of these
+/// contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirConversionKind {
+    /// Explicitly spell a no-op cast for a Copy scalar without changing its
+    /// canonical type identity.
+    ScalarIdentity,
+    /// Exact signed integer widening.  Runtime scalar values are already
+    /// carried in the canonical integer slot, so this has no trap or loss.
+    SignedI32ToI64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirConversionContract {
+    pub kind: MirConversionKind,
+    pub name: &'static str,
+    pub requires_scalar: bool,
+    pub requires_copy: bool,
+}
+
+impl MirConversionContract {
+    pub fn for_kind(kind: MirConversionKind) -> Self {
+        match kind {
+            MirConversionKind::ScalarIdentity => Self {
+                kind,
+                name: "scalar identity",
+                requires_scalar: true,
+                requires_copy: true,
+            },
+            MirConversionKind::SignedI32ToI64 => Self {
+                kind,
+                name: "signed i32 to signed i64 widening",
+                requires_scalar: true,
+                requires_copy: true,
+            },
+        }
+    }
+
+    /// Resolve a pair of checker-owned TypeDesc values to the closed
+    /// conversion family.  No backend may add another ABI pair locally.
+    pub fn for_descriptors(source: &MirTypeDesc, target: &MirTypeDesc) -> Option<Self> {
+        [
+            MirConversionKind::ScalarIdentity,
+            MirConversionKind::SignedI32ToI64,
+        ]
+        .into_iter()
+        .map(Self::for_kind)
+        .find(|contract| contract.accepts(source, target))
+    }
+
+    pub fn accepts(self, source: &MirTypeDesc, target: &MirTypeDesc) -> bool {
+        let layout_ok = !self.requires_scalar
+            || (matches!(&source.layout, MirLayout::Scalar)
+                && matches!(&target.layout, MirLayout::Scalar));
+        let ownership_ok = !self.requires_copy
+            || (source.ownership == MirOwnership::Copy && target.ownership == MirOwnership::Copy);
+        if !layout_ok || !ownership_ok {
+            return false;
+        }
+        match self.kind {
+            MirConversionKind::ScalarIdentity => source.id == target.id && source.abi == target.abi,
+            MirConversionKind::SignedI32ToI64 => {
+                matches!(
+                    source.abi,
+                    MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true
+                    }
+                ) && matches!(
+                    target.abi,
+                    MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true
+                    }
+                )
+            }
+        }
+    }
+
+    pub fn accepted_description() -> &'static str {
+        "same Copy scalar type or signed i32 to signed i64"
+    }
+}
+
 /// Backend-independent implementation selected for one ownership boundary.
 ///
 /// `OwnedString` is a semantic contract, not a VM/LLVM representation: every
@@ -1099,6 +1185,41 @@ impl MirTypeCatalog {
                 ty.as_str()
             ))
         }
+    }
+
+    /// Resolve and validate a checked `Convert` against the closed canonical
+    /// scalar conversion contract.  The returned contract is shared by the
+    /// reference executor and every production adapter; no backend may grow
+    /// its own ABI-pair table.
+    pub fn validate_conversion(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirConversionContract, String> {
+        let source = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "conversion source type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "conversion result type '{}' is absent from MIR type catalog",
+                result_ty.as_str()
+            )
+        })?;
+        MirConversionContract::for_descriptors(source, result).ok_or_else(|| {
+            format!(
+                "conversion from ABI {:?}/layout {:?}/ownership {:?} to ABI {:?}/layout {:?}/ownership {:?} is outside the canonical contract (accepted: {})",
+                source.abi,
+                source.layout,
+                source.ownership,
+                result.abi,
+                result.layout,
+                result.ownership,
+                MirConversionContract::accepted_description()
+            )
+        })
     }
 
     pub fn validate_value_operation(

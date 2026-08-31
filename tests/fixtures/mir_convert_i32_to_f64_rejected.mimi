@@ -1,0 +1,4 @@
+func main() -> f64 {
+    let value: i32 = 7
+    value as f64
+}

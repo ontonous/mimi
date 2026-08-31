@@ -265,6 +265,58 @@ fn canonical_mir_builtin_min_rejects_unsupported_abi_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_convert_i32_to_i64_cli_smoke() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_convert_i32_to_i64_min_max.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR conversion fixture");
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "canonical MIR conversion fixture failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn canonical_mir_convert_i32_to_f64_rejects_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_convert_i32_to_f64_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical conversion fixture");
+    assert!(
+        !output.status.success(),
+        "i32 to f64 conversion must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("canonical MIR build error")
+            && stderr.contains("conversion")
+            && stderr.contains("accepted: same Copy scalar type"),
+        "unexpected canonical conversion rejection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bytecode runtime error"),
+        "canonical conversion rejection must not fall back to the legacy runtime:\n{stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_run_cli_executes_imported_user_call_graph() {
     let fixture = project_root()
         .join("tests")

@@ -202,6 +202,7 @@ impl MirProgram {
             }
             errors.extend(validate_linear_consumption(function, &type_catalog));
             errors.extend(validate_builtin_calls(function, &type_catalog));
+            errors.extend(validate_conversions(function, &type_catalog));
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
                     match &instruction.kind {
@@ -649,6 +650,39 @@ impl MirProgram {
     pub fn type_catalog(&self) -> &MirTypeCatalog {
         &self.type_catalog
     }
+}
+
+/// Validate every `Convert` against the closed TypeDesc conversion contract
+/// before either the reference executor or a production backend sees it.
+/// Existing surface casts such as integer-to-float remain deliberately
+/// rejected until their deterministic numeric and trap semantics are
+/// materialized here.
+fn validate_conversions(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let super::MirInstructionKind::Convert { result, source } = &instruction.kind else {
+                continue;
+            };
+            let (Some(source_value), Some(result_value)) =
+                (function.values.get(source), function.values.get(result))
+            else {
+                continue;
+            };
+            if let Err(message) =
+                type_catalog.validate_conversion(&source_value.ty, &result_value.ty)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message,
+                });
+            }
+        }
+    }
+    errors
 }
 
 /// Validate the complete semantic contract for every first-class builtin
@@ -1252,9 +1286,52 @@ impl<'a> MirReferenceInterpreter<'a> {
                 values.insert(result.clone(), source);
             }
             MirInstructionKind::Copy { result, source }
-            | MirInstructionKind::Clone { result, source }
-            | MirInstructionKind::Convert { result, source } => {
+            | MirInstructionKind::Clone { result, source } => {
                 let value = self.read_value(function, values, source)?;
+                values.insert(result.clone(), value);
+            }
+            MirInstructionKind::Convert { result, source } => {
+                let source_ty = function
+                    .values
+                    .get(source)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!("conversion source '{}' is absent from MIR values", source),
+                        )
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!("conversion result '{}' is absent from MIR values", result),
+                        )
+                    })?;
+                let contract = self
+                    .program
+                    .type_catalog()
+                    .validate_conversion(&source_ty, &result_ty)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let value = self.read_value(function, values, source)?;
+                let value = match contract.kind {
+                    super::types::MirConversionKind::ScalarIdentity => value,
+                    super::types::MirConversionKind::SignedI32ToI64 => match value {
+                        MirRuntimeValue::Int(value) => MirRuntimeValue::Int(value),
+                        _ => {
+                            return Err(self.error(
+                                &function.owner,
+                                format!(
+                                    "conversion '{}' received an incompatible runtime value",
+                                    contract.name
+                                ),
+                            ))
+                        }
+                    },
+                };
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::Move { result, source } => {
@@ -2843,6 +2920,51 @@ mod tests {
                         .contains("canonical contract accepts signed i64")
             })),
             other => panic!("unsupported min ABI escaped the validator: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_i32_to_i64_conversion_feeds_min_max_reference_oracle() {
+        let (owner, program) = canonical_program_with_main(
+            "func min_i64(left: i32, right: i32) -> i64 { min(left as i64, right as i64) }\nfunc main() -> i32 { if min_i64(1, 2) == 1 { 42 } else { 0 } }",
+        );
+        let instructions = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+        assert!(instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            crate::core::mir::MirInstructionKind::Convert { .. }
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            crate::core::mir::MirInstructionKind::BuiltinCall {
+                kind: crate::core::mir::types::MirBuiltinKind::Min,
+                ..
+            }
+        )));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference i32 to i64 conversion");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn canonical_i32_to_f64_conversion_rejects_before_any_backend() {
+        let source = "func main() -> f64 { let value: i32 = 7; value as f64 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("i32 to f64 remains outside the canonical conversion contract");
+        match error {
+            MirProgramBuildError::Validation(errors) => assert!(errors.iter().any(|error| {
+                error.message.contains("conversion")
+                    && error.message.contains("accepted: same Copy scalar type")
+            })),
+            other => panic!("unsupported conversion escaped the validator: {other:?}"),
         }
     }
 

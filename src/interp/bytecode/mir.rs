@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::types::{MirAbiClass, MirGlueKind, MirLayout, MirOwnership, MirTypeDesc};
+use crate::core::mir::types::{
+    MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout, MirOwnership,
+    MirTypeDesc,
+};
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
     MirTerminator, MirValueId,
@@ -1102,19 +1105,22 @@ impl<'a> FunctionEmitter<'a> {
             self.error("conversion operand lacks a type descriptor");
             return;
         };
-        let opcode = match (from.abi, to.abi) {
-            (MirAbiClass::Integer { bits, signed: true }, MirAbiClass::Float { bits: 32 | 64 })
-                if bits <= 64 =>
-            {
-                Op::IntToFloat { rd, ra }
-            }
-            (from, to) if from == to => Op::Mov { rd, rs: ra },
-            _ => {
-                self.error(format!(
-                    "conversion {:?} -> {:?} is outside bytecode slice",
-                    from.abi, to.abi
-                ));
-                return;
+        let Some(contract) = MirConversionContract::for_descriptors(from, to) else {
+            self.error(format!(
+                "conversion {:?}/layout {:?}/ownership {:?} -> {:?}/layout {:?}/ownership {:?} is outside the canonical contract (accepted: {})",
+                from.abi,
+                from.layout,
+                from.ownership,
+                to.abi,
+                to.layout,
+                to.ownership,
+                MirConversionContract::accepted_description()
+            ));
+            return;
+        };
+        let opcode = match contract.kind {
+            MirConversionKind::ScalarIdentity | MirConversionKind::SignedI32ToI64 => {
+                Op::Mov { rd, rs: ra }
             }
         };
         self.proto.emit(opcode);
@@ -2557,6 +2563,11 @@ mod tests {
                 "func min_i64(left: i64, right: i64) -> i64 { min(left, right) }\nfunc max_i64(left: i64, right: i64) -> i64 { max(left, right) }\nfunc main() -> i32 { if min_i64(9223372036854775806, 9223372036854775807) == 9223372036854775806 { if max_i64(-9223372036854775807, 9223372036854775806) == 9223372036854775806 { 42 } else { 0 } } else { 0 } }",
                 "builtin_call",
             ),
+            (
+                "conversion-i32-to-i64-min",
+                "func min_i64(left: i32, right: i32) -> i64 { min(left as i64, right as i64) }\nfunc main() -> i32 { if min_i64(1, 2) == 1 { 42 } else { 0 } }",
+                "convert",
+            ),
         ];
 
         for (name, source, shape) in cases {
@@ -2702,6 +2713,24 @@ mod tests {
             .count();
         assert!(builtin_ops >= 2, "expected min and max builtin opcodes");
         let value = BytecodeVM::new(program).run_value().expect("VM min/max");
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_canonical_i32_to_i64_conversion_through_ast_free_bytecode() {
+        let source = "func min_i64(left: i32, right: i32) -> i64 { min(left as i64, right as i64) }\nfunc main() -> i32 { if min_i64(1, 2) == 1 { 42 } else { 0 } }";
+        let program = compile(source);
+        assert!(program.ast.is_none());
+        let conversion_ops = program
+            .functions
+            .iter()
+            .flat_map(|function| function.code.iter())
+            .filter(|op| matches!(op, Op::Mov { .. }))
+            .count();
+        assert!(conversion_ops >= 2, "expected canonical conversion MOVs");
+        let value = BytecodeVM::new(program)
+            .run_value()
+            .expect("VM i32 to i64 conversion");
         assert!(matches!(value, Value::Int(42)));
     }
 
