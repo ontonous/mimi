@@ -164,6 +164,13 @@ pub enum MirInstructionKind {
         kind: MirAggregateKind,
         fields: Vec<MirValueId>,
     },
+    /// Construct a move-owned List from element values. The TypeDesc List
+    /// contract supplies the element layout and glue; this node carries no
+    /// backend-specific capacity or handle representation.
+    ConstructList {
+        result: MirValueId,
+        elements: Vec<MirValueId>,
+    },
     /// Construct a canonical Option/Result variant. Payload identities are
     /// checker-owned; discriminant and physical payload encoding come from
     /// the TypeDesc variant layout.
@@ -548,6 +555,9 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             kind,
             fields,
         } => format!("construct {result} = {kind:?}({})", format_values(fields)),
+        MirInstructionKind::ConstructList { result, elements } => {
+            format!("construct_list {result} = [{}]", format_values(elements))
+        }
         MirInstructionKind::ConstructVariant {
             result,
             nominal,
@@ -937,6 +947,10 @@ impl<'a> MirValidator<'a> {
             }
             Construct { result, fields, .. } => {
                 self.values(fields);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            ConstructList { result, elements } => {
+                self.values(elements);
                 self.result_at(result, &instruction.id, block, index);
             }
             ConstructVariant { result, fields, .. }
@@ -1342,6 +1356,9 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
+            }
+            MirInstructionKind::ConstructList { elements, .. } => {
+                uses.extend(elements.iter().cloned());
             }
             MirInstructionKind::ConstructVariant { fields, .. }
             | MirInstructionKind::ConstructVariantMove { fields, .. } => {

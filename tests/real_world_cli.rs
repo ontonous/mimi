@@ -709,7 +709,8 @@ fn canonical_mir_run_cli_rejects_unlowered_shape_without_fallback() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("canonical MIR build error")
-            && stderr.contains("expression shape is not lowered"),
+            && (stderr.contains("indexed place projection")
+                || stderr.contains("indexed projection")),
         "unexpected canonical rejection:\n{stderr}"
     );
     assert!(

@@ -5,7 +5,7 @@
 //! resolver, or checker.  Unsupported MIR shapes are reported explicitly
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
-//! glued tuple/record products.
+//! glued tuple/record products, and concrete Copy-scalar Lists.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -382,7 +382,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::Mov { rd, rs });
                 } else if matches!(
                     desc.glue.move_out,
-                    MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                    MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
                 ) {
                     self.proto.emit(Op::Move { rd, rs });
                 } else {
@@ -410,7 +410,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.proto.emit(Op::Mov { rd, rs });
                 } else if matches!(
                     desc.glue.clone,
-                    MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                    MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
                 ) {
                     self.proto.emit(Op::Clone { rd, rs });
                 } else {
@@ -431,7 +431,7 @@ impl<'a> FunctionEmitter<'a> {
                         value
                     ));
                 } else if desc.ownership != MirOwnership::Copy
-                    && desc.glue.drop == MirGlueKind::OwnedString
+                    && matches!(desc.glue.drop, MirGlueKind::OwnedString | MirGlueKind::List)
                 {
                     let Some(ra) = self.reg(value) else { return };
                     self.proto.emit(Op::Drop { ra });
@@ -492,6 +492,9 @@ impl<'a> FunctionEmitter<'a> {
                 kind: MirAggregateKind::Tuple,
                 fields,
             } => self.emit_tuple_construct(result, fields),
+            MirInstructionKind::ConstructList { result, elements } => {
+                self.emit_list_construct(result, elements)
+            }
             MirInstructionKind::Construct {
                 result,
                 kind: MirAggregateKind::Record { nominal, fields },
@@ -710,7 +713,7 @@ impl<'a> FunctionEmitter<'a> {
                 });
             } else if matches!(
                 current_ty_desc.glue.clone,
-                MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
             ) {
                 self.proto.emit(Op::Clone {
                     rd,
@@ -1062,7 +1065,7 @@ impl<'a> FunctionEmitter<'a> {
                 });
             } else if matches!(
                 desc.glue.move_out,
-                MirGlueKind::OwnedString | MirGlueKind::Aggregate
+                MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
             ) {
                 self.proto.emit(Op::Move {
                     rd: scratch,
@@ -1280,6 +1283,64 @@ impl<'a> FunctionEmitter<'a> {
             ra,
             field: field_idx,
         });
+    }
+
+    fn emit_list_construct(&mut self, result: &MirValueId, elements: &[MirValueId]) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(result_desc) = self.type_of(result).cloned() else {
+            self.error(format!("List result '{}' has no type descriptor", result));
+            return;
+        };
+        let MirLayout::List { element } = &result_desc.layout else {
+            self.error(format!("List result '{}' has no List layout", result));
+            return;
+        };
+        let Some(element_types) = elements
+            .iter()
+            .map(|value| {
+                self.function
+                    .values
+                    .get(value)
+                    .map(|value| value.ty.clone())
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            self.error("List construction element is absent from MIR value catalog");
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_list_construct(&result_desc.id, &element_types)
+        {
+            self.error(format!("List construction is unsupported: {message}"));
+            return;
+        }
+        if elements.len() > u32::MAX as usize {
+            self.error("List construction length exceeds bytecode capacity ABI");
+            return;
+        }
+        self.proto.emit(Op::NewList {
+            rd,
+            capacity: elements.len() as u32,
+        });
+        for (index, value) in elements.iter().enumerate() {
+            let Some(rb) = self.reg(value) else { return };
+            let Some(value_info) = self.function.values.get(value) else {
+                self.error(format!("List element {} is absent from MIR values", index));
+                return;
+            };
+            if &value_info.ty != element {
+                self.error(format!(
+                    "List element {} type '{}' disagrees with layout element type '{}'",
+                    index,
+                    value_info.ty.as_str(),
+                    element.as_str()
+                ));
+                return;
+            }
+            self.proto.emit(Op::ListPush { ra: rd, rb });
+        }
     }
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
@@ -1781,6 +1842,15 @@ impl<'a> FunctionEmitter<'a> {
             {
                 Ok(())
             }
+            MirAbiClass::OpaqueHandle if matches!(desc.layout, MirLayout::List { .. }) => {
+                self.program
+                    .type_catalog()
+                    .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
+                let MirLayout::List { element } = &desc.layout else {
+                    unreachable!()
+                };
+                self.supported_type(element)
+            }
             MirAbiClass::Aggregate => match &desc.layout {
                 MirLayout::Tuple(elements) => {
                     if desc.ownership != MirOwnership::Copy
@@ -2122,6 +2192,11 @@ impl<'a> FunctionEmitter<'a> {
             MirGlueKind::OwnedString => {
                 self.proto.emit(Op::Drop { ra: register });
             }
+            MirGlueKind::List => {
+                // The opened List shape has Copy scalar elements, so the
+                // handle release is the complete canonical drop operation.
+                self.proto.emit(Op::Drop { ra: register });
+            }
             MirGlueKind::Aggregate => match &descriptor.layout {
                 MirLayout::Tuple(elements) => {
                     self.proto.emit(Op::DropAggregate {
@@ -2280,7 +2355,7 @@ impl<'a> FunctionEmitter<'a> {
             true
         } else if matches!(
             desc.glue.move_out,
-            MirGlueKind::OwnedString | MirGlueKind::Aggregate
+            MirGlueKind::OwnedString | MirGlueKind::List | MirGlueKind::Aggregate
         ) {
             self.proto.emit(Op::Move { rd, rs });
             true
@@ -2401,6 +2476,12 @@ mod tests {
                 .map(normalize_value)
                 .collect::<Result<Vec<_>, _>>()
                 .map(MirRuntimeValue::Tuple),
+            Value::List(values) => values
+                .iter()
+                .cloned()
+                .map(normalize_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(MirRuntimeValue::List),
             other => Err(format!(
                 "differential value normalization is not materialized for {other:?}"
             )),
@@ -2613,6 +2694,78 @@ mod tests {
     }
 
     #[test]
+    fn canonical_mir_differential_covers_copy_scalar_list_branch_and_return() {
+        let report = run_canonical_differential(
+            "func main() -> List<i32> { if true { [1, 2] } else { [3, 4] } }",
+        )
+        .expect("Copy-scalar List differential");
+        assert!(report.mir_text.contains("construct_list"));
+        assert!(report.type_desc_text.contains("layout=List"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::List(vec![
+                MirRuntimeValue::Int(1),
+                MirRuntimeValue::Int(2),
+            ]))
+        );
+    }
+
+    #[test]
+    fn canonical_mir_differential_covers_bool_list_elements() {
+        let report = run_canonical_differential(
+            "func main() -> List<bool> { if false { [true] } else { [false, true] } }",
+        )
+        .expect("Copy-scalar bool List differential");
+        assert!(report.type_desc_text.contains("layout=List"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::List(vec![
+                MirRuntimeValue::Bool(false),
+                MirRuntimeValue::Bool(true),
+            ]))
+        );
+    }
+
+    #[test]
+    fn canonical_mir_rejects_list_element_shape_before_backend() {
+        let error = run_canonical_differential("func main() -> List<string> { [\"owned\"] }")
+            .expect_err("List<string> is outside the first canonical List slice");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(message.contains("List") && message.contains("Copy scalar"));
+            }
+            other => panic!("unsupported List shape crossed the canonical gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_mir_rejects_nested_list_shape_before_backend() {
+        let error = run_canonical_differential("func main() -> List<List<i32>> { [[1, 2]] }")
+            .expect_err("nested List is outside the first canonical List slice");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(message.contains("List") && message.contains("Copy scalar"));
+            }
+            other => panic!("nested List crossed the canonical gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_mir_list_drop_uses_explicit_list_glue() {
+        let report = run_canonical_differential(
+            "func main() -> i32 { let values = [1, 2, 3]; drop(values); 42 }",
+        )
+        .expect("List drop differential");
+        assert!(report.mir_text.contains("construct_list"));
+        assert!(report.mir_text.contains("drop"));
+        assert!(report.type_desc_text.contains("move_out: List"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(42))
+        );
+    }
+
+    #[test]
     fn canonical_mir_differential_rejects_unmaterialized_shape_without_fallback() {
         let error = run_canonical_differential(
             "func main() -> i32 { let values = [10, 20, 30]; values[0] }",
@@ -2620,7 +2773,7 @@ mod tests {
         .expect_err("list literal must remain outside this canonical slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
-                assert!(message.contains("expression shape is not lowered"));
+                assert!(message.contains("indexed") || message.contains("projection"));
             }
             other => panic!("unsupported shape crossed the canonical gate: {other:?}"),
         }

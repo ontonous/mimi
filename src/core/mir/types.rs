@@ -14,7 +14,7 @@ use crate::core::ir::{
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-8";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-9";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -284,15 +284,17 @@ impl MirConversionContract {
 
 /// Backend-independent implementation selected for one ownership boundary.
 ///
-/// `OwnedString` is a semantic contract, not a VM/LLVM representation: every
-/// consumer must implement the same retain/release/transfer behavior for an
-/// owned Mimi string. `Aggregate` is reserved for a recursively materialized
-/// product contract. `Unsupported` is deliberately explicit so a backend
-/// cannot turn an unmodelled aggregate into an accidental shallow copy.
+/// `OwnedString` and `List` are semantic contracts, not VM/LLVM
+/// representations: every consumer must implement the same retain/release/
+/// transfer behavior for the corresponding owned Mimi value. `Aggregate` is
+/// reserved for a recursively materialized product contract. `Unsupported`
+/// is deliberately explicit so a backend cannot turn an unmodelled aggregate
+/// into an accidental shallow copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirGlueKind {
     Noop,
     OwnedString,
+    List,
     Aggregate,
     Unsupported,
 }
@@ -357,6 +359,13 @@ impl MirGlueContract {
                 drop: MirGlueKind::OwnedString,
             };
         }
+        if matches!(kind, MirTypeKind::List) && ownership == MirOwnership::Move {
+            return Self {
+                move_out: MirGlueKind::List,
+                clone: MirGlueKind::List,
+                drop: MirGlueKind::List,
+            };
+        }
         Self {
             move_out: MirGlueKind::Unsupported,
             clone: MirGlueKind::Unsupported,
@@ -382,6 +391,7 @@ pub enum MirTypeKind {
     Primitive(PrimitiveType),
     GenericParameter,
     Nominal,
+    List,
     FlowStateSet,
     Reference { mutable: bool },
     Option,
@@ -430,6 +440,13 @@ pub enum MirLayout {
     Record {
         nominal: crate::core::NominalTypeId,
         fields: Vec<MirFieldDesc>,
+    },
+    /// Variable-length List storage. The physical representation remains
+    /// backend-owned, but the element identity and ownership contract are
+    /// canonical MIR facts. The first production slice admits only a
+    /// concrete Copy scalar element.
+    List {
+        element: ResolvedTypeId,
     },
     Opaque,
 }
@@ -481,6 +498,15 @@ impl MirTypeDesc {
                 MirTypeKind::GenericParameter,
                 MirAbiClass::OpaqueHandle,
                 MirLayout::Opaque,
+            ),
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:List" && arguments.len() == 1 => (
+                MirTypeKind::List,
+                MirAbiClass::OpaqueHandle,
+                MirLayout::List {
+                    element: arguments[0].clone(),
+                },
             ),
             ResolvedType::Nominal { .. } => (
                 MirTypeKind::Nominal,
@@ -790,6 +816,92 @@ impl MirTypeCatalog {
                 }
                 _ => self.validate_aggregate_glue(ty, operation)?,
             }
+        }
+        if operation_glue == MirGlueKind::List {
+            self.validate_list_glue(ty, operation)?;
+        }
+        Ok(())
+    }
+
+    /// Validate the first variable-length container contract. A List is a
+    /// move-owned runtime handle, but its element identity and glue are still
+    /// canonical MIR facts. This slice intentionally admits only concrete
+    /// Copy scalars so a backend cannot accidentally inherit recursive or
+    /// element-drop semantics from the VM's generic list implementation.
+    pub fn validate_list_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "list glue type '{}' has no canonical List layout",
+                ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::List
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+        {
+            return Err(format!(
+                "type '{}' List TypeDesc has an inconsistent ABI/ownership contract",
+                ty.as_str()
+            ));
+        }
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::List,
+            clone: MirGlueKind::List,
+            drop: MirGlueKind::List,
+        };
+        if descriptor.glue != expected {
+            return Err(format!(
+                "type '{}' List glue contract is not fully materialized",
+                ty.as_str()
+            ));
+        }
+        let element_desc = self.get(element).ok_or_else(|| {
+            format!(
+                "List '{}' element type '{}' is absent from MIR type catalog",
+                ty.as_str(),
+                element.as_str()
+            )
+        })?;
+        if element_desc.ownership != MirOwnership::Copy
+            || element_desc.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || !matches!(element_desc.layout, MirLayout::Scalar)
+            || !matches!(
+                element_desc.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } | MirAbiClass::Bool
+            )
+        {
+            return Err(format!(
+                "List '{}' element type '{}' is outside the canonical Copy scalar contract",
+                ty.as_str(),
+                element.as_str()
+            ));
+        }
+        let operation_glue = match operation {
+            MirGlueOperation::MoveOut => descriptor.glue.move_out,
+            MirGlueOperation::Clone => descriptor.glue.clone,
+            MirGlueOperation::Drop => descriptor.glue.drop,
+        };
+        if operation_glue != MirGlueKind::List {
+            return Err(format!(
+                "List '{}' operation {:?} is missing List glue",
+                ty.as_str(),
+                operation
+            ));
         }
         Ok(())
     }
@@ -1349,6 +1461,37 @@ impl MirTypeCatalog {
                 kind, layout
             )),
         }
+    }
+
+    /// Validate a List construction against the closed first container
+    /// contract. Empty lists still carry an element TypeDesc through their
+    /// result type, so they are checked just as strictly as non-empty lists.
+    pub fn validate_list_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        element_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        self.validate_list_glue(result_ty, MirGlueOperation::MoveOut)?;
+        let descriptor = self
+            .get(result_ty)
+            .ok_or_else(|| format!("List result type '{}' is absent", result_ty.as_str()))?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "List result type '{}' has no canonical List layout",
+                result_ty.as_str()
+            ));
+        };
+        for (index, actual) in element_types.iter().enumerate() {
+            if actual != element {
+                return Err(format!(
+                    "List element {} type '{}' disagrees with layout element type '{}'",
+                    index,
+                    actual.as_str(),
+                    element.as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Validate one value projection against the canonical semantic layout.

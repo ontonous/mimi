@@ -23,6 +23,7 @@ pub enum MirRuntimeValue {
     Bool(bool),
     String(String),
     Tuple(Vec<MirRuntimeValue>),
+    List(Vec<MirRuntimeValue>),
     Record {
         nominal: crate::core::ir::NominalTypeId,
         fields: Vec<MirRuntimeValue>,
@@ -317,6 +318,32 @@ impl MirProgram {
                             }
                             if let Err(message) = type_catalog
                                 .validate_glue(&result_value.ty, MirGlueOperation::MoveOut)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::ConstructList { result, elements } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let element_types = elements
+                                .iter()
+                                .filter_map(|element| {
+                                    function.values.get(element).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            if element_types.len() != elements.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "List element is absent from MIR value catalog".into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog
+                                .validate_list_construct(&result_value.ty, &element_types)
                             {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
@@ -1124,6 +1151,7 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         | super::MirInstructionKind::Construct {
             fields: arguments, ..
         } => arguments.clone(),
+        super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
         super::MirInstructionKind::ConstructVariant { fields, .. }
         | super::MirInstructionKind::ConstructVariantMove { fields, .. } => {
             fields.iter().map(|(_, value)| value.clone()).collect()
@@ -1153,6 +1181,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Project { result, .. }
         | super::MirInstructionKind::MoveProject { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
+        | super::MirInstructionKind::ConstructList { result, .. }
         | super::MirInstructionKind::ConstructVariant { result, .. }
         | super::MirInstructionKind::ConstructVariantMove { result, .. }
         | super::MirInstructionKind::UpdateRecord { result, .. }
@@ -1574,6 +1603,31 @@ impl<'a> MirReferenceInterpreter<'a> {
                     } => self.construct_record(function, result, nominal, field_ids, fields)?,
                 };
                 values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ConstructList { result, elements } => {
+                let element_types = elements
+                    .iter()
+                    .map(|element| {
+                        function
+                            .values
+                            .get(element)
+                            .map(|value| value.ty.clone())
+                            .ok_or_else(|| {
+                                self.error(&function.owner, "List element has no MIR type")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| self.error(&function.owner, "List result has no MIR type"))?;
+                self.program
+                    .type_catalog()
+                    .validate_list_construct(&result_ty, &element_types)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let elements = self.take_transfer_values(function, values, elements)?;
+                values.insert(result.clone(), MirRuntimeValue::List(elements));
             }
             MirInstructionKind::ConstructVariant {
                 result,
@@ -2150,6 +2204,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                         MirRuntimeValue::Unit,
                     );
                     self.drop_runtime_value(function, &field.ty, child)?;
+                }
+                Ok(())
+            }
+            MirLayout::List { element } => {
+                let MirRuntimeValue::List(elements) = value else {
+                    return Err(
+                        self.error(&function.owner, "List drop value is not a canonical List")
+                    );
+                };
+                for element_value in elements {
+                    self.drop_runtime_value(function, element, element_value)?;
                 }
                 Ok(())
             }

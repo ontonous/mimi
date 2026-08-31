@@ -4,6 +4,8 @@
 //! architectural boundary for scalar expressions, structured branch control
 //! flow, Copy record aggregates, and recursive Move-owned tuple/record product
 //! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
+//! The first container slice adds List construction for concrete Copy scalar
+//! elements; all other List operations and element shapes remain fail-closed.
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
@@ -725,6 +727,20 @@ impl<'a> Lowerer<'a> {
                         result: result.clone(),
                         kind: MirAggregateKind::Tuple,
                         fields,
+                    },
+                );
+            }
+            ResolvedExprKind::List(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.lower_expr(element))
+                    .collect();
+                self.emit(
+                    &expression.node_id,
+                    "construct_list",
+                    MirInstructionKind::ConstructList {
+                        result: result.clone(),
+                        elements,
                     },
                 );
             }

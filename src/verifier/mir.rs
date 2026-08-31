@@ -752,6 +752,7 @@ fn eval_instruction(
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::MoveProject { .. }
+        | MirInstructionKind::ConstructList { .. }
         | MirInstructionKind::Borrow { .. }
         | MirInstructionKind::EndBorrow { .. }
         | MirInstructionKind::ConstructVariant { .. }
