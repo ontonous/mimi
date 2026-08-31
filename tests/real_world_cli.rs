@@ -161,6 +161,170 @@ fn canonical_mir_run_cli_smoke() {
 }
 
 #[test]
+fn canonical_mir_native_build_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_scalar.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR reference bytecode run");
+    assert_eq!(mir_run.status.code(), Some(42));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-{}-{}",
+        std::process::id(),
+        fixture.file_stem().unwrap().to_string_lossy()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
+fn canonical_mir_native_abs_overflow_matches_mir_trap_class() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_abs_overflow.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR trap oracle");
+    assert_eq!(mir_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&mir_run.stderr).contains("E0802"));
+
+    let binary =
+        std::env::temp_dir().join(format!("mimi-canonical-native-trap-{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR trap build");
+    assert!(
+        build.status.success(),
+        "canonical MIR trap build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR trap binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&native_run.stderr).contains("E0802"));
+}
+
+#[test]
+fn canonical_mir_native_builds_min_max_and_widening_convert() {
+    for fixture_name in [
+        "mir_builtin_min_max.mimi",
+        "mir_convert_i32_to_i64_min_max.mimi",
+    ] {
+        let fixture = project_root()
+            .join("tests")
+            .join("fixtures")
+            .join(fixture_name);
+        let binary = std::env::temp_dir().join(format!(
+            "mimi-canonical-native-numeric-{}-{}",
+            std::process::id(),
+            fixture_name
+        ));
+        let build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg(&fixture)
+            .arg("--mir")
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("failed to spawn canonical MIR numeric build");
+        assert!(
+            build.status.success(),
+            "canonical MIR numeric build failed for {fixture_name}:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native_run = Command::new(&binary)
+            .output()
+            .expect("failed to execute canonical MIR numeric binary");
+        let _ = fs::remove_file(&binary);
+        assert_eq!(
+            native_run.status.code(),
+            Some(42),
+            "canonical MIR numeric native run failed for {fixture_name}:\n{}",
+            String::from_utf8_lossy(&native_run.stderr)
+        );
+    }
+}
+
+#[test]
+fn canonical_mir_native_build_rejects_unsupported_shape_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected canonical MIR native build");
+    let _ = fs::remove_file(&binary);
+    assert!(
+        !build.status.success(),
+        "unsupported native MIR must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("canonical MIR native backend rejected")
+            && stderr.contains("ABI Float")
+            && stderr.contains("outside the Copy scalar native contract"),
+        "unexpected canonical native rejection:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("canonical MIR native backend capability check failed"),
+        "rejection must identify the canonical MIR gate:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("bytecode runtime error"),
+        "native MIR rejection must not fall back to another backend:\n{stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_builtin_abs_cli_smoke() {
     let fixture = project_root()
         .join("tests")

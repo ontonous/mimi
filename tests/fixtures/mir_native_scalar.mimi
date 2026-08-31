@@ -1,0 +1,14 @@
+// Canonical MIR native slice: Copy integer/bool control flow and calls.
+func choose(flag: bool, when_true: i32, when_false: i32) -> i32 {
+    if flag { when_true } else { when_false }
+}
+
+func main() -> i32 {
+    let selected = choose(true, 40, 0)
+    let magnitude = abs(7 as i64)
+    if (selected + 2) == 42 {
+        if magnitude == (7 as i64) { 42 } else { 0 }
+    } else {
+        0
+    }
+}

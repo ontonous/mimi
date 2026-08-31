@@ -3,5 +3,5 @@ func min_i64(left: i32, right: i32) -> i64 {
 }
 
 func main() -> i32 {
-    if min_i64(1, 2) == 1 { 42 } else { 0 }
+    if min_i64(1, 2) == (1 as i64) { 42 } else { 0 }
 }

@@ -1,0 +1,6 @@
+// Native MIR trap parity: abs(i64::MIN) is classified as E0802.
+func main() -> i32 {
+    let value: i64 = -9223372036854775807 - (1 as i64)
+    let trapped = abs(value)
+    if trapped == (0 as i64) { 1 } else { 0 }
+}

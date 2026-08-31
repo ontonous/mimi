@@ -7,6 +7,7 @@ mod expr;
 mod float_chain;
 mod func;
 pub mod gep;
+pub mod mir;
 mod mono_recover;
 mod registry;
 mod resolved;

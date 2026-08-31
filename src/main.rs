@@ -216,6 +216,9 @@ enum Command {
         /// Emit LLVM IR instead of compiling
         #[arg(long)]
         emit_ir: bool,
+        /// Compile through the canonical MIR native backend (experimental; fails closed)
+        #[arg(long)]
+        mir: bool,
         /// Strict mode: only compile MimiSpec $/$$ locked fragments
         #[arg(long)]
         strict: bool,
@@ -596,6 +599,7 @@ fn main() {
             path,
             output,
             emit_ir,
+            mir,
             strict,
             no_std,
             verify_contracts,
@@ -612,6 +616,7 @@ fn main() {
             verify_ffi,
             shared,
             target.as_deref(),
+            mir,
         ),
         Command::EmitCHeaders { path, output } => {
             emit::emit_c_headers(path.as_deref(), output.as_deref())

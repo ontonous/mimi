@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -186,6 +187,7 @@ pub(crate) fn build(
     verify_ffi: bool,
     shared: bool,
     target: Option<&str>,
+    mir: bool,
 ) -> Result<(), String> {
     let path = resolve_path(path)?;
     let source = mimi::path_safety::read_source_capped(&path)?;
@@ -315,7 +317,26 @@ pub(crate) fn build(
     codegen.shared = shared;
     codegen.target_triple = target.map(|s| s.to_string());
 
-    if let Err(diagnostics) = codegen.compile_checked(&checked_program) {
+    let compile_result = if mir {
+        let excluded_sources = merged_file
+            .sources
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
+        let canonical =
+            mimi::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+                &checked_program,
+                &excluded_sources,
+            )
+            .map_err(|error| format!("canonical MIR build error: {error:?}"))?;
+        codegen.compile_mir_native(&canonical)
+    } else {
+        codegen.compile_checked(&checked_program)
+    };
+
+    if let Err(diagnostics) = compile_result {
         let use_color = colors_enabled();
         let filename = path.display().to_string();
         for diagnostic in &diagnostics {
@@ -326,7 +347,11 @@ pub(crate) fn build(
                 eprint!("{}", strip_ansi(&formatted));
             }
         }
-        return Err("native backend capability check failed".into());
+        return Err(if mir {
+            "canonical MIR native backend capability check failed".into()
+        } else {
+            "native backend capability check failed".into()
+        });
     }
 
     if emit_ir {

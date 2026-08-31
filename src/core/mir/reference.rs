@@ -2952,6 +2952,17 @@ mod tests {
     }
 
     #[test]
+    fn canonical_native_scalar_slice_has_a_reference_oracle() {
+        let (owner, program) = canonical_program_with_main(
+            "func choose(flag: bool, when_true: i32, when_false: i32) -> i32 { if flag { when_true } else { when_false } }\nfunc main() -> i32 { let selected = choose(true, 40, 0); let magnitude = abs(7 as i64); if (selected + 2) == 42 { if magnitude == (7 as i64) { 42 } else { 0 } } else { 0 } }",
+        );
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference native scalar slice");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
     fn canonical_i32_to_f64_conversion_rejects_before_any_backend() {
         let source = "func main() -> f64 { let value: i32 = 7; value as f64 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

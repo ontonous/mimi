@@ -1,0 +1,3 @@
+// Canonical MIR accepts this scalar for reference/bytecode, but the first
+// native MIR slice is intentionally limited to signed integers and bool.
+func main() -> f64 { 1.0 }
