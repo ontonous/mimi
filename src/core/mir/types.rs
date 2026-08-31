@@ -9,12 +9,12 @@
 use std::collections::BTreeMap;
 
 use crate::core::ir::{
-    FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedType, ResolvedTypeId,
-    ResolvedTypeTable,
+    FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
+    ResolvedTypeId, ResolvedTypeTable,
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-2";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
@@ -319,8 +319,18 @@ impl MirTypeCatalog {
                     ty: field_ty.clone(),
                 });
             }
+            let ownership = fields.iter().fold(MirOwnership::Copy, |current, field| {
+                let field_ownership = catalog
+                    .get(&field.ty)
+                    .map(|field| field.ownership)
+                    .unwrap_or(MirOwnership::Move);
+                combine_ownership(current, field_ownership)
+            });
             if let Some(descriptor) = catalog.entries.get_mut(id) {
                 descriptor.abi = MirAbiClass::Aggregate;
+                descriptor.ownership = ownership;
+                descriptor.needs_drop_glue = ownership.needs_drop();
+                descriptor.needs_clone_glue = ownership.needs_clone();
                 descriptor.layout = MirLayout::Record {
                     nominal: item.clone(),
                     fields,
@@ -443,6 +453,207 @@ impl MirTypeCatalog {
                 kind, layout
             )),
         }
+    }
+
+    /// Validate one value projection against the canonical semantic layout.
+    /// Field names are intentionally unavailable here: the stable field ID is
+    /// the only identity that crosses the MIR/backend boundary.
+    pub fn validate_projection(
+        &self,
+        base_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        projection: &crate::core::mir::MirProjection,
+    ) -> Result<(), String> {
+        let base = self
+            .get(base_ty)
+            .ok_or_else(|| format!("projection base type '{}' is absent", base_ty.as_str()))?;
+        let _result = self
+            .get(result_ty)
+            .ok_or_else(|| format!("projection result type '{}' is absent", result_ty.as_str()))?;
+        match (&base.layout, projection) {
+            (MirLayout::Tuple(elements), crate::core::mir::MirProjection::Tuple(index)) => {
+                let expected = elements
+                    .get(*index)
+                    .ok_or_else(|| format!("tuple projection index {} is out of bounds", index))?;
+                if expected != result_ty {
+                    return Err(format!(
+                        "tuple projection result type '{}' disagrees with layout type '{}'",
+                        result_ty.as_str(),
+                        expected.as_str()
+                    ));
+                }
+                Ok(())
+            }
+            (MirLayout::Record { fields, .. }, crate::core::mir::MirProjection::Field(field)) => {
+                let expected = fields
+                    .iter()
+                    .find(|candidate| candidate.id == *field)
+                    .ok_or_else(|| format!("record projection field '{}' is absent", field.0))?;
+                if expected.ty != *result_ty {
+                    return Err(format!(
+                        "record projection field '{}' type '{}' disagrees with result type '{}'",
+                        field.0,
+                        expected.ty.as_str(),
+                        result_ty.as_str()
+                    ));
+                }
+                Ok(())
+            }
+            (_, crate::core::mir::MirProjection::Index(_)) => {
+                Err("indexed projection has no canonical MIR layout contract".into())
+            }
+            (_, crate::core::mir::MirProjection::Dereference) => {
+                Err("dereference projection has no canonical MIR layout contract".into())
+            }
+            (layout, projection) => Err(format!(
+                "projection {:?} does not match base layout {:?}",
+                projection, layout
+            )),
+        }
+    }
+
+    /// Validate a place load one projection at a time.  This keeps lvalue
+    /// projection type facts in MIR's TypeDesc contract instead of asking a
+    /// backend to rediscover them from `ResolvedPlace` names.
+    pub fn validate_place(
+        &self,
+        base_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        projections: &[ResolvedProjection],
+    ) -> Result<(), String> {
+        let mut current_ty = base_ty.clone();
+        for projection in projections {
+            let mir_projection = match projection {
+                ResolvedProjection::Field { field, .. } => {
+                    crate::core::mir::MirProjection::Field(field.clone())
+                }
+                ResolvedProjection::Tuple { index, .. } => {
+                    crate::core::mir::MirProjection::Tuple(*index)
+                }
+                ResolvedProjection::Index { .. } => {
+                    return Err(
+                        "indexed place projection has no canonical MIR layout contract".into(),
+                    )
+                }
+                ResolvedProjection::Deref { .. } => {
+                    return Err(
+                        "dereference place projection has no canonical MIR layout contract".into(),
+                    )
+                }
+            };
+            self.validate_projection(&current_ty, projection.ty(), &mir_projection)?;
+            current_ty = projection.ty().clone();
+        }
+        if &current_ty != result_ty {
+            return Err(format!(
+                "place load result type '{}' disagrees with projected type '{}'",
+                result_ty.as_str(),
+                current_ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate a record update.  The base and result are the same nominal
+    /// record, while the explicit field set may be a declaration-order
+    /// independent subset.  The base is still an explicit MIR operand so a
+    /// future ownership pass can prove its consume/clone behavior.
+    pub fn validate_record_update(
+        &self,
+        result_ty: &ResolvedTypeId,
+        base_ty: &ResolvedTypeId,
+        kind: &crate::core::mir::MirAggregateKind,
+        field_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        let (result_nominal, result_fields) = match self
+            .get(result_ty)
+            .ok_or_else(|| {
+                format!(
+                    "record update result type '{}' is absent",
+                    result_ty.as_str()
+                )
+            })?
+            .layout
+            .clone()
+        {
+            MirLayout::Record { nominal, fields } => (nominal, fields),
+            layout => {
+                return Err(format!(
+                    "record update result layout {:?} is not a record",
+                    layout
+                ))
+            }
+        };
+        let (base_nominal, base_fields) = match self
+            .get(base_ty)
+            .ok_or_else(|| format!("record update base type '{}' is absent", base_ty.as_str()))?
+            .layout
+            .clone()
+        {
+            MirLayout::Record { nominal, fields } => (nominal, fields),
+            layout => {
+                return Err(format!(
+                    "record update base layout {:?} is not a record",
+                    layout
+                ))
+            }
+        };
+        if result_nominal != base_nominal {
+            return Err(format!(
+                "record update base nominal '{}' disagrees with result nominal '{}'",
+                base_nominal.as_str(),
+                result_nominal.as_str()
+            ));
+        }
+        let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
+            return Err("record update requires a record aggregate kind".into());
+        };
+        if nominal != &result_nominal {
+            return Err(format!(
+                "record update nominal '{}' disagrees with layout nominal '{}'",
+                nominal.as_str(),
+                result_nominal.as_str()
+            ));
+        }
+        if fields.len() != field_types.len() {
+            return Err(format!(
+                "record update names {} fields but carries {} values",
+                fields.len(),
+                field_types.len()
+            ));
+        }
+        if result_fields.len() != base_fields.len()
+            || result_fields
+                .iter()
+                .zip(&base_fields)
+                .any(|(left, right)| left != right)
+        {
+            return Err("record update base and result layouts disagree".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (field, actual) in fields.iter().zip(field_types) {
+            if !seen.insert(field) {
+                return Err(format!("record update field '{}' is repeated", field.0));
+            }
+            let Some(expected) = result_fields
+                .iter()
+                .find(|candidate| candidate.id == *field)
+            else {
+                return Err(format!(
+                    "record update field '{}' is absent from declaration",
+                    field.0
+                ));
+            };
+            if actual != &expected.ty {
+                return Err(format!(
+                    "record update field '{}' type '{}' disagrees with layout type '{}'",
+                    field.0,
+                    actual.as_str(),
+                    expected.ty.as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn canonical_text(&self) -> String {
@@ -617,6 +828,7 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 mod tests {
     use super::{MirAbiClass, MirLayout, MirOwnership, MirTypeCatalog};
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+    use crate::core::mir::{MirAggregateKind, MirProjection};
 
     #[test]
     fn materializes_scalar_abi_and_copy_ownership() {
@@ -725,6 +937,7 @@ mod tests {
             })
             .expect("Point record contract");
         assert_eq!(point.0.abi, MirAbiClass::Aggregate);
+        assert_eq!(point.0.ownership, MirOwnership::Copy);
         assert_eq!(
             point
                 .1
@@ -734,6 +947,58 @@ mod tests {
             ["x", "y"]
         );
         assert!(point.1.iter().all(|field| catalog.get(&field.ty).is_some()));
+    }
+
+    #[test]
+    fn record_projection_and_update_contracts_are_field_id_based() {
+        let source =
+            "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { x: 1, y: true }.x }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("catalog");
+        let (point_ty, fields) = catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, fields } if nominal.as_str().ends_with("Point") => {
+                    Some((id.clone(), fields.clone()))
+                }
+                _ => None,
+            })
+            .expect("Point layout");
+        let x = fields.iter().find(|field| field.name == "x").expect("x");
+        let y = fields.iter().find(|field| field.name == "y").expect("y");
+        assert!(catalog
+            .validate_projection(&point_ty, &x.ty, &MirProjection::Field(x.id.clone()),)
+            .is_ok());
+        let unknown = catalog
+            .validate_projection(
+                &point_ty,
+                &x.ty,
+                &MirProjection::Field(crate::core::NodeId("field:missing".into())),
+            )
+            .expect_err("unknown field must fail closed");
+        assert!(unknown.contains("absent"));
+        let wrong_type = catalog
+            .validate_projection(&point_ty, &y.ty, &MirProjection::Field(x.id.clone()))
+            .expect_err("wrong projection result type must fail closed");
+        assert!(wrong_type.contains("disagrees"));
+        assert!(catalog
+            .validate_record_update(
+                &point_ty,
+                &point_ty,
+                &MirAggregateKind::Record {
+                    nominal: match &catalog.get(&point_ty).expect("point").layout {
+                        MirLayout::Record { nominal, .. } => nominal.clone(),
+                        _ => unreachable!(),
+                    },
+                    fields: vec![y.id.clone()],
+                },
+                std::slice::from_ref(&y.ty),
+            )
+            .is_ok());
     }
 
     #[test]

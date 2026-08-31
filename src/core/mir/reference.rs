@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
-use super::types::MirTypeCatalog;
+use super::types::{MirLayout, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirFunction, MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm,
     MirSwitchCase, MirTerminator, MirValueId,
@@ -177,37 +177,130 @@ impl MirProgram {
             }
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
-                    let super::MirInstructionKind::Construct {
-                        result,
-                        kind,
-                        fields,
-                    } = &instruction.kind
-                    else {
-                        continue;
-                    };
-                    let Some(result_value) = function.values.get(result) else {
-                        continue;
-                    };
-                    let field_types = fields
-                        .iter()
-                        .filter_map(|field| {
-                            function.values.get(field).map(|value| value.ty.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    if field_types.len() != fields.len() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "aggregate field is absent from MIR value catalog".into(),
-                        });
-                        continue;
-                    }
-                    if let Err(message) =
-                        type_catalog.validate_aggregate(&result_value.ty, kind, &field_types)
-                    {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message,
-                        });
+                    match &instruction.kind {
+                        super::MirInstructionKind::Project {
+                            result,
+                            base,
+                            projection,
+                        } => {
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_projection(
+                                &base_value.ty,
+                                &result_value.ty,
+                                projection,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::Load { result, place } => {
+                            let local_id =
+                                match MirValueId::new(format!("local:{}", place.base.0 .0)) {
+                                    Ok(local_id) => local_id,
+                                    Err(error) => {
+                                        errors.push(super::MirValidationError {
+                                            subject: instruction.id.to_string(),
+                                            message: error.to_string(),
+                                        });
+                                        continue;
+                                    }
+                                };
+                            let Some(base_value) = function.values.get(&local_id) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_place(
+                                &base_value.ty,
+                                &result_value.ty,
+                                &place.projections,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::Construct {
+                            result,
+                            kind,
+                            fields,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let field_types = fields
+                                .iter()
+                                .filter_map(|field| {
+                                    function.values.get(field).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            if field_types.len() != fields.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "aggregate field is absent from MIR value catalog"
+                                        .into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog.validate_aggregate(
+                                &result_value.ty,
+                                kind,
+                                &field_types,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::UpdateRecord {
+                            result,
+                            base,
+                            kind,
+                            fields,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let field_types = fields
+                                .iter()
+                                .filter_map(|field| {
+                                    function.values.get(field).map(|value| value.ty.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            if field_types.len() != fields.len() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "record update field is absent from MIR value catalog"
+                                        .into(),
+                                });
+                                continue;
+                            }
+                            if let Err(message) = type_catalog.validate_record_update(
+                                &result_value.ty,
+                                &base_value.ty,
+                                kind,
+                                &field_types,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -424,7 +517,14 @@ impl<'a> MirReferenceInterpreter<'a> {
                 projection,
             } => {
                 let value = self.read_value(function, values, base)?;
-                let projected = project_value(&function.owner, value, projection)?;
+                let base_ty = function.values.get(base).map(|value| &value.ty);
+                let projected = project_value(
+                    &function.owner,
+                    value,
+                    base_ty,
+                    projection,
+                    self.program.type_catalog(),
+                )?;
                 values.insert(result.clone(), projected);
             }
             MirInstructionKind::Construct {
@@ -435,12 +535,36 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let fields = self.read_values(function, values, fields)?;
                 let value = match kind {
                     MirAggregateKind::Tuple => MirRuntimeValue::Tuple(fields),
-                    MirAggregateKind::Record { nominal, .. } => MirRuntimeValue::Record {
-                        nominal: nominal.clone(),
-                        fields,
-                    },
+                    MirAggregateKind::Record {
+                        nominal,
+                        fields: field_ids,
+                    } => self.construct_record(function, result, nominal, field_ids, fields)?,
                 };
                 values.insert(result.clone(), value);
+            }
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind: MirAggregateKind::Record { nominal, fields },
+                fields: update_values,
+            } => {
+                let base_value = self.read_value(function, values, base)?;
+                let update_values = self.read_values(function, values, update_values)?;
+                let value = self.update_record(
+                    function,
+                    result,
+                    base_value,
+                    nominal,
+                    fields,
+                    update_values,
+                )?;
+                values.insert(result.clone(), value);
+            }
+            MirInstructionKind::UpdateRecord { .. } => {
+                return Err(self.error(
+                    &function.owner,
+                    "record update instruction has a non-record aggregate kind",
+                ));
             }
             MirInstructionKind::Binary {
                 result,
@@ -498,27 +622,177 @@ impl<'a> MirReferenceInterpreter<'a> {
         let local = MirValueId::new(format!("local:{}", place.base.0 .0))
             .map_err(|error| self.error(&function.owner, error.to_string()))?;
         let mut value = self.read_value(function, values, &local)?;
+        let mut current_ty = function
+            .values
+            .get(&local)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| self.error(&function.owner, "place base has no MIR type"))?;
         for projection in &place.projections {
-            value = match projection {
+            let mir_projection = match projection {
                 crate::core::ir::ResolvedProjection::Tuple { index, .. } => {
-                    project_value(&function.owner, value, &MirProjection::Tuple(*index))?
+                    MirProjection::Tuple(*index)
                 }
-                crate::core::ir::ResolvedProjection::Field { name, .. } => {
-                    return Err(self.error(
-                        &function.owner,
-                        format!("record field projection '{}' lacks reference layout", name),
-                    ));
+                crate::core::ir::ResolvedProjection::Field { field, .. } => {
+                    MirProjection::Field(field.clone())
                 }
                 crate::core::ir::ResolvedProjection::Index { .. } => {
                     return Err(self.error(
                         &function.owner,
-                        "indexed projection is not implemented by the reference slice",
+                        "indexed place projection has no canonical MIR layout contract",
                     ));
                 }
-                crate::core::ir::ResolvedProjection::Deref { .. } => value,
+                crate::core::ir::ResolvedProjection::Deref { .. } => {
+                    return Err(self.error(
+                        &function.owner,
+                        "dereference place projection has no canonical MIR layout contract",
+                    ));
+                }
             };
+            value = project_value(
+                &function.owner,
+                value,
+                Some(&current_ty),
+                &mir_projection,
+                self.program.type_catalog(),
+            )?;
+            current_ty = projection.ty().clone();
         }
         Ok(value)
+    }
+
+    fn construct_record(
+        &self,
+        function: &MirFunction,
+        result: &MirValueId,
+        nominal: &crate::core::ir::NominalTypeId,
+        field_ids: &[NodeId],
+        values: Vec<MirRuntimeValue>,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let result_ty = function
+            .values
+            .get(result)
+            .map(|value| &value.ty)
+            .ok_or_else(|| self.error(&function.owner, "record result has no MIR type"))?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(result_ty)
+            .ok_or_else(|| self.error(&function.owner, "record result has no TypeDesc"))?;
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err(self.error(&function.owner, "record result has no record layout"));
+        };
+        if nominal != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "record construction nominal disagrees with TypeDesc",
+            ));
+        }
+        if field_ids.len() != values.len() {
+            return Err(self.error(
+                &function.owner,
+                "record construction field/value arity disagrees",
+            ));
+        }
+        let mut supplied = HashMap::new();
+        for (field, value) in field_ids.iter().zip(values) {
+            if supplied.insert(field.clone(), value).is_some() {
+                return Err(self.error(&function.owner, "record construction repeats a field"));
+            }
+        }
+        layout_fields
+            .iter()
+            .map(|field| {
+                supplied.remove(&field.id).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("record construction omits field '{}'", field.id.0),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|fields| {
+                if supplied.is_empty() {
+                    Ok(MirRuntimeValue::Record {
+                        nominal: expected_nominal.clone(),
+                        fields,
+                    })
+                } else {
+                    Err(self.error(
+                        &function.owner,
+                        "record construction contains an unknown field",
+                    ))
+                }
+            })
+    }
+
+    fn update_record(
+        &self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: MirRuntimeValue,
+        nominal: &crate::core::ir::NominalTypeId,
+        field_ids: &[NodeId],
+        update_values: Vec<MirRuntimeValue>,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let MirRuntimeValue::Record {
+            nominal: base_nominal,
+            mut fields,
+        } = base
+        else {
+            return Err(self.error(&function.owner, "record update base is not a record"));
+        };
+        let result_ty = function
+            .values
+            .get(result)
+            .map(|value| &value.ty)
+            .ok_or_else(|| self.error(&function.owner, "record update result has no MIR type"))?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(result_ty)
+            .ok_or_else(|| self.error(&function.owner, "record update has no TypeDesc"))?;
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err(self.error(&function.owner, "record update result has no record layout"));
+        };
+        if nominal != expected_nominal || &base_nominal != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "record update nominal disagrees with TypeDesc",
+            ));
+        }
+        if fields.len() != layout_fields.len() {
+            return Err(self.error(&function.owner, "record base is shorter than TypeDesc"));
+        }
+        if field_ids.len() != update_values.len() || field_ids.len() > u16::MAX as usize {
+            return Err(self.error(&function.owner, "record update field/value arity disagrees"));
+        }
+        for (field, value) in field_ids.iter().zip(update_values) {
+            let Some(index) = layout_fields
+                .iter()
+                .position(|candidate| candidate.id == *field)
+            else {
+                return Err(self.error(
+                    &function.owner,
+                    format!("record update field '{}' is absent", field.0),
+                ));
+            };
+            if index >= fields.len() {
+                return Err(self.error(&function.owner, "record base is shorter than TypeDesc"));
+            }
+            fields[index] = value;
+        }
+        Ok(MirRuntimeValue::Record {
+            nominal: expected_nominal.clone(),
+            fields,
+        })
     }
 
     fn read_value(
@@ -594,17 +868,58 @@ fn runtime_literal(literal: &ResolvedLiteral) -> MirRuntimeValue {
 fn project_value(
     function: &NodeId,
     value: MirRuntimeValue,
+    base_ty: Option<&crate::core::ResolvedTypeId>,
     projection: &MirProjection,
+    type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     match (value, projection) {
         (MirRuntimeValue::Tuple(values), MirProjection::Tuple(index)) => values
             .get(*index)
             .cloned()
             .ok_or_else(|| execution_error(function, "tuple projection is out of bounds")),
-        (MirRuntimeValue::Record { .. }, MirProjection::Field(_)) => Err(execution_error(
-            function,
-            "record field projection lacks field layout in the reference slice",
-        )),
+        (MirRuntimeValue::Record { nominal, fields }, MirProjection::Field(field)) => {
+            let Some(base_ty) = base_ty else {
+                return Err(execution_error(
+                    function,
+                    "record projection has no base type",
+                ));
+            };
+            let Some(descriptor) = type_catalog.get(base_ty) else {
+                return Err(execution_error(
+                    function,
+                    "record projection base has no TypeDesc",
+                ));
+            };
+            let MirLayout::Record {
+                nominal: expected_nominal,
+                fields: layout_fields,
+            } = &descriptor.layout
+            else {
+                return Err(execution_error(
+                    function,
+                    "record projection base has no record layout",
+                ));
+            };
+            if &nominal != expected_nominal {
+                return Err(execution_error(
+                    function,
+                    "record runtime nominal disagrees with TypeDesc",
+                ));
+            }
+            let Some(index) = layout_fields
+                .iter()
+                .position(|candidate| candidate.id == *field)
+            else {
+                return Err(execution_error(
+                    function,
+                    "record projection field is absent from TypeDesc",
+                ));
+            };
+            fields
+                .get(index)
+                .cloned()
+                .ok_or_else(|| execution_error(function, "record field vector is too short"))
+        }
         (value, MirProjection::Dereference) => Ok(value),
         (_, MirProjection::Index(_)) => Err(execution_error(
             function,
@@ -840,6 +1155,20 @@ mod tests {
         (owner, program)
     }
 
+    fn canonical_program_with_main(source: &str) -> (crate::core::NodeId, MirProgram) {
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let owner = checked
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .map(|callable| callable.owner.clone())
+            .expect("main callable");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        (owner, program)
+    }
+
     #[test]
     fn executes_scalar_arithmetic_without_backend() {
         let (owner, program) = lower_main("func main() -> i32 { 40 + 2 }");
@@ -946,5 +1275,26 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         assert!(!program.type_catalog().is_empty());
+    }
+
+    #[test]
+    fn executes_record_rvalue_projection_from_canonical_layout() {
+        let source =
+            "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { y: true, x: 40 }.x }";
+        let (owner, program) = canonical_program_with_main(source);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(40));
+    }
+
+    #[test]
+    fn executes_record_update_and_place_projection_from_canonical_layout() {
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 40, y: true }; let q = Point { y: false, ..p }; q.x }";
+        let (owner, program) = canonical_program_with_main(source);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(value, MirRuntimeValue::Int(40));
     }
 }

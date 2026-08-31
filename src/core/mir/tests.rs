@@ -225,3 +225,66 @@ fn ownership_event_value_must_be_declared_by_the_function() {
             .contains("event value 'local:missing' is absent")
     }));
 }
+
+#[test]
+fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
+    let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { x: 1, y: true }.x }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+
+    let mut unknown = canonical.functions().get(&owner).cloned().expect("main");
+    let projection = unknown
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::Project { projection, .. } => Some(projection),
+            _ => None,
+        })
+        .expect("record projection");
+    *projection = MirProjection::Field(crate::core::NodeId("field:missing".into()));
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner.clone(), unknown)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("unknown record field must fail before a backend");
+    assert!(errors.iter().any(|error| error.message.contains("absent")));
+
+    let bool_ty = canonical
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi == crate::core::mir::types::MirAbiClass::Bool).then(|| id.clone())
+        })
+        .expect("bool type");
+    let mut wrong_type = canonical.functions().get(&owner).cloned().expect("main");
+    let projection_result = wrong_type
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("record projection result");
+    wrong_type
+        .values
+        .get_mut(&projection_result)
+        .expect("projection value")
+        .ty = bool_ty.clone();
+    wrong_type.result = bool_ty;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, wrong_type)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("wrong record projection type must fail before a backend");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("projection") && error.message.contains("disagrees")
+    }));
+}

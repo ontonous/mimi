@@ -1,9 +1,9 @@
 //! Initial lowering from checker-owned ResolvedBody to canonical MIR.
 //!
 //! This is intentionally a narrow, fail-closed slice. It proves the
-//! architectural boundary for scalar expressions and structured branch
-//! control flow. Unsupported shapes return a structured error and must not
-//! silently select the legacy emitter.
+//! architectural boundary for scalar expressions, structured branch control
+//! flow, and Copy record aggregates. Unsupported shapes return a structured
+//! error and must not silently select the legacy emitter.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -42,10 +42,11 @@ impl std::error::Error for MirLoweringError {}
 /// Lower the currently supported expression/statement subset.
 ///
 /// Supported forms are deliberately small: literals, local loads, unary and
-/// binary expressions, calls, casts, binds, expression statements, and
-/// returns, and branch/match expressions with explicit MIR blocks. Loops,
-/// destructuring, and aggregate operations remain rejected until their
-/// ownership and effect contracts are represented in MIR.
+/// binary expressions, calls, casts, binds, expression statements, returns,
+/// and branch/match expressions with explicit MIR blocks. Copy-only tuple and
+/// record construction/projection/update are also represented. Loops,
+/// destructuring, and ownership-bearing aggregate operations remain rejected
+/// until their ownership and effect contracts are represented in MIR.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,
@@ -529,7 +530,7 @@ impl<'a> Lowerer<'a> {
                 let base = self.lower_expr(value);
                 let projection = match projection {
                     crate::core::ir::ResolvedValueProjection::Field(field) => {
-                        super::MirProjection::Field(field.0.clone())
+                        super::MirProjection::Field(field.clone())
                     }
                     crate::core::ir::ResolvedValueProjection::Tuple(index) => {
                         super::MirProjection::Tuple(*index)
@@ -572,25 +573,33 @@ impl<'a> Lowerer<'a> {
                 fields,
                 rest,
             } => {
-                if rest.is_some() {
-                    self.error(
+                let values = fields
+                    .iter()
+                    .map(|field| self.lower_expr(&field.value))
+                    .collect();
+                let kind = MirAggregateKind::Record {
+                    nominal: nominal.clone(),
+                    fields: fields.iter().map(|field| field.field.clone()).collect(),
+                };
+                if let Some(rest) = rest {
+                    let base = self.lower_expr(rest);
+                    self.emit(
                         &expression.node_id,
-                        "record update syntax requires aggregate ownership lowering",
+                        "update_record",
+                        MirInstructionKind::UpdateRecord {
+                            result: result.clone(),
+                            base,
+                            kind,
+                            fields: values,
+                        },
                     );
                 } else {
-                    let values = fields
-                        .iter()
-                        .map(|field| self.lower_expr(&field.value))
-                        .collect();
                     self.emit(
                         &expression.node_id,
                         "construct",
                         MirInstructionKind::Construct {
                             result: result.clone(),
-                            kind: MirAggregateKind::Record {
-                                nominal: nominal.clone(),
-                                fields: fields.iter().map(|field| field.field.clone()).collect(),
-                            },
+                            kind,
                             fields: values,
                         },
                     );
@@ -1146,5 +1155,23 @@ mod tests {
             .expect("main callable");
         let mir = lower_body(&callable.body).expect("tuple lowering");
         assert!(mir.canonical_text().contains("construct"));
+    }
+
+    #[test]
+    fn record_projection_and_update_lower_to_explicit_mir_nodes() {
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; let q = Point { y: false, ..p }; Point { x: q.x, y: false }.x }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let callable = program
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .expect("main callable");
+        let mir = lower_body(&callable.body).expect("record lowering");
+        let text = mir.canonical_text();
+        assert!(text.contains("construct"));
+        assert!(text.contains("update_record"));
+        assert!(text.contains("Field(NodeId"));
     }
 }

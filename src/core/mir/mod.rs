@@ -85,7 +85,9 @@ pub struct MirBlockParameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirProjection {
-    Field(String),
+    /// Checker-owned stable field identity.  A display name is deliberately
+    /// not part of MIR; consumers resolve it through the TypeDesc layout.
+    Field(NodeId),
     Tuple(usize),
     Index(MirValueId),
     Dereference,
@@ -145,6 +147,15 @@ pub enum MirInstructionKind {
     },
     Construct {
         result: MirValueId,
+        kind: MirAggregateKind,
+        fields: Vec<MirValueId>,
+    },
+    /// Consume a record base and produce the same record with the explicit
+    /// field values overlaid.  The field identities in `kind` remain
+    /// checker-owned; backend field names are recovered from TypeDesc only.
+    UpdateRecord {
+        result: MirValueId,
+        base: MirValueId,
         kind: MirAggregateKind,
         fields: Vec<MirValueId>,
     },
@@ -469,6 +480,15 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             kind,
             fields,
         } => format!("construct {result} = {kind:?}({})", format_values(fields)),
+        MirInstructionKind::UpdateRecord {
+            result,
+            base,
+            kind,
+            fields,
+        } => format!(
+            "update_record {result} = {base} {kind:?}({})",
+            format_values(fields)
+        ),
         MirInstructionKind::Binary {
             result,
             op,
@@ -767,10 +787,40 @@ impl<'a> MirValidator<'a> {
                 if let MirProjection::Index(index) = projection {
                     self.use_value(index);
                 }
+                if let MirProjection::Field(field) = projection {
+                    if field.0.trim().is_empty() {
+                        self.error(
+                            result.to_string(),
+                            "record projection field identity is empty",
+                        );
+                    }
+                }
                 self.result_at(result, &instruction.id, block, index);
             }
             Construct { result, fields, .. } => {
                 self.values(fields);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            UpdateRecord {
+                result,
+                base,
+                fields,
+                kind,
+            } => {
+                self.use_value(base);
+                self.values(fields);
+                if let MirAggregateKind::Record { fields, .. } = kind {
+                    for field in fields {
+                        if field.0.trim().is_empty() {
+                            self.error(result.to_string(), "record update field identity is empty");
+                        }
+                    }
+                } else {
+                    self.error(
+                        result.to_string(),
+                        "record update instruction requires a record aggregate kind",
+                    );
+                }
                 self.result_at(result, &instruction.id, block, index);
             }
             Binary {
@@ -1091,6 +1141,10 @@ impl<'a> MirValidator<'a> {
                 }
             }
             MirInstructionKind::Construct { fields, .. } => {
+                uses.extend(fields.iter().cloned());
+            }
+            MirInstructionKind::UpdateRecord { base, fields, .. } => {
+                uses.push(base.clone());
                 uses.extend(fields.iter().cloned());
             }
             MirInstructionKind::Binary { left, right, .. } => {

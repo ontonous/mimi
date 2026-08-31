@@ -14,8 +14,8 @@ use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, Resolve
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{MirAbiClass, MirLayout, MirOwnership, MirTypeDesc};
 use crate::core::mir::{
-    MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection, MirTerminator,
-    MirValueId,
+    MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
+    MirTerminator, MirValueId,
 };
 use crate::core::NodeId;
 
@@ -379,13 +379,23 @@ impl<'a> FunctionEmitter<'a> {
             }
             MirInstructionKind::Construct {
                 result,
-                kind: crate::core::mir::MirAggregateKind::Tuple,
+                kind: MirAggregateKind::Tuple,
                 fields,
             } => self.emit_tuple_construct(result, fields),
             MirInstructionKind::Construct {
-                kind: crate::core::mir::MirAggregateKind::Record { .. },
-                ..
-            } => self.error("record construction is outside the tuple bytecode slice"),
+                result,
+                kind: MirAggregateKind::Record { nominal, fields },
+                fields: values,
+            } => self.emit_record_construct(result, nominal, fields, values),
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind: MirAggregateKind::Record { nominal, fields },
+                fields: values,
+            } => self.emit_record_update(result, base, nominal, fields, values),
+            MirInstructionKind::UpdateRecord { .. } => {
+                self.error("record update instruction requires a record aggregate kind")
+            }
             MirInstructionKind::Binary {
                 result,
                 op,
@@ -455,56 +465,106 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.proto.alloc_reg()
             };
-            let crate::core::ir::ResolvedProjection::Tuple {
-                index: tuple_index,
-                ty: projected_ty,
-            } = projection
-            else {
-                self.error(
-                    "field/index/deref projected loads are outside the tuple bytecode slice",
-                );
-                return;
-            };
-            let Some(desc) = self.program.type_catalog().get(&current_ty) else {
-                self.error(format!(
-                    "projected load base type '{}' is absent",
-                    current_ty.as_str()
-                ));
-                return;
-            };
-            let MirLayout::Tuple(elements) = &desc.layout else {
-                self.error(format!(
-                    "projected load base type '{}' is not a tuple",
-                    current_ty.as_str()
-                ));
-                return;
-            };
-            let Some(expected_ty) = elements.get(*tuple_index) else {
-                self.error(format!(
-                    "tuple projected load index {} is out of bounds",
-                    tuple_index
-                ));
-                return;
-            };
-            if expected_ty != projected_ty {
-                self.error(format!(
-                    "tuple projected load type '{}' disagrees with layout type '{}'",
-                    projected_ty.as_str(),
-                    expected_ty.as_str()
-                ));
-                return;
+            match projection {
+                crate::core::ir::ResolvedProjection::Tuple {
+                    index: tuple_index,
+                    ty: projected_ty,
+                } => {
+                    let Some(desc) = self.program.type_catalog().get(&current_ty) else {
+                        self.error(format!(
+                            "projected load base type '{}' is absent",
+                            current_ty.as_str()
+                        ));
+                        return;
+                    };
+                    let MirLayout::Tuple(elements) = &desc.layout else {
+                        self.error(format!(
+                            "projected load base type '{}' is not a tuple",
+                            current_ty.as_str()
+                        ));
+                        return;
+                    };
+                    let Some(expected_ty) = elements.get(*tuple_index) else {
+                        self.error(format!(
+                            "tuple projected load index {} is out of bounds",
+                            tuple_index
+                        ));
+                        return;
+                    };
+                    if expected_ty != projected_ty {
+                        self.error(format!(
+                            "tuple projected load type '{}' disagrees with layout type '{}'",
+                            projected_ty.as_str(),
+                            expected_ty.as_str()
+                        ));
+                        return;
+                    }
+                    if *tuple_index > u16::MAX as usize {
+                        self.error("tuple projected load index exceeds bytecode field ABI");
+                        return;
+                    }
+                    self.proto.emit(Op::TupleGet {
+                        rd: destination,
+                        ra: current_reg,
+                        idx: *tuple_index as u16,
+                    });
+                    current_ty = projected_ty.clone();
+                }
+                crate::core::ir::ResolvedProjection::Field {
+                    field,
+                    ty: projected_ty,
+                    ..
+                } => {
+                    let Some(desc) = self.program.type_catalog().get(&current_ty) else {
+                        self.error(format!(
+                            "projected load base type '{}' is absent",
+                            current_ty.as_str()
+                        ));
+                        return;
+                    };
+                    let MirLayout::Record { fields, .. } = &desc.layout else {
+                        self.error(format!(
+                            "projected load base type '{}' is not a record",
+                            current_ty.as_str()
+                        ));
+                        return;
+                    };
+                    let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field)
+                    else {
+                        self.error(format!(
+                            "projected load field '{}' is absent from TypeDesc",
+                            field.0
+                        ));
+                        return;
+                    };
+                    if &field_desc.ty != projected_ty {
+                        self.error(format!(
+                            "record projected load type '{}' disagrees with layout type '{}'",
+                            projected_ty.as_str(),
+                            field_desc.ty.as_str()
+                        ));
+                        return;
+                    }
+                    let field_idx = self
+                        .proto
+                        .add_const(ConstValue::Str(field_desc.name.clone()));
+                    self.proto.emit(Op::RecordGet {
+                        rd: destination,
+                        ra: current_reg,
+                        field: field_idx,
+                    });
+                    current_ty = projected_ty.clone();
+                }
+                crate::core::ir::ResolvedProjection::Index { .. } => {
+                    self.error("indexed projected loads have no canonical MIR layout contract");
+                    return;
+                }
+                crate::core::ir::ResolvedProjection::Deref { .. } => {
+                    self.error("dereference projected loads have no canonical MIR layout contract");
+                    return;
+                }
             }
-            if *tuple_index > u16::MAX as usize {
-                self.error("tuple projected load index exceeds bytecode field ABI");
-                return;
-            }
-            self.proto.emit(Op::TupleGet {
-                rd: destination,
-                ra: current_reg,
-                idx: *tuple_index as u16,
-            });
             current_reg = destination;
-            current_ty = projected_ty.clone();
         }
     }
 
@@ -779,55 +839,89 @@ impl<'a> FunctionEmitter<'a> {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
         };
-        let MirProjection::Tuple(index) = projection else {
-            let detail = match projection {
-                MirProjection::Field(name) => format!("field '{name}'"),
-                MirProjection::Tuple(index) => format!("tuple index {index}"),
-                MirProjection::Index(_) => "index".into(),
-                MirProjection::Dereference => "dereference".into(),
-            };
+        for value in [result, base] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "projection value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let Some(base_desc) = self.type_of(base).cloned() else {
+            self.error(format!("projection base '{}' has no type descriptor", base));
+            return;
+        };
+        let Some(result_desc) = self.type_of(result).cloned() else {
             self.error(format!(
-                "projection {detail} is outside the tuple bytecode slice"
-            ));
-            return;
-        };
-        let Some(base_desc) = self.type_of(base) else {
-            self.error(format!("tuple base '{}' has no type descriptor", base));
-            return;
-        };
-        let MirLayout::Tuple(elements) = &base_desc.layout else {
-            self.error(format!("projection base '{}' is not a tuple", base));
-            return;
-        };
-        let Some(element_ty) = elements.get(*index) else {
-            self.error(format!("tuple projection index {} is out of bounds", index));
-            return;
-        };
-        let Some(result_desc) = self.type_of(result) else {
-            self.error(format!(
-                "tuple projection result '{}' has no type descriptor",
+                "projection result '{}' has no type descriptor",
                 result
             ));
             return;
         };
-        if element_ty != &result_desc.id {
-            self.error(format!(
-                "tuple projection result '{}' has type '{}' but layout selects '{}'",
-                result,
-                result_desc.id.as_str(),
-                element_ty.as_str()
-            ));
-            return;
+        match (&base_desc.layout, projection) {
+            (MirLayout::Tuple(elements), MirProjection::Tuple(index)) => {
+                let Some(element_ty) = elements.get(*index) else {
+                    self.error(format!("tuple projection index {} is out of bounds", index));
+                    return;
+                };
+                if element_ty != &result_desc.id {
+                    self.error(format!(
+                        "tuple projection result '{}' has type '{}' but layout selects '{}'",
+                        result,
+                        result_desc.id.as_str(),
+                        element_ty.as_str()
+                    ));
+                    return;
+                }
+                if *index > u16::MAX as usize {
+                    self.error("tuple projection index exceeds bytecode field ABI");
+                    return;
+                }
+                self.proto.emit(Op::TupleGet {
+                    rd,
+                    ra,
+                    idx: *index as u16,
+                });
+            }
+            (MirLayout::Record { fields, .. }, MirProjection::Field(field)) => {
+                let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field)
+                else {
+                    self.error(format!(
+                        "record projection field '{}' is absent from TypeDesc",
+                        field.0
+                    ));
+                    return;
+                };
+                if field_desc.ty != result_desc.id {
+                    self.error(format!(
+                        "record projection result '{}' has type '{}' but field selects '{}'",
+                        result,
+                        result_desc.id.as_str(),
+                        field_desc.ty.as_str()
+                    ));
+                    return;
+                }
+                let field_idx = self
+                    .proto
+                    .add_const(ConstValue::Str(field_desc.name.clone()));
+                self.proto.emit(Op::RecordGet {
+                    rd,
+                    ra,
+                    field: field_idx,
+                });
+            }
+            (_, MirProjection::Index(_)) => {
+                self.error("indexed projection has no canonical MIR layout contract");
+            }
+            (_, MirProjection::Dereference) => {
+                self.error("dereference projection has no canonical MIR layout contract");
+            }
+            (layout, projection) => self.error(format!(
+                "projection {:?} does not match base layout {:?}",
+                projection, layout
+            )),
         }
-        if *index > u16::MAX as usize {
-            self.error("tuple projection index exceeds bytecode field ABI");
-            return;
-        }
-        self.proto.emit(Op::TupleGet {
-            rd,
-            ra,
-            idx: *index as u16,
-        });
     }
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
@@ -900,6 +994,242 @@ impl<'a> FunctionEmitter<'a> {
         });
     }
 
+    fn emit_record_construct(
+        &mut self,
+        result: &MirValueId,
+        nominal: &crate::core::ir::NominalTypeId,
+        field_ids: &[crate::core::NodeId],
+        values: &[MirValueId],
+    ) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(result_desc) = self.type_of(result).cloned() else {
+            self.error(format!("record result '{}' has no type descriptor", result));
+            return;
+        };
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = result_desc.layout.clone()
+        else {
+            self.error(format!("record result '{}' has no record layout", result));
+            return;
+        };
+        if nominal != &expected_nominal {
+            self.error(format!(
+                "record nominal '{}' disagrees with TypeDesc nominal '{}'",
+                nominal.as_str(),
+                expected_nominal.as_str()
+            ));
+            return;
+        }
+        if field_ids.len() != values.len() || field_ids.len() != layout_fields.len() {
+            self.error("record construction field/value arity disagrees with TypeDesc");
+            return;
+        }
+        if let Err(message) = self.supported_type(&result_desc.id) {
+            self.error(format!(
+                "record result '{}' is unsupported: {message}",
+                result
+            ));
+            return;
+        }
+        let mut supplied = BTreeMap::new();
+        for (field, value) in field_ids.iter().zip(values) {
+            let Some(field_desc) = layout_fields
+                .iter()
+                .find(|candidate| candidate.id == *field)
+            else {
+                self.error(format!(
+                    "record construction field '{}' is absent from TypeDesc",
+                    field.0
+                ));
+                return;
+            };
+            let Some(value_info) = self.function.values.get(value) else {
+                self.error(format!("record field '{}' is absent", value));
+                return;
+            };
+            if value_info.ty != field_desc.ty {
+                self.error(format!(
+                    "record field '{}' type '{}' disagrees with layout type '{}'",
+                    field.0,
+                    value_info.ty.as_str(),
+                    field_desc.ty.as_str()
+                ));
+                return;
+            }
+            if supplied.insert(field.clone(), value.clone()).is_some() {
+                self.error(format!(
+                    "record construction field '{}' is repeated",
+                    field.0
+                ));
+                return;
+            }
+        }
+        let base = self.proto.alloc_reg();
+        for (index, field_desc) in layout_fields.iter().enumerate() {
+            let Some(source_value) = supplied.get(&field_desc.id) else {
+                self.error(format!(
+                    "record construction omits field '{}'",
+                    field_desc.name
+                ));
+                return;
+            };
+            let Some(source) = self.reg(source_value) else {
+                return;
+            };
+            let destination = if index == 0 {
+                base
+            } else {
+                self.proto.alloc_reg()
+            };
+            self.proto.emit(Op::Mov {
+                rd: destination,
+                rs: source,
+            });
+        }
+        let type_name = self
+            .proto
+            .add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
+        for field in &layout_fields {
+            self.proto
+                .add_const_raw(ConstValue::Str(field.name.clone()));
+        }
+        self.proto.emit(Op::NewRecord {
+            rd,
+            type_name,
+            base,
+            count: layout_fields.len() as u16,
+        });
+    }
+
+    fn emit_record_update(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        nominal: &crate::core::ir::NominalTypeId,
+        field_ids: &[crate::core::NodeId],
+        values: &[MirValueId],
+    ) {
+        let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
+            return;
+        };
+        let Some(result_desc) = self.type_of(result).cloned() else {
+            self.error(format!(
+                "record update result '{}' has no type descriptor",
+                result
+            ));
+            return;
+        };
+        let Some(base_desc) = self.type_of(base).cloned() else {
+            self.error(format!(
+                "record update base '{}' has no type descriptor",
+                base
+            ));
+            return;
+        };
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = result_desc.layout.clone()
+        else {
+            self.error("record update result has no record layout");
+            return;
+        };
+        let MirLayout::Record {
+            nominal: base_nominal,
+            fields: base_fields,
+        } = base_desc.layout
+        else {
+            self.error("record update base has no record layout");
+            return;
+        };
+        if nominal != &expected_nominal
+            || base_nominal != expected_nominal
+            || base_fields != layout_fields
+        {
+            self.error("record update nominal/layout disagrees with TypeDesc");
+            return;
+        }
+        if field_ids.len() != values.len() || field_ids.len() > u16::MAX as usize {
+            self.error("record update field/value arity exceeds the bytecode ABI");
+            return;
+        }
+        if let Err(message) = self.supported_type(&result_desc.id) {
+            self.error(format!("record update result is unsupported: {message}"));
+            return;
+        }
+        let mut supplied = BTreeMap::new();
+        for (field, value) in field_ids.iter().zip(values) {
+            let Some(field_desc) = layout_fields
+                .iter()
+                .find(|candidate| candidate.id == *field)
+            else {
+                self.error(format!(
+                    "record update field '{}' is absent from TypeDesc",
+                    field.0
+                ));
+                return;
+            };
+            let Some(value_info) = self.function.values.get(value) else {
+                self.error(format!("record update value '{}' is absent", value));
+                return;
+            };
+            if value_info.ty != field_desc.ty {
+                self.error(format!(
+                    "record update field '{}' type '{}' disagrees with layout type '{}'",
+                    field.0,
+                    value_info.ty.as_str(),
+                    field_desc.ty.as_str()
+                ));
+                return;
+            }
+            if supplied.insert(field.clone(), value.clone()).is_some() {
+                self.error(format!("record update field '{}' is repeated", field.0));
+                return;
+            }
+        }
+        let update_base = self.proto.alloc_reg();
+        for (index, field_desc) in layout_fields
+            .iter()
+            .filter(|field| supplied.contains_key(&field.id))
+            .enumerate()
+        {
+            let Some(source_value) = supplied.get(&field_desc.id) else {
+                return;
+            };
+            let Some(source) = self.reg(source_value) else {
+                return;
+            };
+            let destination = if index == 0 {
+                update_base
+            } else {
+                self.proto.alloc_reg()
+            };
+            self.proto.emit(Op::Mov {
+                rd: destination,
+                rs: source,
+            });
+        }
+        let type_name = self
+            .proto
+            .add_const_raw(ConstValue::Str(expected_nominal.as_str().to_string()));
+        for field in layout_fields
+            .iter()
+            .filter(|field| supplied.contains_key(&field.id))
+        {
+            self.proto
+                .add_const_raw(ConstValue::Str(field.name.clone()));
+        }
+        self.proto.emit(Op::UpdateRecord {
+            rd,
+            type_name,
+            ra,
+            base: update_base,
+            count: supplied.len() as u16,
+        });
+    }
+
     fn supported_type_for_value(&self, value: &MirValueId) -> Result<(), String> {
         let info = self
             .function
@@ -933,8 +1263,21 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     Ok(())
                 }
+                MirLayout::Record { fields, .. } => {
+                    if desc.ownership != MirOwnership::Copy {
+                        return Err(format!(
+                            "type '{}' has ownership {:?} and needs runtime glue",
+                            ty.as_str(),
+                            desc.ownership
+                        ));
+                    }
+                    for field in fields {
+                        self.supported_type(&field.ty)?;
+                    }
+                    Ok(())
+                }
                 layout => Err(format!(
-                    "aggregate layout {:?} is not in tuple bytecode slice",
+                    "aggregate layout {:?} is not in the canonical bytecode slice",
                     layout
                 )),
             },
@@ -1099,6 +1442,14 @@ mod tests {
     }
 
     #[test]
+    fn executes_record_projection_and_update_through_canonical_mir() {
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { y: true, x: 40 }; let q = Point { y: false, ..p }; q.x }";
+        let program = compile(source);
+        let value = BytecodeVM::new(program).run_value().expect("VM execution");
+        assert!(matches!(value, Value::Int(40)));
+    }
+
+    #[test]
     fn returns_tuple_through_canonical_mir() {
         let program = compile("func main() -> (i32, i32) { (40, 2) }");
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
@@ -1137,6 +1488,24 @@ mod tests {
             .expect("bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(42));
         assert!(matches!(bytecode, Value::Int(42)));
+    }
+
+    #[test]
+    fn bytecode_and_reference_agree_on_record_projection_and_update() {
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { y: true, x: 40 }; let q = Point { y: false, ..p }; Point { x: q.x, y: true }.x }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = BytecodeVM::new(compile_mir_program(&mir).expect("MIR bytecode"))
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(40));
+        assert!(matches!(bytecode, Value::Int(40)));
     }
 
     #[test]
