@@ -2054,15 +2054,35 @@ impl<'a> ActionEmitter<'a> {
         let Some(value) = initializer else {
             return false;
         };
-        let ResolvedExprKind::Load(place) = &value.kind else {
-            return false;
+        let base = match &value.kind {
+            // Legacy/borrow-place form: the index is already part of the
+            // resolved place projection.
+            ResolvedExprKind::Load(place) if self.is_directional_head_index(place) => {
+                Some(&place.base)
+            }
+            // Canonical value-projection form: lowering keeps the typed index
+            // child explicit as `Project { value: Load(v), Index(0) }`.
+            // This must use the same catalog rule as the place form; otherwise
+            // `catalog_pattern` aliases the extracted binding to the whole
+            // container before `visit_stmt` can install its fresh element
+            // identity, producing false double-consume diagnostics.
+            ResolvedExprKind::Project {
+                value: projected,
+                projection: ResolvedValueProjection::Index(index),
+            } => {
+                let ResolvedExprKind::Load(place) = &projected.kind else {
+                    return false;
+                };
+                let literal_zero = matches!(
+                    &index.kind,
+                    ResolvedExprKind::Literal(crate::core::ResolvedLiteral::Int(index))
+                        if *index == 0
+                );
+                (place.projections.is_empty() && literal_zero).then_some(&place.base)
+            }
+            _ => None,
         };
-        if !self.is_directional_head_index(place) {
-            return false;
-        }
-        self.body
-            .locals
-            .get(&place.base)
+        base.and_then(|base| self.body.locals.get(base))
             .is_some_and(|l| self.is_linear(&l.ty) && !self.is_droppable_type(&l.ty))
     }
 
@@ -2185,16 +2205,88 @@ impl<'a> ActionEmitter<'a> {
                     && self.is_linear(&value.ty)
                     && !self.is_droppable_type(&value.ty)
                 {
-                    // Extracting the ONLY literal element is a whole
-                    // consumption (no leak) — stay legal.
-                    let single_literal = match &value.kind {
-                        ResolvedExprKind::List(elements) => elements.len() == 1,
-                        ResolvedExprKind::Tuple(elements) => elements.len() == 1,
-                        _ => false,
-                    };
-                    if !single_literal {
-                        self.push_element_leak_error(expression);
-                        emitted = true;
+                    // 0.36.46: resolved lowering represents a local index
+                    // read as `Project { value: Load(v), Index(0) }`, while
+                    // the older place path above sees `Load(v[0])`. Keep the
+                    // directional-head contract identical for both forms:
+                    // only a direct local base, literal zero, and let-binding
+                    // may claim one element while retaining the container's
+                    // remainder obligation. Missing this canonical Project
+                    // form regressed every `let x = v[0]` test to the generic
+                    // extraction-not-tracked diagnostic.
+                    let mut handled_directional = false;
+                    if self.in_bind_initializer {
+                        if let (
+                            ResolvedValueProjection::Index(index),
+                            ResolvedExprKind::Load(place),
+                        ) = (projection, &value.kind)
+                        {
+                            let direct_local = place.projections.is_empty();
+                            let literal_zero = matches!(
+                                &index.kind,
+                                ResolvedExprKind::Literal(
+                                    crate::core::ResolvedLiteral::Int(index),
+                                ) if *index == 0
+                            );
+                            if direct_local && literal_zero {
+                                handled_directional = true;
+                                if !self.extracted_containers.insert(place.base.clone()) {
+                                    self.errors.push(
+                                        Diagnostic::error_code(
+                                            crate::diagnostic::codes::E0304,
+                                            format!(
+                                                "resource '{}' head element is claimed more than once",
+                                                self.local_name(&place.base)
+                                            ),
+                                            expression.origin.user_span(),
+                                        )
+                                        .with_help(&format!(
+                                            "extract `{}[0]` at most once per container; consume the remainder with a whole-container drop/move/return",
+                                            self.local_name(&place.base)
+                                        )),
+                                    );
+                                    self.last_visit_rejected = true;
+                                    emitted = true;
+                                } else {
+                                    self.directional_extraction_base = Some(place.base.clone());
+                                }
+                                // The Bind arm below pairs the extracted
+                                // element with a fresh resource and leaves the
+                                // container identity in place for the rest.
+                            }
+                        }
+                    }
+                    if !handled_directional {
+                        // Extracting the ONLY literal element is a whole
+                        // consumption (no leak) — stay legal.
+                        let single_literal = match &value.kind {
+                            ResolvedExprKind::List(elements) => elements.len() == 1,
+                            ResolvedExprKind::Tuple(elements) => elements.len() == 1,
+                            _ => false,
+                        };
+                        if !single_literal {
+                            // Preserve the more precise index-read diagnostic
+                            // for a direct local value projection outside the
+                            // let-binding exception (`sink(v[0])`, `v[1]`).
+                            // The canonical Project form must retain the same
+                            // fail-closed surface as the legacy Load(place)
+                            // form; only literal aggregate projections use
+                            // the generic element-leak wording.
+                            if let (
+                                ResolvedValueProjection::Index(_),
+                                ResolvedExprKind::Load(place),
+                            ) = (projection, &value.kind)
+                            {
+                                if place.projections.is_empty() {
+                                    self.push_index_read_error(&place.base, expression);
+                                } else {
+                                    self.push_element_leak_error(expression);
+                                }
+                            } else {
+                                self.push_element_leak_error(expression);
+                            }
+                            emitted = true;
+                        }
                     }
                 }
             }
