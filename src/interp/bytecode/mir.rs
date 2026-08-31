@@ -1771,7 +1771,14 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_switch(scrutinee, arms, true)
             }
             MirTerminator::Trap { code } => {
-                self.error(format!("trap terminator '{code}' is not lowered"))
+                if let Err(message) = crate::core::mir::types::validate_trap_code(code) {
+                    self.error(format!("trap terminator is invalid: {message}"));
+                } else {
+                    let msg = self
+                        .proto
+                        .add_const(ConstValue::Str(format!("trap {code}")));
+                    self.proto.emit(Op::Trap { msg });
+                }
             }
             MirTerminator::Fault { .. } => {
                 self.error("fault terminators are deferred to flow lowering")
@@ -2191,6 +2198,28 @@ mod tests {
         compile_mir_program(&mir).expect("MIR bytecode")
     }
 
+    fn canonical_trap_program(code: &str) -> MirProgram {
+        let tokens = Lexer::new("func main() -> i32 { 42 }")
+            .tokenize()
+            .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = mir.functions().get(&owner).cloned().expect("main");
+        let entry = function.entry.clone();
+        function
+            .blocks
+            .get_mut(&entry)
+            .expect("entry block")
+            .terminator = crate::core::mir::MirTerminator::Trap { code: code.into() };
+        MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            mir.type_catalog().clone(),
+        )
+        .expect("canonical trap program")
+    }
+
     #[test]
     fn executes_scalar_call_through_canonical_mir() {
         let program =
@@ -2201,6 +2230,24 @@ mod tests {
         );
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn reference_and_bytecode_agree_on_canonical_trap() {
+        let mir = canonical_trap_program("E0801");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect_err("reference trap");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let main = &bytecode.functions[bytecode.entry as usize];
+        assert!(main.code.iter().any(|op| matches!(op, Op::Trap { .. })));
+        let vm_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode trap");
+        assert_eq!(reference.message, "trap E0801");
+        assert_eq!(vm_error.message(), reference.message);
     }
 
     #[test]

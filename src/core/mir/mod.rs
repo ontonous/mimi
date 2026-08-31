@@ -1057,8 +1057,8 @@ impl<'a> MirValidator<'a> {
                 }
             }
             MirTerminator::Trap { code } => {
-                if code.trim().is_empty() {
-                    self.error("terminator", "trap code is empty");
+                if let Err(message) = types::validate_trap_code(code) {
+                    self.error("terminator", message);
                 }
             }
             MirTerminator::Unreachable => {}

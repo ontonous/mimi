@@ -16,6 +16,32 @@ use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
 pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-8";
 
+/// Maximum size of a canonical trap identity/message carried by a MIR
+/// terminator.  Trap text is semantic diagnostic data, not an unchecked
+/// backend format string; keeping it bounded and control-character-free makes
+/// the reference and bytecode representations deterministic.
+pub const MIR_TRAP_CODE_MAX_LEN: usize = 128;
+
+/// Validate the backend-independent contract for a canonical `Trap`.
+///
+/// A trap has no value operand, layout, ABI, ownership transfer, or drop
+/// obligation. Its only semantic payload is a stable non-empty diagnostic
+/// identity. The bytecode/native representation may format it differently,
+/// but it may not accept a malformed identity or invent a value contract.
+pub fn validate_trap_code(code: &str) -> Result<(), String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err("trap code is empty".into());
+    }
+    if code.len() > MIR_TRAP_CODE_MAX_LEN {
+        return Err(format!("trap code exceeds {} bytes", MIR_TRAP_CODE_MAX_LEN));
+    }
+    if code.chars().any(char::is_control) {
+        return Err("trap code contains a control character".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirOwnership {
     Copy,

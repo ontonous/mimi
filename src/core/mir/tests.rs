@@ -117,6 +117,56 @@ fn missing_target_and_arity_are_rejected_before_backend() {
 }
 
 #[test]
+fn malformed_trap_identity_is_rejected_before_backend() {
+    let mut function = fixture();
+    let entry = function
+        .blocks
+        .get_mut(&MirBlockId::new("bb.entry").unwrap())
+        .unwrap();
+    entry.terminator = MirTerminator::Trap { code: "\n".into() };
+    let errors = function
+        .validate()
+        .expect_err("malformed trap must fail closed");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("trap code is empty")));
+}
+
+#[test]
+fn oversized_or_controlled_trap_identity_is_rejected_before_backend() {
+    let mut function = fixture();
+    let entry = function
+        .blocks
+        .get_mut(&MirBlockId::new("bb.entry").unwrap())
+        .unwrap();
+    entry.terminator = MirTerminator::Trap {
+        code: format!(
+            "bad{}",
+            "x".repeat(crate::core::mir::types::MIR_TRAP_CODE_MAX_LEN)
+        ),
+    };
+    let errors = function
+        .validate()
+        .expect_err("oversized trap must fail closed");
+    assert!(errors.iter().any(|error| error.message.contains("exceeds")));
+
+    let mut function = fixture();
+    let entry = function
+        .blocks
+        .get_mut(&MirBlockId::new("bb.entry").unwrap())
+        .unwrap();
+    entry.terminator = MirTerminator::Trap {
+        code: "trap\u{0007}".into(),
+    };
+    let errors = function
+        .validate()
+        .expect_err("control character in trap must fail closed");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("control character")));
+}
+
+#[test]
 fn duplicate_definition_is_rejected() {
     let mut function = fixture();
     let entry = function
