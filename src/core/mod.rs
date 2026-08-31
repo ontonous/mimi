@@ -15,6 +15,7 @@ mod check_stmt;
 mod infer;
 mod infer_expr;
 pub mod ir;
+pub mod mir;
 mod ownership;
 pub mod resolved;
 

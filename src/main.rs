@@ -36,6 +36,8 @@ mod lint_cmd;
 mod list;
 #[path = "main/lsp_cmd.rs"]
 mod lsp_cmd;
+#[path = "main/mir_cmd.rs"]
+mod mir_cmd;
 #[path = "main/promote.rs"]
 mod promote;
 #[path = "main/publish.rs"]
@@ -98,6 +100,9 @@ enum Command {
         /// Strict mode: only compile MimiSpec $/$$ locked fragments
         #[arg(long)]
         strict: bool,
+        /// Execute through canonical MIR (experimental; fails closed on unsupported shapes)
+        #[arg(long)]
+        mir: bool,
         /// Profile mode: track function call counts and durations
         #[arg(long)]
         profile: bool,
@@ -176,6 +181,16 @@ enum Command {
         /// Treat warnings as errors (exit non-zero on warnings)
         #[arg(long)]
         fail_on_warnings: bool,
+    },
+    /// Lower a .mimi file to canonical MIR and print the deterministic form
+    Mir {
+        path: Option<PathBuf>,
+        /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
+        #[arg(long)]
+        strict: bool,
+        /// Include imported modules and the automatically merged prelude
+        #[arg(long)]
+        all: bool,
     },
     /// Disassemble a .mimi file to bytecode (debugging)
     Disasm {
@@ -508,6 +523,7 @@ fn main() {
             skip_verify_ffi,
             allocator,
             strict,
+            mir,
             watch,
             profile,
             extra_args,
@@ -519,6 +535,7 @@ fn main() {
                 ffi_check,
                 &allocator,
                 strict,
+                mir,
                 watch,
                 profile,
                 &extra_args,
@@ -568,6 +585,7 @@ fn main() {
             files,
             fail_on_warnings,
         } => lint_cmd::lint_files(&files, fail_on_warnings),
+        Command::Mir { path, strict, all } => mir_cmd::mir(path.as_deref(), strict, all),
         Command::Disasm { file } => disasm_cmd::disasm_file(&file),
         Command::Verify {
             path,

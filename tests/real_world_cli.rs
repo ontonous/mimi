@@ -115,6 +115,52 @@ fn std_mimispec_removed() {
 }
 
 #[test]
+fn canonical_mir_cli_smoke() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn mimi mir");
+    assert!(
+        output.status.success(),
+        "mimi mir failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("mir.type-catalog"));
+    assert!(stdout.contains("mir.function function:main"));
+    assert!(stdout.contains("binary"));
+}
+
+#[test]
+fn canonical_mir_run_cli_smoke() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn mimi run --mir");
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "canonical MIR run failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn real_world_cli_suite() {
     let root = project_root().join("tests").join("real_world");
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)

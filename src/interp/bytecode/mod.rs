@@ -13,11 +13,13 @@ pub mod builtins;
 pub mod compiler;
 pub mod disasm;
 pub mod instr;
+pub mod mir;
 pub mod registry;
 pub mod vm;
 
 pub use compiler::BytecodeCompiler;
 pub use instr::{BytecodeProgram, ConstValue, FunctionProto, Op};
+pub use mir::compile_mir_program;
 pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};
 pub use vm::BytecodeVM;
 

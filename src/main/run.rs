@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,7 @@ pub(crate) fn run(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    mir: bool,
     watch: bool,
     profile: bool,
     extra_args: &[String],
@@ -29,6 +31,7 @@ pub(crate) fn run(
             verify_ffi,
             allocator,
             strict,
+            mir,
             extra_args,
         )?;
         0
@@ -39,6 +42,7 @@ pub(crate) fn run(
             verify_ffi,
             allocator,
             strict,
+            mir,
             extra_args,
         )?
     };
@@ -54,6 +58,7 @@ fn run_once(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    mir: bool,
     extra_args: &[String],
 ) -> Result<i32, String> {
     // §13-#67 (audit 2026-08-05, closed 2026-08-07): --allocator was a dead
@@ -136,7 +141,44 @@ fn run_once(
         }
     };
 
-    // Bytecode VM path (sole interpreter since v0.33).
+    // Canonical MIR bytecode path (opt-in during the migration).  The
+    // automatically merged prelude remains a compatibility island until its
+    // generic/lambda bodies lower to MIR; all user and imported sources stay
+    // in the selected graph and must pass the same fail-closed checks.
+    if mir {
+        let excluded_sources = merged_file
+            .sources
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
+        let canonical =
+            mimi::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+                &checked_program,
+                &excluded_sources,
+            )
+            .map_err(|error| format!("canonical MIR build error: {error:?}"))?;
+        let prog = mimi::interp::bytecode::compile_mir_program(&canonical).map_err(|errors| {
+            let details = errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("canonical MIR bytecode is not eligible:\n{details}")
+        })?;
+        let mut vm =
+            mimi::interp::bytecode::BytecodeVM::new(prog).with_cli_args(extra_args.to_vec());
+        vm.verify_contracts = verify_contracts;
+        return vm
+            .run()
+            .map(|exit_code| exit_code as i32)
+            .map_err(|error| format!("canonical MIR runtime error: {error}"));
+    }
+
+    // Legacy-compatible Bytecode VM path (sole default interpreter since
+    // v0.33).  It remains the default until the canonical MIR eligibility
+    // surface covers aggregate values, builtins, Flow, and ownership glue.
     {
         use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
         let mut compiler = BytecodeCompiler::new();
@@ -195,6 +237,7 @@ fn run_watch(
     verify_ffi: bool,
     allocator: &str,
     strict: bool,
+    mir: bool,
     extra_args: &[String],
 ) -> Result<(), String> {
     println!("Watching {} for changes...", path.display());
@@ -218,6 +261,7 @@ fn run_watch(
         verify_ffi,
         allocator,
         strict,
+        mir,
         extra_args,
     ) {
         eprintln!("{}", e);
@@ -237,6 +281,7 @@ fn run_watch(
                     verify_ffi,
                     allocator,
                     strict,
+                    mir,
                     extra_args,
                 ) {
                     eprintln!("{}", e);

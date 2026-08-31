@@ -1,0 +1,2 @@
+// Canonical MIR CLI smoke fixture: no prelude/import dependency.
+func main() -> i32 { 40 + 2 }
