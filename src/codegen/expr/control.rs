@@ -689,19 +689,44 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             _ => return Err("slice target must be a list/array pointer".into()),
         };
+        // The strict runtime helper takes the same length-aware ABI as the
+        // canonical string value. Raw pointer strings are an older internal
+        // representation, so recover their byte length once with `strlen`;
+        // fat string values already carry the exact length.
+        let byte_len = match byte_bound {
+            Some(len) => len,
+            None => self
+                .build_call(
+                    self.get_runtime_fn("strlen")?,
+                    &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                        str_ptr,
+                    )],
+                    "str_slice_strlen",
+                )?
+                .try_as_basic_value_opt()
+                .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+                .into_int_value(),
+        };
         // VM index space is Unicode scalar values — count chars, not bytes.
-        let char_len = self.count_utf8_chars(str_ptr, byte_bound)?;
+        let char_len = self.count_utf8_chars(str_ptr, Some(byte_len))?;
         let i64_ty = self.context.i64_type();
         let zero = i64_ty.const_int(0, false);
         let start_idx = self.resolve_slice_index(start, zero, char_len, vars, "start")?;
         let end_idx = self.resolve_slice_index(end, char_len, char_len, vars, "end")?;
         self.check_slice_bounds(start_idx, end_idx, char_len)?;
         let sub_fn = self.get_runtime_fn("mimi_str_substring")?;
-        let sub_ptr = self
+        // `mimi_str_substring` returns the canonical owned `{ptr, len}` value.
+        // Do not treat this aggregate as a raw pointer: the old path called
+        // `into_pointer_value()` here, which panicked during native emission
+        // before the existing string-slice L1 tests could execute. Register
+        // only the returned data pointer; the length must remain the runtime's
+        // byte length so embedded NULs and Unicode slices stay lossless.
+        let sub_value = self
             .build_call(
                 sub_fn,
                 &[
                     inkwell::values::BasicMetadataValueEnum::PointerValue(str_ptr),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(byte_len),
                     inkwell::values::BasicMetadataValueEnum::IntValue(start_idx),
                     inkwell::values::BasicMetadataValueEnum::IntValue(end_idx),
                 ],
@@ -709,7 +734,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .try_as_basic_value_opt()
             .ok_or_else(|| CompileError::LlvmError("mimi_str_substring returned void".into()))?
+            .into_struct_value();
+        let sub_ptr = self
+            .builder
+            .build_extract_value(sub_value, 0, "str_slice_ptr")
+            .map_err(|e| CompileError::LlvmError(format!("extract error: {}", e)))?
             .into_pointer_value();
-        self.wrap_c_string(sub_ptr)
+        self.register_heap_alloc(sub_ptr);
+        Ok(sub_value.into())
     }
 }
