@@ -52,6 +52,16 @@ declare i32 @snprintf(ptr, i64, ptr, ...)
 
 declare void @exit(i32)
 
+declare ptr @mimi_mir_list_new_scalar(i8)
+
+declare i8 @mimi_mir_list_push_scalar(ptr, i8, i64)
+
+declare ptr @mimi_mir_list_clone_scalar(ptr, i8)
+
+declare i64 @mimi_mir_list_get_scalar(ptr, i8, i64)
+
+declare void @mimi_mir_list_drop_scalar(ptr, i8)
+
 declare i64 @mimi_map_new()
 
 declare i64 @mimi_map_clone(i64)
@@ -384,6 +394,10 @@ declare { ptr, i64 } @mimi_str_substring(ptr, i64, i64, i64)
 
 declare { ptr, i64 } @mimi_str_substring_clamp(ptr, i64, i64, i64)
 
+declare void @mimi_print_bytes(ptr, i64)
+
+declare void @mimi_eprint_bytes(ptr, i64)
+
 declare ptr @mimi_str_replace(ptr, ptr, ptr)
 
 declare ptr @mimi_str_replace_ll(ptr, i64, ptr, i64, ptr, i64, ptr)
@@ -714,6 +728,8 @@ declare i64 @mimi_actor_current_id()
 declare i64 @mimi_actor_call(ptr, i32, ptr, i64, ptr)
 
 declare void @mimi_actor_drop(ptr)
+
+declare void @mimi_actor_drop_all()
 
 declare void @mimi_actor_fault(ptr)
 
