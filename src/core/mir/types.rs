@@ -842,6 +842,45 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the complete canonical scalar `string` contract.
+    ///
+    /// `StringHandle` is a semantic ABI class, not an opaque permission for a
+    /// backend to choose its own representation.  The current physical
+    /// contract is the length-bearing `{ptr, i64}` value described by
+    /// `MirLayout::Handle`; all three ownership operations must be backed by
+    /// the same `OwnedString` glue family before a consumer may materialize
+    /// the value.
+    pub fn validate_owned_string(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.kind != MirTypeKind::Primitive(PrimitiveType::String)
+            || descriptor.abi != MirAbiClass::StringHandle
+            || descriptor.layout != MirLayout::Handle
+            || descriptor.ownership != MirOwnership::Move
+        {
+            return Err(format!(
+                "type '{}' is not the canonical owned StringHandle contract",
+                ty.as_str()
+            ));
+        }
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::OwnedString,
+            clone: MirGlueKind::OwnedString,
+            drop: MirGlueKind::OwnedString,
+        };
+        if descriptor.glue != expected
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+        {
+            return Err(format!(
+                "type '{}' owned string glue contract is incomplete",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate the first variable-length container contract. A List is a
     /// move-owned runtime handle, but its element identity and glue are still
     /// canonical MIR facts. This slice intentionally admits only concrete
@@ -2544,6 +2583,23 @@ mod tests {
         ] {
             assert!(catalog.validate_glue(&id, operation).is_ok());
         }
+        assert!(catalog.validate_owned_string(&id).is_ok());
+    }
+
+    #[test]
+    fn owned_string_contract_rejects_incomplete_glue() {
+        let mut table = ResolvedTypeTable::new();
+        let id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("type");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut descriptor = catalog.get(&id).expect("descriptor").clone();
+        descriptor.glue.drop = MirGlueKind::Noop;
+        catalog.replace_for_test_only(id.clone(), descriptor);
+        let error = catalog
+            .validate_owned_string(&id)
+            .expect_err("incomplete owned String glue must fail closed");
+        assert!(error.contains("glue contract is incomplete"));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+func make_text() -> string {
+    "canonical"
+}
+
+func consume_text(text: string) -> i32 {
+    drop(text);
+    41
+}
+
+func main() -> i32 {
+    let text = make_text();
+    let cloned = text;
+    drop(cloned);
+    consume_text(text)
+}

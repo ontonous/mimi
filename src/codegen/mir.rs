@@ -1,5 +1,6 @@
-//! AST-free native consumer for the closed scalar/flat-record/flat-variant,
-//! scalar-List, and local immutable-borrow Canonical MIR slices.
+//! AST-free native consumer for the closed scalar/owned-String,
+//! flat-record/flat-variant, scalar-List, and local immutable-borrow
+//! Canonical MIR slices.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
 //! surface AST or `CheckedProgram`, and it never calls the legacy emitter.  A
@@ -213,9 +214,21 @@ impl<'a> NativeMirValidator<'a> {
         };
         let is_list = matches!(desc.layout, MirLayout::List { .. });
         let is_reference = matches!(&desc.kind, MirTypeKind::Reference { mutable: false });
+        let is_owned_string = matches!(
+            &desc.kind,
+            MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+        );
         let supported = if is_reference {
             match self.program.type_catalog().validate_reference_type(ty) {
                 Ok(_) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
+        } else if is_owned_string {
+            match self.program.type_catalog().validate_owned_string(ty) {
+                Ok(()) => true,
                 Err(message) => {
                     self.errors.push(NativeMirError::new(subject, message));
                     false
@@ -248,7 +261,9 @@ impl<'a> NativeMirValidator<'a> {
                 || self.validate_flat_copy_variant(ty, subject, desc)
         };
         if !supported {
-            let contract = if is_list {
+            let contract = if is_owned_string {
+                "native canonical owned String contract"
+            } else if is_list {
                 "native canonical List contract"
             } else {
                 "Copy scalar native contract"
@@ -261,7 +276,7 @@ impl<'a> NativeMirValidator<'a> {
                 ),
             ));
         }
-        if !is_list && !is_reference {
+        if !is_list && !is_reference && !is_owned_string {
             if desc.ownership != MirOwnership::Copy {
                 self.errors.push(NativeMirError::new(
                     subject,
@@ -384,6 +399,16 @@ impl<'a> NativeMirValidator<'a> {
                             || i32::try_from(*value).is_ok()
                     }
                     (MirAbiClass::Bool, ResolvedLiteral::Bool(_)) => true,
+                    (MirAbiClass::StringHandle, ResolvedLiteral::String(_)) => {
+                        if let Err(message) = catalog.validate_owned_string(
+                            &function.values.get(result).expect("validated result").ty,
+                        ) {
+                            self.errors.push(NativeMirError::new(subject, message));
+                            false
+                        } else {
+                            true
+                        }
+                    }
                     _ => false,
                 };
                 if !valid {
@@ -413,13 +438,20 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                 }
                 if let Some(desc) = catalog.get(&source_value.ty) {
-                    if matches!(desc.layout, MirLayout::List { .. })
+                    if desc.ownership != MirOwnership::Copy
                         && matches!(instruction, MirInstructionKind::Copy { .. })
                     {
-                        self.errors.push(NativeMirError::new(
-                            subject,
-                            "List values require explicit Move or Clone glue; shallow Copy is not permitted",
-                        ));
+                        let message = if matches!(desc.layout, MirLayout::List { .. }) {
+                            "List values require explicit Move or Clone glue; shallow Copy is not permitted"
+                        } else if matches!(
+                            &desc.kind,
+                            MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                        ) {
+                            "owned String values require explicit Move or Clone glue; shallow Copy is not permitted"
+                        } else {
+                            "non-Copy values require explicit Move or Clone glue; shallow Copy is not permitted"
+                        };
+                        self.errors.push(NativeMirError::new(subject, message));
                     } else if !matches!(instruction, MirInstructionKind::Copy { .. }) {
                         let operation = match instruction {
                             MirInstructionKind::Move { .. } => {
@@ -521,10 +553,15 @@ impl<'a> NativeMirValidator<'a> {
                         ) {
                             self.errors.push(NativeMirError::new(subject, message));
                         }
-                        if !matches!(desc.layout, MirLayout::List { .. }) {
+                        if !matches!(desc.layout, MirLayout::List { .. })
+                            && !matches!(
+                                &desc.kind,
+                                MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                            )
+                        {
                             self.errors.push(NativeMirError::new(
                                 subject,
-                                "only canonical List drop glue is emitted by this native slice",
+                                "only canonical owned String/List drop glue is emitted by this native slice",
                             ));
                         }
                     }
@@ -1293,6 +1330,19 @@ fn mir_symbol(owner: &crate::core::NodeId) -> Result<&str, String> {
     Ok(symbol)
 }
 
+fn native_symbol_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 struct NativeMirEmitter<'a, 'ctx> {
     generator: &'a mut CodeGenerator<'ctx>,
     program: &'a MirProgram,
@@ -1499,11 +1549,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::Clone { result, source } => {
-                let value = if matches!(
-                    self.value_desc(source, subject)?.layout,
-                    MirLayout::List { .. }
-                ) {
+                let desc = self.value_desc(source, subject)?;
+                let value = if matches!(desc.layout, MirLayout::List { .. }) {
                     self.emit_list_clone(source, subject)?
+                } else if desc.glue.clone == MirGlueKind::OwnedString {
+                    self.emit_owned_string_clone(source, subject)?
                 } else {
                     self.value(source, subject)?
                 };
@@ -2032,6 +2082,28 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if desc.ownership == MirOwnership::Copy {
             return Ok(());
         }
+        if desc.glue.drop == MirGlueKind::OwnedString {
+            let string = self.value(value, subject)?.into_struct_value();
+            let data = self
+                .generator
+                .builder
+                .build_extract_value(string, 0, "mir_string_drop_data")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_pointer_value();
+            let free_fn = self
+                .generator
+                .get_runtime_fn("mimi_string_free")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(
+                    free_fn,
+                    &[BasicMetadataValueEnum::from(data)],
+                    "mir_string_drop",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            return Ok(());
+        }
         let ty = self.value_type(value, subject)?;
         let kind = native_list_kind(self.program.type_catalog(), &ty)?;
         let function = self
@@ -2333,7 +2405,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     }
 
     fn emit_const(
-        &self,
+        &mut self,
         result: &MirValueId,
         literal: &ResolvedLiteral,
         subject: &str,
@@ -2358,11 +2430,185 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .bool_type()
                 .const_int(u64::from(*value), false)
                 .into()),
+            (MirAbiClass::StringHandle, ResolvedLiteral::String(value)) => {
+                self.emit_owned_string_literal(result, value, subject)
+            }
             _ => Err(NativeMirError::new(
                 subject,
                 "literal is outside native scalar ABI",
             )),
         }
+    }
+
+    fn emit_owned_string_literal(
+        &mut self,
+        result: &MirValueId,
+        value: &str,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let i8_ty = self.generator.context.i8_type();
+        let mut bytes = value
+            .as_bytes()
+            .iter()
+            .map(|byte| i8_ty.const_int(u64::from(*byte), false))
+            .collect::<Vec<_>>();
+        bytes.push(i8_ty.const_zero());
+        let array_ty = i8_ty.array_type(bytes.len() as u32);
+        let global_name = format!(
+            "__mimi_mir_string_{}_{}",
+            native_symbol_fragment(&self.function.owner.0),
+            native_symbol_fragment(result.as_str())
+        );
+        let global = self
+            .generator
+            .module
+            .add_global(array_ty, None, &global_name);
+        global.set_initializer(&i8_ty.const_array(&bytes));
+        global.set_constant(true);
+        global.set_alignment(1);
+        self.emit_owned_string_from_parts(
+            global.as_pointer_value(),
+            self.generator
+                .context
+                .i64_type()
+                .const_int(value.len() as u64, false),
+            subject,
+        )
+    }
+
+    fn emit_owned_string_clone(
+        &mut self,
+        source: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let source = self.value(source, subject)?.into_struct_value();
+        let data = self
+            .generator
+            .builder
+            .build_extract_value(source, 0, "mir_string_clone_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let len = self
+            .generator
+            .builder
+            .build_extract_value(source, 1, "mir_string_clone_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_str_clone")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let handle = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::from(data),
+                        BasicMetadataValueEnum::from(len),
+                    ],
+                    "mir_string_clone",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "String clone returned void"))?
+        .into_int_value();
+        self.emit_owned_string_from_handle(handle, len, subject)
+    }
+
+    fn emit_owned_string_from_parts(
+        &mut self,
+        data: inkwell::values::PointerValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_str_clone")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let handle = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::from(data),
+                        BasicMetadataValueEnum::from(len),
+                    ],
+                    "mir_string_alloc",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "String allocation returned void"))?
+        .into_int_value();
+        self.emit_owned_string_from_handle(handle, len, subject)
+    }
+
+    fn emit_owned_string_from_handle(
+        &mut self,
+        handle: inkwell::values::IntValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let is_empty = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                len,
+                len.get_type().const_zero(),
+                "mir_string_empty",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let is_null = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                handle,
+                handle.get_type().const_zero(),
+                "mir_string_alloc_null",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let not_empty = self
+            .generator
+            .builder
+            .build_not(is_empty, "mir_string_not_empty")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let failed = self
+            .generator
+            .builder
+            .build_and(not_empty, is_null, "mir_string_alloc_failed")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fail = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_alloc_abort");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_alloc_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(failed, fail, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(fail);
+        self.emit_abort_with_message("[E0800] canonical MIR String allocation failed", subject)?;
+        self.generator.builder.position_at_end(ok);
+        let pointer_type = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let data = self
+            .generator
+            .builder
+            .build_int_to_ptr(handle, pointer_type, "mir_string_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .build_string_struct(data, len)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
     fn emit_unary(
@@ -3425,6 +3671,21 @@ fn native_basic_type<'ctx>(
             signed: true,
         } => Ok(context.i64_type().into()),
         MirAbiClass::Bool => Ok(context.bool_type().into()),
+        MirAbiClass::StringHandle => {
+            catalog
+                .validate_owned_string(ty)
+                .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+            let i8_ptr = context.ptr_type(inkwell::AddressSpace::default());
+            Ok(context
+                .struct_type(
+                    &[
+                        BasicTypeEnum::PointerType(i8_ptr),
+                        BasicTypeEnum::IntType(context.i64_type()),
+                    ],
+                    false,
+                )
+                .into())
+        }
         MirAbiClass::Pointer if matches!(&desc.kind, MirTypeKind::Reference { mutable: false }) => {
             catalog
                 .validate_reference_type(ty)
@@ -3645,6 +3906,37 @@ mod tests {
             .module
             .verify()
             .expect("native List module verifies");
+    }
+
+    #[test]
+    fn native_emitter_materializes_owned_string_clone_move_and_drop() {
+        let program = canonical_program(
+            "func make_text() -> string { \"canonical\" }\nfunc consume_text(text: string) -> i32 { drop(text); 41 }\nfunc main() -> i32 { let text = make_text(); let cloned = text; drop(cloned); consume_text(text) }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference owned string execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("owned string MIR bytecode"))
+                .run_value()
+                .expect("MIR bytecode owned string execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(bytecode, Value::Int(41)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_owned_string_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("owned String MIR should have a native glue contract");
+        generator
+            .module
+            .verify()
+            .expect("native owned String module verifies");
+        assert!(generator.module.get_function("make_text").is_some());
+        assert!(generator.module.get_function("consume_text").is_some());
+        assert!(generator.module.get_function("mimi_str_clone").is_some());
+        assert!(generator.module.get_function("mimi_string_free").is_some());
     }
 
     #[test]
