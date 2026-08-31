@@ -1189,6 +1189,178 @@ impl<'a> NativeMirValidator<'a> {
         }
     }
 
+    fn validate_switch_move(
+        &mut self,
+        function: &MirFunction,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        subject: &str,
+    ) {
+        self.validate_value(function, scrutinee, "switch-move scrutinee");
+        let Some(scrutinee_value) = function.values.get(scrutinee) else {
+            return;
+        };
+        if let Err(message) =
+            native_non_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_value.ty)
+        {
+            let mut message = message;
+            message.subject = subject.to_owned();
+            self.errors.push(message);
+            return;
+        }
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_switch_move(&scrutinee_value.ty, arms)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+            return;
+        }
+
+        let Some((_, variants)) = self
+            .program
+            .type_catalog()
+            .variant_layout(&scrutinee_value.ty)
+        else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "switch-move has no canonical variant layout",
+            ));
+            return;
+        };
+        let required = variants
+            .iter()
+            .map(|variant| variant.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        if arms.len() != required.len() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "native Option<string> SwitchMove requires exactly one explicit arm for each TypeDesc variant",
+            ));
+        }
+
+        for arm in arms {
+            let MirSwitchCase::Variant(variant_id) = &arm.case else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "native Option<string> SwitchMove requires explicit variant arms; default/literal cases are not covered",
+                ));
+                continue;
+            };
+            let Some(variant) = self
+                .program
+                .type_catalog()
+                .variant(&scrutinee_value.ty, variant_id)
+            else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!(
+                        "switch-move variant '{}' is absent from TypeDesc",
+                        variant_id.0
+                    ),
+                ));
+                continue;
+            };
+            if !seen.insert(variant.id.clone()) {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!("switch-move variant '{}' is repeated", variant.name),
+                ));
+            }
+            let Some(target) = function.blocks.get(&arm.target) else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    format!("switch-move edge target '{}' is absent", arm.target),
+                ));
+                continue;
+            };
+            for (index, argument) in arm.arguments.iter().enumerate() {
+                self.validate_value(function, argument, "switch-move edge argument");
+                let Some(parameter) = target
+                    .parameters
+                    .get(index)
+                    .and_then(|parameter| function.values.get(&parameter.value))
+                else {
+                    continue;
+                };
+                if function
+                    .values
+                    .get(argument)
+                    .is_some_and(|value| value.ty != parameter.ty)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch-move edge argument type disagrees with block parameter",
+                    ));
+                }
+            }
+            if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "switch-move edge arguments and payload bindings disagree with block parameter arity",
+                ));
+            }
+            if variant.fields.len() > 1 || arm.bindings.len() > 1 {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "native Option<string> SwitchMove supports at most one payload field and one binding",
+                ));
+            }
+            let mut binding_fields = BTreeSet::new();
+            for (index, binding) in arm.bindings.iter().enumerate() {
+                if !binding_fields.insert(binding.field.clone()) {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "switch-move payload field '{}' is bound more than once",
+                            binding.field.0
+                        ),
+                    ));
+                }
+                let Some(field) = variant
+                    .fields
+                    .iter()
+                    .find(|field| field.id == binding.field)
+                else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "switch-move payload field '{}' is absent from TypeDesc",
+                            binding.field.0
+                        ),
+                    ));
+                    continue;
+                };
+                let Some(parameter) = target
+                    .parameters
+                    .get(arm.arguments.len() + index)
+                    .and_then(|parameter| function.values.get(&parameter.value))
+                else {
+                    continue;
+                };
+                if binding.parameter != target.parameters[arm.arguments.len() + index].value {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch-move binding parameter disagrees with target block parameter",
+                    ));
+                }
+                if parameter.ty != field.ty {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "switch-move payload binding type disagrees with TypeDesc",
+                    ));
+                }
+            }
+        }
+        if seen != required {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "native Option<string> SwitchMove does not cover exactly the canonical None/Some variants",
+            ));
+        }
+    }
+
     fn validate_unary(
         &mut self,
         function: &MirFunction,
@@ -1403,11 +1575,8 @@ impl<'a> NativeMirValidator<'a> {
             MirTerminator::Switch { scrutinee, arms } => {
                 self.validate_switch(function, scrutinee, arms, &subject);
             }
-            MirTerminator::SwitchMove { .. } => {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    "consuming switch has no native Copy-only variant contract",
-                ));
+            MirTerminator::SwitchMove { scrutinee, arms } => {
+                self.validate_switch_move(function, scrutinee, arms, &subject);
             }
             MirTerminator::Return { value } => match value {
                 Some(value) => {
@@ -3767,6 +3936,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirTerminator::Switch { scrutinee, arms } => {
                 self.emit_switch(scrutinee, arms, subject)?;
             }
+            MirTerminator::SwitchMove { scrutinee, arms } => {
+                self.emit_switch_move(scrutinee, arms, subject)?;
+            }
             MirTerminator::Return { value } => match value {
                 Some(value) => {
                     let value = self.value(value, &subject.to_string())?;
@@ -3794,6 +3966,175 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     subject.to_string(),
                     "unvalidated terminator reached native emitter",
                 ))
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_switch_move(
+        &mut self,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
+        let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
+        let payload_ty =
+            native_non_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_ty)?;
+        let (_, variants) = self
+            .program
+            .type_catalog()
+            .variant_layout(&scrutinee_ty)
+            .ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "switch-move has no TypeDesc layout")
+            })?;
+        let tag = self
+            .generator
+            .builder
+            .build_extract_value(
+                scrutinee_value.into_struct_value(),
+                0,
+                "mir_variant_move_tag_load",
+            )
+            .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?
+            .into_int_value();
+
+        for (index, arm) in arms.iter().enumerate() {
+            let MirSwitchCase::Variant(variant_id) = &arm.case else {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "native Option<string> SwitchMove requires explicit variant arms",
+                ));
+            };
+            let variant = variants
+                .iter()
+                .find(|candidate| candidate.id == *variant_id)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject.to_string(),
+                        format!(
+                            "switch-move variant '{}' is absent from TypeDesc",
+                            variant_id.0
+                        ),
+                    )
+                })?;
+            if variant.fields.len() == 1 && variant.fields[0].ty != payload_ty {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "switch-move payload field disagrees with the native Option<string> TypeDesc contract",
+                ));
+            }
+            let condition = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(variant.discriminant), false),
+                    "mir_variant_move_case",
+                )
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            let target = *self.blocks.get(&arm.target).ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "switch-move target is absent")
+            })?;
+            let current = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject.to_string(), "switch-move case has no LLVM block")
+            })?;
+            let next = if index + 1 < arms.len() {
+                Some(
+                    self.generator
+                        .context
+                        .append_basic_block(self.llvm_function, "mir_variant_move_next"),
+                )
+            } else {
+                None
+            };
+
+            if variant.fields.len() == 1 && arm.bindings.is_empty() {
+                let drop_payload = self
+                    .generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_variant_move_drop_payload");
+                let false_target = next.unwrap_or_else(|| {
+                    self.generator
+                        .context
+                        .append_basic_block(self.llvm_function, "mir_variant_move_invalid")
+                });
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, drop_payload, false_target)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.generator.builder.position_at_end(drop_payload);
+                let payload = self
+                    .generator
+                    .builder
+                    .build_extract_value(
+                        scrutinee_value.into_struct_value(),
+                        1,
+                        "mir_variant_move_drop_payload",
+                    )
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.emit_owned_string_drop_value(payload, &subject.to_string())?;
+                let drop_predecessor =
+                    self.generator.builder.get_insert_block().ok_or_else(|| {
+                        NativeMirError::new(
+                            subject.to_string(),
+                            "switch-move drop block has no LLVM insertion block",
+                        )
+                    })?;
+                self.queue_variant_edge(
+                    &arm.target,
+                    &arm.arguments,
+                    &arm.bindings,
+                    variant,
+                    scrutinee_value,
+                    drop_predecessor,
+                    subject,
+                )?;
+                self.generator
+                    .builder
+                    .build_unconditional_branch(target)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                if let Some(next) = next {
+                    self.generator.builder.position_at_end(next);
+                } else {
+                    self.generator.builder.position_at_end(false_target);
+                    self.emit_abort_with_message(
+                        "[E0800] canonical MIR variant tag is invalid",
+                        &subject.to_string(),
+                    )?;
+                }
+            } else {
+                self.queue_variant_edge(
+                    &arm.target,
+                    &arm.arguments,
+                    &arm.bindings,
+                    variant,
+                    scrutinee_value,
+                    current,
+                    subject,
+                )?;
+                let false_target = next.unwrap_or_else(|| {
+                    self.generator
+                        .context
+                        .append_basic_block(self.llvm_function, "mir_variant_move_invalid")
+                });
+                self.generator
+                    .builder
+                    .build_conditional_branch(condition, target, false_target)
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                if let Some(next) = next {
+                    self.generator.builder.position_at_end(next);
+                } else {
+                    self.generator.builder.position_at_end(false_target);
+                    self.emit_abort_with_message(
+                        "[E0800] canonical MIR variant tag is invalid",
+                        &subject.to_string(),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -4935,6 +5276,48 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_option_string_switch_move_and_matches_oracles() {
+        let program = canonical_program(
+            "func consume_text(text: string) -> i32 { drop(text); 41 }\nfunc consume(value: Option<string>) -> i32 { match value { Some(text) => consume_text(text), None => 0 } }\nfunc discard(value: Option<string>) -> i32 { match value { Some(_) => 7, None => 8 } }\nfunc main() -> i32 { let first: Option<string> = Some(\"owned\"); let second: Option<string> = Some(\"discard\"); let a = consume(first); let b = discard(second); a + b }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Option<string> switch-move execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("Option<string> MIR bytecode"))
+                .run_value()
+                .expect("bytecode Option<string> switch-move execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(bytecode, Value::Int(48)));
+        let switch_move_count = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .filter(|block| {
+                matches!(
+                    block.terminator,
+                    crate::core::mir::MirTerminator::SwitchMove { .. }
+                )
+            })
+            .count();
+        assert_eq!(switch_move_count, 2);
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_option_string_switch_move_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Option<string> SwitchMove should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Option<string> SwitchMove module verifies");
+        assert!(generator.module.get_function("consume").is_some());
+        assert!(generator.module.get_function("discard").is_some());
+    }
+
+    #[test]
     fn native_validator_rejects_non_copy_variant_outside_promoted_contract_before_llvm_declarations(
     ) {
         let program = canonical_program(
@@ -4957,6 +5340,38 @@ mod tests {
         assert!(
             generator.module.get_function("main").is_none(),
             "unsupported variant must be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
+    fn native_validator_rejects_non_copy_switch_move_default_before_llvm_declarations() {
+        let program = canonical_program(
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(text) => text, _ => \"fallback\" } }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        assert!(program.functions().get(&owner).is_some_and(|function| {
+            function.blocks.values().any(|block| {
+                matches!(
+                    block.terminator,
+                    crate::core::mir::MirTerminator::SwitchMove { .. }
+                )
+            })
+        }));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_option_string_switch_default_test");
+
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("default consuming switch must remain fail-closed in native slice");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("requires explicit variant arms; default/literal cases are not covered")
+        }));
+        assert!(
+            generator.module.get_function("main").is_none(),
+            "unsupported consuming switch must be rejected before LLVM declarations"
         );
     }
 

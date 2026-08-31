@@ -1,0 +1,26 @@
+func consume_text(text: string) -> i32 {
+    drop(text)
+    41
+}
+
+func consume(value: Option<string>) -> i32 {
+    match value {
+        Some(text) => consume_text(text),
+        None => 0
+    }
+}
+
+func discard(value: Option<string>) -> i32 {
+    match value {
+        Some(_) => 7,
+        None => 8
+    }
+}
+
+func main() -> i32 {
+    let first: Option<string> = Some("owned")
+    let second: Option<string> = Some("discard")
+    let a = consume(first)
+    let b = discard(second)
+    a + b
+}
