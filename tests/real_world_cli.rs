@@ -330,6 +330,51 @@ fn canonical_mir_native_owned_string_glue_matches_mir_run() {
         "canonical MIR owned String native run failed:\n{}",
         String::from_utf8_lossy(&native_run.stderr)
     );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR owned String verifier");
+    assert!(
+        verification.status.success(),
+        "canonical MIR owned String verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_verifier_reports_owned_string_result_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_owned_string_result_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR owned String result verifier");
+    assert!(
+        output.status.success(),
+        "verifier should report a closed subset"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("owned String slice requires a Copy scalar result"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("0/1 verified"), "{stdout}");
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
 }
 
 #[test]

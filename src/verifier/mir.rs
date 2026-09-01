@@ -29,6 +29,14 @@ use z3::Sort;
 enum SymbolicValue {
     Int(Int),
     Bool(Bool),
+    /// An owned value whose payload is intentionally opaque to the arithmetic
+    /// contract domain.  The exact TypeDesc identity is retained so the
+    /// verifier can still prove that Clone/Move/Drop operate on the same
+    /// canonical ABI and ownership contract without inventing string
+    /// semantics in Z3.
+    Opaque {
+        ty: crate::core::ResolvedTypeId,
+    },
     Tuple(Vec<SymbolicValue>),
     Record {
         nominal: crate::core::ir::NominalTypeId,
@@ -203,6 +211,22 @@ fn verify_function(
         ));
     }
 
+    // The owned-String verifier slice proves only arithmetic contracts whose
+    // observable result is a Copy scalar.  String payloads stay opaque in the
+    // symbolic domain; admitting an aggregate or owned result here would
+    // silently turn this proof into a new ABI/ownership slice.  The check is
+    // intentionally driven by the canonical value catalog, never by a
+    // surface type or backend-specific representation.
+    let has_owned_string_value = function
+        .values
+        .values()
+        .any(|value| catalog.validate_owned_string(&value.ty).is_ok());
+    if has_owned_string_value && catalog.validate_copy_scalar(&function.result).is_err() {
+        return Err(
+            "canonical MIR verifier owned String slice requires a Copy scalar result".into(),
+        );
+    }
+
     let mut initial = initial_state(function, catalog, session)?;
     let mut require_terms = Vec::with_capacity(requires.len());
     for condition in &requires {
@@ -348,6 +372,10 @@ fn symbolic_value_for_type(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String) {
+        catalog.validate_owned_string(ty)?;
+        return Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()));
+    }
     if descriptor.kind == MirTypeKind::Set {
         catalog.validate_set_glue(ty, MirGlueOperation::MoveOut)?;
         let MirLayout::Set { element } = &descriptor.layout else {
@@ -935,13 +963,29 @@ fn eval_instruction(
 ) -> Result<(), String> {
     match instruction {
         MirInstructionKind::Const { result, literal } => {
-            let kind = value_scalar_kind(function, catalog, result)?;
-            let value = match (kind, literal) {
-                (ScalarKind::Int { .. }, crate::core::ir::ResolvedLiteral::Int(value)) => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR const result '{}' is absent", result))?
+                .ty
+                .clone();
+            let value = match literal {
+                crate::core::ir::ResolvedLiteral::Int(value) => {
+                    let ScalarKind::Int { .. } = value_scalar_kind(function, catalog, result)?
+                    else {
+                        return Err("MIR scalar const literal disagrees with TypeDesc ABI".into());
+                    };
                     SymbolicValue::Int(Int::from_i64(*value))
                 }
-                (ScalarKind::Bool, crate::core::ir::ResolvedLiteral::Bool(value)) => {
+                crate::core::ir::ResolvedLiteral::Bool(value) => {
+                    let ScalarKind::Bool = value_scalar_kind(function, catalog, result)? else {
+                        return Err("MIR scalar const literal disagrees with TypeDesc ABI".into());
+                    };
                     SymbolicValue::Bool(Bool::from_bool(*value))
+                }
+                crate::core::ir::ResolvedLiteral::String(_) => {
+                    catalog.validate_owned_string(&result_ty)?;
+                    SymbolicValue::Opaque { ty: result_ty }
                 }
                 _ => return Err("MIR scalar const literal disagrees with TypeDesc ABI".into()),
             };
@@ -962,9 +1006,52 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
-        MirInstructionKind::Copy { result, source }
-        | MirInstructionKind::Move { result, source }
-        | MirInstructionKind::Clone { result, source } => {
+        MirInstructionKind::Copy { result, source } => {
+            let source_ty = instruction_value_type(function, source, "copy source")?;
+            ensure_copy_value(function, catalog, source)?;
+            ensure_same_instruction_types(function, result, &source_ty, "copy")?;
+            let value = state
+                .values
+                .get(source)
+                .cloned()
+                .ok_or_else(|| format!("MIR value '{}' is not defined", source))?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::Move { result, source } => {
+            let source_ty = instruction_value_type(function, source, "move source")?;
+            ensure_same_instruction_types(function, result, &source_ty, "move")?;
+            let is_copy = catalog
+                .get(&source_ty)
+                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            let value = if is_copy {
+                ensure_copy_value(function, catalog, source)?;
+                state
+                    .values
+                    .get(source)
+                    .cloned()
+                    .ok_or_else(|| format!("MIR value '{}' is not defined", source))?
+            } else {
+                catalog.validate_glue(&source_ty, MirGlueOperation::MoveOut)?;
+                state
+                    .values
+                    .remove(source)
+                    .ok_or_else(|| format!("MIR value '{}' is not available for move", source))?
+            };
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::Clone { result, source } => {
+            let source_ty = instruction_value_type(function, source, "clone source")?;
+            ensure_same_instruction_types(function, result, &source_ty, "clone")?;
+            let is_copy = catalog
+                .get(&source_ty)
+                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            if is_copy {
+                ensure_copy_value(function, catalog, source)?;
+            } else {
+                catalog.validate_glue(&source_ty, MirGlueOperation::Clone)?;
+            }
             let value = state
                 .values
                 .get(source)
@@ -974,20 +1061,27 @@ fn eval_instruction(
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Drop { value } => {
-            let ty = function
-                .values
-                .get(value)
-                .ok_or_else(|| format!("MIR drop value '{}' is absent", value))?
-                .ty
-                .clone();
-            if catalog.get(&ty).is_some_and(|descriptor| {
-                matches!(descriptor.kind, MirTypeKind::Set | MirTypeKind::List)
-            }) {
-                catalog.validate_glue(&ty, MirGlueOperation::Drop)?;
-            } else {
+            let ty = instruction_value_type(function, value, "drop value")?;
+            let is_copy = catalog
+                .get(&ty)
+                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            if is_copy {
                 ensure_copy_value(function, catalog, value)?;
+            } else {
+                catalog.validate_glue(&ty, MirGlueOperation::Drop)?;
             }
-            if !state.values.contains_key(value) {
+            if !is_copy {
+                let dropped = state
+                    .values
+                    .remove(value)
+                    .ok_or_else(|| format!("MIR drop value '{}' is not defined", value))?;
+                if !symbolic_matches_type(catalog, &ty, &dropped) {
+                    return Err(format!(
+                        "MIR drop value '{}' disagrees with TypeDesc",
+                        value
+                    ));
+                }
+            } else if !state.values.contains_key(value) {
                 return Err(format!("MIR drop value '{}' is not defined", value));
             }
         }
@@ -1527,6 +1621,35 @@ fn ensure_copy_value(
     Ok(())
 }
 
+fn instruction_value_type(
+    function: &MirFunction,
+    value: &MirValueId,
+    role: &str,
+) -> Result<crate::core::ResolvedTypeId, String> {
+    function
+        .values
+        .get(value)
+        .map(|info| info.ty.clone())
+        .ok_or_else(|| format!("MIR verifier {role} '{}' is absent", value))
+}
+
+fn ensure_same_instruction_types(
+    function: &MirFunction,
+    result: &MirValueId,
+    source_ty: &crate::core::ResolvedTypeId,
+    operation: &str,
+) -> Result<(), String> {
+    let result_ty = instruction_value_type(function, result, &format!("{operation} result"))?;
+    if result_ty != *source_ty {
+        return Err(format!(
+            "MIR verifier {operation} result TypeDesc '{}' disagrees with source TypeDesc '{}'",
+            result_ty.as_str(),
+            source_ty.as_str()
+        ));
+    }
+    Ok(())
+}
+
 /// Symbolically consume the one generic call family admitted by this slice.
 ///
 /// The verifier does not infer a callee body from a template name.  It first
@@ -1700,6 +1823,9 @@ fn symbolic_matches_type(
             SymbolicValue::Int(_),
         )
         | (MirLayout::Scalar, MirAbiClass::Bool, SymbolicValue::Bool(_)) => true,
+        (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
+            actual_ty == ty && catalog.validate_owned_string(ty).is_ok()
+        }
         (MirLayout::Tuple(elements), _, SymbolicValue::Tuple(values)) => {
             elements.len() == values.len()
                 && elements
@@ -1967,6 +2093,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
         SymbolicValue::Int(_)
+        | SymbolicValue::Opaque { .. }
         | SymbolicValue::Tuple(_)
         | SymbolicValue::Record { .. }
         | SymbolicValue::Set { .. }
@@ -2121,6 +2248,92 @@ mod tests {
             .expect("function")
             .canonical_text()
             .contains("contract"));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_owned_string_glue_for_scalar_contracts() {
+        let source = r#"
+            func consume(text: string, n: i32) -> i32 {
+                requires: n >= 0
+                ensures: result == n
+                let cloned = text;
+                drop(cloned);
+                drop(text);
+                let literal = "owned";
+                drop(literal);
+                n
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("consume"))
+            .cloned()
+            .expect("consume MIR function");
+
+        let reference_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &owner,
+                &[
+                    MirRuntimeValue::String("input".into()),
+                    MirRuntimeValue::Int(41),
+                ],
+            )
+            .expect("reference owned String execution");
+        assert_eq!(reference_value, MirRuntimeValue::Int(41));
+
+        let results = verify_program(&program, "owned-string-source-hash".into())
+            .expect("verify owned String MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("owned String contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        assert!(program
+            .functions()
+            .get(&owner)
+            .expect("owned String function")
+            .canonical_text()
+            .contains("clone"));
+        assert!(program
+            .type_catalog()
+            .iter()
+            .any(|(ty, _)| program.type_catalog().validate_owned_string(ty).is_ok()));
+    }
+
+    #[test]
+    fn verifier_rejects_owned_string_result_without_fallback() {
+        let source = r#"
+            func echo(text: string) -> string {
+                ensures: true
+                text
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results = verify_program(&program, "owned-string-result-source-hash".into())
+            .expect("verifier should classify unsupported owned result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("echo"))
+            .expect("echo verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result
+            .message
+            .contains("owned String slice requires a Copy scalar result"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ func make_text() -> string {
 }
 
 func consume_text(text: string) -> i32 {
+    ensures: result == 41
     drop(text);
     41
 }
