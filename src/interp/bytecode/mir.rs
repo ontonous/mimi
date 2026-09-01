@@ -563,6 +563,11 @@ impl<'a> FunctionEmitter<'a> {
                 arguments,
                 ..
             } => self.emit_call(result.as_ref(), callee, arguments),
+            MirInstructionKind::FlowTransition {
+                result,
+                transition,
+                arguments,
+            } => self.emit_flow_transition(result, transition, arguments),
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
@@ -1046,6 +1051,50 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("callee '{}' is absent from MIR program", owner.0));
             return;
         };
+        self.emit_call_target(result, func, arguments);
+    }
+
+    fn emit_flow_transition(
+        &mut self,
+        result: &MirValueId,
+        transition: &NodeId,
+        arguments: &[MirValueId],
+    ) {
+        let Some(contract) = self.program.transitions().get(transition) else {
+            self.error(format!(
+                "flow transition '{}' has no canonical contract",
+                transition.0
+            ));
+            return;
+        };
+        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+            || contract.targets.len() != 1
+            || contract.failure.is_some()
+            || contract.is_fallback
+            || contract.is_ffi_pinned
+        {
+            self.error(format!(
+                "flow transition '{}' is outside the bytecode production contract",
+                transition.0
+            ));
+            return;
+        }
+        let Some(&func) = self.indices.get(&contract.owner) else {
+            self.error(format!(
+                "flow transition '{}' executable body is absent from MIR program",
+                transition.0
+            ));
+            return;
+        };
+        self.emit_call_target(Some(result), func, arguments);
+    }
+
+    fn emit_call_target(
+        &mut self,
+        result: Option<&MirValueId>,
+        func: FuncIdx,
+        arguments: &[MirValueId],
+    ) {
         for argument in arguments {
             if let Err(message) = self.supported_type_for_value(argument) {
                 self.error(format!(

@@ -67,7 +67,10 @@ pub(super) fn validate_native_non_copy_record_type(
             descriptor.abi
         ));
     }
-    if descriptor.ownership != MirOwnership::Move {
+    if !matches!(
+        descriptor.ownership,
+        MirOwnership::Move | MirOwnership::Linear
+    ) {
         return Err(format!(
             "record TypeDesc '{}' ownership {:?} is outside the native non-Copy record contract",
             ty.as_str(),

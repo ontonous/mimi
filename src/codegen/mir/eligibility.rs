@@ -59,18 +59,27 @@ pub(super) fn instruction_kind(
     &instruction.kind
 }
 
-pub(super) fn mir_symbol(owner: &crate::core::NodeId) -> Result<&str, String> {
-    let symbol = owner
-        .0
-        .strip_prefix("function:")
-        .ok_or_else(|| "callable identity is not a function owner".to_string())?;
+pub(super) fn mir_symbol(owner: &crate::core::NodeId) -> Result<String, String> {
+    let Some(symbol) = owner.0.strip_prefix("function:") else {
+        let transition = owner
+            .0
+            .strip_prefix("transition:")
+            .ok_or_else(|| "callable identity is not a function or transition owner".to_string())?;
+        if transition.trim().is_empty() {
+            return Err("transition symbol must not be empty".into());
+        }
+        return Ok(format!(
+            "__mimi_transition_{}",
+            native_symbol_fragment(transition)
+        ));
+    };
     if symbol.trim().is_empty() || symbol.contains("::") {
         return Err("only simple function symbols are in the native MIR slice".into());
     }
     if symbol.starts_with("mimi_") {
         return Err("function symbol collides with reserved runtime namespace".into());
     }
-    Ok(symbol)
+    Ok(symbol.to_owned())
 }
 
 pub(super) fn native_symbol_fragment(value: &str) -> String {

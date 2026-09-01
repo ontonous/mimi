@@ -203,7 +203,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             let value =
                 self.generator
                     .module
-                    .add_function(symbol, function_type, Some(Linkage::External));
+                    .add_function(&symbol, function_type, Some(Linkage::External));
             self.functions.insert(owner.clone(), value);
         }
         Ok(())
@@ -501,6 +501,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             } => {
                 self.emit_call(result.as_ref(), callee, arguments, subject)?;
             }
+            MirInstructionKind::FlowTransition {
+                result,
+                transition,
+                arguments,
+            } => {
+                self.emit_flow_transition(result, transition, arguments, subject)?;
+            }
             MirInstructionKind::Nop => {}
             _ => {
                 return Err(NativeMirError::new(
@@ -567,6 +574,113 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    #[test]
+    fn silent_local_flow_transition_is_one_four_consumer_production_island() {
+        let program = canonical_program(
+            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
+        );
+        let transition = crate::core::NodeId("transition:Counter::inc::Zero".into());
+        let contract = program
+            .transitions()
+            .get(&transition)
+            .expect("implemented transition contract");
+        assert_eq!(contract.targets.len(), 1);
+        assert_eq!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::SilentLocal
+        );
+        assert_eq!(contract.source, contract.parameters[0]);
+        let state_desc = program
+            .type_catalog()
+            .get(&contract.source)
+            .expect("Flow state TypeDesc");
+        assert_eq!(
+            state_desc.abi,
+            crate::core::mir::types::MirAbiClass::Aggregate
+        );
+        assert_eq!(
+            state_desc.ownership,
+            crate::core::mir::types::MirOwnership::Linear
+        );
+        assert_eq!(
+            state_desc.glue.move_out,
+            crate::core::mir::types::MirGlueKind::Aggregate
+        );
+        assert_eq!(
+            state_desc.glue.clone,
+            crate::core::mir::types::MirGlueKind::Aggregate
+        );
+        assert_eq!(
+            state_desc.glue.drop,
+            crate::core::mir::types::MirGlueKind::Aggregate
+        );
+        assert!(state_desc.drop_plan.is_some());
+        assert!(program.functions().contains_key(&transition));
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        crate::core::mir::MirInstructionKind::FlowTransition {
+                            transition: ref owner,
+                            ..
+                        } if owner == &transition
+                    )
+                })
+            })
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Flow transition execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("Flow transition MIR bytecode"))
+                .run_value()
+                .expect("bytecode Flow transition execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for Flow transition island");
+        crate::verifier::verify_mir(&program, String::new())
+            .expect("verifier consumes Flow transition MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_flow_transition_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native Flow transition lowering");
+        generator
+            .module
+            .verify()
+            .expect("native Flow transition module verifies");
+        assert!(generator.module.get_function("main").is_some());
+        assert!(generator
+            .module
+            .get_function("__mimi_transition_Counter__inc__Zero")
+            .is_some());
+    }
+
+    #[test]
+    fn failing_flow_transition_is_rejected_before_any_backend() {
+        let source =
+            "flow F { state A { v: i32 } transition go(A) -> A fails string { return A { v: self.v + 1 } } } func main() -> i32 { 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("failing transition must remain outside the S8 island");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("silent-local")
+                || message.contains("FlowTransition")
+                || message.contains("Lowering"),
+            "missing fail-closed transition diagnostic: {message}"
+        );
     }
 
     #[test]

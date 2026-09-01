@@ -85,6 +85,9 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
     .map_err(|error| format!("MIR inspection input rejected: {error}"))?;
 
     print!("{}", program.type_catalog().canonical_text());
+    for transition in program.transitions().values() {
+        print!("{}", transition.canonical_text());
+    }
     for function in program.functions().values() {
         print!("{}", function.canonical_text());
     }

@@ -21,9 +21,24 @@ fn project_root() -> PathBuf {
 }
 
 fn mimi_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_mimi")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| project_root().join("target").join("debug").join("mimi"))
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_mimi") {
+        return PathBuf::from(path);
+    }
+
+    // Cargo does not expose CARGO_BIN_EXE_mimi for every custom-target-dir
+    // invocation.  The integration test itself still lives beside the
+    // matching target directory, so prefer that binary over a stale
+    // workspace target/debug/mimi.
+    if let Ok(test_exe) = std::env::current_exe() {
+        if let Some(target_debug) = test_exe.parent().and_then(Path::parent) {
+            let candidate = target_debug.join("mimi");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    project_root().join("target").join("debug").join("mimi")
 }
 
 fn can_link() -> bool {
@@ -941,6 +956,96 @@ fn default_copy_record_update_selects_canonical_route() {
     assert!(
         verification.status.success(),
         "default canonical record update verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+}
+
+#[test]
+fn default_silent_local_flow_transition_selects_one_canonical_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_flow_transition.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Flow transition run");
+    assert_eq!(
+        default_run.status.code(),
+        Some(42),
+        "default Flow transition run failed:\n{}",
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+
+    let default_build_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default Flow transition LLVM emission");
+    assert!(
+        default_build_ir.status.success(),
+        "default Flow transition build failed:\n{}",
+        String::from_utf8_lossy(&default_build_ir.stderr)
+    );
+    let ir = String::from_utf8_lossy(&default_build_ir.stdout);
+    assert!(
+        ir.contains("@__mimi_transition_Counter__inc__Zero"),
+        "default build did not select the canonical Flow transition island:\n{ir}"
+    );
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical Flow transition inspection");
+    assert!(mir.status.success());
+    assert!(String::from_utf8_lossy(&mir.stdout)
+        .contains("mir.transition transition:Counter::inc::Zero"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-canonical-flow-transition-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default Flow transition native build");
+    assert!(
+        build.status.success(),
+        "default Flow transition native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default Flow transition native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(42),
+        "default Flow transition native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Flow transition verifier");
+    assert!(
+        verification.status.success(),
+        "default Flow transition verification failed:\n{}\n{}",
         String::from_utf8_lossy(&verification.stderr),
         String::from_utf8_lossy(&verification.stdout)
     );

@@ -405,10 +405,18 @@ fn symbolic_value_for_type(
             vec![length.ge(Int::from_i64(0))],
         ));
     }
-    if descriptor.ownership != MirOwnership::Copy
-        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
+    let linear_record = descriptor.ownership == MirOwnership::Linear
+        && matches!(&descriptor.layout, MirLayout::Record { .. })
+        && descriptor.abi == MirAbiClass::Aggregate
+        && descriptor.glue.move_out == crate::core::mir::types::MirGlueKind::Aggregate
+        && descriptor.glue.clone == crate::core::mir::types::MirGlueKind::Aggregate
+        && descriptor.glue.drop == crate::core::mir::types::MirGlueKind::Aggregate
+        && descriptor.drop_plan.is_some();
+    if (descriptor.ownership != MirOwnership::Copy && !linear_record)
+        || (!linear_record
+            && (descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
+                || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
+                || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop))
     {
         return Err(format!(
             "MIR verifier TypeDesc '{}' is outside the Copy/no-op aggregate contract",
@@ -1534,6 +1542,13 @@ fn eval_instruction(
             type_arguments,
             arguments,
         )?,
+        MirInstructionKind::FlowTransition {
+            result,
+            transition,
+            arguments,
+        } => eval_flow_transition(
+            function, program, catalog, state, result, transition, arguments,
+        )?,
         MirInstructionKind::Borrow {
             result,
             source,
@@ -1671,6 +1686,138 @@ fn ensure_same_instruction_types(
             source_ty.as_str()
         ));
     }
+    Ok(())
+}
+
+fn eval_flow_transition(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &MirValueId,
+    transition: &crate::core::NodeId,
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    let contract = program.transitions().get(transition).ok_or_else(|| {
+        format!(
+            "MIR verifier transition '{}' has no canonical contract",
+            transition.0
+        )
+    })?;
+    if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+        || contract.targets.len() != 1
+        || contract.failure.is_some()
+        || contract.is_fallback
+        || contract.is_ffi_pinned
+        || contract.targets.first() != Some(&contract.result)
+    {
+        return Err(format!(
+            "MIR verifier transition '{}' is outside the silent-local contract",
+            transition.0
+        ));
+    }
+    let target = program.functions().get(&contract.owner).ok_or_else(|| {
+        format!(
+            "MIR verifier transition '{}' executable body is absent",
+            transition.0
+        )
+    })?;
+    if arguments.len() != target.parameters.len() {
+        return Err(format!(
+            "MIR verifier transition '{}' argument arity disagrees with its body",
+            transition.0
+        ));
+    }
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(format!(
+            "MIR verifier transition '{}' result TypeDesc disagrees with its body",
+            transition.0
+        ));
+    }
+
+    let mut target_state = SymbolicState {
+        values: BTreeMap::new(),
+        constraints: state.constraints.clone(),
+        traps: Vec::new(),
+    };
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let argument_info = function.values.get(argument).ok_or_else(|| {
+            format!(
+                "MIR verifier transition '{}' argument '{}' is absent",
+                transition.0, argument
+            )
+        })?;
+        let parameter_info = target.values.get(parameter).ok_or_else(|| {
+            format!(
+                "MIR verifier transition '{}' parameter '{}' is absent",
+                transition.0, parameter
+            )
+        })?;
+        if argument_info.ty != parameter_info.ty {
+            return Err(format!(
+                "MIR verifier transition '{}' argument TypeDesc disagrees with its body",
+                transition.0
+            ));
+        }
+        let value = state.values.get(argument).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier transition '{}' argument '{}' is not defined",
+                transition.0, argument
+            )
+        })?;
+        target_state.values.insert(parameter.clone(), value);
+    }
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let ty = target
+            .values
+            .get(parameter)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| "MIR verifier transition parameter TypeDesc is absent".to_string())?;
+        if catalog
+            .get(&ty)
+            .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy)
+        {
+            catalog.validate_glue(&ty, MirGlueOperation::MoveOut)?;
+            state.values.remove(argument).ok_or_else(|| {
+                format!(
+                    "MIR verifier transition '{}' argument '{}' is not available for move",
+                    transition.0, argument
+                )
+            })?;
+        }
+    }
+
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if !traps.is_empty() {
+        return Err(format!(
+            "MIR verifier transition '{}' has a trapping execution path",
+            transition.0
+        ));
+    }
+    let [returned] = returns.as_slice() else {
+        return Err(format!(
+            "MIR verifier transition '{}' must have exactly one non-trapping return path",
+            transition.0
+        ));
+    };
+    state.constraints = returned.constraints.clone();
+    ensure_result_shape(function, catalog, result, &returned.value)?;
+    state.values.insert(result.clone(), returned.value.clone());
     Ok(())
 }
 

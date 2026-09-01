@@ -211,7 +211,11 @@ impl<'a> CapabilityGate<'a> {
                 Ok(())
             }
             MirLayout::Record { fields, .. } => {
-                self.require_copy_aggregate(ty, &descriptor)?;
+                if descriptor.ownership == MirOwnership::Linear {
+                    self.require_linear_aggregate(ty, &descriptor)?;
+                } else {
+                    self.require_copy_aggregate(ty, &descriptor)?;
+                }
                 for field in fields {
                     self.validate_type(&field.ty, "record field");
                 }
@@ -243,6 +247,26 @@ impl<'a> CapabilityGate<'a> {
         {
             return Err(format!(
                 "aggregate '{}' is not Copy with canonical no-op glue",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_linear_aggregate(
+        &self,
+        ty: &crate::core::ResolvedTypeId,
+        descriptor: &crate::core::mir::types::MirTypeDesc,
+    ) -> Result<(), String> {
+        if descriptor.ownership != MirOwnership::Linear
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.glue.move_out != MirGlueKind::Aggregate
+            || descriptor.glue.clone != MirGlueKind::Aggregate
+            || descriptor.glue.drop != MirGlueKind::Aggregate
+            || descriptor.drop_plan.is_none()
+        {
+            return Err(format!(
+                "linear aggregate '{}' lacks the canonical aggregate Move/Clone/Drop glue plan",
                 ty.as_str()
             ));
         }
@@ -624,7 +648,64 @@ impl<'a> CapabilityGate<'a> {
                     subject,
                 );
             }
+            MirInstructionKind::FlowTransition {
+                result,
+                transition,
+                arguments,
+            } => self.validate_flow_transition(function, result, transition, arguments, subject),
             MirInstructionKind::Nop => {}
+        }
+    }
+
+    fn validate_flow_transition(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        transition: &crate::core::NodeId,
+        arguments: &[MirValueId],
+        subject: &str,
+    ) {
+        let Some(contract) = self.program.transitions().get(transition) else {
+            self.error(format!(
+                "{subject} FlowTransition '{}' has no canonical contract",
+                transition.0
+            ));
+            return;
+        };
+        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+            || contract.targets.len() != 1
+            || contract.failure.is_some()
+            || contract.is_fallback
+            || contract.is_ffi_pinned
+        {
+            self.error(format!(
+                "{subject} FlowTransition is outside the silent-local transition capability"
+            ));
+        }
+        let Some(target) = self.program.functions().get(&contract.owner) else {
+            self.error(format!(
+                "{subject} FlowTransition target '{}' is absent",
+                contract.owner.0
+            ));
+            return;
+        };
+        if arguments.len() != target.parameters.len() {
+            self.error(format!(
+                "{subject} FlowTransition argument arity disagrees with its canonical body"
+            ));
+        }
+        for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+            if value_type(function, argument) != value_type(target, parameter) {
+                self.error(format!(
+                    "{subject} FlowTransition argument TypeDesc disagrees with its canonical body"
+                ));
+            }
+        }
+        match value_type(function, result) {
+            Some(actual) if actual == contract.result && actual == target.result => {}
+            _ => self.error(format!(
+                "{subject} FlowTransition result TypeDesc disagrees with its canonical contract"
+            )),
         }
     }
 

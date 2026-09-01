@@ -7,14 +7,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
+use crate::core::ir::{
+    ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedType, ResolvedUnaryOp,
+};
 use crate::core::{NodeId, ResolvedPlace};
 
 use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId,
     MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
-    MirValueId,
+    MirTransitionContract, MirTransitionEffect, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,7 @@ pub struct MirProgram {
     functions: BTreeMap<NodeId, MirFunction>,
     type_catalog: MirTypeCatalog,
     instances: BTreeMap<MirInstanceId, MirInstance>,
+    transitions: BTreeMap<NodeId, MirTransitionContract>,
 }
 
 impl MirProgram {
@@ -108,8 +111,15 @@ impl MirProgram {
             &mut functions,
         )
         .map_err(MirProgramBuildError::Lowering)?;
-        Self::with_type_catalog_and_instances(functions, type_catalog, instances)
-            .map_err(MirProgramBuildError::Validation)
+        let transitions = materialize_transition_contracts(program, &type_catalog, None)
+            .map_err(MirProgramBuildError::Validation)?;
+        Self::with_type_catalog_and_instances_and_transitions(
+            functions,
+            type_catalog,
+            instances,
+            transitions,
+        )
+        .map_err(MirProgramBuildError::Validation)
     }
 
     /// Build canonical MIR while excluding checker callables whose origin is
@@ -157,8 +167,16 @@ impl MirProgram {
             excluded_sources,
         )
         .map_err(MirProgramBuildError::Lowering)?;
-        Self::with_type_catalog_and_instances(functions, type_catalog, instances)
-            .map_err(MirProgramBuildError::Validation)
+        let transitions =
+            materialize_transition_contracts(program, &type_catalog, Some(excluded_sources))
+                .map_err(MirProgramBuildError::Validation)?;
+        Self::with_type_catalog_and_instances_and_transitions(
+            functions,
+            type_catalog,
+            instances,
+            transitions,
+        )
+        .map_err(MirProgramBuildError::Validation)
     }
 
     /// Internal constructor retained for structural/unit tests that build
@@ -179,6 +197,7 @@ impl MirProgram {
                 functions,
                 type_catalog: MirTypeCatalog::default(),
                 instances: BTreeMap::new(),
+                transitions: BTreeMap::new(),
             })
         } else {
             Err(errors)
@@ -196,6 +215,20 @@ impl MirProgram {
         functions: BTreeMap<NodeId, MirFunction>,
         type_catalog: MirTypeCatalog,
         instances: BTreeMap<MirInstanceId, MirInstance>,
+    ) -> Result<Self, Vec<super::MirValidationError>> {
+        Self::with_type_catalog_and_instances_and_transitions(
+            functions,
+            type_catalog,
+            instances,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn with_type_catalog_and_instances_and_transitions(
+        functions: BTreeMap<NodeId, MirFunction>,
+        type_catalog: MirTypeCatalog,
+        instances: BTreeMap<MirInstanceId, MirInstance>,
+        transitions: BTreeMap<NodeId, MirTransitionContract>,
     ) -> Result<Self, Vec<super::MirValidationError>> {
         let mut errors = Vec::new();
         errors.extend(validate_instance_table(
@@ -744,6 +777,7 @@ impl MirProgram {
                         }
                         super::MirInstructionKind::Const { .. }
                         | super::MirInstructionKind::Call { .. }
+                        | super::MirInstructionKind::FlowTransition { .. }
                         | super::MirInstructionKind::BuiltinCall { .. }
                         | super::MirInstructionKind::Binary { .. }
                         | super::MirInstructionKind::Unary { .. }
@@ -840,13 +874,19 @@ impl MirProgram {
             }
         }
         if errors.is_empty() {
-            errors.extend(validate_call_graph(&functions, &instances));
+            errors.extend(validate_call_graph(
+                &functions,
+                &instances,
+                &type_catalog,
+                &transitions,
+            ));
         }
         if errors.is_empty() {
             Ok(Self {
                 functions,
                 type_catalog,
                 instances,
+                transitions,
             })
         } else {
             Err(errors)
@@ -869,6 +909,10 @@ impl MirProgram {
 
     pub fn instances(&self) -> &BTreeMap<MirInstanceId, MirInstance> {
         &self.instances
+    }
+
+    pub fn transitions(&self) -> &BTreeMap<NodeId, MirTransitionContract> {
+        &self.transitions
     }
 }
 
@@ -1189,11 +1233,37 @@ fn validate_generic_identity_instance_function(
 fn validate_call_graph(
     functions: &BTreeMap<NodeId, MirFunction>,
     instances: &BTreeMap<MirInstanceId, MirInstance>,
+    type_catalog: &MirTypeCatalog,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
+    errors.extend(validate_transition_contracts(
+        functions,
+        type_catalog,
+        transitions,
+    ));
     for function in functions.values() {
         for block in function.blocks.values() {
             for instruction in &block.instructions {
+                if let super::MirInstructionKind::FlowTransition {
+                    result,
+                    transition,
+                    arguments,
+                } = &instruction.kind
+                {
+                    validate_flow_transition_instruction(
+                        function,
+                        type_catalog,
+                        functions,
+                        transitions,
+                        result,
+                        transition,
+                        arguments,
+                        &instruction.id.to_string(),
+                        &mut errors,
+                    );
+                    continue;
+                }
                 let super::MirInstructionKind::Call {
                     result,
                     callee,
@@ -1336,6 +1406,310 @@ fn validate_call_graph(
         }
     }
     errors
+}
+
+fn validate_transition_contracts(
+    functions: &BTreeMap<NodeId, MirFunction>,
+    type_catalog: &MirTypeCatalog,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+    for (owner, contract) in transitions {
+        let subject = owner.0.clone();
+        if owner != &contract.owner {
+            errors.push(super::MirValidationError {
+                subject: subject.clone(),
+                message: "transition contract owner key disagrees with its owner identity".into(),
+            });
+        }
+        let Some(target) = functions.get(&contract.owner) else {
+            errors.push(super::MirValidationError {
+                subject: subject.clone(),
+                message: "transition executable body is absent from the canonical MIR program"
+                    .into(),
+            });
+            continue;
+        };
+        for ty in std::iter::once(&contract.source)
+            .chain(contract.parameters.iter())
+            .chain(std::iter::once(&contract.result))
+            .chain(contract.targets.iter())
+            .chain(contract.failure.iter())
+        {
+            if type_catalog.get(ty).is_none() {
+                errors.push(super::MirValidationError {
+                    subject: subject.clone(),
+                    message: format!(
+                        "transition contract refers to TypeDesc '{}' absent from the catalog",
+                        ty.as_str()
+                    ),
+                });
+            }
+        }
+        if contract.parameters.first() != Some(&contract.source)
+            || contract.parameters.len() != target.parameters.len()
+        {
+            errors.push(super::MirValidationError {
+                subject: subject.clone(),
+                message:
+                    "transition source/parameter contract disagrees with executable MIR signature"
+                        .into(),
+            });
+        }
+        for (actual, expected) in contract.parameters.iter().zip(&target.parameters) {
+            if target
+                .values
+                .get(expected)
+                .is_none_or(|value| value.ty != *actual)
+            {
+                errors.push(super::MirValidationError {
+                    subject: subject.clone(),
+                    message:
+                        "transition parameter TypeDesc disagrees with executable MIR signature"
+                            .into(),
+                });
+                break;
+            }
+        }
+        if contract.result != target.result {
+            errors.push(super::MirValidationError {
+                subject: subject.clone(),
+                message: "transition result TypeDesc disagrees with executable MIR signature"
+                    .into(),
+            });
+        }
+        match contract.effect {
+            MirTransitionEffect::SilentLocal => {
+                if contract.targets.len() != 1
+                    || contract.failure.is_some()
+                    || contract.is_fallback
+                    || contract.is_ffi_pinned
+                    || contract.targets.first() != Some(&contract.result)
+                {
+                    errors.push(super::MirValidationError {
+                        subject,
+                        message: "silent-local transition must be one target, non-failing, non-fallback, non-pinned, and return that target state".into(),
+                    });
+                }
+            }
+            MirTransitionEffect::Boundary => {
+                errors.push(super::MirValidationError {
+                    subject,
+                    message:
+                        "transition boundary effect is outside the implemented canonical MIR island"
+                            .into(),
+                });
+            }
+        }
+    }
+    errors
+}
+
+fn validate_flow_transition_instruction(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    functions: &BTreeMap<NodeId, MirFunction>,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
+    result: &MirValueId,
+    transition: &NodeId,
+    arguments: &[MirValueId],
+    subject: &str,
+    errors: &mut Vec<super::MirValidationError>,
+) {
+    let Some(contract) = transitions.get(transition) else {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: format!(
+                "transition '{}' has no canonical MIR contract",
+                transition.0
+            ),
+        });
+        return;
+    };
+    if contract.effect != MirTransitionEffect::SilentLocal
+        || contract.targets.len() != 1
+        || contract.failure.is_some()
+        || contract.is_fallback
+        || contract.is_ffi_pinned
+    {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition instruction is outside the silent-local transition island"
+                .into(),
+        });
+    }
+    let Some(target) = functions.get(&contract.owner) else {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition target body is absent from the canonical MIR program".into(),
+        });
+        return;
+    };
+    if arguments.len() != target.parameters.len() {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition argument arity disagrees with its contract".into(),
+        });
+    }
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let Some(actual) = function.values.get(argument) else {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message: format!(
+                    "FlowTransition argument '{}' is absent from caller values",
+                    argument
+                ),
+            });
+            continue;
+        };
+        let Some(expected) = target.values.get(parameter) else {
+            continue;
+        };
+        if actual.ty != expected.ty {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message: "FlowTransition argument TypeDesc disagrees with transition parameter"
+                    .into(),
+            });
+        }
+    }
+    let Some(result_value) = function.values.get(result) else {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition result is absent from caller values".into(),
+        });
+        return;
+    };
+    if result_value.ty != contract.result || result_value.ty != target.result {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition result TypeDesc disagrees with transition result".into(),
+        });
+    }
+    if type_catalog.get(&result_value.ty).is_none() {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: "FlowTransition result TypeDesc is absent from the catalog".into(),
+        });
+    }
+}
+
+fn materialize_transition_contracts(
+    program: &crate::core::CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+) -> Result<BTreeMap<NodeId, MirTransitionContract>, Vec<super::MirValidationError>> {
+    let mut transitions = BTreeMap::new();
+    let mut errors = Vec::new();
+    let mut resolved = program.transitions().values().collect::<Vec<_>>();
+    resolved.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    for transition in resolved {
+        if excluded_sources
+            .is_some_and(|excluded| excluded.contains(&transition.origin.user_span().source_id))
+        {
+            continue;
+        }
+        // The checker catalog also contains generated matrix transitions that
+        // are declaration-only.  They are not executable MIR and must not be
+        // advertised as contracts that every consumer has to resolve.  Only a
+        // checker-owned ResolvedBody can enter the canonical transition island.
+        if program.resolved_body(&transition.node_id).is_none() {
+            continue;
+        }
+        let Some(signature) = program.resolved_signature(&transition.node_id) else {
+            errors.push(super::MirValidationError {
+                subject: transition.node_id.0.clone(),
+                message: "resolved transition signature is absent".into(),
+            });
+            continue;
+        };
+        let state_type = |state: &crate::core::StateId| {
+            let nominal =
+                crate::core::NominalTypeId::new(format!("state:{}::{}", state.flow.0, state.name))
+                    .ok()?;
+            program
+                .resolved_types()
+                .iter()
+                .find_map(|(id, ty)| match ty {
+                    ResolvedType::Nominal { item, .. } if *item == nominal => Some(id.clone()),
+                    _ => None,
+                })
+        };
+        let Some(source) = state_type(&transition.id.source) else {
+            errors.push(super::MirValidationError {
+                subject: transition.node_id.0.clone(),
+                message: "transition source state has no canonical TypeDesc identity".into(),
+            });
+            continue;
+        };
+        let targets = transition
+            .targets
+            .iter()
+            .filter_map(|state| state_type(state))
+            .collect::<Vec<_>>();
+        if targets.len() != transition.targets.len() {
+            errors.push(super::MirValidationError {
+                subject: transition.node_id.0.clone(),
+                message: "transition target state has no canonical TypeDesc identity".into(),
+            });
+            continue;
+        }
+        let parameters = signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.ty.clone())
+            .collect::<Vec<_>>();
+        let failure = if transition.fails.is_some() {
+            match program.resolved_types().get(&signature.result) {
+                Some(ResolvedType::Result { error, .. }) => Some(error.clone()),
+                _ => {
+                    errors.push(super::MirValidationError {
+                        subject: transition.node_id.0.clone(),
+                        message: "failing transition signature is not a canonical Result".into(),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        for ty in std::iter::once(&source)
+            .chain(parameters.iter())
+            .chain(std::iter::once(&signature.result))
+            .chain(targets.iter())
+            .chain(failure.iter())
+        {
+            if type_catalog.get(ty).is_none() {
+                errors.push(super::MirValidationError {
+                    subject: transition.node_id.0.clone(),
+                    message: format!("transition contract TypeDesc '{}' is absent", ty.as_str()),
+                });
+            }
+        }
+        transitions.insert(
+            transition.node_id.clone(),
+            MirTransitionContract {
+                owner: transition.node_id.clone(),
+                source,
+                parameters,
+                result: signature.result.clone(),
+                targets,
+                failure,
+                effect: if transition.silent_transition {
+                    MirTransitionEffect::SilentLocal
+                } else {
+                    MirTransitionEffect::Boundary
+                },
+                is_fallback: transition.is_fallback,
+                is_ffi_pinned: transition.is_ffi_pinned,
+            },
+        );
+    }
+    if errors.is_empty() {
+        Ok(transitions)
+    } else {
+        Err(errors)
+    }
 }
 
 /// Validate explicit ownership boundaries before any execution backend sees
@@ -1529,6 +1903,7 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         | super::MirInstructionKind::Drop { value: source }
         | super::MirInstructionKind::MoveProject { base: source, .. } => vec![source.clone()],
         super::MirInstructionKind::Call { arguments, .. }
+        | super::MirInstructionKind::FlowTransition { arguments, .. }
         | super::MirInstructionKind::BuiltinCall { arguments, .. }
         | super::MirInstructionKind::Construct {
             fields: arguments, ..
@@ -1703,6 +2078,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::Binary { left, right, .. } => left == needle || right == needle,
         super::MirInstructionKind::Unary { operand, .. } => operand == needle,
         super::MirInstructionKind::Call { arguments, .. }
+        | super::MirInstructionKind::FlowTransition { arguments, .. }
         | super::MirInstructionKind::BuiltinCall { arguments, .. } => {
             arguments.iter().any(|v| v == needle)
         }
@@ -1759,6 +2135,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::BuiltinCall { result, .. }
         | super::MirInstructionKind::Convert { result, .. } => Some(result),
         super::MirInstructionKind::Call { result, .. } => result.as_ref(),
+        super::MirInstructionKind::FlowTransition { result, .. } => Some(result),
         super::MirInstructionKind::EndBorrow { .. }
         | super::MirInstructionKind::Drop { .. }
         | super::MirInstructionKind::Nop => None,
@@ -2581,6 +2958,38 @@ impl<'a> MirReferenceInterpreter<'a> {
                 if let Some(result) = result {
                     values.insert(result.clone(), output);
                 }
+            }
+            MirInstructionKind::FlowTransition {
+                result,
+                transition,
+                arguments,
+            } => {
+                let arguments = self.take_transfer_values(function, values, arguments)?;
+                let contract = self.program.transitions.get(transition).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("transition '{}' has no MIR contract", transition.0),
+                    )
+                })?;
+                if contract.effect != MirTransitionEffect::SilentLocal
+                    || contract.targets.len() != 1
+                    || contract.failure.is_some()
+                    || contract.is_fallback
+                    || contract.is_ffi_pinned
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "FlowTransition is outside the silent-local transition island",
+                    ));
+                }
+                let callee = self.program.functions.get(&contract.owner).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("transition '{}' executable body is absent", transition.0),
+                    )
+                })?;
+                let output = self.execute_function(callee, &arguments, steps)?;
+                values.insert(result.clone(), output);
             }
             MirInstructionKind::Nop => {}
         }

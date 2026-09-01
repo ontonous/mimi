@@ -1,0 +1,14 @@
+// Canonical MIR S8 production island: one silent local Flow transition.
+// The program intentionally has no builtin/effect/import dependency so the
+// default route can be proven to select the same complete MIR graph.
+
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+
+func main() -> i32 {
+    let c = Zero { n: 41 }
+    let c2 = Counter::inc(c)
+    c2.n
+}

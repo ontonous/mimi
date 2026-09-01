@@ -69,11 +69,12 @@ pub(crate) fn select_default_route(
 ) -> DefaultMirRoute {
     let set_candidate = may_contain_typed_set_facade(checked, merged_file);
     let record_candidate = may_contain_user_record(checked, merged_file);
+    let flow_candidate = may_contain_single_silent_local_transition(checked);
     // List.len is probed only for import-free programs. The canonical graph
     // itself is the typed fact source: after lowering, an actual ListOp::Len
     // is evidence that the shared TypeDesc contract admitted the operation.
     let list_len_probe_allowed = merged_file.imports.is_empty();
-    if !set_candidate && !record_candidate && !list_len_probe_allowed {
+    if !set_candidate && !record_candidate && !list_len_probe_allowed && !flow_candidate {
         return DefaultMirRoute::Legacy;
     }
 
@@ -88,9 +89,11 @@ pub(crate) fn select_default_route(
     });
     let copy_record = may_contain_flat_copy_record(&canonical);
     let list_len_operation = canonical_has_list_len(&canonical);
+    let flow_transition_operation = canonical_has_flow_transition(&canonical);
     if (!set_candidate || !set_instance)
         && (!record_candidate || !copy_record)
         && (!list_len_probe_allowed || !list_len_operation)
+        && (!flow_candidate || !flow_transition_operation)
     {
         return DefaultMirRoute::Legacy;
     }
@@ -148,6 +151,35 @@ fn canonical_has_list_len(canonical: &MirProgram) -> bool {
             })
         })
     })
+}
+
+fn canonical_has_flow_transition(canonical: &MirProgram) -> bool {
+    canonical.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    mimi::core::mir::MirInstructionKind::FlowTransition { .. }
+                )
+            })
+        })
+    })
+}
+
+fn may_contain_single_silent_local_transition(checked: &CheckedProgram) -> bool {
+    let implemented = checked
+        .transitions()
+        .values()
+        .filter(|transition| checked.resolved_body(&transition.node_id).is_some())
+        .collect::<Vec<_>>();
+    let [transition] = implemented.as_slice() else {
+        return false;
+    };
+    transition.silent_transition
+        && transition.targets.len() == 1
+        && transition.fails.is_none()
+        && !transition.is_fallback
+        && !transition.is_ffi_pinned
 }
 
 fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool {
@@ -302,6 +334,17 @@ mod tests {
             select_default_route(&checked, &file),
             DefaultMirRoute::Canonical(_)
         ));
+    }
+
+    #[test]
+    fn single_silent_local_flow_transition_switches_as_one_complete_island() {
+        let source = "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }";
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("the closed silent-local Flow island should select canonical MIR");
+        };
+        assert_eq!(program.transitions().len(), 1);
+        assert!(canonical_has_flow_transition(&program));
     }
 
     #[test]

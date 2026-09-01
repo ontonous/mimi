@@ -25,6 +25,15 @@ pub use contracts::{
     MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
 };
 
+/// Stable owner identity shared by resolved transition bodies, transition
+/// contracts, and all backend adapters.
+pub fn transition_owner_from_id(transition: &crate::core::TransitionId) -> NodeId {
+    NodeId(format!(
+        "transition:{}::{}::{}",
+        transition.flow.0, transition.event, transition.source.name
+    ))
+}
+
 macro_rules! mir_id {
     ($name:ident, $label:literal) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -166,6 +175,60 @@ pub enum MirListOperation {
     Len,
 }
 
+/// Effect boundary carried by a materialized Flow transition contract.  The
+/// first production island admits only a local silent self-loop; boundary
+/// effects stay explicit so no consumer can accidentally erase epoch,
+/// mailbox, FFI, or failure semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirTransitionEffect {
+    SilentLocal,
+    Boundary,
+}
+
+/// Checker-owned ABI/ownership/effect contract for a Flow transition.
+/// `parameters` includes the consumed source state as its first entry.  The
+/// transition instruction refers to `owner` rather than re-encoding a surface
+/// Flow name, so all consumers use the same materialized identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirTransitionContract {
+    pub owner: NodeId,
+    pub source: ResolvedTypeId,
+    pub parameters: Vec<ResolvedTypeId>,
+    pub result: ResolvedTypeId,
+    pub targets: Vec<ResolvedTypeId>,
+    pub failure: Option<ResolvedTypeId>,
+    pub effect: MirTransitionEffect,
+    pub is_fallback: bool,
+    pub is_ffi_pinned: bool,
+}
+
+impl MirTransitionContract {
+    pub fn canonical_text(&self) -> String {
+        format!(
+            "mir.transition {} {:?} [{}] -> {} targets [{}] failure {} fallback={} pinned={}\n",
+            self.owner.0,
+            self.effect,
+            self.parameters
+                .iter()
+                .map(|ty| ty.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.result.as_str(),
+            self.targets
+                .iter()
+                .map(|ty| ty.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            self.failure
+                .as_ref()
+                .map(ResolvedTypeId::as_str)
+                .unwrap_or("-"),
+            self.is_fallback,
+            self.is_ffi_pinned,
+        )
+    }
+}
+
 /// Closed proof carried by a materialized generic MIR instance. The instance
 /// table is part of the canonical program, so consumers must not guess which
 /// generic template family a specialized body belongs to from its symbol name
@@ -305,6 +368,15 @@ pub enum MirInstructionKind {
         /// Checker-finalized generic arguments in binder order.  An empty
         /// list is the canonical marker for a non-generic call.
         type_arguments: Vec<ResolvedTypeId>,
+        arguments: Vec<MirValueId>,
+    },
+    /// Invoke a checker-resolved Flow transition through its materialized
+    /// contract.  This is intentionally distinct from ordinary calls: the
+    /// source state is consumed and effect/failure/target facts are carried by
+    /// `MirProgram::transitions`, never reconstructed by a backend.
+    FlowTransition {
+        result: MirValueId,
+        transition: NodeId,
         arguments: Vec<MirValueId>,
     },
     /// A builtin whose ABI, trap behavior, and ownership boundary have been
@@ -747,6 +819,19 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        MirInstructionKind::FlowTransition {
+            result,
+            transition,
+            arguments,
+        } => format!(
+            "flow_transition {result} {}({})",
+            transition.0,
+            arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         MirInstructionKind::BuiltinCall {
             result,
             kind,
@@ -1160,6 +1245,12 @@ impl<'a> MirValidator<'a> {
                     self.result_at(result, &instruction.id, block, index);
                 }
             }
+            FlowTransition {
+                result, arguments, ..
+            } => {
+                self.values(arguments);
+                self.result_at(result, &instruction.id, block, index);
+            }
             BuiltinCall {
                 result, arguments, ..
             } => {
@@ -1530,6 +1621,7 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::Unary { operand, .. } => uses.push(operand.clone()),
             MirInstructionKind::Call { arguments, .. }
+            | MirInstructionKind::FlowTransition { arguments, .. }
             | MirInstructionKind::BuiltinCall { arguments, .. } => {
                 uses.extend(arguments.iter().cloned())
             }

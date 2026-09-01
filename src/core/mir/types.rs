@@ -15,7 +15,7 @@ use crate::core::ir::{
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-11";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-12";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -826,6 +826,78 @@ impl MirTypeCatalog {
                     nominal: item.clone(),
                     fields,
                 };
+            }
+        }
+        // Flow states are checker-owned nominal records, but they are not
+        // ordinary `type` declarations. Materialize their payload layout here
+        // so every consumer sees the same field identities, ABI class, and
+        // linear aggregate glue. In particular, a state must never remain an
+        // opaque handle merely because it came from a Flow declaration.
+        let mut states = program
+            .flows()
+            .values()
+            .flat_map(|flow| flow.states.values())
+            .collect::<Vec<_>>();
+        states.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        for state in states {
+            let state_nominal = crate::core::NominalTypeId::new(state.node_id.0.clone())
+                .map_err(|error| vec![error.to_string()])?;
+            let Some(state_type_id) = program
+                .resolved_types()
+                .iter()
+                .find_map(|(id, ty)| match ty {
+                    ResolvedType::Nominal { item, .. } if *item == state_nominal => Some(id),
+                    _ => None,
+                })
+                .cloned()
+            else {
+                errors.push(format!(
+                    "flow state '{}' has no canonical nominal type identity",
+                    state.node_id.0
+                ));
+                continue;
+            };
+            let mut fields = Vec::with_capacity(state.payload.len());
+            for (name, _) in &state.payload {
+                let Some(field_id) = state.field_ids.get(name) else {
+                    errors.push(format!(
+                        "flow state '{}' field '{}' has no stable declaration identity",
+                        state.node_id.0, name
+                    ));
+                    continue;
+                };
+                let Some(field_ty) = program.resolved_field_type(field_id) else {
+                    errors.push(format!(
+                        "flow state '{}' field '{}' has no resolved type",
+                        state.node_id.0, name
+                    ));
+                    continue;
+                };
+                if catalog.get(field_ty).is_none() {
+                    errors.push(format!(
+                        "flow state '{}' field '{}' references a type absent from MIR catalog",
+                        state.node_id.0, name
+                    ));
+                }
+                fields.push(MirFieldDesc {
+                    id: field_id.clone(),
+                    name: name.clone(),
+                    ty: field_ty.clone(),
+                });
+            }
+            if let Some(descriptor) = catalog.entries.get_mut(&state_type_id) {
+                descriptor.abi = MirAbiClass::Aggregate;
+                // Flow state linearity is a checker fact and must survive
+                // layout materialization; do not collapse it to field
+                // Copy-ness. The product-glue pass below supplies the
+                // aggregate Move/Clone/Drop schedule.
+                descriptor.layout = MirLayout::Record {
+                    nominal: state_nominal,
+                    fields,
+                };
+                descriptor.needs_drop_glue = descriptor.ownership.needs_drop();
+                descriptor.needs_clone_glue = descriptor.ownership.needs_clone();
+                descriptor.glue = MirGlueContract::for_type(&descriptor.kind, descriptor.ownership);
             }
         }
         // Record ownership/layout facts are attached above from the checker.

@@ -408,6 +408,56 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("callee '{}' is absent from native declarations", owner.0),
             )
         })?;
+        self.emit_call_target(result, function, arguments, subject)
+    }
+
+    pub(super) fn emit_flow_transition(
+        &mut self,
+        result: &MirValueId,
+        transition: &crate::core::NodeId,
+        arguments: &[MirValueId],
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let contract = self.program.transitions().get(transition).ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                format!(
+                    "flow transition '{}' has no canonical contract",
+                    transition.0
+                ),
+            )
+        })?;
+        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+            || contract.targets.len() != 1
+            || contract.failure.is_some()
+            || contract.is_fallback
+            || contract.is_ffi_pinned
+            || contract.targets.first() != Some(&contract.result)
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "FlowTransition is outside the silent-local native contract",
+            ));
+        }
+        let function = *self.functions.get(&contract.owner).ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                format!(
+                    "flow transition '{}' is absent from native declarations",
+                    transition.0
+                ),
+            )
+        })?;
+        self.emit_call_target(Some(result), function, arguments, subject)
+    }
+
+    fn emit_call_target(
+        &mut self,
+        result: Option<&MirValueId>,
+        function: FunctionValue<'ctx>,
+        arguments: &[MirValueId],
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
         let values = arguments
             .iter()
             .map(|argument| {

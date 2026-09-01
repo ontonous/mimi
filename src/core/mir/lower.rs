@@ -1411,7 +1411,17 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|argument| self.lower_expr(&argument.value))
                     .collect();
-                if let Some((nominal, variant, field_ids)) = builtin_variant(call) {
+                if let ResolvedCallee::Transition(transition) = &call.callee {
+                    self.emit(
+                        &expression.node_id,
+                        "flow_transition",
+                        MirInstructionKind::FlowTransition {
+                            result: result.clone(),
+                            transition: super::transition_owner_from_id(transition),
+                            arguments,
+                        },
+                    );
+                } else if let Some((nominal, variant, field_ids)) = builtin_variant(call) {
                     if field_ids.len() != arguments.len() {
                         self.error(
                             &expression.node_id,

@@ -30,7 +30,7 @@ impl<'a> NativeMirValidator<'a> {
                     continue;
                 }
             };
-            if !self.symbols.insert(symbol.to_owned()) {
+            if !self.symbols.insert(symbol.clone()) {
                 self.errors.push(NativeMirError::new(
                     function.owner.0.clone(),
                     format!("native symbol '{symbol}' is duplicated"),
@@ -728,6 +728,11 @@ impl<'a> NativeMirValidator<'a> {
                 arguments,
                 ..
             } => self.validate_call(function, result.as_ref(), callee, arguments, subject),
+            MirInstructionKind::FlowTransition {
+                result,
+                transition,
+                arguments,
+            } => self.validate_flow_transition(function, result, transition, arguments, subject),
             MirInstructionKind::Nop => {}
             _ => self.errors.push(NativeMirError::new(
                 subject,
@@ -802,7 +807,14 @@ impl<'a> NativeMirValidator<'a> {
                     .program
                     .type_catalog()
                     .get(&base_value.ty)
-                    .is_some_and(|desc| desc.ownership != MirOwnership::Copy)
+                    .is_some_and(|desc| {
+                        desc.ownership != MirOwnership::Copy
+                            && self
+                                .program
+                                .type_catalog()
+                                .get(&result_value.ty)
+                                .is_some_and(|result| result.ownership != MirOwnership::Copy)
+                    })
                 {
                     self.errors.push(NativeMirError::new(
                         subject,
@@ -1512,6 +1524,77 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
             (None, _) => {}
+        }
+    }
+
+    fn validate_flow_transition(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        transition: &crate::core::NodeId,
+        arguments: &[MirValueId],
+        subject: &str,
+    ) {
+        let Some(contract) = self.program.transitions().get(transition) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!(
+                    "flow transition '{}' has no canonical contract",
+                    transition.0
+                ),
+            ));
+            return;
+        };
+        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+            || contract.targets.len() != 1
+            || contract.failure.is_some()
+            || contract.is_fallback
+            || contract.is_ffi_pinned
+            || contract.targets.first() != Some(&contract.result)
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "FlowTransition is outside the silent-local native contract",
+            ));
+        }
+        let Some(target) = self.program.functions().get(&contract.owner) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("flow transition '{}' target body is absent", transition.0),
+            ));
+            return;
+        };
+        if arguments.len() != target.parameters.len() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "FlowTransition argument arity disagrees with its canonical body",
+            ));
+        }
+        for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+            self.validate_value(function, argument, "FlowTransition argument");
+            let Some(argument) = function.values.get(argument) else {
+                continue;
+            };
+            let Some(parameter) = target.values.get(parameter) else {
+                continue;
+            };
+            if argument.ty != parameter.ty {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "FlowTransition argument TypeDesc disagrees with its canonical body",
+                ));
+            }
+        }
+        self.validate_value(function, result, "FlowTransition result");
+        if function
+            .values
+            .get(result)
+            .is_some_and(|value| value.ty != contract.result || value.ty != target.result)
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "FlowTransition result TypeDesc disagrees with its canonical contract",
+            ));
         }
     }
 
