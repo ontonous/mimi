@@ -432,6 +432,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .returns(prim(I64))
             .effect("trap")
     });
+    gen.export("mimi_mir_list_len_scalar", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("kind", prim(I8))
+            .returns(prim(I32))
+            .effect("trap")
+    });
     gen.export("mimi_mir_list_drop_scalar", |f| {
         f.param("list", ptr(prim(U8)))
             .param("kind", prim(I8))

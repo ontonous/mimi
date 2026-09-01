@@ -15,7 +15,8 @@ use crate::core::mir::types::{
 };
 use crate::core::mir::{
     MirAggregateKind, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
-    MirFunction, MirInstructionKind, MirProjection, MirSwitchCase, MirTerminator, MirValueId,
+    MirFunction, MirInstructionKind, MirListOperation, MirProjection, MirSwitchCase, MirTerminator,
+    MirValueId,
 };
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
@@ -979,10 +980,9 @@ fn eval_instruction(
                 .ok_or_else(|| format!("MIR drop value '{}' is absent", value))?
                 .ty
                 .clone();
-            if catalog
-                .get(&ty)
-                .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Set)
-            {
+            if catalog.get(&ty).is_some_and(|descriptor| {
+                matches!(descriptor.kind, MirTypeKind::Set | MirTypeKind::List)
+            }) {
                 catalog.validate_glue(&ty, MirGlueOperation::Drop)?;
             } else {
                 ensure_copy_value(function, catalog, value)?;
@@ -1139,6 +1139,35 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
+        MirInstructionKind::ConstructList { result, elements } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR List result '{}' is absent", result))?
+                .ty
+                .clone();
+            let element_types = elements
+                .iter()
+                .map(|value| {
+                    function
+                        .values
+                        .get(value)
+                        .map(|info| info.ty.clone())
+                        .ok_or_else(|| format!("MIR List element '{}' is absent", value))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            catalog.validate_list_construct(&result_ty, &element_types)?;
+            for value in elements {
+                if !state.values.contains_key(value) {
+                    return Err(format!("MIR List element '{}' is not defined", value));
+                }
+            }
+            let value = SymbolicValue::List {
+                length: Int::from_i64(elements.len() as i64),
+            };
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
         MirInstructionKind::ConstructVariant {
             result,
             nominal,
@@ -1169,6 +1198,40 @@ fn eval_instruction(
                 variant,
                 &values,
             )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirInstructionKind::ListOp {
+            result,
+            operation,
+            list,
+        } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR List operation result '{}' is absent", result))?
+                .ty
+                .clone();
+            let list_ty = function
+                .values
+                .get(list)
+                .ok_or_else(|| format!("MIR List operation receiver '{}' is absent", list))?
+                .ty
+                .clone();
+            catalog.validate_list_operation(&result_ty, &list_ty, *operation)?;
+            let SymbolicValue::List { length } = state
+                .values
+                .get(list)
+                .cloned()
+                .ok_or_else(|| format!("MIR List receiver '{}' is not defined", list))?
+            else {
+                return Err("MIR List operation receiver is not a symbolic List".into());
+            };
+            let fits_i32 = length.le(Int::from_i64(i32::MAX as i64));
+            add_definedness(state, fits_i32, "E0802")?;
+            let value = match operation {
+                MirListOperation::Len => SymbolicValue::Int(length),
+            };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
@@ -1333,7 +1396,6 @@ fn eval_instruction(
             state.values.insert(result.clone(), output);
         }
         MirInstructionKind::MoveProject { .. }
-        | MirInstructionKind::ConstructList { .. }
         | MirInstructionKind::ConstructVariantMove { .. } => {
             return Err("MIR instruction is outside scalar verifier contract".into())
         }

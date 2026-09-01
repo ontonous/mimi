@@ -755,6 +755,12 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
     },
+    /// rd = canonical List.len(ra). The MIR validator proves the List
+    /// element ABI and the i32 result contract before this opcode is emitted.
+    MirListLen {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1058,6 +1064,7 @@ impl Op {
             | ListGet { rd, .. }
             | ListPop { rd, .. }
             | MirSetToList { rd, .. }
+            | MirListLen { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1299,6 +1306,7 @@ impl Op {
             | MirSetIsEmpty { ra, .. }
             | MirSetContains { ra, .. }
             | MirSetToList { ra, .. }
+            | MirListLen { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
             | Ret { ra, .. }

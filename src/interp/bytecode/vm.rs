@@ -2579,6 +2579,23 @@ impl BytecodeVM {
                     });
                     self.set_reg(rd, Value::List(std::sync::Arc::new(values)));
                 }
+                Op::MirListLen { rd, ra } => {
+                    let len = match self.get_reg(ra) {
+                        Value::List(values) => values.len(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical List.len: expected List, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    if len > i32::MAX as usize {
+                        return Err(InterpError::integer_overflow(
+                            "E0802: canonical List.len result overflows i32",
+                        ));
+                    }
+                    self.set_reg(rd, Value::Int(len as i64));
+                }
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {

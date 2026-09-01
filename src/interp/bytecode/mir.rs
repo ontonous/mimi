@@ -18,8 +18,8 @@ use crate::core::mir::types::{
     MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirFunction, MirInstructionKind, MirOwnershipEventKind, MirProjection,
-    MirSetOperation, MirTerminator, MirValueId,
+    MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
+    MirProjection, MirSetOperation, MirTerminator, MirValueId,
 };
 use crate::core::NodeId;
 
@@ -506,6 +506,11 @@ impl<'a> FunctionEmitter<'a> {
             MirInstructionKind::ConstructList { result, elements } => {
                 self.emit_list_construct(result, elements)
             }
+            MirInstructionKind::ListOp {
+                result,
+                operation,
+                list,
+            } => self.emit_list_op(result, *operation, list),
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.emit_set_construct(result, elements)
             }
@@ -1573,6 +1578,37 @@ impl<'a> FunctionEmitter<'a> {
             }
             MirSetOperation::ToList => {
                 self.proto.emit(Op::MirSetToList { rd, ra });
+            }
+        }
+    }
+
+    fn emit_list_op(
+        &mut self,
+        result: &MirValueId,
+        operation: MirListOperation,
+        list: &MirValueId,
+    ) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(ra) = self.reg(list) else { return };
+        let Some(result_info) = self.function.values.get(result) else {
+            self.error(format!("List operation result '{}' is absent", result));
+            return;
+        };
+        let Some(list_info) = self.function.values.get(list) else {
+            self.error(format!("List operation receiver '{}' is absent", list));
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_list_operation(
+            &result_info.ty,
+            &list_info.ty,
+            operation,
+        ) {
+            self.error(format!("List operation is unsupported: {message}"));
+            return;
+        }
+        match operation {
+            MirListOperation::Len => {
+                self.proto.emit(Op::MirListLen { rd, ra });
             }
         }
     }
@@ -2993,6 +3029,33 @@ mod tests {
                 MirRuntimeValue::Bool(true),
             ]))
         );
+    }
+
+    #[test]
+    fn canonical_mir_list_len_is_ast_free_and_preserves_source_ownership() {
+        let source = "func main() -> i32 { let values = [3, 1, 2]; let count = len(values); drop(values); count }";
+        let report = run_canonical_differential(source).expect("canonical List.len differential");
+        assert!(report.mir_text.contains("list_op"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::Int(3))
+        );
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
+    }
+
+    #[test]
+    fn canonical_mir_rejects_list_len_for_non_copy_elements() {
+        let source = "func main() -> i32 { let values = [\"owned\"]; len(values) }";
+        let (_, checked) = parse_and_check(source).expect("source type check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("List.len must reject unsupported element ownership before a backend");
+        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
+            panic!("unexpected canonical List.len rejection: {error:?}");
+        };
+        assert!(errors.iter().any(|error| {
+            error.message.contains("Copy scalar") || error.message.contains("List construction")
+        }));
     }
 
     #[test]

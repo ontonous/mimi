@@ -3,6 +3,61 @@
 use super::*;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
+    pub(super) fn emit_list_op(
+        &mut self,
+        result: &MirValueId,
+        operation: MirListOperation,
+        list: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let list_ty = self.value_type(list, subject)?;
+        self.program
+            .type_catalog()
+            .validate_list_operation(&result_ty, &list_ty, operation)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let list_desc = self
+            .program
+            .type_catalog()
+            .get(&list_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "List TypeDesc is absent"))?;
+        let MirLayout::List { .. } = &list_desc.layout else {
+            return Err(NativeMirError::new(
+                subject,
+                "List operation receiver has a non-List layout",
+            ));
+        };
+        let list_handle = self.value(list, subject)?.into_pointer_value();
+        let kind = native_list_kind(self.program.type_catalog(), &list_ty)?;
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        let function = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_len_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let value = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    function,
+                    &[
+                        BasicMetadataValueEnum::from(list_handle),
+                        BasicMetadataValueEnum::from(kind_value),
+                    ],
+                    match operation {
+                        MirListOperation::Len => "mir_list_len",
+                    },
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "List.len returned void"))?;
+        Ok(value)
+    }
+
     pub(super) fn emit_set_op(
         &mut self,
         result: &MirValueId,

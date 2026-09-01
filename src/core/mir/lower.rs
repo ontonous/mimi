@@ -4,8 +4,9 @@
 //! architectural boundary for scalar expressions, structured branch control
 //! flow, Copy record aggregates, and recursive Move-owned tuple/record product
 //! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
-//! The first container slice adds List construction for concrete Copy scalar
-//! elements; all other List operations and element shapes remain fail-closed.
+//! The first container slice adds List construction and the read-only `Len`
+//! operation for concrete Copy scalar elements; all other List operations and
+//! element shapes remain fail-closed.
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
@@ -1210,6 +1211,23 @@ impl<'a> Lowerer<'a> {
                             "Set builtin arity does not match its canonical MIR operation",
                         );
                     }
+                } else if is_list_len_builtin(call, self.type_catalog) {
+                    if let Some(list) = arguments.first() {
+                        self.emit(
+                            &expression.node_id,
+                            "list_op",
+                            MirInstructionKind::ListOp {
+                                result: result.clone(),
+                                operation: super::MirListOperation::Len,
+                                list: list.clone(),
+                            },
+                        );
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "List.len canonical MIR operation requires one receiver",
+                        );
+                    }
                 } else if let Some(contract) = call_builtin_contract(call) {
                     self.emit(
                         &expression.node_id,
@@ -1872,6 +1890,22 @@ fn call_builtin_contract(call: &ResolvedCall) -> Option<super::types::MirBuiltin
         return None;
     };
     super::types::MirBuiltinContract::from_builtin(builtin)
+}
+
+fn is_list_len_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    if !matches!(builtin.as_str(), "len" | "builtin.method.list.len") || call.arguments.len() != 1 {
+        return false;
+    }
+    type_catalog.is_some_and(|catalog| {
+        catalog
+            .get(&call.arguments[0].value.ty)
+            .is_some_and(|descriptor| {
+                matches!(descriptor.layout, super::types::MirLayout::List { .. })
+            })
+    })
 }
 
 fn set_builtin_contract(

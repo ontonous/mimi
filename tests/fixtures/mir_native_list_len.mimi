@@ -1,0 +1,37 @@
+// Collection-Scalar Closure v1: List.len is a read-only canonical MIR op.
+func list_len_contract() -> i32 {
+    ensures: result == 3
+    let values = [10, 20, 30]
+    let count = len(values)
+    drop(values)
+    count
+}
+
+func list_len_i64() -> i32 {
+    let values: List<i64> = [10, 20]
+    let count = len(values)
+    drop(values)
+    count
+}
+
+func list_len_bool() -> i32 {
+    let values: List<bool> = [true, false]
+    let count = len(values)
+    drop(values)
+    count
+}
+
+func set_to_list_len() -> i32 {
+    let values: Set<i32> = {3, 1, 2, 1}
+    let list = values.to_list()
+    let count = len(list)
+    drop(list)
+    let size = values.size()
+    drop(values)
+    count + size
+}
+
+func main() -> i32 {
+    let total = list_len_contract() + list_len_i64() + list_len_bool() + set_to_list_len()
+    if total == 13 { 42 } else { 0 }
+}

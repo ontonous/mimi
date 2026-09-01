@@ -157,6 +157,14 @@ pub enum MirSetOperation {
     ToList,
 }
 
+/// Closed read-only operations over the canonical scalar List production
+/// island.  The list remains borrowed for the duration of the operation;
+/// its Move/Clone/Drop obligations stay with the source value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirListOperation {
+    Len,
+}
+
 /// Operations with explicit value and ownership boundaries. The MIR validator
 /// checks their TypeDesc/glue contract before any backend; effect-bearing
 /// operations remain fail-closed until their own effect summary is materialized.
@@ -218,6 +226,14 @@ pub enum MirInstructionKind {
     ConstructList {
         result: MirValueId,
         elements: Vec<MirValueId>,
+    },
+    /// Read the length of a canonical Copy-scalar List without transferring
+    /// its ownership.  The TypeDesc contract fixes the input List ABI and
+    /// the i32 result ABI before any consumer is invoked.
+    ListOp {
+        result: MirValueId,
+        operation: MirListOperation,
+        list: MirValueId,
     },
     /// Construct a move-owned Set from concrete Copy-scalar elements. The
     /// Set<T> layout, equality representation, and handle glue are supplied
@@ -624,6 +640,11 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
         MirInstructionKind::ConstructList { result, elements } => {
             format!("construct_list {result} = [{}]", format_values(elements))
         }
+        MirInstructionKind::ListOp {
+            result,
+            operation,
+            list,
+        } => format!("list_op {result} = {operation:?} {list}"),
         MirInstructionKind::ConstructSet { result, elements } => {
             format!("construct_set {result} = {{{}}}", format_values(elements))
         }
@@ -1045,6 +1066,10 @@ impl<'a> MirValidator<'a> {
             }
             ConstructList { result, elements } => {
                 self.values(elements);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            ListOp { result, list, .. } => {
+                self.use_value(list);
                 self.result_at(result, &instruction.id, block, index);
             }
             ConstructSet { result, elements } => {
@@ -1470,6 +1495,7 @@ impl<'a> MirValidator<'a> {
             MirInstructionKind::ConstructList { elements, .. } => {
                 uses.extend(elements.iter().cloned());
             }
+            MirInstructionKind::ListOp { list, .. } => uses.push(list.clone()),
             MirInstructionKind::ConstructSet { elements, .. } => {
                 uses.extend(elements.iter().cloned());
             }

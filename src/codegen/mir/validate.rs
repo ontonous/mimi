@@ -647,6 +647,26 @@ impl<'a> NativeMirValidator<'a> {
                     }
                 }
             }
+            MirInstructionKind::ListOp {
+                result,
+                operation,
+                list,
+            } => {
+                self.validate_value(function, result, "List operation result");
+                self.validate_value(function, list, "List operation receiver");
+                let (Some(result_value), Some(list_value)) =
+                    (function.values.get(result), function.values.get(list))
+                else {
+                    return;
+                };
+                if let Err(message) = self.program.type_catalog().validate_list_operation(
+                    &result_value.ty,
+                    &list_value.ty,
+                    *operation,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.validate_value(function, result, "Set result");
                 let element_types = elements

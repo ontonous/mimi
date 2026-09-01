@@ -202,6 +202,87 @@ fn canonical_mir_native_build_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_scalar_list_len_closes_reference_native_and_verifier() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_len.mimi");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical MIR List.len dump");
+    assert!(
+        mir.status.success(),
+        "canonical MIR List.len dump failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir.stderr),
+        String::from_utf8_lossy(&mir.stdout)
+    );
+    assert!(String::from_utf8_lossy(&mir.stdout).contains("list_op"));
+
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR List.len reference run");
+    assert_eq!(
+        reference.status.code(),
+        Some(42),
+        "canonical MIR List.len reference run failed:\n{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-list-len-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR List.len native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR List.len native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR List.len native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(42),
+        "canonical MIR List.len native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR List.len verifier");
+    assert!(
+        verification.status.success(),
+        "canonical MIR List.len verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
 fn canonical_mir_native_owned_string_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

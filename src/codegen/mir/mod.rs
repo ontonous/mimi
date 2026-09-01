@@ -27,8 +27,8 @@ use crate::core::mir::types::{
     MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirProjection, MirSetOperation,
-    MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
+    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirListOperation, MirProjection,
+    MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -132,6 +132,31 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 ptr.fn_type(
                     &[
                         BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::IntType(i8),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_list_len_scalar")
+            .is_none()
+        {
+            let i8 = self.generator.context.i8_type();
+            let i32 = self.generator.context.i32_type();
+            let ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            self.generator.module.add_function(
+                "mimi_mir_list_len_scalar",
+                i32.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(ptr),
                         BasicMetadataTypeEnum::IntType(i8),
                     ],
                     false,
@@ -432,6 +457,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             MirInstructionKind::ConstructList { result, elements } => {
                 let value = self.emit_list_construct(result, elements, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ListOp {
+                result,
+                operation,
+                list,
+            } => {
+                let value = self.emit_list_op(result, *operation, list, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::ConstructSet { result, elements } => {
@@ -855,6 +888,41 @@ mod tests {
             .module
             .verify()
             .expect("native List module verifies");
+    }
+
+    #[test]
+    fn native_emitter_materializes_scalar_list_len_adapter() {
+        let program = canonical_program(
+            "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let function = program.functions().get(&owner).expect("List.len main MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Len,
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_scalar_list_len_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar List.len MIR should have a canonical ABI adapter");
+        generator
+            .module
+            .verify()
+            .expect("native List.len module verifies");
+        assert!(generator.module.get_function("main").is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_len_scalar")
+            .is_some());
     }
 
     #[test]

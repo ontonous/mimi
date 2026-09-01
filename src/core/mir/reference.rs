@@ -413,6 +413,34 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::ListOp {
+                            result,
+                            operation,
+                            list,
+                        } => {
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(list_value) = function.values.get(list) else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "List operation receiver is absent from MIR value catalog"
+                                            .into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_list_operation(
+                                &result_value.ty,
+                                &list_value.ty,
+                                *operation,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::ConstructSet { result, elements } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
@@ -1491,6 +1519,7 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
             fields: arguments, ..
         } => arguments.clone(),
         super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
+        super::MirInstructionKind::ListOp { .. } => Vec::new(),
         super::MirInstructionKind::ConstructSet { elements, .. } => elements.clone(),
         super::MirInstructionKind::SetOp {
             operation,
@@ -1642,6 +1671,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
+        super::MirInstructionKind::ListOp { list, .. } => list == needle,
         super::MirInstructionKind::ConstructSet { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
@@ -1703,6 +1733,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::MoveProject { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
+        | super::MirInstructionKind::ListOp { result, .. }
         | super::MirInstructionKind::ConstructSet { result, .. }
         | super::MirInstructionKind::SetOp { result, .. }
         | super::MirInstructionKind::ConstructVariant { result, .. }
@@ -2156,6 +2187,46 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .map_err(|message| self.error(&function.owner, message))?;
                 let elements = self.take_transfer_values(function, values, elements)?;
                 values.insert(result.clone(), MirRuntimeValue::List(elements));
+            }
+            MirInstructionKind::ListOp {
+                result,
+                operation,
+                list,
+            } => {
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "List operation result has no MIR type")
+                    })?;
+                let list_ty = function
+                    .values
+                    .get(list)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "List operation receiver has no MIR type")
+                    })?;
+                self.program
+                    .type_catalog()
+                    .validate_list_operation(&result_ty, &list_ty, *operation)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let MirRuntimeValue::List(elements) = self.read_value(function, values, list)?
+                else {
+                    return Err(
+                        self.error(&function.owner, "List.len receiver is not a canonical List")
+                    );
+                };
+                if elements.len() > i32::MAX as usize {
+                    return Err(self.error(
+                        &function.owner,
+                        "E0802: canonical List.len result overflows i32",
+                    ));
+                }
+                let output = match operation {
+                    super::MirListOperation::Len => MirRuntimeValue::Int(elements.len() as i64),
+                };
+                values.insert(result.clone(), output);
             }
             MirInstructionKind::ConstructSet { result, elements } => {
                 let element_types = elements

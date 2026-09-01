@@ -1501,6 +1501,30 @@ pub unsafe extern "C" fn mimi_mir_list_get_scalar(
     unsafe { *(source.data as *const i64).add(index as usize) }
 }
 
+/// Read the length of a canonical scalar List without transferring ownership.
+/// The explicit kind check keeps a pointer from one canonical List ABI from
+/// being consumed as another shape; an impossible/invalid handle is a
+/// contract trap rather than a guessed layout.  The surface len result is i32,
+/// so an oversized runtime length has the same E0802 classification as other
+/// checked integer narrowing operations.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i8) -> i32 {
+    let Some(expected) = mir_list_kind(kind) else {
+        mir_list_abort(b"[E0800] canonical MIR List kind is invalid\0");
+    };
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List handle is null\0");
+    }
+    // SAFETY: the canonical emitter passes a live MimiList; null was checked.
+    let source = unsafe { &*list };
+    if source.element_kind != expected || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical MIR List kind disagrees\0");
+    }
+    i32::try_from(source.len).unwrap_or_else(|_| {
+        mir_list_abort(b"[E0802] canonical MIR List.len result overflows i32\0")
+    })
+}
+
 /// Drop a scalar list allocated by canonical native MIR.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
@@ -1570,6 +1594,27 @@ mod canonical_mir_list_tests {
                 1
             );
             mimi_mir_list_drop_scalar(list, ListElementKind::Bool as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_scalar_list_len_is_read_only_and_kind_checked() {
+        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!list.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(list, ListElementKind::I64 as i8, 10),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_len_scalar(list, ListElementKind::I64 as i8),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_len_scalar(list, ListElementKind::I64 as i8),
+                1
+            );
+            mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
         }
     }
 

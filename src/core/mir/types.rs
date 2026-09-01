@@ -1059,6 +1059,44 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate a read-only operation over the canonical scalar List island.
+    /// `Len` borrows the List handle, returns a Copy i32, and never transfers
+    /// or mutates the source.  The List's full Move/Clone/Drop glue is still
+    /// required so a later consumer cannot treat a view operation as proof
+    /// that the source ownership obligation disappeared.
+    pub fn validate_list_operation(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        operation: crate::core::mir::MirListOperation,
+    ) -> Result<(), String> {
+        self.validate_list_glue(list_ty, MirGlueOperation::MoveOut)?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "List operation result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if operation != crate::core::mir::MirListOperation::Len {
+            return Err(format!(
+                "List operation {:?} is outside the canonical List contract",
+                operation
+            ));
+        }
+        if result.kind != MirTypeKind::Primitive(PrimitiveType::I32)
+            || result.abi
+                != (MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            || result.layout != MirLayout::Scalar
+            || result.ownership != MirOwnership::Copy
+        {
+            return Err("List.len result must be a Copy i32 scalar".into());
+        }
+        Ok(())
+    }
+
     /// Validate the first Set production island. Set values are move-owned
     /// runtime handles, but the element identity is still part of the
     /// canonical contract. The island admits only `Set<T>` with a concrete
@@ -2812,7 +2850,7 @@ mod tests {
         MirTypeKind,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
-    use crate::core::mir::{MirAggregateKind, MirProjection, MirSetOperation};
+    use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
 
     #[test]
     fn materializes_scalar_abi_and_copy_ownership() {
@@ -2967,6 +3005,44 @@ mod tests {
         assert!(catalog
             .validate_set_operation(&set_id, &set_id, None, MirSetOperation::ToList,)
             .is_err());
+    }
+
+    #[test]
+    fn list_len_contract_is_read_only_and_rejects_erased_or_wrong_results() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let erased_list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: Vec::new(),
+                is_linear: false,
+            })
+            .expect("erased List");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        assert!(catalog
+            .validate_list_operation(&i32_id, &list_id, MirListOperation::Len)
+            .is_ok());
+        let wrong_result = catalog
+            .validate_list_operation(&bool_id, &list_id, MirListOperation::Len)
+            .expect_err("List.len must return i32");
+        assert!(wrong_result.contains("Copy i32"));
+        let erased = catalog
+            .validate_list_operation(&i32_id, &erased_list_id, MirListOperation::Len)
+            .expect_err("erased List has no element ABI contract");
+        assert!(erased.contains("List<T>") || erased.contains("canonical"));
     }
 
     #[test]
