@@ -121,17 +121,47 @@ pub(crate) fn test(
     let mut errors = Vec::new();
     let use_color = colors_enabled();
 
-    // 0.33 Phase F: use bytecode VM (tree-walker removed).
+    // 0.33 Phase F: use bytecode VM (tree-walker removed).  A complete
+    // migrated island is compiled from the one canonical MIR graph; the
+    // compatibility compiler remains only for programs that have not yet
+    // entered an island.  Once the selector recognizes a candidate, a
+    // rejected preflight is a hard error and cannot fall through here.
     use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
-    let mut compiler = BytecodeCompiler::new();
-    compiler.install_checked_program(&checked_program);
-    let prog = compiler
-        .compile_file(&merged_file)
-        .map_err(|e| format!("bytecode compile error: {}", e))?;
+    let (prog, canonical_function_names) =
+        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
+                let prog =
+                    mimi::interp::bytecode::compile_mir_program(&canonical).map_err(|errors| {
+                        let details = errors
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("canonical MIR bytecode is not eligible:\n{details}")
+                    })?;
+                (prog, true)
+            }
+            crate::canonical_dispatch::DefaultMirRoute::Legacy => {
+                let mut compiler = BytecodeCompiler::new();
+                compiler.install_checked_program(&checked_program);
+                let prog = compiler
+                    .compile_file(&merged_file)
+                    .map_err(|e| format!("bytecode compile error: {}", e))?;
+                (prog, false)
+            }
+            crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+                return Err(format!("default Canonical MIR route rejected: {reason}"));
+            }
+        };
 
     for func_name in &test_funcs {
         let mut vm = BytecodeVM::new(prog.clone());
-        match vm.call_named(func_name, vec![]) {
+        let vm_function_name = if canonical_function_names {
+            format!("function:{func_name}")
+        } else {
+            func_name.clone()
+        };
+        match vm.call_named(&vm_function_name, vec![]) {
             // TC-H1: bool-returning tests fail when the value is false;
             // non-bool Ok is still a pass (side-effect / unit tests).
             Ok(val) => {

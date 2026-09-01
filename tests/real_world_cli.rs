@@ -449,6 +449,50 @@ fn canonical_default_does_not_promote_non_copy_list_len() {
 }
 
 #[test]
+fn canonical_mir_test_uses_ast_free_bytecode_for_scalar_collection() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_test_scalar_collection.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical scalar-collection mimi test");
+    assert!(
+        output.status.success(),
+        "canonical scalar-collection mimi test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed, 0 failed"));
+}
+
+#[test]
+fn canonical_mir_test_rejects_mixed_scalar_collection_without_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_test_scalar_collection_mixed.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected mixed scalar-collection mimi test");
+    assert!(
+        !output.status.success(),
+        "mixed scalar collection unexpectedly used a compatibility test compiler:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("default Canonical MIR route rejected"));
+    assert!(stderr.contains("S11 scalar collection candidate"));
+}
+
+#[test]
 fn canonical_mir_native_owned_string_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

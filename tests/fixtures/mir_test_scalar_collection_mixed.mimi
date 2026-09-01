@@ -1,0 +1,10 @@
+func test_list_len_mixed() -> i32 {
+    let values = [10, 20, 30]
+    let count = len(values)
+    drop(values)
+    let text = "managed"
+    drop(text)
+    if count == 3 { 1 } else { 0 }
+}
+
+func main() -> i32 { 0 }
