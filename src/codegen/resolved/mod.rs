@@ -2365,49 +2365,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     "list_val",
                 )
             }
-            // 0.32.3: Map literal. Call mimi_map_new() then mimi_map_set()
-            // for each entry, same as legacy compile_map_literal.
-            // Returns an i64 opaque handle — the same type used in types.rs.
-            ResolvedExprKind::Map(entries) => {
-                let map_new = self.generator.get_runtime_fn("mimi_map_new")?;
-                let result = self.generator.build_call(map_new, &[], "map_new_call")?;
-                let map_handle = result
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("mimi_map_new returned void".into()))?
-                    .into_int_value();
-                if !entries.is_empty() {
-                    let map_set = self.generator.get_runtime_fn("mimi_map_set")?;
-                    for (key_expr, val_expr) in entries {
-                        let key_val = self.emit_expr(key_expr, frame)?;
-                        let val_val = self.emit_expr(val_expr, frame)?;
-                        // Key must be a string — extract the data pointer.
-                        let key_ptr = match key_val {
-                            BasicValueEnum::PointerValue(pv) => pv,
-                            BasicValueEnum::StructValue(sv) => self
-                                .generator
-                                .build_extract_value(sv.into(), 0, "map_key_ptr")?
-                                .into_pointer_value(),
-                            _ => {
-                                return Err(CompileError::Unsupported(
-                                    "map literal key must be a string".into(),
-                                ))
-                            }
-                        };
-                        // Value is cast to i64 (ValueHandle) for storage.
-                        let val_i64 = self.generator.any_value_to_handle(val_val)?;
-                        self.generator.build_call(
-                            map_set,
-                            &[
-                                BasicMetadataValueEnum::IntValue(map_handle),
-                                BasicMetadataValueEnum::PointerValue(key_ptr),
-                                BasicMetadataValueEnum::IntValue(val_i64),
-                            ],
-                            "map_set_call",
-                        )?;
-                    }
-                }
-                Ok(BasicValueEnum::IntValue(map_handle))
-            }
             // 0.32.5: Record construction. Build LLVM struct from field
             // value types, allocate, store each field. 0.1.8 Phase F:
             // `..rest` starts from the rest record and overrides explicit
@@ -14750,6 +14707,33 @@ func main() -> i32 {
         assert_eq!(
             error.reason,
             "Set is owned by Canonical MIR; resolved native Set lowering is retired"
+        );
+    }
+
+    #[test]
+    fn map_shape_is_rejected_from_resolved_native_slice() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let values = {"answer": 42}
+    println(len(values))
+    0
+}
+"#,
+        );
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "main")
+            .expect("main function");
+        let callable = program
+            .callable(&function.node_id)
+            .expect("resolved main callable");
+        let error = require_resolved_native_callable(&program, callable)
+            .expect_err("Map must not enter the retired resolved Map lowering");
+        assert_eq!(
+            error.reason,
+            "Map has no Canonical MIR production island; resolved native Map lowering is retired"
         );
     }
 
