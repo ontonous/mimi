@@ -90,6 +90,7 @@ pub(crate) fn select_default_route(
             return reject_migrated_candidates(
                 flow_candidate,
                 set_candidate,
+                false,
                 format!("canonical MIR construction failed: {error}"),
             )
         }
@@ -100,7 +101,7 @@ pub(crate) fn select_default_route(
             MirGenericInstanceContract::ScalarSetFacade { .. }
         )
     });
-    let copy_record = may_contain_flat_copy_record(&canonical);
+    let copy_record = mimi::core::mir::contains_flat_copy_record_candidate(&canonical);
     let list_len_operation = canonical_has_list_len(&canonical);
     let collection_candidate = mimi::core::mir::contains_scalar_collection_candidate(&canonical);
     let flow_transition_operation = canonical_has_flow_transition(&canonical);
@@ -111,7 +112,8 @@ pub(crate) fn select_default_route(
     {
         return reject_migrated_candidates(
             flow_candidate,
-            false,
+            collection_candidate || (record_candidate && copy_record),
+            record_candidate && copy_record,
             "canonical graph did not materialize the selected production operation",
         );
     }
@@ -127,6 +129,7 @@ pub(crate) fn select_default_route(
             return reject_migrated_candidates(
                 flow_candidate,
                 true,
+                false,
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::SCALAR_COLLECTION_ISLAND
@@ -144,6 +147,7 @@ pub(crate) fn select_default_route(
         return reject_migrated_candidates(
             flow_candidate,
             collection_candidate,
+            record_candidate && copy_record,
             format!("verifier capability gate failed: {error:?}"),
         );
     }
@@ -155,6 +159,7 @@ pub(crate) fn select_default_route(
         return reject_migrated_candidates(
             flow_candidate,
             collection_candidate,
+            record_candidate && copy_record,
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
     }
@@ -162,6 +167,7 @@ pub(crate) fn select_default_route(
         return reject_migrated_candidates(
             flow_candidate,
             collection_candidate,
+            record_candidate && copy_record,
             format!("native MIR preflight failed: {errors:?}"),
         );
     }
@@ -181,6 +187,7 @@ pub(crate) fn select_default_route(
             return reject_migrated_candidates(
                 flow_candidate,
                 collection_candidate,
+                record_candidate && copy_record,
                 format!("verifier contract pass failed: {error}"),
             )
         }
@@ -189,6 +196,7 @@ pub(crate) fn select_default_route(
         return reject_migrated_candidates(
             flow_candidate,
             collection_candidate,
+            record_candidate && copy_record,
             "verifier returned an unsupported or inconclusive result",
         );
     }
@@ -199,6 +207,7 @@ pub(crate) fn select_default_route(
 fn reject_migrated_candidates(
     flow_candidate: bool,
     collection_candidate: bool,
+    record_candidate: bool,
     reason: impl Into<String>,
 ) -> DefaultMirRoute {
     if flow_candidate {
@@ -209,6 +218,11 @@ fn reject_migrated_candidates(
     } else if collection_candidate {
         DefaultMirRoute::Rejected(format!(
             "S11 scalar collection candidate is not eligible for the default route: {}",
+            reason.into()
+        ))
+    } else if record_candidate {
+        DefaultMirRoute::Rejected(format!(
+            "S0 flat Copy record candidate is not eligible for the default route: {}",
             reason.into()
         ))
     } else {
@@ -270,31 +284,6 @@ fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool
     checked.type_defs().values().any(|type_def| {
         type_def.kind == mimi::core::ResolvedTypeKind::Record
             && !excluded_sources.contains(&type_def.origin.user_span().source_id)
-    })
-}
-
-fn may_contain_flat_copy_record(canonical: &MirProgram) -> bool {
-    canonical.functions().values().any(|function| {
-        function
-            .parameters
-            .iter()
-            .filter_map(|parameter| function.values.get(parameter))
-            .any(|value| {
-                canonical
-                    .type_catalog()
-                    .validate_flat_copy_record(&value.ty)
-                    .is_ok()
-            })
-            || canonical
-                .type_catalog()
-                .validate_flat_copy_record(&function.result)
-                .is_ok()
-            || function.values.values().any(|value| {
-                canonical
-                    .type_catalog()
-                    .validate_flat_copy_record(&value.ty)
-                    .is_ok()
-            })
     })
 }
 
@@ -435,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_gap_keeps_mixed_record_and_owned_variant_on_legacy_route() {
+    fn rejected_mixed_record_and_owned_variant_cannot_reenter_legacy_route() {
         let source = r#"
             type Point { x: i32 }
 
@@ -447,10 +436,12 @@ mod tests {
             }
         "#;
         let (checked, file) = checked(source);
-        assert!(matches!(
-            select_default_route(&checked, &file),
-            DefaultMirRoute::Legacy
-        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!(
+                "a recognized flat Copy-record candidate must fail closed instead of using legacy"
+            );
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"));
     }
 
     #[test]

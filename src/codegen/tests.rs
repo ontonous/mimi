@@ -257,6 +257,66 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_record_update.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical MIR");
+    assert!(crate::core::mir::contains_flat_copy_record_candidate(
+        &canonical
+    ));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("flat Copy record consumer capability");
+    crate::codegen::mir::validate_mir_native(&canonical)
+        .expect("flat Copy record native capability");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s15_flat_copy_record_route");
+    codegen
+        .compile_checked(&program)
+        .expect("flat Copy record must use the canonical MIR native consumer");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
+fn direct_native_entry_rejects_a_mixed_flat_copy_record_graph_without_fallback() {
+    let source = r#"
+        type Point { x: i32 }
+
+        func make_some() -> Option<string> { Some("owned") }
+
+        func main() -> i32 {
+            let point = Point { x: 1 }
+            point.x
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s15_flat_copy_record_reject");
+    let errors = codegen.compile_checked(&program).expect_err(
+        "a recognized mixed flat Copy-record graph must not re-enter legacy native codegen",
+    );
+    assert!(errors.iter().any(|error| {
+        error.code.as_deref() == Some("MIR-CAPABILITY-001")
+            || error.message.contains("canonical MIR")
+    }));
+    assert!(
+        codegen.module.get_function("main").is_none(),
+        "rejected canonical candidate must fail before legacy LLVM emission"
+    );
+}
+
+#[test]
 fn direct_native_entry_rejects_a_mixed_scalar_collection_candidate() {
     let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

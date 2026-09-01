@@ -58,6 +58,52 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
         })
 }
 
+/// Return whether the canonical executable graph contains a flat Copy record
+/// value at a consumer boundary.
+///
+/// This is the MIR-side counterpart of the default route's front-end record
+/// hint.  It deliberately examines only materialized values, parameters, and
+/// results: a declaration in the checker catalog is not executable evidence.
+/// Keeping the predicate with the island contract lets direct native callers
+/// and the CLI make the same admission decision without re-reading surface
+/// record names or duplicating the TypeDesc rule.
+pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        // The current flat-record native contract emits only simple function
+        // symbols.  A qualified trait/impl method may carry an implicit
+        // receiver whose type is a flat record, but that declaration is not a
+        // record value consumed by this production island.  Treating it as a
+        // candidate would make unrelated metadata-only programs cross the
+        // default route boundary.
+        let Some(owner) = function.owner.0.strip_prefix("function:") else {
+            return false;
+        };
+        if owner.contains(':') {
+            return false;
+        }
+        function
+            .parameters
+            .iter()
+            .filter_map(|parameter| function.values.get(parameter))
+            .any(|value| {
+                program
+                    .type_catalog()
+                    .validate_flat_copy_record(&value.ty)
+                    .is_ok()
+            })
+            || program
+                .type_catalog()
+                .validate_flat_copy_record(&function.result)
+                .is_ok()
+            || function.values.values().any(|value| {
+                program
+                    .type_catalog()
+                    .validate_flat_copy_record(&value.ty)
+                    .is_ok()
+            })
+    })
+}
+
 /// Validate the current scalar List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR

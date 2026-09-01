@@ -28,8 +28,8 @@ pub use contracts::{
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{
-    contains_scalar_collection_candidate, validate_scalar_collection_island,
-    SCALAR_COLLECTION_ISLAND,
+    contains_flat_copy_record_candidate, contains_scalar_collection_candidate,
+    validate_scalar_collection_island, SCALAR_COLLECTION_ISLAND,
 };
 
 /// Stable owner identity shared by resolved transition bodies, transition
