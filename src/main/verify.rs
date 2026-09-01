@@ -76,13 +76,27 @@ pub(crate) fn verify(
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
-    let results = if mir {
+    let canonical = if mir {
         if dump_z3 {
             return Err("--dump-z3 is not available with --mir".into());
         }
-        let canonical =
-            mimi::core::mir::reference::MirProgram::from_checked_program(&checked_program)
-                .map_err(|error| format!("canonical MIR verifier input rejected: {error:?}"))?;
+        Some(
+            crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)
+                .map_err(|error| format!("canonical MIR verifier input rejected: {error}"))?,
+        )
+    } else if dump_z3 {
+        None
+    } else {
+        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
+            crate::canonical_dispatch::DefaultMirRoute::Legacy => None,
+        }
+    };
+
+    let results = if let Some(canonical) = canonical {
+        // The default route is selected only after the shared dispatcher has
+        // preflighted every consumer.  The verifier still validates its own
+        // input at the final consumer boundary and never falls back.
         mimi::verifier::verify_mir(&canonical, source_hash)?
     } else if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,

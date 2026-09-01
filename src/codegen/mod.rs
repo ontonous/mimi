@@ -2362,8 +2362,17 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Remove and return the most recently registered raw heap pointer from
-    /// the current scope. Used to transfer ownership of a string expression
-    /// result into a local variable slot.
+    /// the current scope. Used to transfer ownership of a string/list
+    /// expression result into a local variable slot.
+    ///
+    /// Keep non-`Ptr` entries intact. Dedicated entries such as
+    /// `StringListData` and `StringListListData` are already the complete
+    /// owner for a returned aggregate; consuming them while looking for an
+    /// unrelated raw pointer silently disables their destructor and leaks the
+    /// aggregate on every loop iteration. The current expression's
+    /// registration must also be the top entry: searching past a dedicated
+    /// entry could steal an older pointer belonging to a different value and
+    /// make the current aggregate and that older value share ownership.
     /// 0.39.x (L1 parity fix): remove the heap-slot registration for `base`
     /// (a nested list literal's header alloca) from the current scope. When
     /// an inner list literal becomes an ELEMENT of an outer list literal,
@@ -2399,8 +2408,8 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(super) fn pop_last_heap_ptr(&self) -> Option<inkwell::values::PointerValue<'ctx>> {
         if let Some(stack) = self.heap_allocs.borrow_mut().last_mut() {
-            while let Some(entry) = stack.pop() {
-                if let HeapEntry::Ptr(p) = entry {
+            if matches!(stack.last(), Some(HeapEntry::Ptr(_))) {
+                if let Some(HeapEntry::Ptr(p)) = stack.pop() {
                     return Some(p);
                 }
             }

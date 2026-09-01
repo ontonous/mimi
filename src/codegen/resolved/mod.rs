@@ -1584,13 +1584,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         }
                     }
                 }
-                // 0.39.x matrix sweep (LOOP-REBIND-HEAP-001): a Call result of
-                // LIST shape bound inside a loop must also leave the
-                // per-iteration heap scope — otherwise each iteration freed the
-                // buffer the variable still referenced (flatten's
-                // `result = concat(result, xs)`; shuffle's
-                // `sh_rest = random_remove_ith(...)`). Root-scope registration
-                // gives the value the binding's lifetime.
+                // A Call result of LIST shape needs the binding's scope as its
+                // owner. For a fresh lexical binding inside a loop, keeping the
+                // slot in the current iteration scope releases that iteration's
+                // buffer before the next one. Rebindings are handled separately
+                // in the Assign arm below and are promoted to the function root
+                // because their storage outlives the loop body.
                 if matches!(initializer.kind, ResolvedExprKind::Call(_)) {
                     if let ResolvedPatternKind::Binding {
                         local,
@@ -1608,17 +1607,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     && matches!(fields[1], BasicTypeEnum::PointerType(_));
                                 if is_list_struct && self.generator.pop_last_heap_ptr().is_some() {
                                     // Transfer ownership to the variable's own
-                                    // slot — but only when it does not already
-                                    // own one (first binding registers it via
-                                    // emit_list_literal); a second entry for the
-                                    // same storage would free the final buffer
-                                    // twice at function exit.
+                                    // slot in the CURRENT scope. A binding is a
+                                    // fresh lexical owner even when its statement
+                                    // is emitted inside a loop; promoting it to
+                                    // the root scope would overwrite one root
+                                    // slot on every iteration and leak all prior
+                                    // buffers. A second entry for the same
+                                    // storage is still avoided for defensive
+                                    // compatibility with direct-list bindings.
                                     if !self.generator.has_heap_slot(entry.storage) {
-                                        self.generator.register_heap_slot_root(
-                                            entry.storage,
-                                            st,
-                                            1,
-                                        );
+                                        self.generator.register_heap_slot(entry.storage, st, 1);
                                     }
                                 }
                             }

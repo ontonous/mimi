@@ -250,8 +250,8 @@ extern "C" {
     fn resolved_extern_catalog_rejects_duplicate_projected_symbols() {
         let file = parse(
             r#"
-module a { extern "C" { func collide(x: i32) -> i32 } }
-module b { extern "C" { func collide(x: i32) -> i32 } }
+extern "C" { func collide(x: i32) -> i32 }
+extern "C" { func collide(x: i32) -> i32 }
 "#,
         );
         let error = checked_component_input(&file)
@@ -344,8 +344,8 @@ type Point { x: i32, y: i32 }
 
         let colliding = parse(
             r#"
-module a { type Point { x: i32 } }
-module b { type Point { y: i32 } }
+type Point { x: i32 }
+type Point { y: i32 }
 "#,
         );
         let error =

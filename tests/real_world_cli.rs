@@ -1437,19 +1437,77 @@ fn canonical_mir_std_set_generic_facade_is_atomic_across_consumers() {
         String::from_utf8_lossy(&verification.stdout)
     );
 
-    // The default native path is intentionally still fail-closed. This
-    // prevents a partial Set migration from silently changing the default
-    // route before the complete program capability matrix is green.
-    let legacy_build = Command::new(mimi_bin())
+    // The typed scalar Set facade is now a complete default-switch island.
+    // All three default entry points must select the same canonical program;
+    // there is no per-consumer fallback after selection.
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default std::set run");
+    assert_eq!(
+        default_run.status.code(),
+        Some(0),
+        "default std::set run failed:\n{}",
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+
+    let default_build_ir = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("build")
         .arg(&fixture)
+        .arg("--emit-ir")
         .output()
-        .expect("failed to spawn default std::set native build");
-    assert!(!legacy_build.status.success());
-    let legacy_stderr = String::from_utf8_lossy(&legacy_build.stderr);
-    assert!(legacy_stderr.contains("E0723"));
-    assert!(!legacy_stderr.contains("canonical MIR bytecode"));
+        .expect("failed to spawn default std::set native emit-ir");
+    assert!(
+        default_build_ir.status.success(),
+        "default std::set native build failed:\n{}",
+        String::from_utf8_lossy(&default_build_ir.stderr)
+    );
+    let default_ir = String::from_utf8_lossy(&default_build_ir.stdout);
+    assert!(
+        default_ir.contains("mimi_mir_set_to_list_scalar"),
+        "default build did not select the canonical Set island:\n{default_ir}"
+    );
+
+    let default_verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default std::set verifier");
+    assert!(
+        default_verification.status.success(),
+        "default std::set verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&default_verification.stderr),
+        String::from_utf8_lossy(&default_verification.stdout)
+    );
+}
+
+#[test]
+fn canonical_default_does_not_promote_non_facade_set_program() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_set_to_list.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default non-facade Set build");
+    assert!(
+        output.status.success(),
+        "default non-facade Set build failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ir = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !ir.contains("mimi_mir_set_to_list_scalar"),
+        "an unqualified Set program was promoted to the generic facade island:\n{ir}"
+    );
 }
 
 #[test]

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -141,24 +140,23 @@ fn run_once(
         }
     };
 
-    // Canonical MIR bytecode path (opt-in during the migration).  The
-    // automatically merged prelude remains a compatibility island until its
-    // generic/lambda bodies lower to MIR; all user and imported sources stay
-    // in the selected graph and must pass the same fail-closed checks.
-    if mir {
-        let excluded_sources = merged_file
-            .sources
-            .records()
-            .iter()
-            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-            .map(|record| record.id)
-            .collect::<HashSet<_>>();
-        let canonical =
-            mimi::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
-                &checked_program,
-                &excluded_sources,
-            )
-            .map_err(|error| format!("canonical MIR build error: {error:?}"))?;
+    // Canonical MIR bytecode path.  Explicit --mir always requests it and
+    // fails closed on an unsupported graph.  The default path enters the same
+    // route only after canonical_dispatch has atomically preflighted every
+    // consumer for the migrated production island; it never falls back after
+    // starting canonical execution.
+    let canonical = if mir {
+        Some(crate::canonical_dispatch::build_canonical_program(
+            &checked_program,
+            &merged_file,
+        )?)
+    } else {
+        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
+            crate::canonical_dispatch::DefaultMirRoute::Legacy => None,
+        }
+    };
+    if let Some(canonical) = canonical {
         let prog = mimi::interp::bytecode::compile_mir_program(&canonical).map_err(|errors| {
             let details = errors
                 .iter()

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -317,23 +316,19 @@ pub(crate) fn build(
     codegen.shared = shared;
     codegen.target_triple = target.map(|s| s.to_string());
 
-    let compile_result = if mir {
-        let excluded_sources = merged_file
-            .sources
-            .records()
-            .iter()
-            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-            .map(|record| record.id)
-            .collect::<HashSet<_>>();
+    let (compile_result, canonical_default) = if mir {
         let canonical =
-            mimi::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
-                &checked_program,
-                &excluded_sources,
-            )
-            .map_err(|error| format!("canonical MIR build error: {error:?}"))?;
-        codegen.compile_mir_native(&canonical)
+            crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?;
+        (codegen.compile_mir_native(&canonical), false)
     } else {
-        codegen.compile_checked(&checked_program)
+        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
+                (codegen.compile_mir_native(&canonical), true)
+            }
+            crate::canonical_dispatch::DefaultMirRoute::Legacy => {
+                (codegen.compile_checked(&checked_program), false)
+            }
+        }
     };
 
     if let Err(diagnostics) = compile_result {
@@ -347,7 +342,7 @@ pub(crate) fn build(
                 eprint!("{}", strip_ansi(&formatted));
             }
         }
-        return Err(if mir {
+        return Err(if mir || canonical_default {
             "canonical MIR native backend capability check failed".into()
         } else {
             "native backend capability check failed".into()

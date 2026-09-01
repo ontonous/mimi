@@ -16,6 +16,8 @@ mod add;
 mod bindgen;
 #[path = "main/build.rs"]
 mod build;
+#[path = "main/canonical_dispatch.rs"]
+mod canonical_dispatch;
 #[path = "main/check.rs"]
 mod check;
 #[path = "main/disasm_cmd.rs"]
