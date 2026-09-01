@@ -1374,6 +1374,85 @@ fn canonical_mir_native_set_to_list_matches_reference() {
 }
 
 #[test]
+fn canonical_mir_std_set_generic_facade_is_atomic_across_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("std_set.mimi");
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical std::set reference run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(0),
+        "canonical std::set reference run failed:\n{}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-std-set-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical std::set native build");
+    assert!(
+        build.status.success(),
+        "canonical std::set native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical std::set native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(0),
+        "canonical std::set native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical std::set verifier");
+    assert!(
+        verification.status.success(),
+        "canonical std::set verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+
+    // The default native path is intentionally still fail-closed. This
+    // prevents a partial Set migration from silently changing the default
+    // route before the complete program capability matrix is green.
+    let legacy_build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default std::set native build");
+    assert!(!legacy_build.status.success());
+    let legacy_stderr = String::from_utf8_lossy(&legacy_build.stderr);
+    assert!(legacy_stderr.contains("E0723"));
+    assert!(!legacy_stderr.contains("canonical MIR bytecode"));
+}
+
+#[test]
 fn canonical_mir_native_build_bool_list_index_matches_reference() {
     let fixture = project_root()
         .join("tests")

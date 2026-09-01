@@ -12,8 +12,9 @@ use crate::core::{NodeId, ResolvedPlace};
 
 use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
 use super::{
-    MirAggregateKind, MirFunction, MirInstance, MirInstanceId, MirInstruction, MirInstructionKind,
-    MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
+    MirAggregateKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId,
+    MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
+    MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1084,11 +1085,25 @@ fn validate_instance_table(
                     .into(),
             });
         }
-        errors.extend(validate_generic_identity_instance_function(
-            id,
-            function,
-            &instance.arguments,
-        ));
+        match instance.contract {
+            MirGenericInstanceContract::ScalarIdentity => {
+                errors.extend(validate_generic_identity_instance_function(
+                    id,
+                    function,
+                    &instance.arguments,
+                ));
+            }
+            MirGenericInstanceContract::ScalarSetFacade { operation } => {
+                if let Err(message) =
+                    super::lower::validate_scalar_set_facade_mir(function, type_catalog, operation)
+                {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!("generic MIR Set facade contract is invalid: {message}"),
+                    });
+                }
+            }
+        }
     }
     errors
 }
@@ -3677,7 +3692,8 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
-    use crate::core::NodeId;
+    use crate::core::mir::{MirGenericInstanceContract, MirInstructionKind};
+    use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -4058,6 +4074,73 @@ mod tests {
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn concrete_scalar_set_facade_instances_are_typed_and_executable() {
+        let source = "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } if !set_contains(inserted, 2) { return 2 } let removed = set_remove(inserted, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("scalar Set facade calls must materialize as canonical MIR");
+
+        assert_eq!(program.instances().len(), 5);
+        assert!(program.instances().values().all(|instance| matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarSetFacade { .. }
+        )));
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR function");
+        let instance_targets = program
+            .instances()
+            .values()
+            .map(|instance| instance.function.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut rewritten_call_count = 0;
+        for instruction in main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+        {
+            if let MirInstructionKind::Call {
+                callee: ResolvedCallee::Function(callee),
+                type_arguments,
+                ..
+            } = &instruction.kind
+            {
+                rewritten_call_count += 1;
+                assert!(instance_targets.contains(callee));
+                assert_eq!(type_arguments.len(), 1);
+            }
+        }
+        assert_eq!(rewritten_call_count, 5);
+
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference Set facade execution");
+        assert_eq!(value, MirRuntimeValue::Int(0));
+    }
+
+    #[test]
+    fn unsupported_generic_set_body_fails_closed_before_backend() {
+        let source =
+            "func bad<T>(s: Set<T>) -> Set<T> { s }\nfunc main() -> i32 { let values: Set<i32> = {1, 2}; let result = bad(values); drop(result); 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("an unproven generic Set body must remain fail-closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("generic Set facade must lower to exactly one canonical SetOp")
+            })),
+            other => panic!("unsupported generic Set shape crossed the MIR gate: {other:?}"),
+        }
     }
 
     #[test]

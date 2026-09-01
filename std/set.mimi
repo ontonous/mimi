@@ -1,35 +1,40 @@
-// SetExt: Trait for Set operations.
-trait SetExt {
+// SetExt: Trait for homogeneous Set<T> operations.
+//
+// The old erased Set/List/Any surface could not carry the element identity
+// into Canonical MIR and therefore had no sound native return contract. Keep
+// the public operations typed so checker-selected concrete instances can
+// materialize the existing scalar Set production island.
+trait SetExt<T> {
     func size() -> i32
     func is_empty() -> bool
-    func contains(value: Any) -> bool
-    func insert(value: Any) -> Set
-    func remove(value: Any) -> Set
-    func to_list() -> List
+    func contains(value: T) -> bool
+    func insert(value: T) -> Set<T>
+    func remove(value: T) -> Set<T>
+    func to_list() -> List<T>
 }
 
-// SetExt implementation for built-in Set type.
-impl SetExt for Set {
+// SetExt implementation for built-in Set<T> type.
+impl<T> SetExt<T> for Set<T> {
     func size() -> i32 { self.size() }
     func is_empty() -> bool { self.is_empty() }
-    func contains(value: Any) -> bool { self.contains(value) }
-    func insert(value: Any) -> Set { self.insert(value) }
-    func remove(value: Any) -> Set { self.remove(value) }
-    func to_list() -> List { self.to_list() }
+    func contains(value: T) -> bool { self.contains(value) }
+    func insert(value: T) -> Set<T> { self.insert(value) }
+    func remove(value: T) -> Set<T> { self.remove(value) }
+    func to_list() -> List<T> { self.to_list() }
 }
 
 // insert: Returns a set with value added.
-pub func insert(s: Set, value: Any) -> Set { s.insert(value) }
+pub func insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }
 
 // set_size: Number of elements in the set.
-pub func set_size(s: Set) -> i32 { s.size() }
+pub func set_size<T>(s: Set<T>) -> i32 { s.size() }
 // set_is_empty: True when the set has no elements.
-pub func set_is_empty(s: Set) -> bool { s.is_empty() }
+pub func set_is_empty<T>(s: Set<T>) -> bool { s.is_empty() }
 // set_contains: True when value is a member of the set.
-pub func set_contains(s: Set, value: Any) -> bool { s.contains(value) }
+pub func set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }
 // set_insert: Returns a set with value added.
-pub func set_insert(s: Set, value: Any) -> Set { s.insert(value) }
+pub func set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }
 // set_remove: Returns a set with value removed.
-pub func set_remove(s: Set, value: Any) -> Set { s.remove(value) }
+pub func set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }
 // set_to_list: Converts the set to a list of elements.
-pub func set_to_list(s: Set) -> List { s.to_list() }
+pub func set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }

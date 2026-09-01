@@ -91,6 +91,7 @@ pub struct MirInstance {
     pub template: NodeId,
     pub arguments: Vec<ResolvedTypeId>,
     pub function: NodeId,
+    pub contract: MirGenericInstanceContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +164,16 @@ pub enum MirSetOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirListOperation {
     Len,
+}
+
+/// Closed proof carried by a materialized generic MIR instance. The instance
+/// table is part of the canonical program, so consumers must not guess which
+/// generic template family a specialized body belongs to from its symbol name
+/// or physical ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirGenericInstanceContract {
+    ScalarIdentity,
+    ScalarSetFacade { operation: MirSetOperation },
 }
 
 /// Operations with explicit value and ownership boundaries. The MIR validator

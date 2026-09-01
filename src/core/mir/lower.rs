@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::core::ir::{
     NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
-    ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedUnaryOp,
+    ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedType, ResolvedUnaryOp,
 };
 use crate::core::{
     CanonicalActionKind, CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResourceAnalysis,
@@ -22,10 +22,10 @@ use crate::core::{
 
 use super::types::MirTypeCatalog;
 use super::{
-    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction, MirInstance,
-    MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirOwnershipEvent,
-    MirOwnershipEventKind, MirOwnershipSummary, MirSwitchArm, MirSwitchBinding, MirSwitchCase,
-    MirTerminator, MirValue, MirValueId,
+    MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
+    MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
+    MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary,
+    MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,7 +347,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                 ),
             }]
         })?;
-        let (instance, function) = materialize_identity_instance(
+        let (instance, function) = materialize_generic_instance(
             callable,
             &template,
             &arguments,
@@ -399,7 +399,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
     Ok(instances)
 }
 
-fn materialize_identity_instance(
+fn materialize_generic_instance(
     callable: &crate::core::ResolvedCallable,
     template: &NodeId,
     arguments: &[crate::core::ResolvedTypeId],
@@ -412,13 +412,12 @@ fn materialize_identity_instance(
             .map(|instruction| NodeId(instruction.as_str().to_owned()))
             .unwrap_or_else(|| template.clone())
     };
-    if callable.signature.generic_parameters.len() != 1
-        || callable.signature.parameters.len() != 1
-        || arguments.len() != 1
-    {
+    if callable.signature.generic_parameters.len() != 1 || arguments.len() != 1 {
         return Err(vec![MirLoweringError {
             node_id: subject(),
-            message: "only one-parameter scalar generic identity instances are materialized".into(),
+            message:
+                "canonical generic MIR instances require one type parameter and one scalar argument"
+                    .into(),
         }]);
     }
     type_catalog
@@ -438,20 +437,18 @@ fn materialize_identity_instance(
                 message: "generic signature parameter has no canonical ResolvedTypeId".into(),
             }]
         })?;
-    if callable.signature.parameters[0].ty != generic_id || callable.signature.result != generic_id
-    {
-        return Err(vec![MirLoweringError {
-            node_id: subject(),
-            message: "generic instance is not the canonical identity signature T -> T".into(),
-        }]);
-    }
     let mut function = lower_callable(callable).map_err(|mut errors| {
         for error in &mut errors {
             error.node_id = subject();
         }
         errors
     })?;
-    validate_identity_mir_shape(&function, &generic_id, &subject())?;
+    let is_identity = callable.signature.parameters.len() == 1
+        && callable.signature.parameters[0].ty == generic_id
+        && callable.signature.result == generic_id;
+    if is_identity {
+        validate_identity_mir_shape(&function, &generic_id, &subject())?;
+    }
     let concrete = arguments.first().cloned().ok_or_else(|| {
         vec![MirLoweringError {
             node_id: subject(),
@@ -466,12 +463,32 @@ fn materialize_identity_instance(
     })?;
     let function_owner = NodeId(format!("function:mir:{}", instance_id.as_str()));
     function.owner = function_owner.clone();
-    function.result = concrete.clone();
+    function.result = specialize_type_id(&function.result, &generic_id, &concrete, program)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]
+        })?;
+    let mut specialization_errors = Vec::new();
     for value in function.values.values_mut() {
-        if value.ty == generic_id {
-            value.ty = concrete.clone();
+        match specialize_type_id(&value.ty, &generic_id, &concrete, program) {
+            Ok(ty) => value.ty = ty,
+            Err(message) => specialization_errors.push(MirLoweringError {
+                node_id: subject(),
+                message,
+            }),
         }
     }
+    if !specialization_errors.is_empty() {
+        return Err(specialization_errors);
+    }
+    let contract = if is_identity {
+        MirGenericInstanceContract::ScalarIdentity
+    } else {
+        let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::ScalarSetFacade { operation }
+    };
     function.validate().map_err(|errors| {
         errors
             .into_iter()
@@ -496,8 +513,239 @@ fn materialize_identity_instance(
         template: template.clone(),
         arguments: arguments.to_vec(),
         function: function_owner,
+        contract,
     };
     Ok((instance, function))
+}
+
+/// Substitute one checker-owned generic parameter in the small set of
+/// parameterized nominal types used by the current concrete Set facade. The
+/// returned identity is looked up in the original resolved type table; a
+/// backend never invents a new type id from a display name or ABI spelling.
+fn specialize_type_id(
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    concrete: &crate::core::ResolvedTypeId,
+    program: &CheckedProgram,
+) -> Result<crate::core::ResolvedTypeId, String> {
+    if id == generic_id {
+        return Ok(concrete.clone());
+    }
+    let Some(ResolvedType::Nominal {
+        item,
+        arguments,
+        is_linear,
+    }) = program.resolved_types().get(id)
+    else {
+        return Ok(id.clone());
+    };
+    let mut specialized_arguments = Vec::with_capacity(arguments.len());
+    let mut changed = false;
+    for argument in arguments {
+        let specialized = specialize_type_id(argument, generic_id, concrete, program)?;
+        changed |= specialized != *argument;
+        specialized_arguments.push(specialized);
+    }
+    if !changed {
+        return Ok(id.clone());
+    }
+    let specialized = ResolvedType::Nominal {
+        item: item.clone(),
+        arguments: specialized_arguments,
+        is_linear: *is_linear,
+    };
+    program
+        .resolved_types()
+        .iter()
+        .find_map(|(candidate, candidate_ty)| {
+            (candidate_ty == &specialized).then(|| candidate.clone())
+        })
+        .ok_or_else(|| {
+            format!(
+                "generic MIR specialization has no canonical type identity for '{}<...>'",
+                item.as_str()
+            )
+        })
+}
+
+fn detect_scalar_set_facade_operation(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::MirSetOperation, Vec<MirLoweringError>> {
+    let operations = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match instruction.kind {
+            MirInstructionKind::SetOp { operation, .. } => Some(operation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [operation] = operations.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic Set facade must lower to exactly one canonical SetOp".into(),
+        }]);
+    };
+    validate_scalar_set_facade_mir(function, type_catalog, *operation).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: format!("generic Set facade contract is invalid: {message}"),
+        }]
+    })?;
+    Ok(*operation)
+}
+
+/// Validate the concrete body of a generic Set facade. This is deliberately
+/// structural: a materialized instance may contain only parameter clones and
+/// one canonical SetOp whose operation/result/argument contract is proven by
+/// TypeDesc. That prevents a generic instance from becoming an unverified
+/// legacy-style body hidden behind a specialized symbol.
+pub(crate) fn validate_scalar_set_facade_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    operation: super::MirSetOperation,
+) -> Result<(), String> {
+    let [set_parameter, rest @ ..] = function.parameters.as_slice() else {
+        return Err("scalar Set facade must have a Set parameter".into());
+    };
+    if rest.len() > 1 {
+        return Err("scalar Set facade has too many parameters".into());
+    }
+    let set_ty = function
+        .values
+        .get(set_parameter)
+        .ok_or_else(|| "scalar Set facade receiver parameter is absent".to_string())?
+        .ty
+        .clone();
+    let element_ty = match type_catalog.get(&set_ty).map(|desc| &desc.layout) {
+        Some(super::types::MirLayout::Set { element }) => element.clone(),
+        _ => return Err("scalar Set facade receiver is not a canonical Set<T>".into()),
+    };
+    if rest.len() == 1 {
+        let argument_ty = function
+            .values
+            .get(&rest[0])
+            .ok_or_else(|| "scalar Set facade argument parameter is absent".to_string())?
+            .ty
+            .clone();
+        if argument_ty != element_ty {
+            return Err("scalar Set facade argument does not match Set element identity".into());
+        }
+    }
+
+    let Some(block) = function.blocks.get(&function.entry) else {
+        return Err("scalar Set facade entry block is absent".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("scalar Set facade must have exactly one MIR block".into());
+    }
+    let mut set_op = None;
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::SetOp {
+                result,
+                operation: actual,
+                set,
+                argument,
+            } => {
+                if *actual != operation {
+                    return Err("scalar Set facade contains a different SetOp operation".into());
+                }
+                if set_op
+                    .replace((result.clone(), set.clone(), argument.clone()))
+                    .is_some()
+                {
+                    return Err("scalar Set facade must contain exactly one SetOp".into());
+                }
+            }
+            MirInstructionKind::Clone { .. } => {}
+            _ => return Err(
+                "scalar Set facade body may contain only parameter Clone and SetOp instructions"
+                    .into(),
+            ),
+        }
+    }
+    let Some((set_result, set_operand, set_argument)) = set_op else {
+        return Err("scalar Set facade must contain exactly one SetOp".into());
+    };
+    let clones = block
+        .instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Clone { result, source } => Some((result, source)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if clones.len() != function.parameters.len()
+        || clones.iter().any(|(_, source)| {
+            !function
+                .parameters
+                .iter()
+                .any(|parameter| parameter == *source)
+        })
+        || clones
+            .iter()
+            .map(|(_, source)| *source)
+            .collect::<HashSet<_>>()
+            .len()
+            != clones.len()
+    {
+        return Err(
+            "scalar Set facade must clone each callable parameter exactly once before SetOp".into(),
+        );
+    }
+    let clone_for = |source: &MirValueId| {
+        clones
+            .iter()
+            .find_map(|(result, candidate)| (*candidate == source).then_some((*result).clone()))
+    };
+    if Some(set_operand.clone()) != clone_for(set_parameter) {
+        return Err("scalar Set facade SetOp receiver is not the cloned Set parameter".into());
+    }
+    let expects_argument = matches!(
+        operation,
+        super::MirSetOperation::Contains
+            | super::MirSetOperation::Insert
+            | super::MirSetOperation::Remove
+    );
+    if expects_argument {
+        let Some(parameter) = rest.first() else {
+            return Err("scalar Set facade operation requires an element argument".into());
+        };
+        if set_argument.as_ref() != clone_for(parameter).as_ref() {
+            return Err(
+                "scalar Set facade SetOp argument is not the cloned element parameter".into(),
+            );
+        }
+    } else if set_argument.is_some() {
+        return Err("scalar Set facade read operation unexpectedly has an argument".into());
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err("scalar Set facade must return its SetOp result".into());
+    };
+    if returned != &set_result {
+        return Err("scalar Set facade return value is not the SetOp result".into());
+    }
+    let result_ty = function
+        .values
+        .get(&set_result)
+        .ok_or_else(|| "scalar Set facade result value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_set_operation(
+        &result_ty,
+        &set_ty,
+        set_argument
+            .as_ref()
+            .and_then(|argument| function.values.get(argument))
+            .map(|value| &value.ty),
+        operation,
+    )
 }
 
 fn validate_identity_mir_shape(
@@ -844,7 +1092,11 @@ impl<'a> Lowerer<'a> {
                     );
                 }
                 ResolvedStmtKind::Expr(expression) => {
-                    let _ = self.lower_expr(expression);
+                    if self.is_statement_if(expression) {
+                        self.lower_if_stmt(&statement.node_id, expression);
+                    } else {
+                        let _ = self.lower_expr(expression);
+                    }
                 }
                 ResolvedStmtKind::Return { value, .. } => {
                     let value = value.as_ref().map(|value| self.lower_expr(value));
@@ -1577,6 +1829,84 @@ impl<'a> Lowerer<'a> {
         self.switch_to(join_id);
     }
 
+    /// Lower a statement-shaped `if` without manufacturing a Unit SSA value.
+    ///
+    /// Unit is a source-level result, not a native ABI value.  Keeping it out
+    /// of the CFG means a branch whose body returns can join a fall-through
+    /// branch using an empty edge; native and bytecode consumers therefore do
+    /// not need a backend-private representation for Unit just to implement
+    /// ordinary guard statements.
+    fn lower_if_stmt(&mut self, node: &NodeId, expression: &ResolvedExpr) {
+        let ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } = &expression.kind
+        else {
+            self.error(
+                node,
+                "statement-shaped MIR if has a non-if expression".to_string(),
+            );
+            return;
+        };
+        let condition = self.lower_expr(condition);
+        let Some(then_id) = self.block_id("if.stmt.then", node) else {
+            return;
+        };
+        let Some(else_id) = self.block_id("if.stmt.else", node) else {
+            return;
+        };
+        let Some(join_id) = self.block_id("if.stmt.join", node) else {
+            return;
+        };
+        let Some(then_edge) = self.edge_id("if.stmt.then", node) else {
+            return;
+        };
+        let Some(else_edge) = self.edge_id("if.stmt.else", node) else {
+            return;
+        };
+        let Some(then_join_edge) = self.edge_id("if.stmt.then.join", node) else {
+            return;
+        };
+        let Some(else_join_edge) = self.edge_id("if.stmt.else.join", node) else {
+            return;
+        };
+
+        self.add_block(then_id.clone(), Vec::new());
+        self.add_block(else_id.clone(), Vec::new());
+        self.add_block(join_id.clone(), Vec::new());
+        self.terminate(MirTerminator::Branch {
+            condition,
+            then_edge,
+            then_target: then_id.clone(),
+            then_arguments: Vec::new(),
+            else_edge,
+            else_target: else_id.clone(),
+            else_arguments: Vec::new(),
+        });
+
+        self.switch_to(then_id);
+        self.lower_block_expr(then_block);
+        if !self.current_is_terminated() {
+            self.terminate(MirTerminator::Goto {
+                edge: then_join_edge,
+                target: join_id.clone(),
+                arguments: Vec::new(),
+            });
+        }
+
+        self.switch_to(else_id);
+        self.lower_block_expr(else_block);
+        if !self.current_is_terminated() {
+            self.terminate(MirTerminator::Goto {
+                edge: else_join_edge,
+                target: join_id.clone(),
+                arguments: Vec::new(),
+            });
+        }
+        self.switch_to(join_id);
+    }
+
     /// Lower a statement-shaped while into a canonical header/body/exit CFG.
     /// The header owns the condition so every back edge re-evaluates it; this
     /// is the key distinction from lowering a loop as a repeated AST walk.
@@ -1740,7 +2070,11 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ResolvedStmtKind::Expr(expression) => {
-                    self.lower_expr(expression);
+                    if self.is_statement_if(expression) {
+                        self.lower_if_stmt(&statement.node_id, expression);
+                    } else {
+                        self.lower_expr(expression);
+                    }
                 }
                 ResolvedStmtKind::While { condition, body } => {
                     self.lower_while_stmt(&statement.node_id, condition, body);
@@ -1750,6 +2084,10 @@ impl<'a> Lowerer<'a> {
                 }
                 ResolvedStmtKind::Continue => {
                     self.lower_continue(&statement.node_id);
+                }
+                ResolvedStmtKind::Return { value, .. } => {
+                    let value = value.as_ref().map(|value| self.lower_expr(value));
+                    self.terminate(MirTerminator::Return { value });
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
                 _ => self.error(
@@ -1769,6 +2107,17 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|_| MirValueId::new("error:fallback").expect("static MIR id"));
         self.insert_value(value.clone(), expression.ty.clone(), &expression.node_id);
         value
+    }
+
+    fn is_statement_if(&self, expression: &ResolvedExpr) -> bool {
+        matches!(
+            &expression.kind,
+            ResolvedExprKind::If {
+                then_block,
+                else_block,
+                ..
+            } if then_block.result.is_none() && else_block.result.is_none()
+        )
     }
 
     fn emit(&mut self, node: &NodeId, role: &str, kind: MirInstructionKind) {
@@ -2052,6 +2401,28 @@ mod tests {
         let text = mir.canonical_text();
         assert!(text.contains("bb:while.header"));
         assert!(text.contains("edge:while.back"));
+    }
+
+    #[test]
+    fn return_inside_if_block_lowers_as_a_terminated_cfg_branch() {
+        let source = "func main() -> i32 { if true { return 41 } 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let callable = program
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .expect("main callable");
+        let mir = lower_body(&callable.body).expect("nested return lowering");
+        assert!(mir
+            .blocks
+            .values()
+            .any(|block| { matches!(block.terminator, MirTerminator::Return { value: Some(_) }) }));
+        assert!(mir
+            .blocks
+            .values()
+            .any(|block| { matches!(block.terminator, MirTerminator::Goto { .. }) }));
     }
 
     #[test]
