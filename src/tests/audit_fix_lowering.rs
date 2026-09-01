@@ -1763,7 +1763,9 @@ func main() -> i32 {
         let resolved = checked_codegen_compile_and_run(src).expect("resolved str_contains List");
         assert_eq!(resolved, expected, "resolved must match VM (audit 1g)");
     }
-    // Set haystack stays a guarded VM-only gap: rejected at compile time.
+    // Set haystack stays outside the resolved native slice. The migration
+    // path remains available through legacy codegen, while the Canonical MIR
+    // Set island is selected atomically by the CLI.
     let set_case = r#"func main() -> i32 {
     let s = new_set()
     println(str_contains(s, 1))
@@ -1779,11 +1781,10 @@ func main() -> i32 {
 
 #[test]
 fn audit_1j_contains_set_haystack_fn_form() {
-    // 2026-08-06 (audit 1j): function-form `contains(set, value)` was a
-    // VM-only gap — the codegen dispatch only handled string (strstr) and
-    // List (compile_contains); a Set haystack (bare i64 handle) made
-    // require_list_pointer fail loudly. Route Set haystacks to
-    // mimi_set_contains (handle probe), returning i1 for VM Bool parity.
+    // 2026-08-06 (audit 1j): function-form `contains(set, value)` remains a
+    // migration-era legacy shape. The resolved emitter must not reimplement
+    // the Set runtime ABI; compile_checked therefore rejects this shape from
+    // resolved eligibility and the legacy backend owns the compatibility path.
     let src = r#"
 func main() -> i32 {
     let s = {4, 1, 1}
@@ -1799,8 +1800,9 @@ func main() -> i32 {
     if can_link() {
         let native = compile_and_run(src).expect("codegen contains(Set, int)");
         assert_eq!(native, expected, "native must match VM (audit 1j)");
-        let resolved = checked_codegen_compile_and_run(src).expect("resolved contains(Set, int)");
-        assert_eq!(resolved, expected, "resolved must match VM (audit 1j)");
+        let checked =
+            checked_codegen_compile_and_run(src).expect("checked legacy contains(Set, int)");
+        assert_eq!(checked, expected, "checked legacy must match VM (audit 1j)");
     }
     // String elements: Set<string> probe must use logical string content, not
     // the address of the source literal.
@@ -1818,11 +1820,11 @@ func main() -> i32 {
     if can_link() {
         let native2 = compile_and_run(str_src).expect("codegen contains(Set<string>, string)");
         assert_eq!(native2, str_expected, "native Set<string> must match VM");
-        let resolved2 = checked_codegen_compile_and_run(str_src)
-            .expect("resolved contains(Set<string>, string)");
+        let checked2 = checked_codegen_compile_and_run(str_src)
+            .expect("checked legacy contains(Set<string>, string)");
         assert_eq!(
-            resolved2, str_expected,
-            "resolved Set<string> must match VM"
+            checked2, str_expected,
+            "checked legacy Set<string> must match VM"
         );
     }
     // Method form keeps working (audit D-2 regression guard).
@@ -1911,9 +1913,9 @@ func main() -> i32 {
 #[test]
 fn audit_1k_str_contains_set_haystack() {
     // 2026-08-06 (audit 1k): str_contains's VM polymorphism covers a Set
-    // haystack; codegen kept it guarded (VM-only gap) after the List
-    // redirect. A Set haystack is a bare i64 handle — route to
-    // mimi_set_contains like function-form contains (audit 1j).
+    // haystack, but Set is deliberately excluded from resolved native
+    // lowering. The checked pipeline uses the legacy compatibility route;
+    // Canonical MIR owns Set only after the complete island selector passes.
     let src = r#"
 func main() -> i32 {
     let s = {1, 2, 3}
@@ -1928,9 +1930,9 @@ func main() -> i32 {
     if can_link() {
         let native = compile_and_run(src).expect("codegen str_contains(Set, int)");
         assert_eq!(native, expected, "native must match VM (audit 1k)");
-        let resolved =
-            checked_codegen_compile_and_run(src).expect("resolved str_contains(Set, int)");
-        assert_eq!(resolved, expected, "resolved must match VM (audit 1k)");
+        let checked =
+            checked_codegen_compile_and_run(src).expect("checked legacy str_contains(Set, int)");
+        assert_eq!(checked, expected, "checked legacy must match VM (audit 1k)");
     }
 }
 

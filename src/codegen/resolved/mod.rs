@@ -2408,37 +2408,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 }
                 Ok(BasicValueEnum::IntValue(map_handle))
             }
-            // 0.32.3: Set literal. Call mimi_set_new() then mimi_set_insert()
-            // for each element, same as legacy compile_set_literal.
-            // Returns an i64 opaque handle.
-            ResolvedExprKind::Set(elements) => {
-                let set_new = self.generator.get_runtime_fn("mimi_set_new")?;
-                let result = self.generator.build_call(set_new, &[], "set_new_call")?;
-                let set_handle = result
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("mimi_set_new returned void".into()))?
-                    .into_int_value();
-                if !elements.is_empty() {
-                    let set_insert = self.generator.get_runtime_fn("mimi_set_insert")?;
-                    for elem in elements {
-                        let val = self.emit_expr(elem, frame)?;
-                        if resolved_type_display_name(self.program, &elem.ty) == "string" {
-                            self.generator.compile_set_insert_string(set_handle, val)?;
-                        } else {
-                            let val_i64 = self.generator.any_value_to_handle(val)?;
-                            self.generator.build_call(
-                                set_insert,
-                                &[
-                                    BasicMetadataValueEnum::IntValue(set_handle),
-                                    BasicMetadataValueEnum::IntValue(val_i64),
-                                ],
-                                "set_insert_call",
-                            )?;
-                        }
-                    }
-                }
-                Ok(BasicValueEnum::IntValue(set_handle))
-            }
             // 0.32.5: Record construction. Build LLVM struct from field
             // value types, allocate, store each field. 0.1.8 Phase F:
             // `..rest` starts from the rest record and overrides explicit
@@ -3249,19 +3218,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 name = mapped;
                             }
                         }
-                        // 0.39.37 (SET-REMOVE-CODEGEN-001 closed): resolved
-                        // SET METHOD calls (`s.size()`, `s.remove(v)`,
-                        // `s.contains(v)`, ...) arrive as
-                        // `builtin.method.set.X`. They used to E0709 (only the
-                        // ProtocolMethod callee form reached the set handler).
-                        // Route the Builtin form to the same handler.
-                        if let Some(method) = name.strip_prefix("builtin.method.set.") {
-                            if let Some(value) =
-                                self.emit_builtin_set_protocol_method(method, &arguments)?
-                            {
-                                return Ok(value);
-                            }
-                        }
                         // 0.1.10 (BUG K): resolved List METHOD calls arrive as
                         // `builtin.method.list.len` — `resolve_builtin_method`
                         // registers ONLY `len` for the list family (every other
@@ -3283,29 +3239,12 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             }
                         }
                         // 2026-08-06 (audit 1g): str_contains List haystack →
-                        // compile_contains (VM polymorphism parity); the guard
-                        // below keeps rejecting Set/other receivers.
-                        // (audit 1k) Set haystacks → mimi_set_contains.
+                        // compile_contains (VM polymorphism parity).
                         if name == "str_contains" && !call.arguments.is_empty() {
                             let hay_ty = resolved_type_display_name(
                                 self.program,
                                 &call.arguments[0].value.ty,
                             );
-                            if hay_ty.starts_with("Set") {
-                                if call.arguments.len() < 2 {
-                                    return Err(CompileError::WrongArgCount(
-                                        "str_contains expects 2 arguments".into(),
-                                    ));
-                                }
-                                return self.generator.compile_set_contains_fn(
-                                    arguments[0],
-                                    arguments[1],
-                                    resolved_type_display_name(
-                                        self.program,
-                                        &call.arguments[1].value.ty,
-                                    ) == "string",
-                                );
-                            }
                             if hay_ty.starts_with("List") {
                                 name = "contains";
                             }
@@ -3330,29 +3269,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         // only handles List and a string haystack would SIGSEGV
                         // (load_list_len on a string struct). Redirect string
                         // haystacks to str_contains — the guard below then
-                        // enforces the string needle too. (audit 1j) Set
-                        // haystacks: bare i64 handle → mimi_set_contains
-                        // (was a VM-only gap).
+                        // enforces the string needle too. Set calls are
+                        // rejected by resolved eligibility and belong to the
+                        // Canonical MIR Set island or the explicit legacy
+                        // migration path.
                         if name == "contains" && !call.arguments.is_empty() {
                             let hay_ty = resolved_type_display_name(
                                 self.program,
                                 &call.arguments[0].value.ty,
                             );
-                            if hay_ty.starts_with("Set") {
-                                if call.arguments.len() < 2 {
-                                    return Err(CompileError::WrongArgCount(
-                                        "contains expects 2 arguments".into(),
-                                    ));
-                                }
-                                return self.generator.compile_set_contains_fn(
-                                    arguments[0],
-                                    arguments[1],
-                                    resolved_type_display_name(
-                                        self.program,
-                                        &call.arguments[1].value.ty,
-                                    ) == "string",
-                                );
-                            }
                             if hay_ty == "string" {
                                 name = "str_contains";
                             }
@@ -5079,20 +5004,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     "cannot parse ProtocolMethod MethodId '{method_str}'"
                                 ))
                             })?;
-                        // Builtin SetExt methods must call the runtime directly.
-                        // The resolved lowering re-dispatches `self.size()` inside
-                        // the synthetic `Set_size` impl body back through
-                        // ProtocolMethod, producing self-recursive trampolines
-                        // (`call Set_size -> Set_size -> ...`). The legacy emitter
-                        // already gives builtin Set semantics precedence; mirror
-                        // that here before looking up the generic symbol.
-                        if impl_type == "Set" || impl_type.starts_with("Set<") {
-                            if let Some(value) =
-                                self.emit_builtin_set_protocol_method(&method_name, &arguments)?
-                            {
-                                return Ok(value);
-                            }
-                        }
                         let symbol = format!("{}_{}", impl_type, method_name);
                         let callee =
                             self.generator.module.get_function(&symbol).ok_or_else(|| {
@@ -5783,169 +5694,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         self.generator
             .build_store(nul_dst, i8_ty.const_int(0, false))?;
         self.generator.build_string_struct(buf, offset)
-    }
-
-    /// Emit a builtin `SetExt` method directly against the runtime set API.
-    ///
-    /// The resolved lowering represents each trait impl method as a synthetic
-    /// function (`Set_size`, `Set_insert`, ...). Its body is the original
-    /// `self.method(...)` call, which would re-enter the same ProtocolMethod
-    /// symbol and create a self-recursive trampoline. Builtin Set operations
-    /// mutate/pass the handle in-place, so call the runtime helpers directly
-    /// and coerce to the small LLVM types used by the trait signatures.
-    fn emit_builtin_set_protocol_method(
-        &mut self,
-        method_name: &str,
-        arguments: &[BasicMetadataValueEnum<'ctx>],
-    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
-        if arguments.is_empty() {
-            return Ok(None);
-        }
-        let i64_ty = self.generator.context.i64_type();
-        let handle = match arguments[0] {
-            BasicMetadataValueEnum::IntValue(iv) => iv,
-            BasicMetadataValueEnum::PointerValue(pv) => self
-                .generator
-                .builder
-                .build_ptr_to_int(pv, i64_ty, "set_self_handle")
-                .map_err(|e| CompileError::LlvmError(format!("set ptrtoint: {e}")))?,
-            _ => return Ok(None),
-        };
-
-        match method_name {
-            "size" | "len" => {
-                let func = self.generator.get_runtime_fn("mimi_set_size")?;
-                let result = self
-                    .generator
-                    .build_call(
-                        func,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "set_size",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("mimi_set_size returned void".into()))?
-                    .into_int_value();
-                let i32_ty = self.generator.context.i32_type();
-                let result_i32 = self
-                    .generator
-                    .builder
-                    .build_int_truncate(result, i32_ty, "set_size_i32")
-                    .map_err(|e| CompileError::LlvmError(format!("set_size trunc: {e}")))?;
-                Ok(Some(result_i32.into()))
-            }
-            "is_empty" => {
-                let func = self.generator.get_runtime_fn("mimi_set_size")?;
-                let result = self
-                    .generator
-                    .build_call(
-                        func,
-                        &[BasicMetadataValueEnum::IntValue(handle)],
-                        "set_size",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError("mimi_set_size returned void".into()))?
-                    .into_int_value();
-                let zero = i64_ty.const_zero();
-                let is_empty = self
-                    .generator
-                    .builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, result, zero, "set_is_empty")
-                    .map_err(|e| CompileError::LlvmError(format!("set is_empty cmp: {e}")))?;
-                Ok(Some(is_empty.into()))
-            }
-            "contains" | "insert" | "remove" => {
-                if arguments.len() < 2 {
-                    return Err(CompileError::Generic(
-                        "set method expects a value argument".into(),
-                    ));
-                }
-                let value = match arguments[1] {
-                    BasicMetadataValueEnum::IntValue(iv) => {
-                        // mimi_set_* take i64 value handles; a narrow literal
-                        // (e.g. `s.remove(1)` → i32) must be widened to i64.
-                        if iv.get_type().get_bit_width() < 64 {
-                            self.generator
-                                .builder
-                                .build_int_s_extend(iv, i64_ty, "set_value_i64")
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("set value sext: {e}"))
-                                })?
-                        } else {
-                            iv
-                        }
-                    }
-                    BasicMetadataValueEnum::PointerValue(pv) => self
-                        .generator
-                        .builder
-                        .build_ptr_to_int(pv, i64_ty, "set_value_handle")
-                        .map_err(|e| CompileError::LlvmError(format!("set value ptrtoint: {e}")))?,
-                    _ => i64_ty.const_zero(),
-                };
-                let runtime = match method_name {
-                    "contains" => self.generator.get_runtime_fn("mimi_set_contains")?,
-                    "insert" => self.generator.get_runtime_fn("mimi_set_insert")?,
-                    _ => self.generator.get_runtime_fn("mimi_set_remove")?,
-                };
-                let call_name = match method_name {
-                    "contains" => "set_contains",
-                    "insert" => "set_insert",
-                    _ => "set_remove",
-                };
-                let result = self
-                    .generator
-                    .build_call(
-                        runtime,
-                        &[
-                            BasicMetadataValueEnum::IntValue(handle),
-                            BasicMetadataValueEnum::IntValue(value),
-                        ],
-                        call_name,
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| CompileError::LlvmError(format!("{call_name} returned void")))?;
-                if method_name == "contains" {
-                    let one = i64_ty.const_int(1, false);
-                    let as_bool = self
-                        .generator
-                        .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::EQ,
-                            result.into_int_value(),
-                            one,
-                            "set_contains_bool",
-                        )
-                        .map_err(|e| CompileError::LlvmError(format!("set contains cmp: {e}")))?;
-                    Ok(Some(as_bool.into()))
-                } else {
-                    Ok(Some(result))
-                }
-            }
-            "to_list" => {
-                let out_len = self.generator.build_alloca(i64_ty, "set_to_list_len")?;
-                let func = self.generator.get_runtime_fn("mimi_set_to_list")?;
-                let result = self
-                    .generator
-                    .build_call(
-                        func,
-                        &[
-                            BasicMetadataValueEnum::IntValue(handle),
-                            BasicMetadataValueEnum::PointerValue(out_len),
-                        ],
-                        "set_to_list",
-                    )?
-                    .try_as_basic_value_opt()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError("mimi_set_to_list returned void".into())
-                    })?
-                    .into_pointer_value();
-                let len = self
-                    .generator
-                    .build_load(i64_ty, out_len, "set_to_list_len_val")?
-                    .into_int_value();
-                Ok(Some(self.generator.build_list_struct(len, result)?))
-            }
-            _ => Ok(None),
-        }
     }
 
     /// ABI bridge: if the expected result type is String ({ptr, i64}) but the
@@ -14976,6 +14724,33 @@ func main() -> i32 {
             .compile_resolved_native(&program)
             .expect("list literal is now in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
+    }
+
+    #[test]
+    fn set_shape_is_rejected_from_resolved_native_slice() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let values = {1, 2, 3}
+    println(len(values))
+    0
+}
+"#,
+        );
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.qualified_name == "main")
+            .expect("main function");
+        let callable = program
+            .callable(&function.node_id)
+            .expect("resolved main callable");
+        let error = require_resolved_native_callable(&program, callable)
+            .expect_err("Set must not enter the retired resolved Set lowering");
+        assert_eq!(
+            error.reason,
+            "Set is owned by Canonical MIR; resolved native Set lowering is retired"
+        );
     }
 
     #[test]

@@ -968,17 +968,17 @@ func main() -> i32 {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 0.39.37 SET-REMOVE-CODEGEN-001 闭合：resolved codegen 下全部 Set 方法
-// 此前 `s.size()`/`s.remove(v)`/… 以 ResolvedCallee::Builtin("builtin.method.
-// set.*") 形式到达 resolved codegen，未接线 → E0709（只有 ProtocolMethod 形式
-// 走到 emit_builtin_set_protocol_method）。修复：Builtin 形式也路由到 set
-// 协议处理器，且 set 值实参按 mimi_set_* 的 i64 签名做位宽扩到 i64。
+// 0.1.10 MIR migration: the resolved emitter no longer owns Set semantics.
+// The complete typed Set island uses Canonical MIR; unsupported Set programs
+// remain on the checked pipeline's legacy route until their island is closed.
 // ─────────────────────────────────────────────────────────────
 
-/// 回归：resolved codegen Set 方法全矩阵（size/is_empty/contains/insert/
-/// remove/to_list）+ remove 结果喂自由 is_empty，双后端等价。
+/// 回归：migration-era legacy Set method matrix (size/is_empty/contains/
+/// insert/remove/to_list) + remove result fed to free is_empty, with VM/native
+/// equivalence. `checked_codegen_compile_and_run` also proves compile_checked
+/// keeps this unsupported Set shape on the legacy side.
 #[test]
-fn set_method_matrix_resolved_dual_backend() {
+fn set_method_matrix_checked_legacy_dual_backend() {
     let src = r#"
 func main() -> i32 {
     let s = {1, 2, 3}
@@ -1003,7 +1003,8 @@ func main() -> i32 {
     let expected = "3\nnonempty\nhas2\n4\n3\n3\nfinal-nonempty";
     let (_v, interp) = checked_run_source_with_stdout(src);
     assert_eq!(interp.trim(), expected, "VM output");
-    let native = checked_codegen_compile_and_run(src).expect("set method matrix must run natively");
+    let native = checked_codegen_compile_and_run(src)
+        .expect("checked legacy Set method matrix must run natively");
     assert_eq!(native.trim(), expected, "native output");
 }
 

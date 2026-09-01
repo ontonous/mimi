@@ -650,14 +650,22 @@ fn require_scalar_type(
             }
             require_scalar_type(program, owner, result)
         }
-        // 0.32.2: Builtin collection types (List/Map/Set) are lowerable
-        // in types.rs. Accept them so the resolved emitter can handle
-        // collection-typed parameters, return values, and local bindings.
+        // 0.32.2: Builtin collection types (List/Map) are lowerable in
+        // types.rs. Set is intentionally absent: Set semantics now belong
+        // to the Canonical MIR Set island, whose selector proves the whole
+        // program before any consumer starts. Keeping Set in this per-function
+        // gate would recreate a second native Set implementation and would
+        // let a non-island Set function silently enter the old resolved path.
         // 0.32.5: User-defined record types are also accepted.
         Some(ResolvedType::Nominal {
             item, arguments, ..
         }) => {
             match item.as_str() {
+                "builtin:type:Set" => Err(UnsupportedResolvedNode::new(
+                    owner,
+                    owner,
+                    "Set is owned by Canonical MIR; resolved native Set lowering is retired",
+                )),
                 // 0.35.23 deep-eval: `builtin:type:Record` is the type-erased
                 // map handle (map_new/map_set/from_json results) — same
                 // opaque-i64 lowering as Map/Set. Without it, mimi-log's main
@@ -677,7 +685,6 @@ fn require_scalar_type(
                 | "builtin:type:MutexGuard"
                 | "builtin:type:List"
                 | "builtin:type:Map"
-                | "builtin:type:Set"
                 | "builtin:type:Record"
                 | "builtin:type:SystemTrace"
                 | "builtin:type:MemoryDump"
@@ -1100,17 +1107,12 @@ fn require_expr(
             }
             Ok(())
         }
-        // 0.32.3: Map/Set literals.
+        // 0.32.3: Map literals. Set literals are owned by Canonical MIR and
+        // are rejected by require_scalar_type before reaching this match.
         ResolvedExprKind::Map(entries) => {
             for (key, value) in entries {
                 require_expr(program, owner, key, entry_source, locals)?;
                 require_expr(program, owner, value, entry_source, locals)?;
-            }
-            Ok(())
-        }
-        ResolvedExprKind::Set(elements) => {
-            for element in elements {
-                require_expr(program, owner, element, entry_source, locals)?;
             }
             Ok(())
         }
