@@ -855,6 +855,71 @@ func bad_point_x(p: Point) -> i32 {
 }
 
 #[test]
+fn public_checked_verifier_routes_closed_copy_record_to_mir() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_verifier_record_contract.mimi");
+    let file = parse_memory_source(source, "mir-record-public-api").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
+    let result = verify_result
+        .iter()
+        .find(|result| result.func_name.ends_with("advance"))
+        .expect("record contract result");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert_eq!(
+        result
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+
+    let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    let dual = dual_result
+        .iter()
+        .find(|result| result.func_name.ends_with("advance"))
+        .expect("dual record contract result");
+    assert_eq!(dual.status, VerifStatus::Proven);
+    assert_eq!(
+        dual.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
+fn public_checked_verifier_rejects_mixed_record_graph_without_ast_fallback() {
+    require_z3!();
+    let source = r#"
+        type Point { x: i32 }
+
+        func make_some() -> Option<string> { Some("owned") }
+
+        func main() -> i32 {
+            let point = Point { x: 1 }
+            point.x
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    let error = verify_checked(&program, source_hash.clone())
+        .expect_err("recognized mixed record graph must not fall back to Flow/AST verifier");
+    assert!(error.contains("MIR-CAPABILITY-001"), "{error}");
+
+    let dual_error = verify_checked_dual(&program, source_hash)
+        .expect_err("dual verifier must preserve the same fail-closed boundary");
+    assert!(dual_error.contains("MIR-CAPABILITY-001"), "{dual_error}");
+}
+
+#[test]
 fn verify_shared_param_field_scalar_contract() {
     require_z3!();
     let src = r#"

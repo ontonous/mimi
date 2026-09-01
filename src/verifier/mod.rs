@@ -94,6 +94,9 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
     if is_z3_available() {
@@ -234,6 +237,9 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
     if !is_z3_available() {
         // C4 mock path: from CheckedProgram, no raw_ast needed.
@@ -247,6 +253,51 @@ pub fn verify_checked_dual(
     let flow_results =
         flow::flow_verify_file_with_hashes(program.raw_ast(), source_hash, resolved_ir_hash)?;
     Ok(merge_engine_verdicts(resolved_results, flow_results))
+}
+
+/// Verify the already-closed flat Copy-record island from canonical MIR.
+///
+/// The public CheckedProgram APIs predate the canonical verifier and normally
+/// retain the Flow/AST verifier for shapes that have not crossed the default
+/// production boundary.  A materialized flat Copy record is different: its
+/// TypeDesc/layout, reference, bytecode, native and MIR-verifier contracts are
+/// already closed.  Once this MIR-side predicate recognizes it, the old AST
+/// verifier is no longer an allowed consumer or fallback.  Construction
+/// failure or absence of a materialized record is deliberately `None`, so
+/// unrelated compatibility programs keep their existing boundary.
+fn verify_closed_flat_copy_record_mir(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    if !is_z3_available() {
+        // The existing public API uses the CheckedProgram mock when Z3 is
+        // unavailable.  Do not change that infrastructure behavior merely by
+        // probing the canonical verifier.
+        return Ok(None);
+    }
+    let Ok(canonical) = crate::core::mir::reference::MirProgram::from_checked_program(program)
+    else {
+        return Ok(None);
+    };
+    if !crate::core::mir::contains_flat_copy_record_candidate(&canonical) {
+        return Ok(None);
+    }
+    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier rejected the flat Copy-record island: {errors:?}"
+        )
+    })?;
+    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
+    // `verify_checked*` historically exposed source-level callable names,
+    // while canonical MIR owners carry the stable `function:` NodeId prefix.
+    // Keep that public API identity stable at the adapter boundary; the
+    // proof artifact still records the canonical MIR engine and hash.
+    for result in &mut results {
+        if let Some(name) = result.func_name.strip_prefix("function:") {
+            result.func_name = name.to_string();
+        }
+    }
+    Ok(Some(results))
 }
 
 /// Coarse verdict classes for divergence detection.
