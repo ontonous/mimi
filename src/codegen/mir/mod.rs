@@ -114,6 +114,31 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 Some(Linkage::External),
             );
         }
+
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_set_to_list_scalar")
+            .is_none()
+        {
+            let i8 = self.generator.context.i8_type();
+            let i64 = self.generator.context.i64_type();
+            let ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            self.generator.module.add_function(
+                "mimi_mir_set_to_list_scalar",
+                ptr.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::IntType(i8),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
     }
 
     fn declare_functions(&mut self) -> Result<(), NativeMirError> {
@@ -991,6 +1016,13 @@ mod tests {
         );
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_scalar_set_to_list_test");
+        assert!(
+            generator
+                .module
+                .get_function("mimi_mir_set_to_list_scalar")
+                .is_none(),
+            "canonical Set.to_list adapter must not leak into legacy runtime registration"
+        );
         generator
             .compile_mir_native(&program)
             .expect("scalar Set.to_list MIR should have a canonical ABI adapter");

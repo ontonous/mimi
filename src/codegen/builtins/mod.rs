@@ -131,17 +131,6 @@ fn register_mir_list_runtime<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
-    module.add_function(
-        "mimi_mir_set_to_list_scalar",
-        ptr.fn_type(
-            &[
-                BasicMetadataTypeEnum::IntType(i64),
-                BasicMetadataTypeEnum::IntType(i8),
-            ],
-            false,
-        ),
-        Some(inkwell::module::Linkage::External),
-    );
 }
 
 fn register_libc<'ctx>(
