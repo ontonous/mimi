@@ -51,6 +51,58 @@ impl<'ctx> CodeGenerator<'ctx> {
         None
     }
 
+    /// Identify a direct `Flow::transition(...)` expression whose declared
+    /// transition has a `fails` payload. The transition producer, rather than
+    /// the surface `Result<T, (A, B)>` type, is the ABI authority here.
+    fn is_flow_failure_transition_expr(
+        &self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> bool {
+        let Expr::Call(callee, args) = expr.unlocated() else {
+            return false;
+        };
+        let Expr::Field(object, method) = callee.unlocated() else {
+            return false;
+        };
+        let Expr::Ident(flow_name) = object.unlocated() else {
+            return false;
+        };
+        let Some(flow) = self.flow_defs.get(flow_name) else {
+            return false;
+        };
+        let from_type = args
+            .first()
+            .map(|arg| self.infer_object_type(arg, vars))
+            .unwrap_or_default();
+        let from_type = from_type
+            .strip_prefix("flow::")
+            .and_then(|name| name.rsplit("::").next())
+            .unwrap_or(&from_type);
+        flow.transitions.iter().any(|transition| {
+            transition.name == *method
+                && transition.fails.is_some()
+                && transition.from_state == from_type
+        })
+    }
+
+    /// Return whether the current match scrutinee came from a producer that
+    /// uses the erased failure-pair ABI. Variables are marked by
+    /// `track_flow_result_type`; direct transition calls are checked from the
+    /// transition directory. This keeps ordinary user Results with an
+    /// identical type shape on their natural layout.
+    fn is_flow_failure_scrutinee(
+        &self,
+        expr: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> bool {
+        match expr.unlocated() {
+            Expr::Ident(name) => self.flow_failure_result_vars.contains(name),
+            Expr::Call(_, _) => self.is_flow_failure_transition_expr(expr, vars),
+            _ => false,
+        }
+    }
+
     /// F-024: register type names for variables bound through nested built-in
     /// `Some` constructors such as `Some(Some(r))`, mirroring F-020's
     /// single-level `option_inner_ty` registration. Walks `pat` and the option's
@@ -412,6 +464,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 } else {
                     None
                 };
+                let is_erased_flow_result = payload_idx == 2
+                    && variant_owner.is_none()
+                    && self.pending_scrutinee_flow_failure_abi;
                 let err_expected_ty: Option<(crate::ast::Type, BasicTypeEnum<'ctx>)> =
                     if payload_idx == 2 && variant_owner.is_none() {
                         let derive =
@@ -428,10 +483,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     }
                                     _ => None,
                                 };
-                                err_ty
-                                    .and_then(|t| {
-                                        self.llvm_type_for(t).map(|llvm| (t.clone(), llvm))
-                                    })
+                                err_ty.and_then(|t| {
+                                    // Fallible flow transitions use an erased
+                                    // `{i64, i64}` heap box even though the AST
+                                    // error is `(Source, E)`. All other Result
+                                    // values, including user tuples, records,
+                                    // f64 and strings, retain their natural
+                                    // layout and must be decoded as such.
+                                    (!is_erased_flow_result)
+                                        .then(|| self.llvm_type_for(t).map(|llvm| (t.clone(), llvm)))
+                                        .flatten()
+                                })
                             };
                         scrutinee_type
                             .and_then(derive)
@@ -832,6 +894,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 // StructValue instead of a raw i64.
                                 let recurse_payload = if name == "Err"
                                     && variant_owner.is_none()
+                                    && is_erased_flow_result
                                     && matches!(payload, BasicValueEnum::IntValue(_))
                                 {
                                     let i64_ty = self.context.i64_type();
@@ -872,15 +935,68 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 // inttoptr+load, so Variable bindings get the
                                 // correct LLVM struct type instead of a raw i64.
                                 if let PatternKind::Tuple(sub_pats) = &inner_pat.kind {
+                                    if !is_erased_flow_result {
+                                        let natural_tuple_types = err_expected_ty
+                                            .as_ref()
+                                            .and_then(|(err_ty, _)| match err_ty.unlocated() {
+                                                crate::ast::Type::Tuple(fields) => {
+                                                    Some(fields.clone())
+                                                }
+                                                _ => None,
+                                            });
+                                        self.compile_pattern_bind(
+                                            inner_pat,
+                                            recurse_payload,
+                                            &mut local_vars,
+                                        )?;
+                                        // `compile_pattern_bind` is deliberately
+                                        // value-oriented and cannot recover Mimi
+                                        // names from LLVM values. Preserve the
+                                        // declared tuple field types here so a
+                                        // normal user Result such as
+                                        // `Result<T, (Source, i32)>` still permits
+                                        // `source.x` after the tuple destructure.
+                                        if let Some(field_types) = natural_tuple_types {
+                                            for (field_ty, sub_pat) in
+                                                field_types.iter().zip(sub_pats.iter())
+                                            {
+                                                if let PatternKind::Variable(binding) =
+                                                    &sub_pat.kind
+                                                {
+                                                    self.var_types
+                                                        .insert(binding.clone(), field_ty.clone());
+                                                    if let Some(full) =
+                                                        self.get_full_type_name(field_ty)
+                                                    {
+                                                        self.var_type_names
+                                                            .insert(binding.clone(), full);
+                                                    }
+                                                    self.register_list_elem_type(binding, field_ty);
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     let decoded_struct = recurse_payload.into_struct_value();
                                     // Determine the expected Mimi types for each
                                     // tuple field from the scrutinee's error type.
                                     // Result<T, (Source, E)> → error tuple field types.
                                     let err_field_mimi_types: Vec<crate::ast::Type> =
                                         scrutinee_type
-                                            .and_then(|st| match st {
+                                            .or(self.pending_scrutinee_result_ty.as_ref())
+                                            .and_then(|st| match st.unlocated() {
                                                 crate::ast::Type::Result(_, err_tuple) => {
-                                                    match err_tuple.as_ref() {
+                                                    match err_tuple.as_ref().unlocated() {
+                                                        crate::ast::Type::Tuple(elems) => {
+                                                            Some(elems.clone())
+                                                        }
+                                                        _ => None,
+                                                    }
+                                                }
+                                                crate::ast::Type::Name(name, args)
+                                                    if name == "Result" && args.len() == 2 =>
+                                                {
+                                                    match args[1].unlocated() {
                                                         crate::ast::Type::Tuple(elems) => {
                                                             Some(elems.clone())
                                                         }
@@ -903,8 +1019,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                                                 CompileError::LlvmError(format!(
                                                     "extract err tuple field {i}: {e}"
                                                 ))
-                                            })?
-                                            .into_int_value();
+                                            })?;
+                                        let field_i64 = match field_i64 {
+                                            BasicValueEnum::IntValue(value) => value,
+                                            other => {
+                                                return Err(CompileError::LlvmError(format!(
+                                                    "Err tuple field {i} has non-erased LLVM type {:?}; refusing ABI guess",
+                                                    other.get_type()
+                                                )))
+                                            }
+                                        };
                                         // If we know the expected Mimi type, inttoptr
                                         // and load as the correct LLVM struct type.
                                         let field_val: BasicValueEnum<'ctx> = if let Some(
@@ -1810,6 +1934,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // variant-ordinal resolution to the scrutinee's enum (disambiguates the
         // shared `Fault` variant across per-flow __MultiTarget unions).
         let scrutinee_type = self.expr_type_of(scrutinee, vars);
+        let saved_pending_scrutinee_flow_failure_abi = self.pending_scrutinee_flow_failure_abi;
+        self.pending_scrutinee_flow_failure_abi = self.is_flow_failure_scrutinee(scrutinee, vars);
         // Deep-eval 2026-08-09 (use std::fs E0700): scrutinee_type stays on
         // the historical probe (arm unification depends on its shapes), but
         // `Err(e)` bindings over a BUILTIN call's Result<string,string> need
@@ -1888,10 +2014,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             self.builder.position_at_end(merge_bb);
             let zero = self.context.i64_type().const_int(0, false);
             self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
+            self.pending_scrutinee_flow_failure_abi = saved_pending_scrutinee_flow_failure_abi;
             Ok(zero.into())
         } else {
             let merged = self.build_match_phi(merge_bb, &incoming_vals, &incoming_bbs)?;
             self.pending_scrutinee_result_ty = saved_pending_scrutinee_result_ty;
+            self.pending_scrutinee_flow_failure_abi = saved_pending_scrutinee_flow_failure_abi;
             Ok(merged)
         }
     }

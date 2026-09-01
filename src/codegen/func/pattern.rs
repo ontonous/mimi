@@ -86,13 +86,114 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 // Newtypes are transparent in codegen: the value *is* the inner
                 // type, so bind the sole inner pattern directly to it.
-                if let Some(td) = self.type_defs.get(name) {
-                    if matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)) {
-                        if sub_patterns.len() == 1 {
-                            self.compile_pattern_bind(&sub_patterns[0].1, val, vars)?;
+                if self
+                    .type_defs
+                    .get(name)
+                    .is_some_and(|td| matches!(td.kind, crate::ast::TypeDefKind::Newtype(_)))
+                {
+                    let [(_, inner)] = sub_patterns.as_slice() else {
+                        return Err(CompileError::LlvmError(format!(
+                            "newtype pattern '{}' requires exactly one payload",
+                            name
+                        )));
+                    };
+                    self.compile_pattern_bind(inner, val, vars)?;
+                    return Ok(());
+                }
+
+                // A record constructor pattern nested inside a built-in
+                // Result/Option pattern (for example `Ok(B { n })`) is
+                // already receiving the plain record value.  It is not an
+                // enum value with a tag/payload slot.  The old generic
+                // constructor path reinterpreted that record as
+                // `{tag, payload}` and attempted to extract field 1 from a
+                // one-field record, producing E0713.  Use the declared
+                // record fields and the value's actual LLVM struct type;
+                // this keeps the legacy compatibility path type-directed
+                // and makes the failure-payload bridge safe to retire in a
+                // later island migration.
+                let record_fields = self.type_defs.get(name).and_then(|td| match &td.kind {
+                    crate::ast::TypeDefKind::Record(fields) => Some(fields.clone()),
+                    _ => None,
+                });
+                if let Some(fields) = record_fields {
+                    let struct_val = match val {
+                        BasicValueEnum::StructValue(sv) => sv,
+                        BasicValueEnum::PointerValue(pv) => {
+                            let struct_ty = self
+                                .type_llvm
+                                .get(name)
+                                .copied()
+                                .and_then(|ty| match ty {
+                                    BasicTypeEnum::StructType(st) => Some(st),
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "record pattern '{}' has no registered LLVM layout",
+                                        name
+                                    ))
+                                })?;
+                            let loaded = self
+                                .builder
+                                .build_load(
+                                    BasicTypeEnum::StructType(struct_ty),
+                                    pv,
+                                    "record_pat_loaded",
+                                )
+                                .map_err(|e| {
+                                    CompileError::LlvmError(format!(
+                                        "record pattern load error: {e}"
+                                    ))
+                                })?;
+                            loaded.into_struct_value()
                         }
-                        return Ok(());
+                        other => {
+                            return Err(CompileError::LlvmError(format!(
+                                "record pattern '{}' requires a record value, got {:?}",
+                                name,
+                                other.get_type()
+                            )))
+                        }
+                    };
+
+                    for (field_label, sub_pat) in sub_patterns {
+                        let binding_name = match &sub_pat.kind {
+                            PatternKind::Variable(binding) => binding,
+                            _ => field_label,
+                        };
+                        let Some((field_index, field)) =
+                            fields.iter().enumerate().find(|(_, field)| {
+                                field.name == *field_label || field.name == *binding_name
+                            })
+                        else {
+                            return Err(CompileError::LlvmError(format!(
+                                "record pattern '{}' has no field '{}'",
+                                name, field_label
+                            )));
+                        };
+                        let field_val = self
+                            .builder
+                            .build_extract_value(
+                                struct_val,
+                                field_index as u32,
+                                &format!("record_pat_field_{}", field.name),
+                            )
+                            .map_err(|e| {
+                                CompileError::LlvmError(format!(
+                                    "record pattern field extract error: {e}"
+                                ))
+                            })?;
+                        self.compile_pattern_bind(sub_pat, field_val, vars)?;
+                        if let PatternKind::Variable(binding) = &sub_pat.kind {
+                            self.var_types.insert(binding.clone(), field.ty.clone());
+                            if let Some(full) = self.get_full_type_name(&field.ty) {
+                                self.var_type_names.insert(binding.clone(), full);
+                            }
+                            self.register_list_elem_type(binding, &field.ty);
+                        }
                     }
+                    return Ok(());
                 }
                 // Load struct value if we have a pointer
                 let struct_val = match val {

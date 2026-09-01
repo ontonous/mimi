@@ -9866,12 +9866,10 @@ fn dual_spawn_await_simple() {
 /// `len` builtin (mirrors BUG G's `string.len` fix). This is the exact repro:
 /// a `fails` transition whose error payload is a `List`, then `.len()` on it.
 ///
-/// Uses the CHECKED native path (`checked_compile_and_run`) to mirror
-/// `mimi build` (which compiles through CheckedProgram). The raw codegen
-/// `compile_file` path has a separate, unrelated bug extracting a `List`
-/// payload from a `Result`/`Err` aggregate ("Aggregate extract index out of
-/// range") that does not affect `mimi build`; this test pins the path that
-/// real programs exercise.
+/// Exercise both the CHECKED native path (`checked_codegen_compile_and_run`)
+/// that mirrors `mimi build` and the explicit legacy `compile_file` path. The
+/// latter is kept here because a future consumer-island cutover must not
+/// resurrect the erased failure-payload ABI bug in the compatibility bridge.
 #[test]
 fn dual_list_len_fails_payload() {
     if !can_link() {
@@ -9901,11 +9899,108 @@ fn dual_list_len_fails_payload() {
     "#;
     let (_v, vm) = run_source_with_stdout(src);
     let native = checked_codegen_compile_and_run(src).expect("list len fails payload native");
+    let legacy = compile_and_run(src).expect("legacy list len fails payload native");
     assert_eq!(
         vm.as_bytes(),
         native.as_bytes(),
         "vm/native list.len on fails error payload"
     );
+    assert_eq!(
+        vm.as_bytes(),
+        legacy.as_bytes(),
+        "vm/legacy list.len on fails error payload"
+    );
+}
+
+#[test]
+fn legacy_record_pattern_unknown_field_fails_closed() {
+    // The compatibility matcher must reject an invalid record pattern with a
+    // compiler error, rather than falling through to enum `{tag,payload}`
+    // extraction or producing malformed LLVM IR.
+    let src = r#"
+        type B { n: i32 }
+        func make() -> Result<B, i32> { Ok(B { n: 1 }) }
+        func main() -> i32 {
+            match make() {
+                Ok(B { missing }) => missing,
+                Err(_) => 0,
+            }
+        }
+    "#;
+    let err = compile_and_run(src).expect_err("unknown record field must fail closed");
+    assert!(
+        err.contains("record pattern") && err.contains("missing"),
+        "expected explicit record-pattern diagnostic, got: {err}"
+    );
+}
+
+#[test]
+fn legacy_result_tuple_with_flow_state_preserves_natural_layout() {
+    // A user-owned Result may have the same surface type as a synthetic flow
+    // failure (`Result<T, (FlowState, E)>`).  The legacy bridge must not infer
+    // the erased transition box from the type alone.
+    let src = r#"
+        flow Marker {
+            state Source { x: i32 }
+        }
+        func make() -> Result<i32, (Source, i32)> {
+            Err((Source { x: 7 }, 9))
+        }
+        func main() -> i32 {
+            match make() {
+                Ok(_) => 0,
+                Err((source, code)) => {
+                    println(source.x)
+                    println(code)
+                    0
+                },
+            }
+        }
+    "#;
+    let (_v, vm) = run_source_with_stdout(src);
+    let legacy = compile_and_run(src).expect("ordinary Result tuple legacy native");
+    assert_eq!(legacy.trim(), vm.trim(), "ordinary tuple layout diverged");
+}
+
+#[test]
+fn legacy_flow_failure_provenance_does_not_leak_between_functions() {
+    // A legacy generator compiles multiple function bodies with one
+    // CodeGenerator. The variable name `r` is a Flow failure result in the
+    // first body but an ordinary natural-layout Result in the second; the
+    // erased ABI authorization must not cross that function boundary.
+    let src = r#"
+        flow F {
+            state A { n: i32 }
+            state B { n: i32 }
+            transition go(A) -> B fails List<i32> {
+                return B { n: self.n }
+            }
+        }
+        func flowish() -> i32 {
+            let r = F::go(A { n: -1 })
+            match r {
+                Ok(B { n }) => n,
+                Err((_, e)) => e.len(),
+            }
+        }
+        func make_ordinary() -> Result<i32, (A, i32)> {
+            Err((A { n: 7 }, 9))
+        }
+        func ordinary() -> i32 {
+            let r = make_ordinary()
+            match r {
+                Ok(_) => 0,
+                Err((source, code)) => source.n + code,
+            }
+        }
+        func main() -> i32 {
+            println(flowish())
+            println(ordinary())
+            0
+        }
+    "#;
+    let legacy = compile_and_run(src).expect("legacy provenance frame isolation");
+    assert_eq!(legacy.trim(), "-1\n16");
 }
 
 /// BUG K (spawn variant): `list.len()` on a spawn/await result also forces the

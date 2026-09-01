@@ -359,6 +359,10 @@ pub struct CodeGenerator<'ctx> {
     /// Err-payload decode: the declared Result/Option type of a builtin-call
     /// scrutinee that the AST probe (expr_type_of) cannot see.
     pending_scrutinee_result_ty: Option<crate::ast::Type>,
+    /// Legacy-only provenance for the erased `{i64, i64}` failure payload.
+    /// This must be set by a `fails` transition producer (or an alias of one),
+    /// never inferred from the user-visible `Result<T, (A, B)>` type alone.
+    pending_scrutinee_flow_failure_abi: bool,
     /// Inferred Mimi element type name for the current `push(list, elem)` call.
     /// Used so that nested lists and other struct elements are heap-copied before
     /// their pointer is stored, preventing stack-use-after-return.
@@ -468,6 +472,10 @@ pub struct CodeGenerator<'ctx> {
     /// Flow definitions keyed by flow name — used to compile transitions
     /// as ordinary functions and dispatch `Flow::transition(...)` calls.
     flow_defs: HashMap<String, crate::ast::FlowDef>,
+    /// Names whose current legacy binding was produced by a `fails`
+    /// transition. This is provenance for the transition-only erased error
+    /// pair and deliberately is not derived from a Result type shape.
+    flow_failure_result_vars: std::collections::HashSet<String>,
     /// Canonical transitions from CheckedProgram for fail-closed dispatch.
     resolved_transitions: Option<HashMap<(String, String, String), Vec<String>>>,
     resolved_fallback_transitions: Option<std::collections::HashSet<(String, String, String)>>,
@@ -738,6 +746,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             pending_is_empty_kind: None,
             pending_print_arg_types: Vec::new(),
             pending_scrutinee_result_ty: None,
+            pending_scrutinee_flow_failure_abi: false,
             display_frees: std::cell::RefCell::new(Vec::new()),
             pending_push_elem_type: None,
             pending_sum_elem_type: None,
@@ -776,6 +785,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             actor_defs: HashMap::new(),
             // v0.29.9 flow transitions
             flow_defs: HashMap::new(),
+            flow_failure_result_vars: std::collections::HashSet::new(),
             resolved_transitions: None,
             resolved_fallback_transitions: None,
             resolved_ffi_pinned_transitions: None,
@@ -4372,6 +4382,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         fails: Option<crate::ast::Type>,
     ) {
         use crate::ast::Type;
+        let is_failure = fails.is_some();
         let to_ty = Type::Name(to_state.to_string(), vec![]);
         let from_ty = Type::Name(from_state.to_string(), vec![]);
         let err_ty = match fails {
@@ -4382,6 +4393,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             var_name.to_string(),
             Type::Result(Box::new(to_ty), Box::new(err_ty)),
         );
+        if is_failure {
+            self.flow_failure_result_vars.insert(var_name.to_string());
+        } else {
+            self.flow_failure_result_vars.remove(var_name);
+        }
+    }
+
+    /// Propagate transition-failure ABI provenance through a plain variable
+    /// alias. The alias is a value move in the legacy bookkeeping, so the
+    /// erased pair contract follows it; unrelated sources clear stale
+    /// provenance for the destination name.
+    pub(super) fn propagate_flow_failure_result_alias(&mut self, dst: &str, src: &str) {
+        if self.flow_failure_result_vars.contains(src) {
+            self.flow_failure_result_vars.insert(dst.to_string());
+        } else {
+            self.flow_failure_result_vars.remove(dst);
+        }
     }
 
     /// Resolve generic type parameters (e.g., `T` → `User`) using the active

@@ -451,6 +451,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             if let Some(src_ty) = self.var_types.get(src_name).cloned() {
                                 self.var_types.insert(name.clone(), src_ty);
                             }
+                            self.propagate_flow_failure_result_alias(name, src_name);
                         } else if matches!(init.unlocated(), Expr::SetLiteral(_)) {
                             self.var_type_names.insert(name.clone(), "set".to_string());
                         } else if let Expr::List(list_elems) = init.unlocated() {
@@ -1109,6 +1110,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                 self.var_types.insert(name.clone(), src_ty);
                             }
                         }
+                        self.propagate_flow_failure_result_alias(name, src_name);
                     }
                     self.compile_pattern_bind(pat, val, vars)?;
                     if let PatternKind::Tuple(sub_pats) = &pat.kind {
@@ -2168,6 +2170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.var_types.insert(name.clone(), src_ty);
                                 }
                             }
+                            self.propagate_flow_failure_result_alias(name, src_name);
                         }
                         if self.expr_is_string(init) {
                             self.var_type_names

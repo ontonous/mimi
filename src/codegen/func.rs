@@ -2694,6 +2694,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     self.var_types.insert(name.clone(), src_ty);
                                 }
                             }
+                            self.propagate_flow_failure_result_alias(name, src_name);
                         }
                         // 0.35.23 deep-eval: `let buf = store.buffer` — a
                         // field-access init must register the field's type
@@ -4304,6 +4305,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Permanent ineligible body classes: capturing lambdas, generics,
     /// async, extern ABI wrappers, view/mutate borrow params (non-self).
     pub(super) fn compile_func_legacy(&mut self, func: &FuncDef) -> MimiResult<()> {
+        // Failure-payload ABI provenance is local to one legacy function body.
+        // Legacy functions are compiled sequentially, and the same surface
+        // variable name may legally mean an ordinary Result in the next body.
+        // Frame it here so a prior function can never authorize erased decode
+        // in a later function, including every `?` exit from the inner helper.
+        let saved_flow_failure_result_vars = std::mem::take(&mut self.flow_failure_result_vars);
         // V-11 (audit 2026-08-05) frame guard: nested-function shadows
         // registered while compiling this body (bare-name directory swap +
         // call redirect) must stay live through the WHOLE body — mirroring
@@ -4313,6 +4320,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let saved_shadows = self.nested_shadow_symbols.clone();
         let saved_current_fn = std::mem::replace(&mut self.current_legacy_fn, func.name.clone());
         let result = self.compile_func_legacy_inner(func);
+        self.flow_failure_result_vars = saved_flow_failure_result_vars;
         self.restore_nested_shadow_frame(saved_shadows, saved_current_fn);
         result
     }
@@ -4632,8 +4640,15 @@ impl<'ctx> CodeGenerator<'ctx> {
         func: &FuncDef,
         type_map: &HashMap<String, crate::ast::Type>,
     ) -> MimiResult<()> {
+        // Keep failure-payload producer provenance scoped to this
+        // monomorphized function frame. A generic instance is emitted nested
+        // inside its caller, so leaking names here would make a caller's
+        // ordinary Result match eligible for the erased Flow ABI.
+        let saved_flow_failure_result_vars = std::mem::take(&mut self.flow_failure_result_vars);
         let mangled = Self::mangle_name(&func.name, type_map);
-        match self.compile_generic_func_inner(func, type_map) {
+        let result = self.compile_generic_func_inner(func, type_map);
+        self.flow_failure_result_vars = saved_flow_failure_result_vars;
+        match result {
             Ok(()) => Ok(()),
             Err(e) => {
                 if let Some(function) = self.module.get_function(&mangled) {
