@@ -212,77 +212,14 @@ fn may_contain_single_silent_local_transition(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> bool {
-    // Keep the deletion gate scoped to the exact S8 island. Other Flow
-    // programs (including actor/effect and failure-payload programs) remain
-    // compatibility inputs until their own complete consumer island exists.
-    if !merged_file.imports.is_empty() || checked.flows().len() != 1 || !checked.actors().is_empty()
-    {
+    // The typed candidate predicate is shared with the native exact-island
+    // gate. Keep the merged-file check as a front-end provenance guard: a caller may
+    // construct a CheckedProgram before module merging has been reflected in
+    // its directory, but an imported program is never the exact S8 island.
+    if !merged_file.imports.is_empty() {
         return false;
     }
-    let implemented = checked
-        .transitions()
-        .values()
-        .filter(|transition| {
-            !transition.is_fallback && checked.resolved_body(&transition.node_id).is_some()
-        })
-        .collect::<Vec<_>>();
-    let [transition] = implemented.as_slice() else {
-        return false;
-    };
-    let Some(flow) = checked.flows().get(&transition.id.flow) else {
-        return false;
-    };
-    let Some(source_state) = flow.states.get(&transition.id.source.name) else {
-        return false;
-    };
-    let [(_, source_ty)] = source_state.payload.as_slice() else {
-        return false;
-    };
-    let Some(target) = transition.targets.first() else {
-        return false;
-    };
-    let Some(target_state) = flow.states.get(&target.name) else {
-        return false;
-    };
-    transition.silent_transition
-        && transition.targets.len() == 1
-        && transition.targets[0] == transition.id.source
-        && transition.params.is_empty()
-        && transition.fails.is_none()
-        && !transition.is_fallback
-        && !transition.is_ffi_pinned
-        && flow
-            .states
-            .keys()
-            .filter(|name| name.as_str() != "Fault")
-            .count()
-            == 1
-        && flow
-            .transitions
-            .iter()
-            .filter(|id| {
-                checked
-                    .transitions()
-                    .get(*id)
-                    .is_some_and(|item| !item.is_fallback)
-            })
-            .count()
-            == 1
-        && flow.persistent_fields.is_empty()
-        && target_state.payload.len() == 1
-        && is_concrete_i32_type(source_ty)
-        && target_state
-            .payload
-            .first()
-            .is_some_and(|(_, ty)| is_concrete_i32_type(ty))
-}
-
-fn is_concrete_i32_type(ty: &mimi::ast::Type) -> bool {
-    match ty {
-        mimi::ast::Type::Located { ty, .. } => is_concrete_i32_type(ty),
-        mimi::ast::Type::Name(name, arguments) => name == "i32" && arguments.is_empty(),
-        _ => false,
-    }
+    mimi::core::mir::is_s8_flow_transition_candidate(checked)
 }
 
 fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool {

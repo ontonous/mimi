@@ -17,6 +17,7 @@ use crate::core::ir::{
 use crate::core::{NodeId, ResolvedPlace};
 
 mod contracts;
+mod eligibility;
 pub mod lower;
 pub mod reference;
 pub mod types;
@@ -24,6 +25,7 @@ pub mod types;
 pub use contracts::{
     MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
 };
+pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.

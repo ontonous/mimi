@@ -28,6 +28,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        // S10: the exact S8 Flow island has already switched to the canonical
+        // MIR native consumer. This compatibility entry point delegates that
+        // island to the same validated MIR program as the CLI; it never
+        // reaches the legacy AST body compiler for an admitted shape.
+        if crate::core::mir::is_exact_s8_flow_transition(program) {
+            let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
+                .map_err(|error| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-LOWERING-001",
+                        format!("canonical MIR build failed for the S8 Flow island: {error}"),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
+            return self.compile_mir_native(&canonical);
+        }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
         // gate — fail closed on native return types whose heap ownership the
         // current ownership-transfer path cannot handle. The legacy

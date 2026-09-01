@@ -207,6 +207,28 @@ fn parse_inner_type_handles_generics() {
 }
 
 #[test]
+fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_flow_transition.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(crate::core::mir::is_exact_s8_flow_transition(&program));
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s10_s8_canonical_route");
+    codegen
+        .compile_checked(&program)
+        .expect("exact S8 Flow must use the canonical MIR native consumer");
+    assert!(codegen
+        .module
+        .get_function("__mimi_transition_Counter__inc__Zero")
+        .is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
 fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
     use crate::ast::{AstNodeMeta, AstOrigin, FlowDef, Param, TransitionDef, Type};
     use crate::span::{SourceId, Span};
