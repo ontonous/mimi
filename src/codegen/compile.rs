@@ -43,6 +43,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 })?;
             return self.compile_mir_native(&canonical);
         }
+        // S12: the scalar List/Set production island has already crossed the
+        // default route boundary.  This direct native API is also an old
+        // production entry point, so an admitted S11 graph must not continue
+        // into the old AST body compiler merely because a
+        // caller bypassed the CLI selector.  The helper performs the same
+        // whole-program, all-consumer preflight as the selector and returns
+        // only after the canonical native consumer is ready.  If canonical
+        // lowering has not materialized an S11 candidate, this remains the
+        // compatibility path for unrelated legacy programs.
+        if let Some(canonical) = self.try_compile_exact_scalar_collection_island(program)? {
+            return self.compile_mir_native(&canonical);
+        }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
         // gate — fail closed on native return types whose heap ownership the
         // current ownership-transfer path cannot handle. The legacy
@@ -540,6 +552,81 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
                 vec![diagnostic]
             })
+    }
+
+    /// Probe the direct native boundary for the already closed S11 island.
+    ///
+    /// The probe is deliberately MIR-first: a failed canonical construction
+    /// means this old API has not recognized a migrated candidate and may keep
+    /// serving an unrelated compatibility program.  Once a candidate is
+    /// materialized, however, an island or consumer failure is a hard error;
+    /// it is never converted into a legacy compile.
+    fn try_compile_exact_scalar_collection_island(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<Option<crate::core::mir::reference::MirProgram>, Vec<crate::diagnostic::Diagnostic>>
+    {
+        let Ok(canonical) = crate::core::mir::reference::MirProgram::from_checked_program(program)
+        else {
+            return Ok(None);
+        };
+        if !crate::core::mir::contains_scalar_collection_candidate(&canonical) {
+            return Ok(None);
+        }
+        if let Err(errors) = crate::core::mir::validate_scalar_collection_island(&canonical) {
+            return Err(Self::mir_gate_diagnostics(
+                program,
+                "scalar collection island",
+                &errors,
+            ));
+        }
+        if let Err(errors) = crate::verifier::validate_mir_capabilities(&canonical) {
+            return Err(Self::mir_gate_diagnostics(
+                program,
+                "MIR verifier capability",
+                &errors,
+            ));
+        }
+        if let Err(errors) = crate::interp::bytecode::compile_mir_program(&canonical) {
+            return Err(Self::mir_gate_diagnostics(program, "MIR bytecode", &errors));
+        }
+        if let Err(errors) = crate::codegen::mir::validate_mir_native(&canonical) {
+            return Err(errors);
+        }
+        let results = crate::verifier::verify_mir(&canonical, String::new()).map_err(|error| {
+            vec![crate::diagnostic::Diagnostic::error_code(
+                "MIR-VERIFY-001",
+                format!("MIR verifier contract pass failed: {error}"),
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]
+        })?;
+        if results.iter().any(|result| {
+            !matches!(
+                result.status,
+                crate::verifier::VerifStatus::Proven
+                    | crate::verifier::VerifStatus::NoObligations
+                    | crate::verifier::VerifStatus::Disproven
+            )
+        }) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                "MIR-VERIFY-001",
+                "MIR verifier returned an unsupported or inconclusive result for the scalar collection island",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
+        Ok(Some(canonical))
+    }
+
+    fn mir_gate_diagnostics(
+        program: &crate::core::CheckedProgram,
+        consumer: &str,
+        errors: impl std::fmt::Debug,
+    ) -> Vec<crate::diagnostic::Diagnostic> {
+        vec![crate::diagnostic::Diagnostic::error_code(
+            "MIR-CAPABILITY-001",
+            format!("{consumer} gate rejected the scalar collection island: {errors:?}"),
+            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+        )]
     }
 
     pub(crate) fn mangle_name(base: &str, type_map: &HashMap<String, crate::ast::Type>) -> String {

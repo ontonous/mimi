@@ -229,6 +229,53 @@ fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_list_len.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical MIR");
+    assert!(crate::core::mir::contains_scalar_collection_candidate(
+        &canonical
+    ));
+    crate::core::mir::validate_scalar_collection_island(&canonical)
+        .expect("complete scalar collection island");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s12_scalar_collection_route");
+    codegen
+        .compile_checked(&program)
+        .expect("exact scalar collection island must use canonical MIR native consumer");
+    assert!(codegen
+        .module
+        .get_function("main")
+        .is_some_and(|function| function.count_basic_blocks() > 0));
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
+fn direct_native_entry_rejects_a_mixed_scalar_collection_candidate() {
+    let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s12_scalar_collection_reject");
+    let errors = codegen.compile_checked(&program).expect_err(
+        "a recognized mixed collection candidate must not re-enter legacy native codegen",
+    );
+    assert!(errors
+        .iter()
+        .any(|error| error.code.as_deref() == Some("MIR-CAPABILITY-001")));
+}
+
+#[test]
 fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
     use crate::ast::{AstNodeMeta, AstOrigin, FlowDef, Param, TransitionDef, Type};
     use crate::span::{SourceId, Span};

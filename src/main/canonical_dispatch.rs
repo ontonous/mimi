@@ -102,7 +102,7 @@ pub(crate) fn select_default_route(
     });
     let copy_record = may_contain_flat_copy_record(&canonical);
     let list_len_operation = canonical_has_list_len(&canonical);
-    let collection_candidate = set_instance || list_len_operation;
+    let collection_candidate = mimi::core::mir::contains_scalar_collection_candidate(&canonical);
     let flow_transition_operation = canonical_has_flow_transition(&canonical);
     if (!set_candidate || !set_instance)
         && (!record_candidate || !copy_record)

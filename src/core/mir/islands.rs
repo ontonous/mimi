@@ -26,6 +26,38 @@ use super::{
 /// Name of the finite whole-program island closed by this contract.
 pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
 
+/// Return whether the canonical graph contains an operation that the default
+/// scalar collection selector recognizes as a migrated production candidate.
+///
+/// This is intentionally narrower than "the graph mentions a List/Set".  A
+/// plain collection value is still a compatibility input; only a materialized
+/// `ListOp::Len` or a checker-owned `ScalarSetFacade` instance has crossed the
+/// S11 production boundary.  Keeping this fact next to the island contract
+/// prevents the CLI and direct native entry points from growing independent
+/// candidate predicates.
+pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
+    let has_list_len = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::ListOp {
+                        operation: MirListOperation::Len,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    has_list_len
+        || program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarSetFacade { .. }
+            )
+        })
+}
+
 /// Validate the current scalar List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
