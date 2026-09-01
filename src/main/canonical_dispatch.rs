@@ -27,11 +27,27 @@ pub(crate) fn build_canonical_program(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> Result<MirProgram, String> {
+    build_canonical_program_for_sources(checked, merged_file, None)
+}
+
+/// Build the same canonical graph as the production dispatcher, optionally
+/// restricting the graph to a source scope for `mimi mir` inspection.  The
+/// source filter is a graph-selection concern only; lowering, generic
+/// instance materialization, TypeDesc construction, and validation all remain
+/// in the single `MirProgram` production constructor.
+pub(crate) fn build_canonical_program_for_sources(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    included_sources: Option<&HashSet<mimi::span::SourceId>>,
+) -> Result<MirProgram, String> {
     let excluded_sources = merged_file
         .sources
         .records()
         .iter()
-        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .filter(|record| {
+            record.key.as_str() == "stdlib:prelude.mimi"
+                || included_sources.is_some_and(|included| !included.contains(&record.id))
+        })
         .map(|record| record.id)
         .collect::<HashSet<_>>();
     MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)

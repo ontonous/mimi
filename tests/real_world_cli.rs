@@ -139,6 +139,65 @@ fn canonical_mir_cli_smoke() {
 }
 
 #[test]
+fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("std_set.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn imported canonical MIR inspection");
+    assert!(
+        output.status.success(),
+        "mimi mir --all failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("mir.function function:mir:instance:function:set_insert"),
+        "canonical MIR inspection omitted the materialized Set facade instance:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" list_op "),
+        "canonical MIR inspection omitted the List.len operation:\n{stdout}"
+    );
+}
+
+#[test]
+fn canonical_mir_cli_all_rejects_unsupported_shapes_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_list_string_index_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn rejected canonical MIR inspection");
+    assert!(
+        !output.status.success(),
+        "unsupported MIR inspection shape must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MIR inspection input rejected") && stderr.contains("Copy scalar"),
+        "unexpected canonical MIR inspection rejection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("legacy") && !stderr.contains("bytecode runtime error"),
+        "MIR inspection must not fall back to another consumer:\n{stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_run_cli_smoke() {
     let fixture = project_root()
         .join("tests")

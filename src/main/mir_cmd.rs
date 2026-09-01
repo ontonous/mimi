@@ -4,7 +4,7 @@
 //! compile or execute the source file and it never falls back to a backend
 //! emitter when MIR lowering is incomplete.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::{is_production, resolve_path};
@@ -72,56 +72,17 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
             .collect::<HashSet<_>>();
         Some(ids)
     };
-    let type_catalog = mimi::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
-        .map_err(|errors| {
-            format!(
-                "MIR type catalog construction failed:\n{}",
-                errors.join("\n")
-            )
-        })?;
-    let mut functions = BTreeMap::new();
-    let mut lowering_errors = Vec::new();
-    for (owner, callable) in checked.callables() {
-        if source_ids
-            .as_ref()
-            .is_some_and(|ids| !ids.contains(&callable.body.root.origin.user_span().source_id))
-        {
-            continue;
-        }
-        match mimi::core::mir::lower::lower_callable_with_type_catalog(callable, &type_catalog) {
-            Ok(function) => {
-                functions.insert(owner.clone(), function);
-            }
-            Err(mut errors) => lowering_errors.append(&mut errors),
-        }
-    }
-    if !lowering_errors.is_empty() {
-        let messages = lowering_errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!(
-            "MIR lowering is incomplete for {}:\n{messages}",
-            path.display()
-        ));
-    }
-    if functions.is_empty() {
-        return Err(format!(
-            "no callable from {} was selected for MIR inspection",
-            path.display()
-        ));
-    }
-    let program =
-        mimi::core::mir::reference::MirProgram::with_type_catalog(functions, type_catalog)
-            .map_err(|errors| {
-                let messages = errors
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("MIR validation failed:\n{messages}")
-            })?;
+    // Keep inspection on the production canonical constructor.  The old
+    // command-local lowering omitted generic instance materialization and
+    // therefore disagreed with `run/build --mir` for imported typed facades.
+    // `None` means the complete user/import graph; `Some` preserves the
+    // historical source-only inspection mode.
+    let program = crate::canonical_dispatch::build_canonical_program_for_sources(
+        &checked,
+        &file,
+        source_ids.as_ref(),
+    )
+    .map_err(|error| format!("MIR inspection input rejected: {error}"))?;
 
     print!("{}", program.type_catalog().canonical_text());
     for function in program.functions().values() {

@@ -190,7 +190,7 @@ enum Command {
         /// Strict mode: enforce MimiSpec $$ lock semantics in files with intent suffixes
         #[arg(long)]
         strict: bool,
-        /// Include imported modules and the automatically merged prelude
+        /// Include imported modules; the merged prelude remains excluded from MIR
         #[arg(long)]
         all: bool,
     },
