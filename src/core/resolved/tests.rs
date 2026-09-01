@@ -2516,6 +2516,32 @@ fn anonymous_node_ids_use_stable_source_keys_not_session_source_ids() {
 }
 
 #[test]
+fn checked_program_preserves_checker_owned_source_provenance() {
+    let source = "func main() -> i32 { 1 }";
+    let key = crate::span::SourceKey::new("workspace:src/main.mimi").expect("key");
+    let disk_path = std::path::PathBuf::from("/workspace/src/main.mimi");
+    let mut registry = crate::span::SourceRegistry::default();
+    let source_id = registry
+        .register(
+            crate::span::SourceRecord::new(key.clone(), crate::span::SourceTextOrigin::Disk)
+                .with_disk_path(disk_path.clone()),
+        )
+        .expect("source");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new_with_source_registry(tokens, source_id, registry)
+        .parse_file()
+        .expect("parse");
+
+    let checked = crate::core::check_program(&file).expect("check");
+    let record = checked
+        .source_registry()
+        .record(source_id)
+        .expect("checked source provenance");
+    assert_eq!(record.key, key);
+    assert_eq!(record.disk_path.as_deref(), Some(disk_path.as_path()));
+}
+
+#[test]
 fn declaration_expression_call_sites_are_complete_expr_ids_and_reorder_stable() {
     let source = r#"
 func leaf() -> i32 { 1 }

@@ -539,7 +539,7 @@ fn module_bodies_lifted(program: &CheckedProgram, source_id: crate::span::Source
     if spec == "1" {
         return true;
     }
-    let record = program.raw_ast().sources.record(source_id);
+    let record = program.source_registry().record(source_id);
     let haystacks: Vec<String> = match record {
         Some(record) => {
             let mut out = Vec::new();

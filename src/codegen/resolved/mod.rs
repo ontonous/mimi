@@ -14604,6 +14604,11 @@ mod tests {
                 }
             }
         }
+
+        assert!(
+            !sources[1].1.contains(".raw_ast()"),
+            "eligibility must use checker-owned provenance, not reopen the surface AST"
+        );
     }
 
     fn checked(source: &str) -> CheckedProgram {

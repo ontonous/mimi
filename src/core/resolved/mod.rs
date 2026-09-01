@@ -663,6 +663,13 @@ pub struct CheckedProgram {
     /// This is a typed route fact used by migration gates; consumers must not
     /// inspect `legacy_file` merely to rediscover module composition.
     has_imports: bool,
+    /// Checker-owned source provenance for route and diagnostic gates.
+    ///
+    /// This is metadata, not a second surface AST. Keeping the registry on
+    /// `CheckedProgram` lets consumers answer source-origin questions without
+    /// reopening `legacy_file`; the registry will outlive the final legacy
+    /// body consumer when that field is removed.
+    source_registry: SourceRegistry,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
     call_sites: HashMap<NodeId, ResolvedCallSite>,
@@ -1204,6 +1211,7 @@ impl CheckedProgram {
         Ok(Self {
             legacy_file: legacy_file_clone,
             has_imports: !file.imports.is_empty(),
+            source_registry: file.sources.clone(),
             items,
             node_meta,
             call_sites,
@@ -1276,6 +1284,13 @@ impl CheckedProgram {
     /// island from unresolved module/stdlib compatibility units.
     pub(crate) fn has_imports(&self) -> bool {
         self.has_imports
+    }
+
+    /// Checker-owned source provenance for consumers that need to classify a
+    /// callable's origin or module path. This accessor must not be replaced
+    /// with a raw-AST lookup.
+    pub(crate) fn source_registry(&self) -> &SourceRegistry {
+        &self.source_registry
     }
 
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {
