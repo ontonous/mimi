@@ -1,0 +1,13 @@
+// A recognized S8 Flow candidate with an unsupported builtin in the same
+// program. The default dispatcher must reject it before entering legacy.
+flow Counter {
+    state Zero { n: i32 }
+    transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } }
+}
+
+func main() -> i32 {
+    let c = Zero { n: 41 }
+    let c2 = Counter::inc(c)
+    println(c2.n)
+    c2.n
+}

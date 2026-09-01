@@ -1052,6 +1052,43 @@ fn default_silent_local_flow_transition_selects_one_canonical_route() {
 }
 
 #[test]
+fn default_flow_candidate_never_falls_back_to_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_flow_transition_rejected_builtin.mimi");
+    let expected = "default Canonical MIR route rejected";
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected Flow candidate run");
+    assert!(!run.status.success());
+    assert!(String::from_utf8_lossy(&run.stderr).contains(expected));
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn rejected Flow candidate build");
+    assert!(!build.status.success());
+    assert!(String::from_utf8_lossy(&build.stderr).contains(expected));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected Flow candidate verifier");
+    assert!(!verify.status.success());
+    assert!(String::from_utf8_lossy(&verify.stderr).contains(expected));
+}
+
+#[test]
 fn canonical_default_does_not_promote_non_copy_record_program() {
     let fixture = project_root()
         .join("tests")

@@ -515,9 +515,17 @@ mod tests {
             });
         });
         assert!(r.is_err());
+
+        // RECOVERY_PTR is process-global because the signal handler cannot
+        // safely discover TLS state. Serialize the observation with the same
+        // lock used by non-reentrant guarded calls; otherwise another test
+        // can arm a legitimate recovery point between the unwind and these
+        // assertions.
+        let _lock = GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
         assert!(RECOVERY_PTR.load(Ordering::Relaxed).is_null());
         assert_eq!(GUARDED_TID.load(Ordering::Relaxed), 0);
+        drop(_lock);
         // Sanity: guard still usable afterwards.
         assert_eq!(guarded(|| 7), Ok(7));
     }
