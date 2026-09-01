@@ -659,6 +659,10 @@ pub struct CheckedProgram {
     /// migration is tracked in 0.31.8–0.31.16 (Flow core phase), NOT v0.31.5
     /// — see CHANGELOG v0.31.6 and `devdocs/v0.31/01-foundation.md:27`.
     legacy_file: File,
+    /// Whether the checked source was assembled from one or more imports.
+    /// This is a typed route fact used by migration gates; consumers must not
+    /// inspect `legacy_file` merely to rediscover module composition.
+    has_imports: bool,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
     call_sites: HashMap<NodeId, ResolvedCallSite>,
@@ -1199,6 +1203,7 @@ impl CheckedProgram {
         }
         Ok(Self {
             legacy_file: legacy_file_clone,
+            has_imports: !file.imports.is_empty(),
             items,
             node_meta,
             call_sites,
@@ -1264,6 +1269,13 @@ impl CheckedProgram {
     /// If you need body-level data, use `resolved_body()` / `callables()`.
     pub(crate) fn raw_ast(&self) -> &File {
         &self.legacy_file
+    }
+
+    /// Whether this checked program contains imported modules.  Migration
+    /// gates use this fact to distinguish the switched import-free production
+    /// island from unresolved module/stdlib compatibility units.
+    pub(crate) fn has_imports(&self) -> bool {
+        self.has_imports
     }
 
     pub fn transitions(&self) -> &HashMap<TransitionId, ResolvedTransition> {

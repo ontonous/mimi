@@ -480,10 +480,17 @@ mod tests {
         });
         assert!(r.is_err(), "the panic must propagate to the caller");
 
-        // Guard state must be clean on this thread after the unwind.
+        // Guard state must be clean on this thread after the unwind.  The
+        // recovery pointer is process-global because the signal handler cannot
+        // safely discover TLS state.  Hold the same serialization lock while
+        // observing it; otherwise another parallel signal-guard test can arm
+        // its own legitimate recovery point between the unwind and these
+        // assertions, producing a false failure in the full suite.
+        let _lock = GUARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         IN_GUARDED_CALL.with(|flag| assert!(!flag.get()));
         assert!(RECOVERY_PTR.load(Ordering::Relaxed).is_null());
         assert_eq!(GUARDED_TID.load(Ordering::Relaxed), 0);
+        drop(_lock);
 
         // And a subsequent guarded call must still catch real crashes.
         // (With IN_GUARDED_CALL stuck true this would run unprotected and

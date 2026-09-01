@@ -3175,21 +3175,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 name = mapped;
                             }
                         }
-                        // 0.1.10 (BUG K): resolved List METHOD calls arrive as
-                        // `builtin.method.list.len` — `resolve_builtin_method`
-                        // registers ONLY `len` for the list family (every other
-                        // List method is trait-dispatched via `ListExt` and
-                        // already works in the resolved path). The resolved
-                        // emitter previously had no mapping for it and hard-
-                        // errored E0722, which fired the moment a `List` method
-                        // was called inside a resolved-forced context: spawn/
-                        // await results, or any program containing a `fails`
-                        // flow transition (the `?` operator forces the resolved
-                        // emitter for the whole program, so even a plain
-                        // `xs.len()` in `main` broke). `len` is the polymorphic
-                        // builtin (it already unboxes fat-ABI strings and
-                        // handles List/Map/Set/string), so route `list.len` to
-                        // it exactly like `string.len` (BUG G).
+                        // Collection-Scalar Closure v1: List.len is owned by
+                        // Canonical MIR on the switched default island. The
+                        // strict all-function resolved entry rejects the
+                        // operation for import-free programs; this mapping is
+                        // retained only for per-function compatibility builds
+                        // that did not qualify for that island (including
+                        // imported/Flow/spawn programs). It therefore cannot
+                        // compete with ListOp::Len after canonical selection.
                         if let Some(method) = name.strip_prefix("builtin.method.list.") {
                             if method == "len" {
                                 name = "len";
@@ -15017,25 +15010,20 @@ func main() -> i32 { 0 }
         generator.module.verify().expect("valid LLVM");
     }
 
-    /// 0.32.2: List<i64> construction, indexing, and len() through the
-    /// resolved native emitter. Verifies LLVM IR is valid.
+    /// 0.32.2: List<i64> construction and indexing through the resolved
+    /// native emitter. List.len is now owned by Canonical MIR, so this test
+    /// deliberately keeps the resolved compatibility probe free of len().
     #[test]
     fn list_construct_index_emits_from_resolved_ir() {
         let program = checked(
             r#"
-func sum(xs: List<i64>) -> i64 {
-    let mut total: i64 = 0
-    let mut i: i64 = 0
-    while i < len(xs) {
-        total = total + xs[i]
-        i = i + 1
-    }
-    total
+func first(xs: List<i64>) -> i64 {
+    xs[0]
 }
 func main() -> i32 {
     let nums: List<i64> = [10, 20, 30]
-    let s = sum(nums)
-    if s == 60 { 0 } else { 1 }
+    let first_value = first(nums)
+    if first_value == 10 { 0 } else { 1 }
 }
 "#,
         );
@@ -15176,7 +15164,7 @@ func main() -> i32 {
         let program = checked(
             r#"
 func first(xs: List<i64>) -> Option<i64> {
-    if len(xs) > 0 { Some(xs[0]) } else { None }
+    if true { Some(xs[0]) } else { None }
 }
 func main() -> i32 {
     let xs: List<i64> = [42, 7]
@@ -15191,6 +15179,30 @@ func main() -> i32 {
             .compile_resolved_native(&program)
             .expect("Try with Option is in the resolved native slice");
         generator.module.verify().expect("valid LLVM");
+    }
+
+    /// Collection-Scalar Closure v1 deletion gate: ordinary resolved-native
+    /// programs may no longer lower List.len. The canonical ListOp::Len path
+    /// owns this shape; only an explicitly detected unmigrated core program
+    /// may use the compatibility bridge above.
+    #[test]
+    fn resolved_native_rejects_list_len_outside_core_compatibility() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let values: List<i64> = [1, 2, 3]
+    values.len()
+}
+"#,
+        );
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_list_len_retired");
+        let errors = generator
+            .compile_resolved_native(&program)
+            .expect_err("ordinary List.len must be owned by Canonical MIR");
+        assert!(errors
+            .iter()
+            .any(|error| { error.message.contains("List.len is owned by Canonical MIR") }));
     }
 
     /// Diagnostic: dispatch distribution across representative programs.

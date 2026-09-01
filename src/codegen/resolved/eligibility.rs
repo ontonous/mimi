@@ -214,6 +214,23 @@ pub(super) fn require_resolved_native_program(
             ),
         ));
     }
+    // Collection-Scalar Closure v1: the strict all-function resolved entry is
+    // no longer allowed to own ordinary List.len.  Import-free programs that
+    // qualify for the production island are lowered to the shared MIR
+    // ListOp::Len contract before native emission.  If that island is not
+    // selected, the per-function compatibility path below may still preserve
+    // the existing resolved/legacy behavior for an unmigrated program; this
+    // program-level gate only prevents the old resolved entry from presenting
+    // itself as a second complete producer.
+    if !program.has_imports() {
+        if let Some((owner, node)) = first_list_len_in_program(program) {
+            return Err(UnsupportedResolvedNode::new(
+                &owner,
+                &node,
+                "List.len is owned by Canonical MIR; resolved native lowering is retired",
+            ));
+        }
+    }
     // Constants are allowed, but only materializable (non-Complex) values.
     for constant in program.constants().values() {
         if matches!(constant.value, crate::core::ResolvedConstValue::Complex) {
@@ -1440,6 +1457,209 @@ fn require_expr(
             &expression.node_id,
             format!("expression {other:?} is not in the resolved native slice"),
         )),
+    }
+}
+
+fn is_list_len_call(program: &CheckedProgram, call: &crate::core::ResolvedCall) -> bool {
+    if call.arguments.len() != 1 {
+        return false;
+    }
+    let is_len = match &call.callee {
+        ResolvedCallee::Builtin(id) => {
+            matches!(id.as_str(), "len" | "builtin.method.list.len")
+        }
+        _ => false,
+    };
+    is_len && is_list_type(program, &call.arguments[0].value.ty)
+}
+
+fn first_list_len_in_program(program: &CheckedProgram) -> Option<(NodeId, NodeId)> {
+    program.callables().values().find_map(|callable| {
+        first_list_len_in_block(program, &callable.body.root)
+            .map(|node| (callable.owner.clone(), node))
+    })
+}
+
+fn first_list_len_in_block(program: &CheckedProgram, block: &ResolvedBlock) -> Option<NodeId> {
+    for statement in &block.statements {
+        let found = match &statement.kind {
+            ResolvedStmtKind::Bind {
+                initializer: Some(initializer),
+                ..
+            }
+            | ResolvedStmtKind::Expr(initializer) => first_list_len_in_expr(program, initializer),
+            ResolvedStmtKind::Assign { value, .. } => first_list_len_in_expr(program, value),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .and_then(|value| first_list_len_in_expr(program, value)),
+            ResolvedStmtKind::While { condition, body } => {
+                first_list_len_in_expr(program, condition)
+                    .or_else(|| first_list_len_in_block(program, body))
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => first_list_len_in_expr(program, initializer)
+                .or_else(|| first_list_len_in_block(program, body)),
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => first_list_len_in_expr(program, initializer)
+                .or_else(|| first_list_len_in_block(program, then_block))
+                .or_else(|| {
+                    else_block
+                        .as_ref()
+                        .and_then(|body| first_list_len_in_block(program, body))
+                }),
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                first_list_len_in_block(program, body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                first_list_len_in_expr(program, iterable)
+                    .or_else(|| first_list_len_in_block(program, body))
+            }
+            ResolvedStmtKind::Contract { condition, .. } => {
+                first_list_len_in_expr(program, condition)
+            }
+            ResolvedStmtKind::Math(expressions) => expressions
+                .iter()
+                .find_map(|expression| first_list_len_in_expr(program, expression)),
+            ResolvedStmtKind::Pinned { value, body, .. } => first_list_len_in_expr(program, value)
+                .or_else(|| first_list_len_in_block(program, body)),
+            ResolvedStmtKind::Bind {
+                initializer: None, ..
+            }
+            | ResolvedStmtKind::Continue
+            | ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::NestedCallable(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    block
+        .result
+        .as_deref()
+        .and_then(|result| first_list_len_in_expr(program, result))
+}
+
+fn first_list_len_in_expr(program: &CheckedProgram, expression: &ResolvedExpr) -> Option<NodeId> {
+    if let ResolvedExprKind::Call(call) = &expression.kind {
+        if is_list_len_call(program, call) {
+            return Some(expression.node_id.clone());
+        }
+    }
+
+    match &expression.kind {
+        ResolvedExprKind::FString(parts) => parts.iter().find_map(|part| match part {
+            crate::core::ir::ResolvedFStringPart::Interpolation(expression) => {
+                first_list_len_in_expr(program, expression)
+            }
+            crate::core::ir::ResolvedFStringPart::Text(_) => None,
+        }),
+        ResolvedExprKind::Project { value, projection } => first_list_len_in_expr(program, value)
+            .or_else(|| match projection {
+                crate::core::ir::ResolvedValueProjection::Index(index) => {
+                    first_list_len_in_expr(program, index)
+                }
+                _ => None,
+            }),
+        ResolvedExprKind::Binary { left, right, .. } => {
+            first_list_len_in_expr(program, left).or_else(|| first_list_len_in_expr(program, right))
+        }
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::TypeOf(operand)
+        | ResolvedExprKind::Old(operand)
+        | ResolvedExprKind::Try { value: operand, .. }
+        | ResolvedExprKind::Spawn(operand)
+        | ResolvedExprKind::Await(operand)
+        | ResolvedExprKind::Cast { value: operand, .. } => first_list_len_in_expr(program, operand),
+        ResolvedExprKind::Call(call) => call
+            .arguments
+            .iter()
+            .find_map(|argument| first_list_len_in_expr(program, &argument.value)),
+        ResolvedExprKind::Tuple(elements)
+        | ResolvedExprKind::List(elements)
+        | ResolvedExprKind::Set(elements) => elements
+            .iter()
+            .find_map(|element| first_list_len_in_expr(program, element)),
+        ResolvedExprKind::Map(entries) => entries.iter().find_map(|(key, value)| {
+            first_list_len_in_expr(program, key).or_else(|| first_list_len_in_expr(program, value))
+        }),
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => first_list_len_in_expr(program, value)
+            .or_else(|| first_list_len_in_expr(program, iterable))
+            .or_else(|| {
+                guard
+                    .as_deref()
+                    .and_then(|guard| first_list_len_in_expr(program, guard))
+            }),
+        ResolvedExprKind::OptionalChain { receiver, .. } => {
+            first_list_len_in_expr(program, receiver)
+        }
+        ResolvedExprKind::Record { fields, rest, .. } => fields
+            .iter()
+            .find_map(|field| first_list_len_in_expr(program, &field.value))
+            .or_else(|| {
+                rest.as_deref()
+                    .and_then(|rest| first_list_len_in_expr(program, rest))
+            }),
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Scope { body: block, .. }
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => first_list_len_in_block(program, block),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => first_list_len_in_expr(program, condition)
+            .or_else(|| first_list_len_in_block(program, then_block))
+            .or_else(|| first_list_len_in_block(program, else_block)),
+        ResolvedExprKind::Match { scrutinee, arms } => first_list_len_in_expr(program, scrutinee)
+            .or_else(|| {
+                arms.iter().find_map(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .and_then(|guard| first_list_len_in_expr(program, guard))
+                        .or_else(|| first_list_len_in_expr(program, &arm.body))
+                })
+            }),
+        ResolvedExprKind::Range { start, end } => {
+            first_list_len_in_expr(program, start).or_else(|| first_list_len_in_expr(program, end))
+        }
+        ResolvedExprKind::Slice { target, start, end } => first_list_len_in_expr(program, target)
+            .or_else(|| {
+                start
+                    .as_deref()
+                    .and_then(|start| first_list_len_in_expr(program, start))
+            })
+            .or_else(|| {
+                end.as_deref()
+                    .and_then(|end| first_list_len_in_expr(program, end))
+            }),
+        ResolvedExprKind::Lambda(lambda) => first_list_len_in_block(program, &lambda.body),
+        ResolvedExprKind::Literal(_)
+        | ResolvedExprKind::Load(_)
+        | ResolvedExprKind::Constant(_)
+        | ResolvedExprKind::Callable(_)
+        | ResolvedExprKind::DefaultArgument { .. }
+        | ResolvedExprKind::ComptimeValue(_)
+        | ResolvedExprKind::TypeValue(_) => None,
+    }
+}
+
+fn is_list_type(program: &CheckedProgram, id: &ResolvedTypeId) -> bool {
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal { item, .. }) => item.as_str() == "builtin:type:List",
+        Some(ResolvedType::Reference { target, .. })
+        | Some(ResolvedType::Ownership { target, .. })
+        | Some(ResolvedType::Newtype { inner: target, .. }) => is_list_type(program, target),
+        _ => false,
     }
 }
 
