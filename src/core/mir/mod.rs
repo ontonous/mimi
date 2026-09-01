@@ -18,6 +18,7 @@ use crate::core::{NodeId, ResolvedPlace};
 
 mod contracts;
 mod eligibility;
+mod islands;
 pub mod lower;
 pub mod reference;
 pub mod types;
@@ -26,6 +27,7 @@ pub use contracts::{
     MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
+pub use islands::{validate_scalar_collection_island, SCALAR_COLLECTION_ISLAND};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.

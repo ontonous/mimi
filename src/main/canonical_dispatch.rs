@@ -4,7 +4,8 @@
 //! checked program.  A canonical backend is never attempted and then replaced
 //! by legacy code on failure: programs either pass this preflight and use the
 //! canonical route, or remain on the legacy route because their capability
-//! set is not yet migrated.
+//! set is not yet migrated.  Once the scalar collection island is recognized,
+//! its failure is an explicit rejection rather than compatibility fallback.
 
 use std::collections::HashSet;
 
@@ -86,8 +87,9 @@ pub(crate) fn select_default_route(
     let canonical = match build_canonical_program(checked, merged_file) {
         Ok(canonical) => canonical,
         Err(error) => {
-            return reject_flow_candidate(
+            return reject_migrated_candidates(
                 flow_candidate,
+                set_candidate,
                 format!("canonical MIR construction failed: {error}"),
             )
         }
@@ -100,16 +102,37 @@ pub(crate) fn select_default_route(
     });
     let copy_record = may_contain_flat_copy_record(&canonical);
     let list_len_operation = canonical_has_list_len(&canonical);
+    let collection_candidate = set_instance || list_len_operation;
     let flow_transition_operation = canonical_has_flow_transition(&canonical);
     if (!set_candidate || !set_instance)
         && (!record_candidate || !copy_record)
         && (!list_len_probe_allowed || !list_len_operation)
         && (!flow_candidate || !flow_transition_operation)
     {
-        return reject_flow_candidate(
+        return reject_migrated_candidates(
             flow_candidate,
+            false,
             "canonical graph did not materialize the selected production operation",
         );
+    }
+
+    // S11: the production unit is a complete scalar List/Set executable
+    // graph, not an individual opcode.  The island validator consumes only
+    // canonical MIR and TypeDesc facts and runs before any verifier/backend
+    // preflight.  A real materialized Set facade or List.len operation is
+    // therefore either inside this finite envelope or rejected; it cannot
+    // re-enter the legacy route.
+    if collection_candidate {
+        if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(&canonical) {
+            return reject_migrated_candidates(
+                flow_candidate,
+                true,
+                format!(
+                    "{} capability gate failed: {errors:?}",
+                    mimi::core::mir::SCALAR_COLLECTION_ISLAND
+                ),
+            );
+        }
     }
 
     // The MIR verifier intentionally skips bodies with no contract.  That is
@@ -118,8 +141,9 @@ pub(crate) fn select_default_route(
     // verifier's contract pass so every selected consumer has an explicit
     // capability, including no-obligation functions.
     if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
-        return reject_flow_candidate(
+        return reject_migrated_candidates(
             flow_candidate,
+            collection_candidate,
             format!("verifier capability gate failed: {error:?}"),
         );
     }
@@ -128,14 +152,16 @@ pub(crate) fn select_default_route(
     // gate.  The actual consumers repeat their own validation immediately
     // before use.
     if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&canonical) {
-        return reject_flow_candidate(
+        return reject_migrated_candidates(
             flow_candidate,
+            collection_candidate,
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
     }
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&canonical) {
-        return reject_flow_candidate(
+        return reject_migrated_candidates(
             flow_candidate,
+            collection_candidate,
             format!("native MIR preflight failed: {errors:?}"),
         );
     }
@@ -152,15 +178,17 @@ pub(crate) fn select_default_route(
             )
         }),
         Err(error) => {
-            return reject_flow_candidate(
+            return reject_migrated_candidates(
                 flow_candidate,
+                collection_candidate,
                 format!("verifier contract pass failed: {error}"),
             )
         }
     };
     if !verifier_ready {
-        return reject_flow_candidate(
+        return reject_migrated_candidates(
             flow_candidate,
+            collection_candidate,
             "verifier returned an unsupported or inconclusive result",
         );
     }
@@ -168,10 +196,19 @@ pub(crate) fn select_default_route(
     DefaultMirRoute::Canonical(canonical)
 }
 
-fn reject_flow_candidate(flow_candidate: bool, reason: impl Into<String>) -> DefaultMirRoute {
+fn reject_migrated_candidates(
+    flow_candidate: bool,
+    collection_candidate: bool,
+    reason: impl Into<String>,
+) -> DefaultMirRoute {
     if flow_candidate {
         DefaultMirRoute::Rejected(format!(
             "S8 Flow transition candidate is not eligible for the default route: {}",
+            reason.into()
+        ))
+    } else if collection_candidate {
+        DefaultMirRoute::Rejected(format!(
+            "S11 scalar collection candidate is not eligible for the default route: {}",
             reason.into()
         ))
     } else {
@@ -414,6 +451,26 @@ mod tests {
             select_default_route(&checked, &file),
             DefaultMirRoute::Legacy
         ));
+    }
+
+    #[test]
+    fn scalar_collection_candidate_rejects_a_mixed_managed_graph() {
+        let source = r#"
+            func main() -> i32 {
+                let values = [1, 2, 3]
+                let count = len(values)
+                drop(values)
+                let text = "outside"
+                drop(text)
+                count
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("a List.len candidate with a managed value must fail closed");
+        };
+        assert!(reason.contains("S11 scalar collection candidate"));
+        assert!(reason.contains("copy-scalar-collection-v1"));
     }
 }
 
