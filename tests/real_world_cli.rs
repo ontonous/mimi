@@ -493,6 +493,65 @@ fn canonical_mir_test_rejects_mixed_scalar_collection_without_legacy() {
 }
 
 #[test]
+fn canonical_mir_disasm_uses_ast_free_bytecode_for_scalar_collection() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_test_scalar_collection.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("disasm")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical scalar-collection mimi disasm");
+    assert!(
+        output.status.success(),
+        "canonical scalar-collection disasm failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("function:test_list_len"),
+        "canonical disasm must expose stable MIR function identity:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("MIR_LIST_LEN"),
+        "canonical disasm must expose the MIR collection operation:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("__flow_Main_run_Single"),
+        "canonical disasm unexpectedly retained compatibility-only Flow helpers:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn canonical_mir_disasm_rejects_mixed_scalar_collection_without_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_test_scalar_collection_mixed.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("disasm")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected mixed scalar-collection mimi disasm");
+    assert!(
+        !output.status.success(),
+        "mixed scalar collection unexpectedly used a compatibility disassembler:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("default Canonical MIR route rejected"));
+    assert!(stderr.contains("S11 scalar collection candidate"));
+}
+
+#[test]
 fn canonical_mir_native_owned_string_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")
