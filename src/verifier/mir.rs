@@ -579,6 +579,83 @@ fn set_del(elements: &Z3Set, value: &SymbolicValue) -> Result<Z3Set, String> {
     }
 }
 
+fn symbolic_set_operation(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result_ty: &crate::core::ResolvedTypeId,
+    set_ty: &crate::core::ResolvedTypeId,
+    operation: crate::core::mir::MirSetOperation,
+    receiver: SymbolicValue,
+    argument: Option<SymbolicValue>,
+) -> Result<SymbolicValue, String> {
+    let SymbolicValue::Set { elements, size } = receiver else {
+        return Err("MIR verifier Set operation receiver is not a symbolic Set".into());
+    };
+    let output = match operation {
+        crate::core::mir::MirSetOperation::Size => SymbolicValue::Int(size),
+        crate::core::mir::MirSetOperation::IsEmpty => {
+            SymbolicValue::Bool(size.eq(Int::from_i64(0)))
+        }
+        crate::core::mir::MirSetOperation::Contains => {
+            let value = argument
+                .as_ref()
+                .ok_or_else(|| "MIR verifier Set.contains argument is absent".to_string())?;
+            SymbolicValue::Bool(set_member(&elements, value)?)
+        }
+        crate::core::mir::MirSetOperation::Insert | crate::core::mir::MirSetOperation::Remove => {
+            let value = argument
+                .as_ref()
+                .ok_or_else(|| "MIR verifier Set mutation argument is absent".to_string())?;
+            let present = set_member(&elements, value)?;
+            let is_insert = operation == crate::core::mir::MirSetOperation::Insert;
+            let delta = if is_insert {
+                present.ite(&Int::from_i64(0), &Int::from_i64(1))
+            } else {
+                state
+                    .constraints
+                    .push(present.implies(size.ge(Int::from_i64(1))));
+                present.ite(&Int::from_i64(1), &Int::from_i64(0))
+            };
+            let next_size = if is_insert {
+                Int::add(&[&size, &delta])
+            } else {
+                Int::sub(&[&size, &delta])
+            };
+            let next_elements = if is_insert {
+                set_add(&elements, value)?
+            } else {
+                set_del(&elements, value)?
+            };
+            SymbolicValue::Set {
+                elements: next_elements,
+                size: next_size,
+            }
+        }
+        crate::core::mir::MirSetOperation::ToList => {
+            let list_desc = catalog
+                .get(result_ty)
+                .ok_or_else(|| "MIR verifier Set.to_list result TypeDesc is absent".to_string())?;
+            let MirLayout::List { element } = &list_desc.layout else {
+                return Err("MIR verifier Set.to_list result has no List layout".into());
+            };
+            let set_desc = catalog.get(set_ty).ok_or_else(|| {
+                "MIR verifier Set.to_list receiver TypeDesc is absent".to_string()
+            })?;
+            let MirLayout::Set {
+                element: set_element,
+            } = &set_desc.layout
+            else {
+                return Err("MIR verifier Set.to_list receiver has no Set layout".into());
+            };
+            if element != set_element {
+                return Err("MIR verifier Set.to_list element types disagree".into());
+            }
+            SymbolicValue::List { length: size }
+        }
+    };
+    Ok(output)
+}
+
 fn value_scalar_kind(
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
@@ -1418,74 +1495,23 @@ fn eval_instruction(
             else {
                 return Err("MIR Set operation receiver is not a symbolic Set".into());
             };
-            let output = match operation {
-                crate::core::mir::MirSetOperation::Size => SymbolicValue::Int(size),
-                crate::core::mir::MirSetOperation::IsEmpty => {
-                    SymbolicValue::Bool(size.eq(Int::from_i64(0)))
-                }
-                crate::core::mir::MirSetOperation::Contains => {
-                    let argument = argument
-                        .as_ref()
-                        .ok_or_else(|| "MIR Set.contains argument is absent".to_string())?;
-                    let value = state.values.get(argument).cloned().ok_or_else(|| {
-                        format!("MIR Set.contains argument '{}' is not defined", argument)
-                    })?;
-                    SymbolicValue::Bool(set_member(&elements, &value)?)
-                }
-                crate::core::mir::MirSetOperation::Insert
-                | crate::core::mir::MirSetOperation::Remove => {
-                    let argument = argument
-                        .as_ref()
-                        .ok_or_else(|| "MIR Set mutation argument is absent".to_string())?;
-                    let value = state.values.get(argument).cloned().ok_or_else(|| {
-                        format!("MIR Set mutation argument '{}' is not defined", argument)
-                    })?;
-                    let present = set_member(&elements, &value)?;
-                    let delta = if *operation == crate::core::mir::MirSetOperation::Insert {
-                        present.ite(&Int::from_i64(0), &Int::from_i64(1))
-                    } else {
-                        state
-                            .constraints
-                            .push(present.implies(size.ge(Int::from_i64(1))));
-                        present.ite(&Int::from_i64(1), &Int::from_i64(0))
-                    };
-                    let next_size = if *operation == crate::core::mir::MirSetOperation::Insert {
-                        Int::add(&[&size, &delta])
-                    } else {
-                        Int::sub(&[&size, &delta])
-                    };
-                    let next_elements = if *operation == crate::core::mir::MirSetOperation::Insert {
-                        set_add(&elements, &value)?
-                    } else {
-                        set_del(&elements, &value)?
-                    };
-                    SymbolicValue::Set {
-                        elements: next_elements,
-                        size: next_size,
-                    }
-                }
-                crate::core::mir::MirSetOperation::ToList => {
-                    let list_desc = catalog.get(&result_ty).ok_or_else(|| {
-                        "MIR verifier Set.to_list result TypeDesc is absent".to_string()
-                    })?;
-                    let MirLayout::List { element } = &list_desc.layout else {
-                        return Err("MIR verifier Set.to_list result has no List layout".into());
-                    };
-                    let set_desc = catalog.get(&set_ty).ok_or_else(|| {
-                        "MIR verifier Set.to_list receiver TypeDesc is absent".to_string()
-                    })?;
-                    let MirLayout::Set {
-                        element: set_element,
-                    } = &set_desc.layout
-                    else {
-                        return Err("MIR verifier Set.to_list receiver has no Set layout".into());
-                    };
-                    if element != set_element {
-                        return Err("MIR verifier Set.to_list element types disagree".into());
-                    }
-                    SymbolicValue::List { length: size }
-                }
-            };
+            let argument_value = argument
+                .as_ref()
+                .map(|argument| {
+                    state.values.get(argument).cloned().ok_or_else(|| {
+                        format!("MIR Set operation argument '{}' is not defined", argument)
+                    })
+                })
+                .transpose()?;
+            let output = symbolic_set_operation(
+                catalog,
+                state,
+                &result_ty,
+                &set_ty,
+                *operation,
+                SymbolicValue::Set { elements, size },
+                argument_value,
+            )?;
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
@@ -1498,18 +1524,16 @@ fn eval_instruction(
             callee,
             type_arguments,
             arguments,
-        } => {
-            eval_materialized_identity_call(
-                function,
-                program,
-                catalog,
-                state,
-                result,
-                callee,
-                type_arguments,
-                arguments,
-            )?;
-        }
+        } => eval_materialized_call(
+            function,
+            program,
+            catalog,
+            state,
+            result,
+            callee,
+            type_arguments,
+            arguments,
+        )?,
         MirInstructionKind::Borrow {
             result,
             source,
@@ -1650,7 +1674,149 @@ fn ensure_same_instruction_types(
     Ok(())
 }
 
-/// Symbolically consume the one generic call family admitted by this slice.
+fn eval_materialized_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err("MIR verifier call callee is not a canonical function instance".into());
+    };
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| instance.function == *target_owner)
+        .ok_or_else(|| {
+            format!(
+                "MIR verifier call target '{}' is absent from the instance table",
+                target_owner.0
+            )
+        })?;
+    if instance.arguments != type_arguments {
+        return Err(format!(
+            "MIR verifier call target '{}' disagrees with its instance arguments",
+            target_owner.0
+        ));
+    }
+    match instance.contract {
+        crate::core::mir::MirGenericInstanceContract::ScalarIdentity => {
+            eval_materialized_identity_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                callee,
+                type_arguments,
+                arguments,
+            )
+        }
+        crate::core::mir::MirGenericInstanceContract::ScalarSetFacade { operation } => {
+            eval_materialized_set_facade_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                operation,
+            )
+        }
+    }
+}
+
+/// Symbolically consume a materialized scalar Set facade call. The target
+/// body is already structurally proven as `Clone*; SetOp; Return` by the MIR
+/// instance validator. This helper applies that exact SetOp contract without
+/// rediscovering a method name or a backend-specific handle operation.
+fn eval_materialized_set_facade_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    operation: crate::core::mir::MirSetOperation,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier Set facade target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_set_facade_mir(target, catalog, operation)?;
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if arguments.len() != target.parameters.len() {
+        return Err("MIR verifier Set facade call arity disagrees with target".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier Set facade call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err("MIR verifier Set facade call result disagrees with target TypeDesc".into());
+    }
+    let mut symbolic_arguments = Vec::with_capacity(arguments.len());
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let argument_ty = function
+            .values
+            .get(argument)
+            .ok_or_else(|| format!("MIR verifier Set facade argument '{}' is absent", argument))?;
+        let parameter_ty = target.values.get(parameter).ok_or_else(|| {
+            format!(
+                "MIR verifier Set facade parameter '{}' is absent",
+                parameter
+            )
+        })?;
+        if argument_ty.ty != parameter_ty.ty {
+            return Err("MIR verifier Set facade argument disagrees with target TypeDesc".into());
+        }
+        symbolic_arguments.push(state.values.get(argument).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier Set facade argument '{}' is not defined",
+                argument
+            )
+        })?);
+    }
+    let set_ty = target
+        .parameters
+        .first()
+        .and_then(|parameter| target.values.get(parameter))
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| "MIR verifier Set facade receiver parameter is absent".to_string())?;
+    let receiver = symbolic_arguments
+        .first()
+        .cloned()
+        .ok_or_else(|| "MIR verifier Set facade receiver argument is absent".to_string())?;
+    let argument = symbolic_arguments.get(1).cloned();
+    let output = symbolic_set_operation(
+        catalog,
+        state,
+        &target.result,
+        &set_ty,
+        operation,
+        receiver,
+        argument,
+    )?;
+    ensure_result_shape(function, catalog, result, &output)?;
+    state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume the scalar generic identity call admitted by this
+/// slice.
 ///
 /// The verifier does not infer a callee body from a template name.  It first
 /// requires the call to name an instance in the canonical instance table,

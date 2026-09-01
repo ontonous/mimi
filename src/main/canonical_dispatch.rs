@@ -95,8 +95,18 @@ pub(crate) fn select_default_route(
         return DefaultMirRoute::Legacy;
     }
 
-    // Bytecode and native are both checked before the route is selected.  The
-    // actual consumers repeat their own validation immediately before use.
+    // The MIR verifier intentionally skips bodies with no contract.  That is
+    // not permission for an unsupported instruction to enter a default
+    // native/bytecode island.  Scan the complete canonical graph before the
+    // verifier's contract pass so every selected consumer has an explicit
+    // capability, including no-obligation functions.
+    if mimi::verifier::validate_mir_capabilities(&canonical).is_err() {
+        return DefaultMirRoute::Legacy;
+    }
+
+    // Bytecode and native are both checked only after the verifier capability
+    // gate.  The actual consumers repeat their own validation immediately
+    // before use.
     if mimi::interp::bytecode::compile_mir_program(&canonical).is_err()
         || mimi::codegen::mir::validate_mir_native(&canonical).is_err()
     {
@@ -267,6 +277,50 @@ fn mentions_generic_set(
                 || mentions_generic_set(result, types, generic_parameters, seen)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checked(source: &str) -> (CheckedProgram, File) {
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = mimi::core::check_program(&file).expect("check");
+        (checked, file)
+    }
+
+    #[test]
+    fn copy_record_island_passes_all_default_consumer_gates() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_record_copy.mimi"
+        ));
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn verifier_gap_keeps_mixed_record_and_owned_variant_on_legacy_route() {
+        let source = r#"
+            type Point { x: i32 }
+
+            func make_some() -> Option<string> { Some("owned") }
+
+            func main() -> i32 {
+                let point = Point { x: 1 }
+                point.x
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Legacy
+        ));
     }
 }
 

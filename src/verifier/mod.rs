@@ -4,6 +4,7 @@ mod flow;
 mod func;
 mod helpers;
 mod mir;
+mod mir_capability;
 pub(crate) mod resolved_expr;
 pub mod vir;
 
@@ -29,6 +30,16 @@ pub fn verify_mir(
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
     mir::verify_program(program, source_hash)
+}
+
+/// Check whether a canonical MIR program is fully consumable by the current
+/// MIR verifier capability.  This is a structural route gate, not a contract
+/// verdict; callers use it before selecting a default producer/consumer
+/// island.
+pub fn validate_mir_capabilities(
+    program: &crate::core::mir::reference::MirProgram,
+) -> Result<(), Vec<String>> {
+    mir_capability::validate_mir_capabilities(program)
 }
 
 fn parse_memory_source(source: &str, label: &str) -> Result<crate::ast::File, String> {
