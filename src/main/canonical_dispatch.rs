@@ -41,18 +41,23 @@ pub(crate) fn build_canonical_program(
 /// Select a default route for a complete checked program.
 ///
 /// The current default-switch islands are deliberately narrow: a program must
-/// contain either a checker-selected scalar Set facade instance or a flat Copy
-/// record value. The candidate then has to pass every consumer preflight before
-/// any caller starts execution or LLVM emission. Returning `Legacy` means the
-/// program has not entered a migrated island; it is not a backend fallback
-/// after a canonical emission attempt.
+/// contain either a checker-selected scalar Set facade instance, a flat Copy
+/// record value, or a concrete scalar `List.len` operation. The candidate then
+/// has to pass every consumer preflight before any caller starts execution or
+/// LLVM emission. Returning `Legacy` means the program has not entered a
+/// migrated island; it is not a backend fallback after a canonical emission
+/// attempt.
 pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
     let set_candidate = may_contain_typed_set_facade(checked, merged_file);
     let record_candidate = may_contain_user_record(checked, merged_file);
-    if !set_candidate && !record_candidate {
+    // List.len is probed only for import-free programs. The canonical graph
+    // itself is the typed fact source: after lowering, an actual ListOp::Len
+    // is evidence that the shared TypeDesc contract admitted the operation.
+    let list_len_probe_allowed = merged_file.imports.is_empty();
+    if !set_candidate && !record_candidate && !list_len_probe_allowed {
         return DefaultMirRoute::Legacy;
     }
 
@@ -66,7 +71,11 @@ pub(crate) fn select_default_route(
         )
     });
     let copy_record = may_contain_flat_copy_record(&canonical);
-    if (!set_candidate || !set_instance) && (!record_candidate || !copy_record) {
+    let list_len_operation = canonical_has_list_len(&canonical);
+    if (!set_candidate || !set_instance)
+        && (!record_candidate || !copy_record)
+        && (!list_len_probe_allowed || !list_len_operation)
+    {
         return DefaultMirRoute::Legacy;
     }
 
@@ -97,6 +106,22 @@ pub(crate) fn select_default_route(
     }
 
     DefaultMirRoute::Canonical(canonical)
+}
+
+fn canonical_has_list_len(canonical: &MirProgram) -> bool {
+    canonical.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    mimi::core::mir::MirInstructionKind::ListOp {
+                        operation: mimi::core::mir::MirListOperation::Len,
+                        ..
+                    }
+                )
+            })
+        })
+    })
 }
 
 fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool {

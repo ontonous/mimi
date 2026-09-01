@@ -280,6 +280,98 @@ fn canonical_mir_scalar_list_len_closes_reference_native_and_verifier() {
     );
     assert!(String::from_utf8_lossy(&verification.stdout)
         .contains("canonical MIR ensures contract proven"));
+
+    // The same complete program is now a default production island. The
+    // selector must choose one canonical graph for run/build/verify; the
+    // presence of the canonical native adapter makes the route observable.
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default canonical List.len run");
+    assert_eq!(
+        default_run.status.code(),
+        Some(42),
+        "default canonical List.len run failed:\n{}",
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+
+    let default_build_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default canonical List.len build");
+    assert!(
+        default_build_ir.status.success(),
+        "default canonical List.len build failed:\n{}",
+        String::from_utf8_lossy(&default_build_ir.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&default_build_ir.stdout).contains("mimi_mir_list_len_scalar"),
+        "default build did not select the canonical List.len island:\n{}",
+        String::from_utf8_lossy(&default_build_ir.stdout)
+    );
+
+    let default_verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default canonical List.len verifier");
+    assert!(
+        default_verification.status.success(),
+        "default canonical List.len verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&default_verification.stderr),
+        String::from_utf8_lossy(&default_verification.stdout)
+    );
+    assert!(String::from_utf8_lossy(&default_verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_default_does_not_promote_non_copy_list_len() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_string_len_rejected.mimi");
+
+    // The typed body contains List<string>. The MIR List.len contract is
+    // scalar-Copy-only, so explicit MIR must reject it before any backend.
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical List<string>.len build");
+    assert!(
+        !explicit.status.success(),
+        "unsupported List<string>.len unexpectedly entered canonical MIR:\n{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+
+    // Default routing remains the explicit compatibility route for this
+    // unsupported shape. It must not be mistaken for a canonical promotion.
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn compatibility List<string>.len build");
+    assert!(
+        default.status.success(),
+        "compatibility List<string>.len build failed:\n{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&default.stdout).contains("mimi_mir_list_len_scalar"),
+        "unsupported List<string>.len was promoted to canonical MIR:\n{}",
+        String::from_utf8_lossy(&default.stdout)
+    );
 }
 
 #[test]

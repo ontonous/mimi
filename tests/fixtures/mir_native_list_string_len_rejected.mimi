@@ -1,0 +1,12 @@
+// Negative Collection-Scalar Closure case: List.len has a Copy-scalar
+// element contract, so List<string> must be rejected by explicit MIR.
+func list_string_len() -> i32 {
+    let values: List<string> = ["a", "b"]
+    let count = len(values)
+    drop(values)
+    count
+}
+
+func main() -> i32 {
+    list_string_len()
+}
