@@ -102,6 +102,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirSetContains { .. } => "MIR_SET_CONTAINS",
         Op::MirSetInsert { .. } => "MIR_SET_INSERT",
         Op::MirSetRemove { .. } => "MIR_SET_REMOVE",
+        Op::MirSetToList { .. } => "MIR_SET_TO_LIST",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
@@ -639,6 +640,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} r{} = mir_set_remove_move(r{}, r{})",
             pc, name, rd, ra, rb
         ),
+        Op::MirSetToList { rd, ra } => {
+            format!("{:04}  {:<16} r{} = mir_set_to_list(r{})", pc, name, rd, ra)
+        }
         Op::NewVariant {
             rd,
             type_name,

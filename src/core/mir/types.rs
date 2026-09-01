@@ -1263,7 +1263,22 @@ impl MirTypeCatalog {
                 }
             }
             MirSetOperation::ToList => {
-                return Err("Set.to_list is outside the canonical Set production island".into());
+                if argument_ty.is_some() {
+                    return Err("Set.to_list does not accept an argument".into());
+                }
+                let MirLayout::List {
+                    element: list_element,
+                } = &result_desc.layout
+                else {
+                    return Err("Set.to_list result must have a canonical List<T> layout".into());
+                };
+                if list_element != element {
+                    return Err(
+                        "Set.to_list result List<T> element must match the Set<T> element".into(),
+                    );
+                }
+                self.validate_list_glue(result_ty, MirGlueOperation::MoveOut)
+                    .map_err(|message| format!("Set.to_list result is unsupported: {message}"))?;
             }
         }
         Ok(())
@@ -2937,6 +2952,17 @@ mod tests {
             .is_ok());
         assert!(catalog
             .validate_set_operation(&bool_id, &set_id, None, MirSetOperation::IsEmpty,)
+            .is_ok());
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog with List");
+        assert!(catalog
+            .validate_set_operation(&list_id, &set_id, None, MirSetOperation::ToList,)
             .is_ok());
         assert!(catalog
             .validate_set_operation(&set_id, &set_id, None, MirSetOperation::ToList,)

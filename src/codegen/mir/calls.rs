@@ -163,10 +163,40 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.emit_set_handle_result_abort(value.into_int_value(), subject)?;
                 Ok(value)
             }
-            MirSetOperation::ToList => Err(NativeMirError::new(
-                subject,
-                "Set.to_list is outside the canonical Set production island",
-            )),
+            MirSetOperation::ToList => {
+                let kind = native_list_kind(self.program.type_catalog(), &result_ty)?;
+                let kind_value = self
+                    .generator
+                    .context
+                    .i8_type()
+                    .const_int(kind as u64, false);
+                let function = self
+                    .generator
+                    .get_runtime_fn("mimi_mir_set_to_list_scalar")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            function,
+                            &[
+                                BasicMetadataValueEnum::from(set_handle),
+                                BasicMetadataValueEnum::from(kind_value),
+                            ],
+                            "mir_set_to_list",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "Set.to_list returned void"))?
+                .into_pointer_value();
+                self.emit_list_null_abort(
+                    value,
+                    subject,
+                    "canonical MIR Set.to_list allocation failed",
+                )?;
+                Ok(value.into())
+            }
         }
     }
 

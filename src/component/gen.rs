@@ -437,6 +437,12 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("kind", prim(I8))
             .effect("dealloc")
     });
+    gen.export("mimi_mir_set_to_list_scalar", |f| {
+        f.param("set", prim(I64))
+            .param("kind", prim(I8))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+    });
 
     // ── Map (runtime/mod.rs:1419-1805; MapHandle = usize, ValueHandle = usize) ──
     gen.export("mimi_map_new", |f| {

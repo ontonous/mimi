@@ -1243,6 +1243,56 @@ fn canonical_mir_native_build_list_index_matches_reference_and_bytecode() {
 }
 
 #[test]
+fn canonical_mir_native_set_to_list_matches_reference() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_set_to_list.mimi");
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical Set.to_list reference run");
+    assert_eq!(
+        reference.status.code(),
+        Some(42),
+        "canonical Set.to_list reference run failed:\n{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-set-to-list-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical Set.to_list native build");
+    assert!(
+        build.status.success(),
+        "canonical Set.to_list native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical Set.to_list native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(42),
+        "canonical Set.to_list native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+}
+
+#[test]
 fn canonical_mir_native_build_bool_list_index_matches_reference() {
     let fixture = project_root()
         .join("tests")

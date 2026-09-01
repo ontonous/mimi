@@ -1572,7 +1572,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.proto.emit(op);
             }
             MirSetOperation::ToList => {
-                self.error("Set.to_list is outside the canonical Set production island")
+                self.proto.emit(Op::MirSetToList { rd, ra });
             }
         }
     }
@@ -3013,6 +3013,42 @@ mod tests {
             report.mir_bytecode.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::Int(2))
         ));
+    }
+
+    #[test]
+    fn canonical_mir_set_to_list_is_sorted_and_ast_free() {
+        let source =
+            "func main() -> List<i32> { let values: Set<i32> = {3, 1, 2, 1}; values.to_list() }";
+        let (_, checked) = parse_and_check(source).expect("Set.to_list source check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical Set.to_list MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference Set.to_list execution");
+        assert_eq!(
+            reference,
+            MirRuntimeValue::List(vec![
+                MirRuntimeValue::Int(1),
+                MirRuntimeValue::Int(2),
+                MirRuntimeValue::Int(3),
+            ])
+        );
+
+        let bytecode = compile_mir_program(&mir).expect("canonical Set.to_list bytecode");
+        assert!(bytecode.ast.is_none());
+        assert!(bytecode.functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirSetToList { .. }))
+        }));
+        let observed = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("canonical Set.to_list bytecode execution");
+        assert_eq!(
+            normalize_value(observed).expect("normalize List result"),
+            reference
+        );
     }
 
     #[test]

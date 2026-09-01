@@ -1581,6 +1581,29 @@ mod canonical_mir_list_tests {
             assert!(mimi_mir_list_clone_scalar(std::ptr::null(), 99).is_null());
         }
     }
+
+    #[test]
+    fn canonical_scalar_set_to_list_uses_sorted_mir_list_ownership() {
+        let set = mimi_set_new();
+        unsafe {
+            assert_ne!(mimi_set_insert(set, 3), 0);
+            assert_ne!(mimi_set_insert(set, 1), 0);
+            assert_ne!(mimi_set_insert(set, 2), 0);
+            let list = mimi_mir_set_to_list_scalar(set, ListElementKind::I64 as i8);
+            assert!(!list.is_null());
+            assert_eq!((*list).element_kind, ListElementKind::I64);
+            assert_eq!(
+                mimi_mir_list_get_scalar(list, ListElementKind::I64 as i8, 0),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_get_scalar(list, ListElementKind::I64 as i8, -1),
+                3
+            );
+            mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
+            mimi_set_destroy(set);
+        }
+    }
 }
 
 /// Free the element pointers of a MimiList (NOT the data buffer, NOT the list struct).
@@ -21106,6 +21129,47 @@ pub unsafe extern "C" fn mimi_set_size(handle: SetHandle) -> i64 {
     }
     // SAFETY: handle validated by `set_from_handle`; deref is in a single scope.
     unsafe { set_from_handle(handle).inner.len() as i64 }
+}
+
+/// Materialize a scalar Set as a canonical MIR List.
+///
+/// The legacy `mimi_set_to_list` ABI returns a raw `i64` array whose ownership
+/// and layout are private to the old emitter. Canonical MIR must cross into
+/// the runtime through the canonical `MimiList` object instead. The `kind`
+/// argument is proven by the MIR TypeDesc (`I64` or `Bool`), and the values
+/// are sorted so HashSet iteration order cannot become observable backend
+/// divergence. A null result means an invalid handle, unsupported kind, or
+/// allocation/push failure; an empty Set still returns a non-null empty list.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_set_to_list_scalar(handle: SetHandle, kind: i8) -> *mut MimiList {
+    if handle == 0
+        || !matches!(kind, x if x == ListElementKind::I64 as i8 || x == ListElementKind::Bool as i8)
+    {
+        return std::ptr::null_mut();
+    }
+    let values = {
+        let set = match handle::set_acquire(handle) {
+            Ok(set) => set,
+            Err(error) => {
+                handle::set_handle_error(error);
+                return std::ptr::null_mut();
+            }
+        };
+        let mut values = set.inner.iter().copied().collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    };
+    let list = unsafe { mimi_mir_list_new_scalar(kind) };
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    for value in values {
+        if unsafe { mimi_mir_list_push_scalar(list, kind, value) } == 0 {
+            unsafe { mimi_list_free(list, false) };
+            return std::ptr::null_mut();
+        }
+    }
+    list
 }
 
 ///

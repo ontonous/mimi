@@ -748,6 +748,13 @@ pub enum Op {
         ra: Reg,
         rb: Reg,
     },
+    /// rd = sorted scalar list copy of Set ra. The MIR TypeDesc fixes both
+    /// the Set<T> and List<T> element ABI; the VM must not expose HashSet
+    /// iteration order as observable semantics.
+    MirSetToList {
+        rd: Reg,
+        ra: Reg,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1050,6 +1057,7 @@ impl Op {
             | NewSet { rd, .. }
             | ListGet { rd, .. }
             | ListPop { rd, .. }
+            | MirSetToList { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1290,6 +1298,7 @@ impl Op {
             | MirSetSize { ra, .. }
             | MirSetIsEmpty { ra, .. }
             | MirSetContains { ra, .. }
+            | MirSetToList { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
             | Ret { ra, .. }

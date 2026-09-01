@@ -985,6 +985,30 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_scalar_set_to_list_adapter() {
+        let program = canonical_program(
+            "func main() -> List<i32> { let values: Set<i32> = {3, 1, 2, 1}; values.to_list() }",
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_scalar_set_to_list_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar Set.to_list MIR should have a canonical ABI adapter");
+        generator
+            .module
+            .verify()
+            .expect("native scalar Set.to_list module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_set_to_list_scalar")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_scalar")
+            .is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_scalar_generic_identity() {
         let program = canonical_program(
             "func identity<T>(value: T) -> T { value }\nfunc main() -> i32 { identity(41) }",

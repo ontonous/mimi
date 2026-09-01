@@ -2180,7 +2180,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .validate_set_construct(&result_ty, &element_types)
                     .map_err(|message| self.error(&function.owner, message))?;
                 let elements = self.take_transfer_values(function, values, elements)?;
-                values.insert(result.clone(), MirRuntimeValue::Set(elements));
+                // A Set literal is semantically the same insertion sequence
+                // used by the production backends: duplicate members do not
+                // survive construction.  Keeping the oracle as a raw Vec
+                // must not leak that representation detail into L1 results.
+                let mut unique = Vec::with_capacity(elements.len());
+                for element in elements {
+                    if !unique.iter().any(|existing| existing == &element) {
+                        unique.push(element);
+                    }
+                }
+                values.insert(result.clone(), MirRuntimeValue::Set(unique));
             }
             MirInstructionKind::SetOp {
                 result,
@@ -2266,10 +2276,28 @@ impl<'a> MirReferenceInterpreter<'a> {
                         MirRuntimeValue::Set(set)
                     }
                     super::MirSetOperation::ToList => {
-                        return Err(self.error(
-                            &function.owner,
-                            "Set.to_list is outside the canonical Set production island",
-                        ));
+                        let mut values = match self.read_value(function, values, set)? {
+                            MirRuntimeValue::Set(values) => values,
+                            _ => {
+                                return Err(self
+                                    .error(&function.owner, "Set.to_list receiver is not a Set"))
+                            }
+                        };
+                        // Set storage is semantically unordered. The
+                        // canonical scalar Set contract exposes a sorted
+                        // List view so the reference, VM, and native
+                        // HashSet-backed implementation have one observable
+                        // result independent of insertion/iteration order.
+                        values.sort_by(|left, right| match (left, right) {
+                            (MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)) => {
+                                left.cmp(right)
+                            }
+                            (MirRuntimeValue::Bool(left), MirRuntimeValue::Bool(right)) => {
+                                left.cmp(right)
+                            }
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                        MirRuntimeValue::List(values)
                     }
                 };
                 values.insert(result.clone(), output);

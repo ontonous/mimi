@@ -42,6 +42,12 @@ enum SymbolicValue {
         elements: Z3Set,
         size: Int,
     },
+    /// A scalar canonical List is represented by its length in the verifier.
+    /// Set-to-list does not expose HashSet iteration order as a proof
+    /// obligation; the runtime order is fixed by the MIR contract.
+    List {
+        length: Int,
+    },
     /// A symbolic built-in Option/Result value.  The tag is constrained to
     /// the canonical TypeDesc discriminants when the value is introduced;
     /// payloads are keyed by stable field identity so switch bindings never
@@ -358,6 +364,16 @@ fn symbolic_value_for_type(
                 size: size.clone(),
             },
             vec![size.ge(Int::from_i64(0))],
+        ));
+    }
+    if descriptor.kind == MirTypeKind::List {
+        catalog.validate_list_glue(ty, MirGlueOperation::MoveOut)?;
+        let length = Int::new_const(format!("{name}.length"));
+        return Ok((
+            SymbolicValue::List {
+                length: length.clone(),
+            },
+            vec![length.ge(Int::from_i64(0))],
         ));
     }
     if descriptor.ownership != MirOwnership::Copy
@@ -1292,9 +1308,25 @@ fn eval_instruction(
                     }
                 }
                 crate::core::mir::MirSetOperation::ToList => {
-                    return Err(
-                        "MIR verifier Set.to_list is outside the canonical Set contract".into(),
-                    )
+                    let list_desc = catalog.get(&result_ty).ok_or_else(|| {
+                        "MIR verifier Set.to_list result TypeDesc is absent".to_string()
+                    })?;
+                    let MirLayout::List { element } = &list_desc.layout else {
+                        return Err("MIR verifier Set.to_list result has no List layout".into());
+                    };
+                    let set_desc = catalog.get(&set_ty).ok_or_else(|| {
+                        "MIR verifier Set.to_list receiver TypeDesc is absent".to_string()
+                    })?;
+                    let MirLayout::Set {
+                        element: set_element,
+                    } = &set_desc.layout
+                    else {
+                        return Err("MIR verifier Set.to_list receiver has no Set layout".into());
+                    };
+                    if element != set_element {
+                        return Err("MIR verifier Set.to_list element types disagree".into());
+                    }
+                    SymbolicValue::List { length: size }
                 }
             };
             ensure_result_shape(function, catalog, result, &output)?;
@@ -1632,6 +1664,9 @@ fn symbolic_matches_type(
         (MirLayout::Set { .. }, MirAbiClass::SetHandle, SymbolicValue::Set { .. }) => catalog
             .validate_set_glue(ty, MirGlueOperation::MoveOut)
             .is_ok(),
+        (MirLayout::List { .. }, MirAbiClass::OpaqueHandle, SymbolicValue::List { .. }) => catalog
+            .validate_list_glue(ty, MirGlueOperation::MoveOut)
+            .is_ok(),
         (
             MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. },
             MirAbiClass::Aggregate,
@@ -1873,6 +1908,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
         | SymbolicValue::Tuple(_)
         | SymbolicValue::Record { .. }
         | SymbolicValue::Set { .. }
+        | SymbolicValue::List { .. }
         | SymbolicValue::Variant { .. } => Err(format!("{context} is not boolean")),
     }
 }
@@ -2293,6 +2329,11 @@ mod tests {
                 removed.size()
             }
 
+            func list_view(values: Set<i32>) -> List<i32> {
+                ensures: true
+                values.to_list()
+            }
+
             func main() -> i32 { 0 }
         "#;
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -2311,6 +2352,12 @@ mod tests {
             .find(|owner| owner.0.ends_with("normalize"))
             .cloned()
             .expect("normalize MIR function");
+        let list_view_owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("list_view"))
+            .cloned()
+            .expect("list_view MIR function");
 
         let size = MirReferenceInterpreter::new(&program)
             .execute(
@@ -2327,9 +2374,27 @@ mod tests {
             .execute(&normalize_owner, &[])
             .expect("reference Set construction execution");
         assert_eq!(normalized, MirRuntimeValue::Int(2));
+        let list = MirReferenceInterpreter::new(&program)
+            .execute(
+                &list_view_owner,
+                &[MirRuntimeValue::Set(vec![
+                    MirRuntimeValue::Int(3),
+                    MirRuntimeValue::Int(1),
+                    MirRuntimeValue::Int(2),
+                ])],
+            )
+            .expect("reference Set.to_list execution");
+        assert_eq!(
+            list,
+            MirRuntimeValue::List(vec![
+                MirRuntimeValue::Int(1),
+                MirRuntimeValue::Int(2),
+                MirRuntimeValue::Int(3),
+            ])
+        );
 
         let results = verify_program(&program, "set-source-hash".into()).expect("verify MIR");
-        for owner in [size_owner, normalize_owner] {
+        for owner in [size_owner, normalize_owner, list_view_owner] {
             let result = results
                 .iter()
                 .find(|result| result.func_name == owner.0)

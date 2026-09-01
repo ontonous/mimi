@@ -2558,6 +2558,27 @@ impl BytecodeVM {
                     values.retain(|value| value != &needle);
                     self.set_reg(rd, Value::Set(values));
                 }
+                Op::MirSetToList { rd, ra } => {
+                    let mut values = match self.get_reg(ra) {
+                        Value::Set(values) => values.clone(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "canonical Set.to_list: expected Set, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    // Canonical Set<T> currently admits only scalar signed
+                    // integers and bools. Keep the ordering rule here
+                    // explicit so HashSet/Vec implementation details do not
+                    // leak into L1 observable List results.
+                    values.sort_by(|left, right| match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => left.cmp(right),
+                        (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
+                        _ => std::cmp::Ordering::Equal,
+                    });
+                    self.set_reg(rd, Value::List(std::sync::Arc::new(values)));
+                }
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {

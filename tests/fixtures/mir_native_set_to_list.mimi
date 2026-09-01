@@ -1,0 +1,13 @@
+func make_values() -> List<i32> {
+    let values: Set<i32> = {3, 1, 2, 1}
+    values.to_list()
+}
+
+func main() -> i32 {
+    let values = make_values()
+    if values[0] == 1 {
+        if values[2] == 3 { 42 } else { 0 }
+    } else {
+        0
+    }
+}
