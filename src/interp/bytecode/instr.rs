@@ -1156,6 +1156,7 @@ impl Op {
             | Op::NewList { rd, .. }
             | Op::NewTuple { rd, .. }
             | Op::NewRecord { rd, .. }
+            | Op::UpdateRecord { rd, .. }
             | Op::NewVariant { rd, .. }
             | Op::NewVariantMove { rd, .. }
             | Op::NewMap { rd, .. }

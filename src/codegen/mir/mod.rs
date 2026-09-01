@@ -38,8 +38,8 @@ mod eligibility;
 mod validate;
 
 use abi::{
-    is_native_scalar_descriptor, native_basic_type, native_copy_variant_payload_type,
-    native_list_kind, native_non_copy_variant_payload_type, validate_native_non_copy_record_type,
+    native_basic_type, native_copy_variant_payload_type, native_list_kind,
+    native_non_copy_variant_payload_type, validate_native_non_copy_record_type,
     validate_native_product_type, validate_native_recursive_tuple_type,
 };
 pub use eligibility::validate_mir_native;

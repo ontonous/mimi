@@ -7435,6 +7435,36 @@ mod peephole_tests {
     }
 
     #[test]
+    fn peephole_fuses_record_update_mov_preserving_destination() {
+        let mut code = vec![
+            Op::UpdateRecord {
+                rd: 8,
+                type_name: 0,
+                ra: 5,
+                base: 6,
+                count: 1,
+            },
+            Op::Mov { rd: 9, rs: 8 },
+            Op::RecordGet {
+                rd: 10,
+                ra: 9,
+                field: 1,
+            },
+            Op::Ret { ra: 10 },
+        ];
+        peephole_optimize(&mut code);
+        assert_eq!(
+            code.len(),
+            3,
+            "record binding MOV should be fused: {code:?}"
+        );
+        assert!(
+            matches!(code[0], Op::UpdateRecord { rd: 9, .. }),
+            "record update destination must follow the fused binding: {code:?}"
+        );
+    }
+
+    #[test]
     fn licm_hoists_loop_invariant_loadconst() {
         // Loop: header LoadConst(9) is read only inside the loop → hoist.
         // 0 LoadConst r7=0; 1 LoadConst r9=<bound>; 2 LtInt r10=r7<r9;

@@ -672,6 +672,110 @@ fn canonical_mir_native_record_update_matches_mir_run() {
 }
 
 #[test]
+fn default_copy_record_update_selects_canonical_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_record_update.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default record update run");
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "default canonical record update run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let default_build_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default canonical record update build");
+    assert!(
+        default_build_ir.status.success(),
+        "default canonical record update build failed:\n{}",
+        String::from_utf8_lossy(&default_build_ir.stderr)
+    );
+    let ir = String::from_utf8_lossy(&default_build_ir.stdout);
+    assert!(
+        ir.contains("define i32 @main()"),
+        "default record update did not select the canonical MIR route:\n{ir}"
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-canonical-record-update-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default canonical record update native build");
+    assert!(
+        build.status.success(),
+        "default canonical record update native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default canonical record update binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(42),
+        "default canonical record update native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default canonical record update verifier");
+    assert!(
+        verification.status.success(),
+        "default canonical record update verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+}
+
+#[test]
+fn canonical_default_does_not_promote_non_copy_record_program() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_non_copy_record.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default non-Copy record build");
+    assert!(
+        output.status.success(),
+        "default non-Copy record compatibility build failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ir = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ir.contains("define i32 @main(i32 %0, ptr %1)"),
+        "non-Copy record was promoted to the flat Copy canonical island:\n{ir}"
+    );
+}
+
+#[test]
 fn canonical_mir_native_borrow_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

@@ -40,29 +40,33 @@ pub(crate) fn build_canonical_program(
 
 /// Select a default route for a complete checked program.
 ///
-/// The current default-switch island is deliberately narrow: it must contain
-/// a checker-selected scalar Set facade instance.  The candidate then has to
-/// pass every consumer preflight before any caller starts execution or LLVM
-/// emission.  Returning `Legacy` means the program has not entered this
-/// migrated island; it is not a backend fallback after a canonical emission
-/// attempt.
+/// The current default-switch islands are deliberately narrow: a program must
+/// contain either a checker-selected scalar Set facade instance or a flat Copy
+/// record value. The candidate then has to pass every consumer preflight before
+/// any caller starts execution or LLVM emission. Returning `Legacy` means the
+/// program has not entered a migrated island; it is not a backend fallback
+/// after a canonical emission attempt.
 pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
-    if !may_contain_typed_set_facade(checked, merged_file) {
+    let set_candidate = may_contain_typed_set_facade(checked, merged_file);
+    let record_candidate = may_contain_user_record(checked, merged_file);
+    if !set_candidate && !record_candidate {
         return DefaultMirRoute::Legacy;
     }
 
     let Ok(canonical) = build_canonical_program(checked, merged_file) else {
         return DefaultMirRoute::Legacy;
     };
-    if !canonical.instances().values().any(|instance| {
+    let set_instance = canonical.instances().values().any(|instance| {
         matches!(
             instance.contract,
             MirGenericInstanceContract::ScalarSetFacade { .. }
         )
-    }) {
+    });
+    let copy_record = may_contain_flat_copy_record(&canonical);
+    if (!set_candidate || !set_instance) && (!record_candidate || !copy_record) {
         return DefaultMirRoute::Legacy;
     }
 
@@ -93,6 +97,45 @@ pub(crate) fn select_default_route(
     }
 
     DefaultMirRoute::Canonical(canonical)
+}
+
+fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool {
+    let excluded_sources = merged_file
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    checked.type_defs().values().any(|type_def| {
+        type_def.kind == mimi::core::ResolvedTypeKind::Record
+            && !excluded_sources.contains(&type_def.origin.user_span().source_id)
+    })
+}
+
+fn may_contain_flat_copy_record(canonical: &MirProgram) -> bool {
+    canonical.functions().values().any(|function| {
+        function
+            .parameters
+            .iter()
+            .filter_map(|parameter| function.values.get(parameter))
+            .any(|value| {
+                canonical
+                    .type_catalog()
+                    .validate_flat_copy_record(&value.ty)
+                    .is_ok()
+            })
+            || canonical
+                .type_catalog()
+                .validate_flat_copy_record(&function.result)
+                .is_ok()
+            || function.values.values().any(|value| {
+                canonical
+                    .type_catalog()
+                    .validate_flat_copy_record(&value.ty)
+                    .is_ok()
+            })
+    })
 }
 
 fn may_contain_typed_set_facade(checked: &CheckedProgram, merged_file: &File) -> bool {

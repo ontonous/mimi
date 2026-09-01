@@ -206,7 +206,7 @@ impl<'a> NativeMirValidator<'a> {
             }
         } else if is_record {
             if desc.ownership == MirOwnership::Copy {
-                self.validate_flat_copy_record(ty, subject, desc)
+                self.validate_flat_copy_record(ty, subject)
             } else {
                 match validate_native_non_copy_record_type(self.program.type_catalog(), ty) {
                     Ok(()) => true,
@@ -241,7 +241,7 @@ impl<'a> NativeMirValidator<'a> {
                 || (allow_unit_result
                     && desc.abi == MirAbiClass::Unit
                     && desc.layout == MirLayout::Unit)
-                || self.validate_flat_copy_record(ty, subject, desc)
+                || self.validate_flat_copy_record(ty, subject)
         };
         if !supported {
             let contract = if is_owned_string {
@@ -307,70 +307,14 @@ impl<'a> NativeMirValidator<'a> {
         &mut self,
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
-        desc: &MirTypeDesc,
     ) -> bool {
-        let MirLayout::Record { fields, .. } = &desc.layout else {
-            return false;
-        };
-        if desc.ownership != MirOwnership::Copy
-            || desc.needs_drop_glue
-            || desc.needs_clone_glue
-            || desc.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-        {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "record TypeDesc is not in the flat Copy record contract",
-            ));
-            return false;
-        }
-        if desc.abi != MirAbiClass::Aggregate {
-            return false;
-        }
-        if fields.is_empty() {
-            self.errors.push(NativeMirError::new(
-                subject,
-                format!(
-                    "record TypeDesc '{}' has no fields in the native ABI",
-                    ty.as_str()
-                ),
-            ));
-            return false;
-        }
-        let mut valid = true;
-        let mut field_ids = BTreeSet::new();
-        for field in fields {
-            if !field_ids.insert(&field.id) {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    format!("record field identity '{}' is duplicated", field.id.0),
-                ));
-                valid = false;
-            }
-            let Some(field_desc) = self.program.type_catalog().get(&field.ty) else {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    format!("record field '{}' TypeDesc is absent", field.name),
-                ));
-                valid = false;
-                continue;
-            };
-            if !is_native_scalar_descriptor(field_desc) {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    format!(
-                        "record field '{}' ABI {:?}/layout {:?} is outside the flat Copy record contract",
-                        field.name, field_desc.abi, field_desc.layout
-                    ),
-                ));
-                valid = false;
+        match self.program.type_catalog().validate_flat_copy_record(ty) {
+            Ok(()) => true,
+            Err(message) => {
+                self.errors.push(NativeMirError::new(subject, message));
+                false
             }
         }
-        valid
     }
 
     fn validate_flat_copy_variant(

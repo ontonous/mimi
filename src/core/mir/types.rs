@@ -845,22 +845,10 @@ impl MirTypeCatalog {
         self.entries.get(id)
     }
 
-    /// Validate the argument side of the first concrete generic MIR
-    /// instance contract.  This is deliberately narrower than the complete
-    /// scalar universe: native and MIR verifier must agree on signed i32/i64
-    /// and bool, with Copy/no-op glue and no ownership transfer at the call
-    /// boundary.
-    pub fn validate_scalar_generic_arguments(
-        &self,
-        arguments: &[ResolvedTypeId],
-    ) -> Result<(), String> {
-        if arguments.len() != 1 {
-            return Err(format!(
-                "scalar generic identity contract requires one type argument, got {}",
-                arguments.len()
-            ));
-        }
-        let ty = &arguments[0];
+    /// Validate the closed Copy scalar leaf contract shared by the production
+    /// consumers. A scalar leaf is a signed i32/i64 or bool with scalar
+    /// layout and no-op glue; this is a TypeDesc fact, not a backend probe.
+    pub fn validate_copy_scalar(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
@@ -888,6 +876,81 @@ impl MirTypeCatalog {
             ));
         }
         Ok(())
+    }
+
+    /// Validate the flat Copy record production contract shared by the
+    /// selector and all consumers. Records must have stable, non-empty
+    /// aggregate layout, no ownership glue, and scalar leaf fields only.
+    /// Nested products and non-Copy fields stay outside this island until
+    /// their own aggregate contract is promoted.
+    pub fn validate_flat_copy_record(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        let MirLayout::Record { fields, .. } = &descriptor.layout else {
+            return Err(format!(
+                "type '{}' has no canonical record layout",
+                ty.as_str()
+            ));
+        };
+        if descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(format!(
+                "record type '{}' is not in the flat Copy record contract",
+                ty.as_str()
+            ));
+        }
+        if descriptor.abi != MirAbiClass::Aggregate || fields.is_empty() {
+            return Err(format!(
+                "record type '{}' has no non-empty aggregate ABI",
+                ty.as_str()
+            ));
+        }
+        let mut field_ids = BTreeSet::new();
+        for field in fields {
+            if !field_ids.insert(&field.id) {
+                return Err(format!(
+                    "record type '{}' repeats field identity '{}'",
+                    ty.as_str(),
+                    field.id.0
+                ));
+            }
+            self.validate_copy_scalar(&field.ty).map_err(|message| {
+                format!(
+                    "record type '{}' field '{}' is outside the flat Copy record contract: {message}",
+                    ty.as_str(),
+                    field.name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Validate the argument side of the first concrete generic MIR
+    /// instance contract.  This is deliberately narrower than the complete
+    /// scalar universe: native and MIR verifier must agree on signed i32/i64
+    /// and bool, with Copy/no-op glue and no ownership transfer at the call
+    /// boundary.
+    pub fn validate_scalar_generic_arguments(
+        &self,
+        arguments: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        if arguments.len() != 1 {
+            return Err(format!(
+                "scalar generic identity contract requires one type argument, got {}",
+                arguments.len()
+            ));
+        }
+        let ty = &arguments[0];
+        self.validate_copy_scalar(ty)
     }
 
     /// Validate a value boundary against the canonical glue contract.  The
@@ -3328,6 +3391,7 @@ mod tests {
             ["x", "y"]
         );
         assert!(point.1.iter().all(|field| catalog.get(&field.ty).is_some()));
+        assert!(catalog.validate_flat_copy_record(&point.0.id).is_ok());
     }
 
     #[test]
@@ -3378,6 +3442,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["name", "count"]
         );
+        assert!(catalog.validate_flat_copy_record(&named.0.id).is_err());
         catalog
             .validate_aggregate_glue(&named.0.id, MirGlueOperation::Drop)
             .expect("record drop schedule");
