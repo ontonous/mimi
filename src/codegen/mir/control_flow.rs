@@ -92,15 +92,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<(), NativeMirError> {
         let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
         let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
-        let payload_ty =
-            native_non_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_ty)?;
-        let (_, variants) = self
+        let (_empty_variant, payload_variant, payload_ty) = self
             .program
             .type_catalog()
-            .variant_layout(&scrutinee_ty)
-            .ok_or_else(|| {
-                NativeMirError::new(subject.to_string(), "switch-move has no TypeDesc layout")
-            })?;
+            .validated_option_string_variants(&scrutinee_ty)
+            .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
         let tag = self
             .generator
             .builder
@@ -119,19 +115,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "native Option<string> SwitchMove requires explicit variant arms",
                 ));
             };
-            let variant = variants
-                .iter()
-                .find(|candidate| candidate.id == *variant_id)
-                .ok_or_else(|| {
-                    NativeMirError::new(
-                        subject.to_string(),
-                        format!(
-                            "switch-move variant '{}' is absent from TypeDesc",
-                            variant_id.0
-                        ),
-                    )
-                })?;
-            if variant.fields.len() == 1 && variant.fields[0].ty != payload_ty {
+            let variant = self
+                .program
+                .type_catalog()
+                .validated_option_string_variant(&scrutinee_ty, variant_id)
+                .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
+            let has_payload = variant.id == payload_variant.id;
+            if has_payload
+                && variant
+                    .fields
+                    .first()
+                    .is_some_and(|field| field.ty != payload_ty)
+            {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "switch-move payload field disagrees with the native Option<string> TypeDesc contract",
@@ -166,7 +161,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 None
             };
 
-            if variant.fields.len() == 1 && arm.bindings.is_empty() {
+            if has_payload && arm.bindings.is_empty() {
                 let drop_payload = self
                     .generator
                     .context

@@ -3116,6 +3116,28 @@ impl MirTypeCatalog {
         Ok((none, some, inner))
     }
 
+    /// Resolve one active variant from the already-validated narrow
+    /// Option<string> contract.  Consumers must select by stable identity;
+    /// payload arity and physical representation are not variant semantics.
+    pub fn validated_option_string_variant(
+        &self,
+        ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+    ) -> Result<&MirVariantDesc, String> {
+        let (none, some, _) = self.validated_option_string_variants(ty)?;
+        if variant_id == &none.id {
+            return Ok(none);
+        }
+        if variant_id == &some.id {
+            return Ok(some);
+        }
+        Err(format!(
+            "variant '{}' is absent from TypeDesc for canonical Option<string> type '{}'",
+            variant_id.0,
+            ty.as_str()
+        ))
+    }
+
     /// Return the canonical nominal label and discriminant/payload table for
     /// the built-in Option/Result families.  User enum layouts remain
     /// fail-closed until their schema is promoted into this catalog.

@@ -1240,20 +1240,19 @@ impl<'a> NativeMirValidator<'a> {
             return;
         }
 
-        let Some((_, variants)) = self
+        let (none_variant, some_variant, _) = match self
             .program
             .type_catalog()
-            .variant_layout(&scrutinee_value.ty)
-        else {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "switch-move has no canonical variant layout",
-            ));
-            return;
+            .validated_option_string_variants(&scrutinee_value.ty)
+        {
+            Ok(variants) => variants,
+            Err(message) => {
+                self.errors.push(NativeMirError::new(subject, message));
+                return;
+            }
         };
-        let required = variants
-            .iter()
-            .map(|variant| variant.id.clone())
+        let required = [none_variant.id.clone(), some_variant.id.clone()]
+            .into_iter()
             .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
         if arms.len() != required.len() {
@@ -1271,19 +1270,16 @@ impl<'a> NativeMirValidator<'a> {
                 ));
                 continue;
             };
-            let Some(variant) = self
+            let variant = match self
                 .program
                 .type_catalog()
-                .variant(&scrutinee_value.ty, variant_id)
-            else {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    format!(
-                        "switch-move variant '{}' is absent from TypeDesc",
-                        variant_id.0
-                    ),
-                ));
-                continue;
+                .validated_option_string_variant(&scrutinee_value.ty, variant_id)
+            {
+                Ok(variant) => variant,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    continue;
+                }
             };
             if !seen.insert(variant.id.clone()) {
                 self.errors.push(NativeMirError::new(
