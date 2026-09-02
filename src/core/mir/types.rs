@@ -1762,11 +1762,25 @@ impl MirTypeCatalog {
         }
 
         for (index, element) in elements.iter().enumerate() {
+            let child = self.get(element).ok_or_else(|| {
+                format!(
+                    "tuple '{}' field {} type '{}' is absent from MIR TypeDesc catalog",
+                    ty.as_str(),
+                    index,
+                    element.as_str()
+                )
+            })?;
+            if descriptor.ownership == MirOwnership::Copy && child.ownership != MirOwnership::Copy {
+                return Err(format!(
+                    "Copy tuple '{}' field {} type '{}' is non-Copy and cannot be hidden by a Copy parent",
+                    ty.as_str(),
+                    index,
+                    element.as_str()
+                ));
+            }
             let supported = self.validate_copy_scalar(element).is_ok()
                 || self.validate_owned_string(element).is_ok()
-                || self
-                    .get(element)
-                    .is_some_and(|descriptor| matches!(descriptor.layout, MirLayout::Tuple(_)));
+                || matches!(child.layout, MirLayout::Tuple(_));
             if !supported {
                 return Err(format!(
                     "tuple '{}' field {} type '{}' is outside the scalar/String/tuple ABI",
@@ -1775,10 +1789,7 @@ impl MirTypeCatalog {
                     element.as_str()
                 ));
             }
-            if self
-                .get(element)
-                .is_some_and(|descriptor| matches!(descriptor.layout, MirLayout::Tuple(_)))
-            {
+            if matches!(child.layout, MirLayout::Tuple(_)) {
                 self.validate_recursive_tuple_abi_inner(element, visiting)?;
             }
         }
@@ -3578,6 +3589,46 @@ mod tests {
         assert!(catalog
             .validate_aggregate_glue(&nested_id, MirGlueOperation::Drop)
             .is_ok());
+    }
+
+    #[test]
+    fn recursive_tuple_rejects_copy_parent_hiding_move_child() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string type");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32 type");
+        let move_child_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![string_id, i32_id]))
+            .expect("move child tuple");
+        let parent_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![move_child_id.clone()]))
+            .expect("parent tuple");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        // A production catalog derives this ownership from the child graph.
+        // Mutating the descriptor here models malformed MIR supplied to a
+        // consumer and ensures the shared validator does not trust the parent
+        // flag over the child TypeDesc contract.
+        let mut forged_parent = catalog.get(&parent_id).expect("parent descriptor").clone();
+        forged_parent.ownership = MirOwnership::Copy;
+        forged_parent.needs_drop_glue = false;
+        forged_parent.needs_clone_glue = false;
+        forged_parent.glue = super::MirGlueContract {
+            move_out: MirGlueKind::Noop,
+            clone: MirGlueKind::Noop,
+            drop: MirGlueKind::Noop,
+        };
+        forged_parent.drop_plan = None;
+        catalog.replace_for_test_only(parent_id.clone(), forged_parent);
+
+        let error = catalog
+            .validate_recursive_tuple_abi(&parent_id)
+            .expect_err("Copy parent must not hide a move-owned tuple child");
+        assert!(error.contains("Copy tuple"), "{error}");
+        assert!(error.contains("non-Copy"), "{error}");
     }
 
     #[test]
