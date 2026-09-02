@@ -639,8 +639,8 @@ impl BytecodeVM {
                     let expected_arity = match proto.constants.get(shapes as usize) {
                         Some(ConstValue::VariantShapes(shapes)) => shapes
                             .iter()
-                            .find(|(tag, _)| tag == actual_tag)
-                            .map(|(_, arity)| *arity),
+                            .find(|shape| shape.tag == actual_tag)
+                            .map(|shape| shape.arity),
                         Some(_) => {
                             return Err(InterpError::new(format!(
                                 "variant drop: shapes constant {} is not a VariantShapes table",
@@ -2835,15 +2835,10 @@ impl BytecodeVM {
                     variant,
                     base,
                     arity,
+                    shapes,
                 } => {
-                    let tag = match &proto.constants[type_name as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => {
-                            // Fall back to generic variant label for
-                            // multi-variant enums without per-variant labels.
-                            format!("variant_{}", variant)
-                        }
-                    };
+                    let tag =
+                        Self::variant_construction_tag(proto, type_name, variant, arity, shapes)?;
                     let payload: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
                     self.set_reg(rd, Value::Variant(tag, payload));
@@ -2854,11 +2849,10 @@ impl BytecodeVM {
                     variant,
                     base,
                     arity,
+                    shapes,
                 } => {
-                    let tag = match &proto.constants[type_name as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => format!("variant_{}", variant),
-                    };
+                    let tag =
+                        Self::variant_construction_tag(proto, type_name, variant, arity, shapes)?;
                     let payload: Vec<Value> = (0..arity)
                         .map(|i| {
                             let frame = self.cur_frame_mut();
@@ -4282,6 +4276,74 @@ impl BytecodeVM {
             Some(ConstValue::Str(s)) => Ok(s),
             _ => Err(InterpError::new("expected Str constant")),
         }
+    }
+
+    /// Resolve the runtime tag for a variant construction and, for canonical
+    /// MIR instructions, prove that its tag/discriminant/arity triple is the
+    /// one emitted from the TypeDesc shape table.  Legacy bytecode has no
+    /// shape-table operand, but still must provide a real string tag; the
+    /// old `variant_{n}` fallback would allow malformed bytecode to invent a
+    /// value outside the checked MIR contract.
+    fn variant_construction_tag(
+        proto: &FunctionProto,
+        type_name: ConstIdx,
+        variant: VariantIdx,
+        arity: u16,
+        shapes: Option<ConstIdx>,
+    ) -> Result<String, InterpError> {
+        let tag = match proto.constants.get(type_name as usize) {
+            Some(ConstValue::Str(tag)) => tag.clone(),
+            Some(_) => {
+                return Err(InterpError::new(format!(
+                    "variant construction: tag constant {} is not a string",
+                    type_name
+                )))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "variant construction: tag constant {} is absent",
+                    type_name
+                )))
+            }
+        };
+
+        let Some(shapes_idx) = shapes else {
+            return Ok(tag);
+        };
+        let shape = match proto.constants.get(shapes_idx as usize) {
+            Some(ConstValue::VariantShapes(shapes)) => shapes.iter().find(|shape| shape.tag == tag),
+            Some(_) => {
+                return Err(InterpError::new(format!(
+                    "variant construction: shapes constant {} is not a VariantShapes table",
+                    shapes_idx
+                )))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "variant construction: shapes constant {} is absent",
+                    shapes_idx
+                )))
+            }
+        };
+        let Some(shape) = shape else {
+            return Err(InterpError::new(format!(
+                "variant construction: tag '{}' is absent from canonical shape table",
+                tag
+            )));
+        };
+        if shape.discriminant != variant {
+            return Err(InterpError::new(format!(
+                "variant construction: tag '{}' has discriminant {}, opcode carries {}",
+                tag, shape.discriminant, variant
+            )));
+        }
+        if shape.arity != arity {
+            return Err(InterpError::new(format!(
+                "variant construction: tag '{}' expects {} payload fields, opcode carries {}",
+                tag, shape.arity, arity
+            )));
+        }
+        Ok(tag)
     }
 
     /// Pop the top of the quote assembly stack.

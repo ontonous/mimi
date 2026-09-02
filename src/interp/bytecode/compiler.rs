@@ -1876,6 +1876,7 @@ impl BytecodeCompiler {
                         variant: 0,
                         base: 0,
                         arity: 0,
+                        shapes: None,
                     });
                     return Ok(rd);
                 }
@@ -1976,6 +1977,7 @@ impl BytecodeCompiler {
                             variant: 0,
                             base: 0,
                             arity: 0,
+                            shapes: None,
                         });
                         return Ok(rd);
                     }
@@ -3673,6 +3675,7 @@ impl BytecodeCompiler {
                     variant: 0,
                     base: args_base,
                     arity: args.len() as u16,
+                    shapes: None,
                 });
                 return Ok(rd);
             }
@@ -3791,6 +3794,7 @@ impl BytecodeCompiler {
                         variant: 0,
                         base: args_base,
                         arity: args.len() as u16,
+                        shapes: None,
                     });
                     return Ok(rd);
                 }

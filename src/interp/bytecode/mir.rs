@@ -23,7 +23,9 @@ use crate::core::mir::{
 };
 use crate::core::NodeId;
 
-use super::instr::{BytecodeProgram, ConstValue, FuncIdx, FunctionProto, Op, Reg};
+use super::instr::{
+    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, Op, Reg, VariantShape,
+};
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1944,6 +1946,9 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant payload arity exceeds bytecode aggregate ABI");
             return;
         }
+        let Some(shapes) = self.emit_variant_shape_table(&result_desc.id) else {
+            return;
+        };
         let base = self.proto.alloc_reg();
         for (index, field_desc) in variant_desc.fields.iter().enumerate() {
             let Some(value) = supplied.get(&field_desc.id) else {
@@ -1980,6 +1985,7 @@ impl<'a> FunctionEmitter<'a> {
                 variant: variant_desc.discriminant,
                 base,
                 arity: variant_desc.fields.len() as u16,
+                shapes: Some(shapes),
             }
         } else {
             Op::NewVariant {
@@ -1988,6 +1994,7 @@ impl<'a> FunctionEmitter<'a> {
                 variant: variant_desc.discriminant,
                 base,
                 arity: variant_desc.fields.len() as u16,
+                shapes: Some(shapes),
             }
         });
     }
@@ -2525,48 +2532,64 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_drop_variant(&mut self, register: Reg, ty: &crate::core::ResolvedTypeId) {
-        let (nominal, variants) = match self
-            .program
-            .type_catalog()
-            .validated_variant_drop_contract_table(ty)
-        {
-            Ok(contract) => contract,
-            Err(message) => {
-                self.error(format!(
-                    "variant drop type '{}' is unsupported: {message}",
-                    ty.as_str()
-                ));
-                return;
-            }
-        };
-        if variants.is_empty() {
-            self.error(format!(
-                "variant drop type '{}' has an empty canonical variant table",
-                nominal
-            ));
+        let Some(shapes) = self.emit_variant_drop_shape_table(ty) else {
             return;
-        }
-        let mut tags = std::collections::BTreeSet::new();
-        let mut shapes = Vec::with_capacity(variants.len());
-        for variant in variants {
-            if !tags.insert(&variant.name) {
-                self.error(format!(
-                    "variant drop type '{}' has duplicate bytecode tag '{}'",
-                    nominal, variant.name
-                ));
-                return;
-            }
-            if variant.fields.len() > u16::MAX as usize {
-                self.error("variant drop payload arity exceeds bytecode ABI");
-                return;
-            }
-            shapes.push((variant.name.clone(), variant.fields.len() as u16));
-        }
-        let shapes = self.proto.add_const(ConstValue::VariantShapes(shapes));
+        };
         self.proto.emit(Op::DropVariant {
             ra: register,
             shapes,
         });
+    }
+
+    fn emit_variant_shape_table(&mut self, ty: &crate::core::ResolvedTypeId) -> Option<ConstIdx> {
+        let (nominal, variants) = match self
+            .program
+            .type_catalog()
+            .validated_variant_shape_table(ty)
+        {
+            Ok(contract) => contract,
+            Err(message) => {
+                self.error(format!(
+                    "variant construction type '{}' is unsupported: {message}",
+                    ty.as_str()
+                ));
+                return None;
+            }
+        };
+        let mut shapes = Vec::with_capacity(variants.len());
+        for variant in variants {
+            if variant.fields.len() > u16::MAX as usize {
+                self.error(format!(
+                    "variant '{}' in '{}' exceeds bytecode payload ABI",
+                    variant.name, nominal
+                ));
+                return None;
+            }
+            shapes.push(VariantShape {
+                tag: variant.name.clone(),
+                discriminant: variant.discriminant,
+                arity: variant.fields.len() as u16,
+            });
+        }
+        Some(self.proto.add_const(ConstValue::VariantShapes(shapes)))
+    }
+
+    fn emit_variant_drop_shape_table(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> Option<ConstIdx> {
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validated_variant_drop_contract_table(ty)
+        {
+            self.error(format!(
+                "variant drop type '{}' is unsupported: {message}",
+                ty.as_str()
+            ));
+            return None;
+        }
+        self.emit_variant_shape_table(ty)
     }
 
     fn emit_drop_register(&mut self, register: Reg, ty: &crate::core::ResolvedTypeId) {
@@ -3951,6 +3974,133 @@ mod tests {
     }
 
     #[test]
+    fn canonical_variant_construction_carries_type_desc_shape_contract() {
+        let source = "func main() -> Option<i32> { Some(41) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        let (tag_idx, shape_idx, discriminant, arity) = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::NewVariant {
+                    type_name,
+                    shapes: Some(shapes),
+                    variant,
+                    arity,
+                    ..
+                } => Some((*type_name, *shapes, *variant, *arity)),
+                _ => None,
+            })
+            .expect("canonical NewVariant shape contract");
+        assert!(matches!(
+            main.constants.get(tag_idx as usize),
+            Some(crate::interp::bytecode::ConstValue::Str(tag)) if tag == "Some"
+        ));
+        let shapes = match main.constants.get(shape_idx as usize) {
+            Some(crate::interp::bytecode::ConstValue::VariantShapes(shapes)) => shapes,
+            other => panic!("expected canonical variant shape table, got {other:?}"),
+        };
+        assert_eq!(
+            shapes
+                .iter()
+                .map(|shape| (shape.tag.as_str(), shape.discriminant, shape.arity))
+                .collect::<Vec<_>>(),
+            vec![("None", 0, 0), ("Some", 1, 1)]
+        );
+        let some = shapes
+            .iter()
+            .find(|shape| shape.tag == "Some")
+            .expect("Some");
+        assert_eq!((some.discriminant, some.arity), (discriminant, arity));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert!(matches!(
+            reference,
+            MirRuntimeValue::Variant { variant, payload, .. }
+                if variant.0 == "builtin:variant:Option::Some"
+                    && payload == vec![MirRuntimeValue::Int(41)]
+        ));
+        assert!(matches!(
+            value,
+            Value::Variant(tag, payload)
+                if tag == "Some" && payload == vec![Value::Int(41)]
+        ));
+    }
+
+    #[test]
+    fn rejects_variant_construction_discriminant_drift_before_moving_payload() {
+        let source = "func main() -> Option<string> { Some(\"owned\") }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert!(matches!(
+            reference,
+            MirRuntimeValue::Variant { variant, .. }
+                if variant.0 == "builtin:variant:Option::Some"
+        ));
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let construction = main
+            .code
+            .iter()
+            .position(|op| {
+                matches!(
+                    op,
+                    Op::NewVariantMove {
+                        shapes: Some(_),
+                        ..
+                    }
+                )
+            })
+            .expect("canonical NewVariantMove shape contract");
+        let payload_reg = match &main.code[construction] {
+            Op::NewVariantMove { base, .. } => *base,
+            _ => unreachable!("construction position changed"),
+        };
+        let forged_shapes =
+            main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
+                crate::interp::bytecode::instr::VariantShape {
+                    tag: "Some".into(),
+                    discriminant: 0,
+                    arity: 1,
+                },
+            ]));
+        match &mut main.code[construction] {
+            Op::NewVariantMove { shapes, .. } => *shapes = Some(forged_shapes),
+            _ => unreachable!("construction position changed"),
+        }
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("corrupted construction shape must fail closed");
+        assert!(error
+            .message()
+            .contains("variant construction: tag 'Some' has discriminant 0, opcode carries 1"));
+        assert!(matches!(
+            vm.get_reg(payload_reg),
+            Value::String(value) if value.as_str() == "owned"
+        ));
+    }
+
+    #[test]
     fn executes_move_owned_option_payload_through_both_oracles() {
         let source = "func main() -> Option<string> { Some(\"owned\") }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -4333,9 +4483,14 @@ mod tests {
         let program = std::sync::Arc::make_mut(&mut bytecode);
         let entry = program.entry as usize;
         let main = &mut program.functions[entry];
-        let forged_shapes = main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(
-            vec![("Err".into(), 1)],
-        ));
+        let forged_shapes =
+            main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
+                crate::interp::bytecode::instr::VariantShape {
+                    tag: "Err".into(),
+                    discriminant: 0,
+                    arity: 1,
+                },
+            ]));
         let (drop_shapes, source_reg) = main
             .code
             .iter_mut()

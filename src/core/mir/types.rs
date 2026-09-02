@@ -1893,13 +1893,49 @@ impl MirTypeCatalog {
         &self,
         ty: &ResolvedTypeId,
     ) -> Result<(&str, &[MirVariantDesc]), String> {
+        let (expected_nominal, variants) = self.validated_variant_shape_table(ty)?;
+        self.validate_variant_glue(ty, MirGlueOperation::Drop)?;
+        Ok((expected_nominal, variants))
+    }
+
+    /// Return the complete canonical variant shape table without requiring
+    /// ownership glue.  Copy variants still need a checked tag/discriminant/
+    /// arity mapping when a backend constructs them; non-Copy consumers add
+    /// the operation-specific recursive glue proof on top of this table.
+    pub fn validated_variant_shape_table(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(&str, &[MirVariantDesc]), String> {
         let (expected_nominal, variants) = self.variant_layout(ty).ok_or_else(|| {
             format!(
                 "type '{}' has no canonical Option/Result variant layout",
                 ty.as_str()
             )
         })?;
-        self.validate_variant_glue(ty, MirGlueOperation::Drop)?;
+        if variants.is_empty() {
+            return Err(format!(
+                "type '{}' has an empty canonical variant table",
+                ty.as_str()
+            ));
+        }
+        let mut names = BTreeSet::new();
+        let mut discriminants = BTreeSet::new();
+        for variant in variants {
+            if !names.insert(&variant.name) {
+                return Err(format!(
+                    "type '{}' has duplicate variant tag '{}'",
+                    ty.as_str(),
+                    variant.name
+                ));
+            }
+            if !discriminants.insert(variant.discriminant) {
+                return Err(format!(
+                    "type '{}' has duplicate variant discriminant {}",
+                    ty.as_str(),
+                    variant.discriminant
+                ));
+            }
+        }
         Ok((expected_nominal, variants))
     }
 
@@ -4150,6 +4186,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("None", 0), ("Some", 1)]
         );
+        let (shape_nominal, shape_table) = catalog
+            .validated_variant_shape_table(&option_id)
+            .expect("complete Option variant construction shape contract");
+        assert_eq!(shape_nominal, "builtin:type:Option");
+        assert_eq!(
+            shape_table
+                .iter()
+                .map(|variant| (
+                    variant.name.as_str(),
+                    variant.discriminant,
+                    variant.fields.len()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("None", 0, 0), ("Some", 1, 1)]
+        );
         let drop_contract_error = catalog
             .validated_variant_drop_contract(&string_id, &some_id)
             .expect_err("bare string has no variant drop contract");
@@ -4218,6 +4269,44 @@ mod tests {
         assert!(catalog
             .validate_variant_glue(&result_id, MirGlueOperation::Drop)
             .is_ok());
+    }
+
+    #[test]
+    fn variant_shape_table_rejects_duplicate_tags_and_discriminants() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(i32_id))
+            .expect("option");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let original = catalog.get(&option_id).expect("option descriptor").clone();
+
+        let mut duplicate_tag = original.clone();
+        let MirLayout::Option { variants, .. } = &mut duplicate_tag.layout else {
+            unreachable!("Option layout");
+        };
+        variants[1].name = variants[0].name.clone();
+        catalog.replace_for_test_only(option_id.clone(), duplicate_tag);
+        let tag_error = catalog
+            .validated_variant_shape_table(&option_id)
+            .expect_err("duplicate variant tags must fail closed");
+        assert!(tag_error.contains("duplicate variant tag"), "{tag_error}");
+
+        let mut duplicate_discriminant = original;
+        let MirLayout::Option { variants, .. } = &mut duplicate_discriminant.layout else {
+            unreachable!("Option layout");
+        };
+        variants[1].discriminant = variants[0].discriminant;
+        catalog.replace_for_test_only(option_id.clone(), duplicate_discriminant);
+        let discriminant_error = catalog
+            .validated_variant_shape_table(&option_id)
+            .expect_err("duplicate variant discriminants must fail closed");
+        assert!(
+            discriminant_error.contains("duplicate variant discriminant"),
+            "{discriminant_error}"
+        );
     }
 
     #[test]

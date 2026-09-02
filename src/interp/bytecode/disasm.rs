@@ -658,6 +658,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             variant,
             base,
             arity,
+            ..
         } => {
             let tname = proto
                 .constants
@@ -684,6 +685,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             variant,
             base,
             arity,
+            ..
         } => {
             let tname = proto
                 .constants

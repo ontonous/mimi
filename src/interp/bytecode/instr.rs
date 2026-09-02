@@ -773,6 +773,9 @@ pub enum Op {
         variant: VariantIdx,
         base: Reg,
         arity: u16,
+        /// Present only for canonical MIR emission; legacy bytecode leaves
+        /// this unset and keeps its historical compiler contract.
+        shapes: Option<ConstIdx>,
     },
     /// rd = consume payload[0..arity] and build a tagged owned variant.
     NewVariantMove {
@@ -781,6 +784,9 @@ pub enum Op {
         variant: VariantIdx,
         base: Reg,
         arity: u16,
+        /// Present only for canonical MIR emission; legacy bytecode leaves
+        /// this unset and keeps its historical compiler contract.
+        shapes: Option<ConstIdx>,
     },
     /// Consume the canonical active variant and move all payload fields into
     /// `base..base+arity`. `variant_tag` is the tag constant selected from
@@ -1435,10 +1441,19 @@ pub enum ConstValue {
     Pattern(crate::ast::Pattern),
     /// String vector constant (for QuoteRecord field names).
     StrVec(Vec<String>),
-    /// Canonical variant drop shapes encoded for the bytecode physical ABI.
-    /// Each pair is (active tag, payload arity), copied only from a validated
-    /// MIR TypeDesc table; the VM must reject tags or payloads outside it.
-    VariantShapes(Vec<(String, u16)>),
+    /// Canonical variant shapes encoded for the bytecode physical ABI.
+    /// Each entry carries the active tag, semantic discriminant, and payload
+    /// arity copied only from a validated MIR TypeDesc table; the VM must
+    /// reject tags or payloads outside it.
+    VariantShapes(Vec<VariantShape>),
+}
+
+/// One canonical variant shape in the bytecode physical contract.
+#[derive(Debug, Clone)]
+pub struct VariantShape {
+    pub tag: String,
+    pub discriminant: VariantIdx,
+    pub arity: u16,
 }
 
 impl FunctionProto {
