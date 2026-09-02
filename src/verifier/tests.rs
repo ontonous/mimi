@@ -1152,7 +1152,8 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
     codegen.module.verify().expect("native module verification");
 
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-    let results = crate::verifier::verify_mir(&canonical, source_hash).expect("MIR verifier");
+    let results =
+        crate::verifier::verify_mir(&canonical, source_hash.clone()).expect("MIR verifier");
     for function in ["function:consume", "function:discard"] {
         let result = results
             .iter()
@@ -1165,6 +1166,36 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
             result.message
         );
     }
+
+    // Public checked-verifier entry points must select the same closed island
+    // before their historical AST/Flow compatibility engine.  The counters
+    // make an accidental raw-AST fallback observable even though the verdicts
+    // would otherwise look identical.
+    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::mir::reset_test_route_materialization_count();
+    let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect("public checked verifier must use the Option<string> MIR island");
+    assert!(checked_results
+        .iter()
+        .any(|result| result.func_name == "consume"));
+    assert!(checked_results
+        .iter()
+        .any(|result| result.func_name == "discard"));
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+
+    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::mir::reset_test_route_materialization_count();
+    let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+        .expect("dual public checked verifier must use the Option<string> MIR island");
+    assert!(dual_results
+        .iter()
+        .any(|result| result.func_name == "consume"));
+    assert!(dual_results
+        .iter()
+        .any(|result| result.func_name == "discard"));
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
 }
 
 #[test]

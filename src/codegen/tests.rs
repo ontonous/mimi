@@ -324,6 +324,50 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_option_string_switch_move.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_option_string_variant_admission(&program),
+        crate::core::mir::OptionStringVariantAdmission::CompleteCoverage
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s30_option_string_default_route");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native entry must use the canonical Option<string> consumer");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
+fn direct_native_entry_rejects_non_exhaustive_option_string_switch_without_fallback() {
+    let source =
+        include_str!("../../tests/fixtures/mir_native_option_string_default_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s30_option_string_default_reject");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("direct native entry must reject the uncovered Option<string> shape");
+    assert!(errors.iter().any(|error| {
+        error.code.as_deref() == Some("MIR-CAPABILITY-001")
+            && error.message.contains("Option<string>")
+    }));
+    assert!(codegen.module.get_function("main").is_none());
+}
+
+#[test]
 fn direct_native_entry_rejects_a_mixed_flat_copy_record_graph_without_fallback() {
     let source = r#"
         type Point { x: i32 }

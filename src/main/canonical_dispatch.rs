@@ -4,8 +4,9 @@
 //! checked program.  A canonical backend is never attempted and then replaced
 //! by legacy code on failure: programs either pass this preflight and use the
 //! canonical route, or remain on the legacy route because their capability
-//! set is not yet migrated.  Once the scalar collection island is recognized,
-//! its failure is an explicit rejection rather than compatibility fallback.
+//! set is not yet migrated. Once the scalar collection or exact non-Copy
+//! `Option<string>` island is recognized, its failure is an explicit rejection
+//! rather than compatibility fallback.
 
 use std::collections::HashSet;
 
@@ -101,6 +102,7 @@ pub(crate) fn select_default_route(
     // this selector from growing a second Set/record lowering walk.
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
     let collection_admission = admission.collection;
+    let option_string_admission = admission.option_string;
     // Imported stdlib facades are part of the production island once their
     // concrete operations materialize in MIR.  Do not use the retained File
     // import list as a second route policy: checker admission records the
@@ -125,8 +127,16 @@ pub(crate) fn select_default_route(
         record_admission,
         mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
     );
+    let option_string_hint = !matches!(
+        option_string_admission,
+        mimi::core::mir::OptionStringVariantAdmission::OutsideProfile
+    );
+    let complete_option_string_candidate = matches!(
+        option_string_admission,
+        mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
+    );
     let flow_candidate = may_contain_single_silent_local_transition(checked, merged_file);
-    if !collection_hint && !record_hint && !flow_candidate {
+    if !collection_hint && !record_hint && !flow_candidate && !option_string_hint {
         return DefaultMirRoute::Legacy;
     }
 
@@ -155,6 +165,10 @@ pub(crate) fn select_default_route(
                     profile,
                     mimi::core::mir::CanonicalMirRouteProfile::FlatCopyRecord
                 ),
+                matches!(
+                    profile,
+                    mimi::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant
+                ),
                 reason,
             );
         }
@@ -169,6 +183,16 @@ pub(crate) fn select_default_route(
                     true,
                     false,
                     false,
+                    false,
+                    "canonical MIR candidate materialization failed",
+                );
+            }
+            if option_string_hint {
+                return reject_migrated_candidates(
+                    false,
+                    false,
+                    false,
+                    true,
                     "canonical MIR candidate materialization failed",
                 );
             }
@@ -179,6 +203,7 @@ pub(crate) fn select_default_route(
     let copy_record = route.materialized_record_candidate;
     let materialized_collection_candidate = route.materialized_collection_candidate;
     let materialized_flow_candidate = route.materialized_flow_candidate;
+    let materialized_option_string_candidate = route.materialized_option_string_candidate;
     let flow_route_candidate = flow_candidate || materialized_flow_candidate;
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
@@ -188,11 +213,14 @@ pub(crate) fn select_default_route(
     let collection_route_candidate =
         complete_collection_candidate || (collection_hint && materialized_collection_candidate);
     let record_route_candidate = complete_record_candidate || (record_hint && copy_record);
+    let option_string_route_candidate = complete_option_string_candidate
+        || (option_string_hint && materialized_option_string_candidate);
     if flow_route_candidate && !flow_transition_operation {
         return reject_migrated_candidates(
             flow_route_candidate,
             collection_route_candidate || (record_route_candidate && copy_record),
             record_route_candidate,
+            option_string_route_candidate,
             "canonical graph did not materialize the selected production operation",
         );
     }
@@ -206,10 +234,24 @@ pub(crate) fn select_default_route(
             flow_route_candidate,
             collection_route_candidate,
             true,
+            option_string_route_candidate,
             "flat Copy record materialized inside mixed coverage",
         );
     }
-    if !collection_route_candidate && !record_route_candidate && !flow_route_candidate {
+    if option_string_route_candidate && !complete_option_string_candidate {
+        return reject_migrated_candidates(
+            flow_route_candidate,
+            collection_route_candidate,
+            record_route_candidate,
+            true,
+            "Option<string> variant materialized inside mixed coverage",
+        );
+    }
+    if !collection_route_candidate
+        && !record_route_candidate
+        && !flow_route_candidate
+        && !option_string_route_candidate
+    {
         return DefaultMirRoute::Legacy;
     }
 
@@ -225,9 +267,25 @@ pub(crate) fn select_default_route(
                 flow_route_candidate,
                 true,
                 record_route_candidate,
+                option_string_route_candidate,
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::SCALAR_COLLECTION_ISLAND
+                ),
+            );
+        }
+    }
+
+    if materialized_option_string_candidate {
+        if let Err(errors) = mimi::core::mir::validate_option_string_variant_island(&canonical) {
+            return reject_migrated_candidates(
+                flow_route_candidate,
+                collection_route_candidate,
+                record_route_candidate,
+                true,
+                format!(
+                    "{} capability gate failed: {errors:?}",
+                    mimi::core::mir::NON_COPY_OPTION_STRING_VARIANT_ISLAND
                 ),
             );
         }
@@ -243,6 +301,7 @@ pub(crate) fn select_default_route(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
+            option_string_route_candidate,
             format!("verifier capability gate failed: {error:?}"),
         );
     }
@@ -255,6 +314,7 @@ pub(crate) fn select_default_route(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
+            option_string_route_candidate,
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
     }
@@ -263,6 +323,7 @@ pub(crate) fn select_default_route(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
+            option_string_route_candidate,
             format!("native MIR preflight failed: {errors:?}"),
         );
     }
@@ -283,6 +344,7 @@ pub(crate) fn select_default_route(
                 flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
+                option_string_route_candidate,
                 format!("verifier contract pass failed: {error}"),
             )
         }
@@ -292,6 +354,7 @@ pub(crate) fn select_default_route(
             flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
+            option_string_route_candidate,
             "verifier returned an unsupported or inconclusive result",
         );
     }
@@ -303,6 +366,7 @@ fn reject_migrated_candidates(
     flow_candidate: bool,
     collection_candidate: bool,
     record_candidate: bool,
+    option_string_candidate: bool,
     reason: impl Into<String>,
 ) -> DefaultMirRoute {
     if flow_candidate {
@@ -318,6 +382,11 @@ fn reject_migrated_candidates(
     } else if record_candidate {
         DefaultMirRoute::Rejected(format!(
             "S0 flat Copy record candidate is not eligible for the default route: {}",
+            reason.into()
+        ))
+    } else if option_string_candidate {
+        DefaultMirRoute::Rejected(format!(
+            "S30 non-Copy Option<string> variant candidate is not eligible for the default route: {}",
             reason.into()
         ))
     } else {
@@ -510,5 +579,35 @@ mod tests {
             reason.contains("canonical MIR construction failed"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn option_string_variant_switches_to_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_option_string_switch_move.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_option_string_variant_admission(&checked),
+            mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn option_string_variant_default_arm_is_rejected_without_legacy_fallback() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_option_string_default_rejected.mimi"
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("an uncovered Option<string> SwitchMove shape must fail closed");
+        };
+        assert!(
+            reason.contains("S30 non-Copy Option<string> variant candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("None and Some"), "{reason}");
     }
 }

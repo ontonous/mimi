@@ -1,16 +1,13 @@
-func consume_text(text: string) -> i32 {
-    drop(text)
-    41
-}
-
 func consume(value: Option<string>) -> i32 {
+    ensures: result >= 0
     match value {
-        Some(text) => consume_text(text),
+        Some(_) => 41,
         None => 0
     }
 }
 
 func discard(value: Option<string>) -> i32 {
+    ensures: result >= 0
     match value {
         Some(_) => 7,
         None => 8

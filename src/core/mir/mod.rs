@@ -20,6 +20,7 @@ mod contracts;
 mod eligibility;
 mod islands;
 pub mod lower;
+mod option_island;
 mod receipt;
 pub mod reference;
 mod route;
@@ -34,6 +35,11 @@ pub use islands::{
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, validate_scalar_collection_island,
     FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+};
+pub use option_island::{
+    classify_option_string_variant_admission, contains_option_string_variant_candidate,
+    validate_option_string_variant_island, OptionStringVariantAdmission,
+    NON_COPY_OPTION_STRING_VARIANT_ISLAND,
 };
 pub use receipt::{
     CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA,

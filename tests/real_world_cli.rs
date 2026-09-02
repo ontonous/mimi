@@ -1433,6 +1433,59 @@ fn canonical_mir_native_option_string_switch_move_matches_mir_run() {
         .expect("failed to execute canonical MIR Option<string> SwitchMove binary");
     let _ = fs::remove_file(&binary);
     assert_eq!(native_run.status.code(), Some(48));
+
+    // The same exact island must be selected by the production defaults after
+    // all-consumer preflight; this is the switch-over proof, not merely an
+    // explicit `--mir` smoke test.
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Canonical MIR Option<string> run");
+    assert_eq!(default_run.status.code(), Some(48));
+
+    let default_binary = std::env::temp_dir().join(format!(
+        "mimi-default-option-string-switch-move-{}",
+        std::process::id()
+    ));
+    let default_build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("failed to spawn default Canonical MIR Option<string> build");
+    assert!(
+        default_build.status.success(),
+        "default Canonical MIR Option<string> build failed:\n{}",
+        String::from_utf8_lossy(&default_build.stderr)
+    );
+    let default_native_run = Command::new(&default_binary)
+        .output()
+        .expect("failed to execute default Canonical MIR Option<string> binary");
+    let _ = fs::remove_file(&default_binary);
+    assert_eq!(default_native_run.status.code(), Some(48));
+
+    let default_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Canonical MIR Option<string> verifier");
+    assert!(
+        default_verify.status.success(),
+        "default Canonical MIR Option<string> verify failed:\n{}",
+        String::from_utf8_lossy(&default_verify.stderr)
+    );
+    let verify_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&default_verify.stdout),
+        String::from_utf8_lossy(&default_verify.stderr)
+    );
+    assert!(verify_output.contains("consume"), "{verify_output}");
+    assert!(verify_output.contains("contract proven"), "{verify_output}");
 }
 
 #[test]
@@ -1530,6 +1583,38 @@ fn canonical_mir_native_rejects_non_copy_variant_outside_promoted_contract_witho
     assert!(stderr.contains("canonical MIR native backend rejected"));
     assert!(stderr.contains("native non-Copy Option<string> variant contract"));
     assert!(!stderr.contains("bytecode runtime error"));
+}
+
+#[test]
+fn default_route_rejects_non_exhaustive_option_string_switch_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_string_default_rejected.mimi");
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-option-string-switch-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected default Option<string> build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("default Canonical MIR route rejected"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("S30 non-Copy Option<string> variant candidate"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("legacy"), "{stderr}");
 }
 
 #[test]

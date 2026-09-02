@@ -77,8 +77,9 @@ pub fn verify_source_with(
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
 /// tamper detection). Pass an empty string if source text is unavailable.
 ///
-/// Closed S8 Flow and flat Copy-record programs are verified from one
-/// canonical MIR graph. Other programs remain on the explicit compatibility
+/// Closed scalar collection, flat Copy-record, S8 Flow, and exact non-Copy
+/// `Option<string>` programs are verified from one canonical MIR graph. Other
+/// programs remain on the explicit compatibility
 /// boundary: when Z3 is available, they delegate to the Flow verifier state
 /// machine (which still uses `legacy_body_file()` for AST-based function body
 /// encoding); when Z3 is unavailable, they use CheckedProgram-based mock
@@ -103,6 +104,9 @@ pub fn verify_checked(
         return Ok(results);
     }
     if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
+    if let Some(results) = verify_closed_option_string_variant_mir(program, source_hash.clone())? {
         return Ok(results);
     }
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
@@ -254,6 +258,9 @@ pub fn verify_checked_dual(
     if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
         return Ok(results);
     }
+    if let Some(results) = verify_closed_option_string_variant_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
     if !is_z3_available() {
         // C4 mock path: from CheckedProgram, no raw_ast needed.
@@ -281,6 +288,7 @@ enum ClosedMirIsland {
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
+    NonCopyOptionStringVariant,
 }
 
 impl ClosedMirIsland {
@@ -289,6 +297,9 @@ impl ClosedMirIsland {
             Self::ScalarCollection => crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
             Self::FlatCopyRecord => crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
             Self::S8FlowTransition => crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+            Self::NonCopyOptionStringVariant => {
+                crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant
+            }
         }
     }
 
@@ -297,6 +308,7 @@ impl ClosedMirIsland {
             Self::ScalarCollection => admission.collection_complete(),
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
+            Self::NonCopyOptionStringVariant => admission.option_string_complete(),
         }
     }
 
@@ -305,6 +317,7 @@ impl ClosedMirIsland {
             Self::ScalarCollection => route.materialized_collection_candidate,
             Self::FlatCopyRecord => route.materialized_record_candidate,
             Self::S8FlowTransition => route.materialized_flow_candidate,
+            Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
         }
     }
 }
@@ -451,6 +464,38 @@ fn verify_closed_s8_flow_mir(
     let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
     // Keep the public checked-verifier display contract stable while retaining
     // the canonical `function:<name>` owner in the MIR proof artifact/hash.
+    for result in &mut results {
+        if let Some(name) = result.func_name.strip_prefix("function:") {
+            result.func_name = name.to_string();
+        }
+    }
+    Ok(Some(results))
+}
+
+/// Verify the already-closed non-Copy `Option<string>` variant island from
+/// canonical MIR.  The variant validator owns the exact TypeDesc/layout,
+/// Move/Clone/Drop glue, and explicit SwitchMove contract; this function only
+/// composes that contract with the verifier's structural and symbolic passes.
+fn verify_closed_option_string_variant_mir(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    let Some(canonical) =
+        materialize_closed_mir_island(program, ClosedMirIsland::NonCopyOptionStringVariant)?
+    else {
+        return Ok(None);
+    };
+    crate::core::mir::validate_option_string_variant_island(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier rejected the Option<string> variant island: {errors:?}"
+        )
+    })?;
+    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier TypeDesc/capability gate rejected the Option<string> variant island: {errors:?}"
+        )
+    })?;
+    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
     for result in &mut results {
         if let Some(name) = result.func_name.strip_prefix("function:") {
             result.func_name = name.to_string();

@@ -17,10 +17,12 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::CheckedProgram;
 
 use super::{
-    classify_flat_copy_record_admission, classify_scalar_collection_admission,
-    contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
+    classify_flat_copy_record_admission, classify_option_string_variant_admission,
+    classify_scalar_collection_admission, contains_flat_copy_record_candidate,
+    contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, is_exact_s8_flow_transition,
-    is_s8_flow_transition_candidate, FlatCopyRecordAdmission, ScalarCollectionAdmission,
+    is_s8_flow_transition_candidate, FlatCopyRecordAdmission, OptionStringVariantAdmission,
+    ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -46,6 +48,7 @@ pub enum CanonicalMirRouteProfile {
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
+    NonCopyOptionStringVariant,
 }
 
 impl CanonicalMirRouteProfile {
@@ -54,6 +57,7 @@ impl CanonicalMirRouteProfile {
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
+            Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
         }
     }
 }
@@ -125,6 +129,7 @@ pub struct CanonicalMirRouteAdmission {
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
+    pub option_string: OptionStringVariantAdmission,
 }
 
 impl CanonicalMirRouteAdmission {
@@ -132,6 +137,10 @@ impl CanonicalMirRouteAdmission {
         !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
             || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
+            || !matches!(
+                self.option_string,
+                OptionStringVariantAdmission::OutsideProfile
+            )
     }
 
     pub const fn collection_complete(self) -> bool {
@@ -144,6 +153,13 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn flow_complete(self) -> bool {
         matches!(self.flow, S8FlowAdmission::CompleteCoverage)
+    }
+
+    pub const fn option_string_complete(self) -> bool {
+        matches!(
+            self.option_string,
+            OptionStringVariantAdmission::CompleteCoverage
+        )
     }
 }
 
@@ -158,6 +174,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_collection_candidate: bool,
     pub materialized_record_candidate: bool,
     pub materialized_flow_candidate: bool,
+    pub materialized_option_string_candidate: bool,
 }
 
 /// Classify route eligibility once from checker-owned typed facts.
@@ -168,6 +185,7 @@ pub fn classify_canonical_mir_route_admission(
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
+        option_string: classify_option_string_variant_admission(program),
     }
 }
 
@@ -210,6 +228,7 @@ pub fn materialize_canonical_mir_route(
     let materialized_collection_candidate = contains_scalar_collection_candidate(&canonical);
     let materialized_record_candidate = contains_flat_copy_record_candidate(&canonical);
     let materialized_flow_candidate = contains_s8_flow_transition_candidate(&canonical);
+    let materialized_option_string_candidate = contains_option_string_variant_candidate(&canonical);
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -235,6 +254,14 @@ pub fn materialize_canonical_mir_route(
                 .into(),
         });
     }
+    if admission.option_string_complete() && !materialized_option_string_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete Option<string> admission did not materialize a variant boundary"
+                .into(),
+        });
+    }
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
@@ -242,6 +269,7 @@ pub fn materialize_canonical_mir_route(
         materialized_collection_candidate,
         materialized_record_candidate,
         materialized_flow_candidate,
+        materialized_option_string_candidate,
     })
 }
 
@@ -265,6 +293,12 @@ fn match_complete_or_compatibility(
     } else if admission.flow_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::S8FlowTransition,
+            stage,
+            message,
+        }
+    } else if admission.option_string_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::NonCopyOptionStringVariant,
             stage,
             message,
         }
@@ -299,6 +333,7 @@ mod tests {
         assert!(route.materialized_collection_candidate);
         assert!(!route.materialized_record_candidate);
         assert!(!route.materialized_flow_candidate);
+        assert!(!route.materialized_option_string_candidate);
     }
 
     #[test]
@@ -340,6 +375,7 @@ mod tests {
         assert!(route.materialized_flow_candidate);
         assert!(!route.materialized_collection_candidate);
         assert!(!route.materialized_record_candidate);
+        assert!(!route.materialized_option_string_candidate);
     }
 
     #[test]
@@ -348,6 +384,7 @@ mod tests {
             collection: ScalarCollectionAdmission::MixedCoverage,
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,
+            option_string: OptionStringVariantAdmission::OutsideProfile,
         };
         let error = match_complete_or_compatibility(
             admission,
@@ -363,5 +400,21 @@ mod tests {
         };
         assert_eq!(preserved, admission);
         assert!(preserved.has_candidate());
+    }
+
+    #[test]
+    fn option_string_variant_materialization_carries_one_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_option_string_switch_move.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.option_string,
+            OptionStringVariantAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete Option<string> route must materialize");
+        assert!(route.materialized_option_string_candidate);
+        assert!(crate::core::mir::validate_option_string_variant_island(&route.program).is_ok());
     }
 }

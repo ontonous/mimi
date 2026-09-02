@@ -28,8 +28,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        // S12/S15/S25: the S8 Flow, scalar collection, and flat Copy-record
-        // production islands have crossed the default route boundary.  This direct
+        // S12/S15/S25/S30: the S8 Flow, scalar collection, flat Copy-record,
+        // and exact non-Copy Option<string> production islands have crossed the default
+        // route boundary.  This direct
         // native API is also an old production entry point, so an admitted
         // graph must not continue into the old AST body compiler merely
         // because a caller bypassed the CLI selector.  The helper performs
@@ -617,6 +618,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete S8 Flow MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete Option<string> variant MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete Option<string> variant MIR island materialization failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,
@@ -625,7 +644,8 @@ impl<'ctx> CodeGenerator<'ctx> {
                 )]);
             }
             Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
-                ..
+                admission,
+                message,
             }) => {
                 // Mixed/Outside construction is the explicit compatibility
                 // boundary.  A complete admission can never arrive here:
@@ -633,6 +653,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                 // `Complete` above.  A mixed candidate that did not
                 // materialize therefore remains on the old API, while any
                 // materialized candidate is rejected by the gates below.
+                if !matches!(
+                    admission.option_string,
+                    crate::core::mir::OptionStringVariantAdmission::OutsideProfile
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized Option<string> variant candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
                 return Ok(None);
             }
         };
@@ -640,7 +672,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
-        if !scalar_collection_candidate && !flat_copy_record_candidate && !flow_transition_candidate
+        let option_string_candidate = route.materialized_option_string_candidate;
+        if !scalar_collection_candidate
+            && !flat_copy_record_candidate
+            && !flow_transition_candidate
+            && !option_string_candidate
         {
             return Ok(None);
         }
@@ -654,11 +690,24 @@ impl<'ctx> CodeGenerator<'ctx> {
             "scalar collection island"
         } else if flat_copy_record_candidate {
             "flat Copy record island"
+        } else if option_string_candidate {
+            "non-Copy Option<string> variant island"
         } else {
             "S8 Flow transition island"
         };
         if scalar_collection_candidate {
             if let Err(errors) = crate::core::mir::validate_scalar_collection_island(&canonical) {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if option_string_candidate {
+            if let Err(errors) = crate::core::mir::validate_option_string_variant_island(&canonical)
+            {
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

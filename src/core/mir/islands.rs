@@ -795,14 +795,14 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         .any(|body| block_has_unmigrated_shape(&body.root))
 }
 
-fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {
+pub(super) fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {
     program
         .source_registry()
         .key(origin.user_span().source_id)
         .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
 }
 
-fn has_mixed_coverage(program: &CheckedProgram) -> bool {
+pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
     fn is_runtime_origin(origin: &crate::core::Origin) -> bool {
         matches!(origin, crate::core::Origin::RuntimeSystem { .. })
     }
