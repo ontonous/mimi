@@ -189,7 +189,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
-        let (empty_variant, payload_variant, payload_ty) = self
+        let (variant_abi, payload_ty) = native_variant_abi(self.program.type_catalog(), ty, true)?;
+        let (empty_variant, payload_variant, _) = self
             .program
             .type_catalog()
             .validated_option_string_variants(ty)
@@ -207,7 +208,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let tag = self
             .generator
             .builder
-            .build_extract_value(aggregate, 0, "mir_variant_clone_tag")
+            .build_extract_value(aggregate, variant_abi.tag_field, "mir_variant_clone_tag")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_int_value();
         let payload_tag = self
@@ -255,13 +256,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let payload = self
             .generator
             .builder
-            .build_extract_value(aggregate, 1, "mir_variant_clone_value")
+            .build_extract_value(
+                aggregate,
+                variant_abi.payload_field,
+                "mir_variant_clone_value",
+            )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let cloned_payload = self.emit_owned_string_clone_value(payload, subject)?;
         let cloned_aggregate = self
             .generator
             .builder
-            .build_insert_value(aggregate, cloned_payload, 1, "mir_variant_clone_insert")
+            .build_insert_value(
+                aggregate,
+                cloned_payload,
+                variant_abi.payload_field,
+                "mir_variant_clone_insert",
+            )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_struct_value();
         let payload_block =

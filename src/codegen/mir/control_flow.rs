@@ -92,7 +92,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<(), NativeMirError> {
         let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
         let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
-        let (_empty_variant, payload_variant, payload_ty) = self
+        let (variant_abi, payload_ty) =
+            native_variant_abi(self.program.type_catalog(), &scrutinee_ty, true)?;
+        let (_, payload_variant, _) = self
             .program
             .type_catalog()
             .validated_option_string_variants(&scrutinee_ty)
@@ -199,6 +201,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.bindings,
                     &scrutinee_ty,
                     variant,
+                    variant_abi,
                     scrutinee_value,
                     drop_predecessor,
                     subject,
@@ -223,6 +226,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.bindings,
                     &scrutinee_ty,
                     variant,
+                    variant_abi,
                     scrutinee_value,
                     current,
                     subject,
@@ -293,12 +297,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return Ok(());
         }
 
+        let (variant_abi, _) =
+            native_variant_abi(self.program.type_catalog(), &scrutinee_ty, false)?;
+
         let tag = self
             .generator
             .builder
             .build_extract_value(
                 scrutinee_value.into_struct_value(),
-                0,
+                variant_abi.tag_field,
                 "mir_variant_tag_load",
             )
             .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?
@@ -340,6 +347,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &arm.bindings,
                 &scrutinee_ty,
                 &variant,
+                variant_abi,
                 scrutinee_value,
                 current,
                 subject,
@@ -424,6 +432,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         bindings: &[crate::core::mir::MirSwitchBinding],
         scrutinee_ty: &crate::core::ResolvedTypeId,
         variant: &crate::core::mir::types::MirVariantDesc,
+        variant_abi: NativeVariantAbi,
         scrutinee: BasicValueEnum<'ctx>,
         predecessor: BasicBlock<'ctx>,
         subject: &MirBlockId,
@@ -480,7 +489,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_extract_value(
                         scrutinee.into_struct_value(),
-                        1,
+                        variant_abi.payload_field,
                         "mir_variant_payload_load",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?,

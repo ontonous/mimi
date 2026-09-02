@@ -237,6 +237,38 @@ pub(super) fn native_non_copy_variant_payload_type(
         })
 }
 
+/// Physical field positions for the narrow native variant ABI.  The semantic
+/// variant identity, discriminant, payload type, and glue remain TypeDesc
+/// facts; this adapter owns only the target struct slots used after those
+/// facts have been validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NativeVariantAbi {
+    pub(super) tag_field: u32,
+    pub(super) payload_field: u32,
+}
+
+/// Materialize the target-facing field contract for a native variant value.
+/// `moving` selects the already-promoted Copy or Option<string> TypeDesc
+/// contract; it never widens the set of admitted shapes.
+pub(super) fn native_variant_abi(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    moving: bool,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let payload_ty = if moving {
+        native_non_copy_variant_payload_type(catalog, ty)?
+    } else {
+        native_copy_variant_payload_type(catalog, ty)?
+    };
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+        },
+        payload_ty,
+    ))
+}
+
 pub(super) fn native_basic_type<'ctx>(
     context: &'ctx Context,
     catalog: &MirTypeCatalog,
@@ -336,11 +368,8 @@ pub(super) fn native_basic_type<'ctx>(
                 Ok(context.struct_type(&field_types, false).into())
             }
             MirLayout::Option { .. } | MirLayout::Result { .. } => {
-                let payload_ty = if desc.ownership == MirOwnership::Copy {
-                    native_copy_variant_payload_type(catalog, ty)?
-                } else {
-                    native_non_copy_variant_payload_type(catalog, ty)?
-                };
+                let (_, payload_ty) =
+                    native_variant_abi(catalog, ty, desc.ownership != MirOwnership::Copy)?;
                 let payload = native_basic_type(context, catalog, &payload_ty)?;
                 Ok(context
                     .struct_type(&[context.i8_type().into(), payload], false)

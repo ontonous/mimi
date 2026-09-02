@@ -39,8 +39,8 @@ mod validate;
 
 use abi::{
     native_basic_type, native_copy_variant_payload_type, native_list_kind,
-    native_non_copy_variant_payload_type, validate_native_non_copy_record_type,
-    validate_native_product_type, validate_native_recursive_tuple_type,
+    native_non_copy_variant_payload_type, native_variant_abi, validate_native_non_copy_record_type,
+    validate_native_product_type, validate_native_recursive_tuple_type, NativeVariantAbi,
 };
 pub use eligibility::validate_mir_native;
 use eligibility::{instruction_kind, mir_symbol, native_symbol_fragment, NativeMirError};
@@ -855,6 +855,30 @@ mod tests {
             })
             .count();
         assert_eq!(switch_move_count, 2);
+
+        let (option_string_ty, string_ty) = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                crate::core::mir::types::MirLayout::Option { inner, .. }
+                    if descriptor.ownership == crate::core::mir::types::MirOwnership::Move =>
+                {
+                    Some((id.clone(), inner.clone()))
+                }
+                _ => None,
+            })
+            .expect("canonical Option<string> TypeDesc");
+        let (variant_abi, payload_ty) =
+            super::native_variant_abi(program.type_catalog(), &option_string_ty, true)
+                .expect("native variant ABI contract");
+        assert_eq!(variant_abi.tag_field, 0);
+        assert_eq!(variant_abi.payload_field, 1);
+        assert_eq!(payload_ty, string_ty);
+        let unsupported = super::native_variant_abi(program.type_catalog(), &string_ty, true)
+            .expect_err("non-variant must not enter native variant ABI");
+        assert!(unsupported
+            .message
+            .contains("native non-Copy Option<string> variant contract"));
 
         let context = Context::create();
         let mut generator =

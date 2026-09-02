@@ -241,11 +241,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let payload_ty = if moving {
-            native_non_copy_variant_payload_type(self.program.type_catalog(), &result_ty)?
-        } else {
-            native_copy_variant_payload_type(self.program.type_catalog(), &result_ty)?
-        };
+        let (variant_abi, payload_ty) =
+            native_variant_abi(self.program.type_catalog(), &result_ty, moving)?;
         let struct_ty = native_basic_type(
             self.generator.context,
             self.program.type_catalog(),
@@ -262,7 +259,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .context
                     .i8_type()
                     .const_int(u64::from(variant_desc.discriminant), false),
-                0,
+                variant_abi.tag_field,
                 "mir_variant_tag",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
@@ -289,7 +286,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         aggregate = self
             .generator
             .builder
-            .build_insert_value(aggregate, payload, 1, "mir_variant_payload")
+            .build_insert_value(
+                aggregate,
+                payload,
+                variant_abi.payload_field,
+                "mir_variant_payload",
+            )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_struct_value();
         Ok(aggregate.into())

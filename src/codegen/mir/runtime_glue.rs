@@ -341,7 +341,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let (empty_variant, payload_variant, payload_ty) = self
+        let (variant_abi, payload_ty) = native_variant_abi(self.program.type_catalog(), ty, true)?;
+        let (empty_variant, payload_variant, _) = self
             .program
             .type_catalog()
             .validated_option_string_variants(ty)
@@ -371,7 +372,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let tag = self
             .generator
             .builder
-            .build_extract_value(aggregate, 0, "mir_variant_drop_tag")
+            .build_extract_value(aggregate, variant_abi.tag_field, "mir_variant_drop_tag")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_int_value();
         let payload_tag = self
@@ -419,7 +420,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let payload = self
             .generator
             .builder
-            .build_extract_value(aggregate, 1, "mir_variant_drop_value")
+            .build_extract_value(
+                aggregate,
+                variant_abi.payload_field,
+                "mir_variant_drop_value",
+            )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let payload_field = payload_variant.fields.first().ok_or_else(|| {
             NativeMirError::new(subject, "canonical Option<string> payload field is absent")
