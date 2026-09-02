@@ -1,0 +1,8 @@
+// Canonical stdout effect: signed i32 and i64 share one explicit integer ABI contract.
+func main() -> i32 {
+    ensures: result == 0
+    println(-7)
+    let wide = 9223372036854775806 as i64
+    println(wide)
+    0
+}

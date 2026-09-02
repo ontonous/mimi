@@ -650,6 +650,7 @@ impl<'a> CapabilityGate<'a> {
                         | crate::core::mir::types::MirBuiltinKind::Min
                         | crate::core::mir::types::MirBuiltinKind::Max
                         | crate::core::mir::types::MirBuiltinKind::PrintlnBool
+                        | crate::core::mir::types::MirBuiltinKind::PrintlnInt
                 ) {
                     self.error(format!(
                         "{subject} builtin is outside the verifier capability"

@@ -20,9 +20,9 @@ use super::{
     classify_flat_copy_record_admission, classify_option_string_variant_admission,
     classify_scalar_collection_admission, contains_flat_copy_record_candidate,
     contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
-    contains_scalar_collection_candidate, is_exact_s8_flow_transition,
-    is_s8_flow_transition_candidate, FlatCopyRecordAdmission, OptionStringVariantAdmission,
-    ScalarCollectionAdmission,
+    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
+    is_exact_s8_flow_transition, is_s8_flow_transition_candidate, FlatCopyRecordAdmission,
+    OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -250,7 +250,12 @@ pub fn materialize_canonical_mir_route(
         }
     };
 
-    let materialized_collection_candidate = contains_scalar_collection_candidate(&canonical);
+    let materialized_collection_operation_candidate =
+        contains_scalar_collection_operation_candidate(&canonical);
+    let materialized_collection_candidate = materialized_collection_operation_candidate
+        || (admission.collection_complete()
+            && canonical.transitions().is_empty()
+            && contains_scalar_collection_candidate(&canonical));
     let materialized_record_candidate = contains_flat_copy_record_candidate(&canonical);
     let materialized_flow_candidate = contains_s8_flow_transition_candidate(&canonical);
     let materialized_option_string_candidate = contains_option_string_variant_candidate(&canonical);

@@ -2188,8 +2188,8 @@ fn canonical_mir_set_contains_println_bool_matches_all_production_consumers() {
         .expect("failed to spawn default Set/println native IR build");
     assert!(default_ir.status.success());
     let ir = String::from_utf8_lossy(&default_ir.stdout);
-    assert!(ir.contains("define i32 @main()"));
-    assert!(ir.contains("call i32 @puts"));
+    assert!(ir.contains("define i32 @main("));
+    assert!(ir.contains("@printf"));
 
     let verification = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -2208,7 +2208,7 @@ fn canonical_mir_set_contains_println_bool_matches_all_production_consumers() {
 }
 
 #[test]
-fn canonical_mir_rejects_non_bool_println_before_any_backend() {
+fn canonical_mir_rejects_unsupported_println_before_any_backend() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -2223,8 +2223,8 @@ fn canonical_mir_rejects_non_bool_println_before_any_backend() {
     assert!(!explicit.status.success());
     let stderr = String::from_utf8_lossy(&explicit.stderr);
     assert!(
-        stderr.contains("canonical contract accepts bool"),
-        "non-bool println lost its stable canonical diagnostic:\n{stderr}"
+        stderr.contains("canonical contract accepts signed i32 or i64"),
+        "unsupported println lost its stable canonical diagnostic:\n{stderr}"
     );
 
     let default = Command::new(mimi_bin())
@@ -2234,7 +2234,7 @@ fn canonical_mir_rejects_non_bool_println_before_any_backend() {
         .output()
         .expect("failed to spawn compatibility non-bool println run");
     assert!(default.status.success());
-    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\n1\n");
+    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\nlegacy\n");
 }
 
 #[test]
@@ -2288,8 +2288,8 @@ fn canonical_mir_standalone_bool_println_uses_default_route() {
         String::from_utf8_lossy(&default_ir.stderr)
     );
     let ir = String::from_utf8_lossy(&default_ir.stdout);
-    assert!(ir.contains("define i32 @main()"));
-    assert!(ir.contains("call i32 @puts"));
+    assert!(ir.contains("define i32 @main("));
+    assert!(ir.contains("@printf"));
 
     let verification = Command::new(mimi_bin())
         .current_dir(project_root())
@@ -2298,6 +2298,96 @@ fn canonical_mir_standalone_bool_println_uses_default_route() {
         .output()
         .expect("failed to spawn standalone verifier");
     assert!(verification.status.success());
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_standalone_integer_println_matches_all_production_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_println_int.mimi");
+    let expected = "-7\n9223372036854775806\n";
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone integer println MIR dump");
+    assert!(mir.status.success());
+    let mir_stdout = String::from_utf8_lossy(&mir.stdout);
+    assert!(mir_stdout.contains("PrintlnInt"));
+    assert!(!mir_stdout.contains("SetOp::") && !mir_stdout.contains("ListOp::"));
+
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn standalone integer canonical run");
+    assert_eq!(explicit.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&explicit.stdout), expected);
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone integer default run");
+    assert_eq!(default_run.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&default_run.stdout), expected);
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-println-int-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn standalone integer default native build");
+    assert!(
+        build.status.success(),
+        "standalone integer default native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute standalone integer native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), expected);
+
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn standalone integer native IR build");
+    assert!(default_ir.status.success());
+    let ir = String::from_utf8_lossy(&default_ir.stdout);
+    assert!(ir.contains("define i32 @main("));
+    assert!(ir.contains("@printf") && ir.contains("c\"%ld\\00"));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone integer verifier");
+    assert!(
+        verification.status.success(),
+        "standalone integer verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
     assert!(String::from_utf8_lossy(&verification.stdout)
         .contains("canonical MIR ensures contract proven"));
 }

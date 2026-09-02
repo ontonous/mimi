@@ -33,8 +33,9 @@ pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candida
 pub use islands::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
-    contains_scalar_collection_candidate, validate_scalar_collection_island,
-    FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
+    validate_scalar_collection_island, FlatCopyRecordAdmission, ScalarCollectionAdmission,
+    SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,

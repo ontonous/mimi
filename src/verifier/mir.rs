@@ -1324,6 +1324,7 @@ fn eval_instruction(
                     SymbolicValue::Int(left.ge(right).ite(left, right))
                 }
                 (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
+                (MirBuiltinKind::PrintlnInt, [SymbolicValue::Int(_)]) => SymbolicValue::Unit,
                 _ => return Err("MIR builtin is outside scalar verifier contract".into()),
             };
             ensure_result_shape(function, catalog, result, &output)?;

@@ -167,6 +167,10 @@ pub(crate) fn select_default_route(
         mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
     );
     let flow_candidate = may_contain_single_silent_local_transition(checked, merged_file);
+    let complete_flow_candidate = matches!(
+        admission.flow,
+        mimi::core::mir::S8FlowAdmission::CompleteCoverage
+    );
     if !collection_hint && !record_hint && !flow_candidate && !option_string_hint {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
@@ -255,6 +259,15 @@ pub(crate) fn select_default_route(
             record_route_candidate,
             option_string_route_candidate,
             "canonical graph did not materialize the selected production operation",
+        );
+    }
+    if flow_candidate && !complete_flow_candidate {
+        return reject_migrated_candidates(
+            true,
+            collection_route_candidate,
+            record_route_candidate,
+            option_string_route_candidate,
+            "S8 Flow transition candidate is not complete coverage",
         );
     }
 
@@ -627,10 +640,31 @@ mod tests {
     }
 
     #[test]
-    fn standalone_non_bool_println_stays_outside_migrated_route() {
+    fn standalone_integer_println_enters_canonical_route() {
         let source = r#"
             func main() -> i32 {
-                println(1)
+                println(-7)
+                let wide = 9223372036854775806 as i64
+                println(wide)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn standalone_unsupported_println_stays_outside_migrated_route() {
+        let source = r#"
+            func main() -> i32 {
+                println("legacy")
                 0
             }
         "#;
@@ -646,12 +680,12 @@ mod tests {
     }
 
     #[test]
-    fn scalar_collection_with_non_bool_println_stays_on_explicit_compatibility_route() {
+    fn scalar_collection_with_unsupported_println_stays_on_explicit_compatibility_route() {
         let source = r#"
             func main() -> i32 {
                 let values = {4, 1, 1}
                 println(contains(values, 1))
-                println(1)
+                println("legacy")
                 0
             }
         "#;

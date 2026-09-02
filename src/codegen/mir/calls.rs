@@ -379,6 +379,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             MirBuiltinKind::Max => "mir_max",
                             MirBuiltinKind::Abs => unreachable!(),
                             MirBuiltinKind::PrintlnBool => unreachable!(),
+                            MirBuiltinKind::PrintlnInt => unreachable!(),
                         },
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
@@ -430,6 +431,43 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 // Unit has no physical LLVM value.  The MIR result slot is
                 // never observed by a valid caller; keep a harmless scalar
                 // placeholder for the emitter's value table.
+                Ok(self.generator.context.i64_type().const_zero().into())
+            }
+            MirBuiltinKind::PrintlnInt => {
+                let value = if left.get_type().get_bit_width() < 64 {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(
+                            left,
+                            self.generator.context.i64_type(),
+                            "mir_println_int_sext",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                } else {
+                    left
+                };
+                let format = self
+                    .generator
+                    .builder
+                    .build_global_string_ptr("%ld\n", "mir_println_int_format")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let printf = self
+                    .generator
+                    .get_runtime_fn("printf")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.generator
+                    .builder
+                    .build_call(
+                        printf,
+                        &[
+                            BasicMetadataValueEnum::PointerValue(format.as_pointer_value()),
+                            BasicMetadataValueEnum::IntValue(value),
+                        ],
+                        "mir_println_int_call",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                // Unit has no physical LLVM value. Keep the same inert
+                // placeholder convention as PrintlnBool for the value map.
                 Ok(self.generator.context.i64_type().const_zero().into())
             }
         }

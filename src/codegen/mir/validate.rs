@@ -695,6 +695,7 @@ impl<'a> NativeMirValidator<'a> {
                         | MirBuiltinKind::Min
                         | MirBuiltinKind::Max
                         | MirBuiltinKind::PrintlnBool
+                        | MirBuiltinKind::PrintlnInt
                 );
                 if !supported_kind {
                     self.errors.push(NativeMirError::new(

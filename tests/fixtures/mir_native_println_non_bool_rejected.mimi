@@ -1,10 +1,10 @@
-// The stdout effect contract is intentionally narrow: println(i32) stays
-// outside the scalar collection island and must fail closed under --mir.
+// String output remains outside the scalar stdout effect contract and must
+// fail closed under --mir; only bool and signed i32/i64 are admitted.
 func main() -> i32 {
     ensures: result == 0
     let values: Set<i32> = {4, 1}
     println(contains(values, 1))
-    println(1)
+    println("legacy")
     drop(values)
     0
 }

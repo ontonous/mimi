@@ -1490,7 +1490,7 @@ impl<'a> Lowerer<'a> {
                             "List.len canonical MIR operation requires one receiver",
                         );
                     }
-                } else if let Some(contract) = call_builtin_contract(call) {
+                } else if let Some(contract) = call_builtin_contract(call, self.type_catalog) {
                     self.emit(
                         &expression.node_id,
                         "builtin_call",
@@ -2244,10 +2244,35 @@ fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<No
     ))
 }
 
-fn call_builtin_contract(call: &ResolvedCall) -> Option<super::types::MirBuiltinContract> {
+fn call_builtin_contract(
+    call: &ResolvedCall,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> Option<super::types::MirBuiltinContract> {
     let crate::core::ir::ResolvedCallee::Builtin(builtin) = &call.callee else {
         return None;
     };
+    if builtin.as_str() == "println" {
+        // Keep unsupported println shapes as a canonical diagnostic witness
+        // rather than a legacy surface Call. The selected integer contract
+        // will be rejected by the shared TypeDesc validator when the
+        // argument is not a signed scalar.
+        let abi = call
+            .arguments
+            .first()
+            .and_then(|argument| type_catalog.and_then(|catalog| catalog.get(&argument.value.ty)))
+            .map(|descriptor| descriptor.abi)
+            .unwrap_or(super::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            });
+        return super::types::MirBuiltinContract::from_builtin_with_abi(builtin, abi).or_else(
+            || {
+                Some(super::types::MirBuiltinContract::for_kind(
+                    super::types::MirBuiltinKind::PrintlnInt,
+                ))
+            },
+        );
+    }
     super::types::MirBuiltinContract::from_builtin(builtin)
 }
 

@@ -343,13 +343,13 @@ fn assert_legacy_return_receipt(
 }
 
 /// Record the remaining mixed Set function-form boundary.  The Set operation
-/// and single-bool println are canonical; this witness deliberately includes
-/// an integer println, whose output ABI/effect is still outside the island.
+/// and scalar println nodes are canonical; this witness deliberately includes
+/// a string println, whose output ABI/effect is still outside the island.
 fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
     assert_legacy_return_receipt(
         case_id,
         "set-lowering-return-ownership",
-        "not-closed: scalar collection integer-output effect is not a Canonical MIR node",
+        "not-closed: scalar collection string-output effect is outside the canonical ABI contract",
         "Set function-form contains",
         "legacy:mixed-coverage-without-materialized-candidate",
         src,
@@ -1185,7 +1185,7 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
 }
 
 /// Set lowering/return-ownership stop-ship receipt.  `contains(Set, T)` and
-/// `println(bool)` now materialize as canonical nodes; the integer println
+/// scalar `println` now materialize as canonical nodes; the string println
 /// keeps this deliberately mixed witness on the compatibility boundary.
 #[test]
 fn audit1j_set_function_form_receipt() {
@@ -1198,18 +1198,19 @@ fn audit1j_set_function_form_receipt() {
         func main() -> i32 {
             let s = {4, 1, 1}
             println(contains(s, 1))
-            println(1)
+            println("legacy")
             0
         }
     "#,
-        "true\n1",
+        "true\nlegacy",
     );
 }
 
 /// Generic identity stop-ship receipt. The old checked VM/native paths agree,
 /// while canonical MIR keeps the concrete tuple/list instance outside the
 /// current scalar generic contract until unified monomorphization and aggregate
-/// ABI/glue are explicit.
+/// ABI/glue are explicit. Its aggregate `println` also makes the whole graph
+/// an explicit mixed compatibility input.
 #[test]
 fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
     if !can_link() {
@@ -1220,7 +1221,7 @@ fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
         "generic-concrete-mir-ownership",
         "not-closed: generic concrete MIR aggregate instance ABI/glue contract",
         "generic identity List tuple return",
-        "legacy:outside-migrated-profile",
+        "legacy:mixed-coverage-without-materialized-candidate",
         r#"
         func wrap<T>(x: T) -> List<T> { return [x] }
         func main() -> i32 {

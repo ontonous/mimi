@@ -41,8 +41,8 @@ pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
 /// compatibility boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarCollectionAdmission {
-    /// No typed List.len, concrete scalar Set-facade call, or Copy-bool
-    /// stdout effect is present.
+    /// No typed List.len, concrete scalar Set-facade call, or closed
+    /// Copy-scalar stdout effect is present.
     OutsideProfile,
     /// A collection candidate exists, but the whole checked program contains
     /// imports, unsupported effects, managed values, or another unresolved
@@ -60,7 +60,7 @@ pub enum ScalarCollectionAdmission {
 /// the retained source file, invoke a backend, or infer a candidate from the
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
-/// identity/Set facade family or the exact Copy-bool stdout effect can make
+/// identity/Set facade family or an exact Copy-scalar stdout effect can make
 /// them part of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
     let mut scanner = ScalarCollectionAdmissionScanner {
@@ -301,18 +301,18 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.has_candidate = true;
                 }
                 if is_scalar_set_contains_call(self.program, call)
-                    || is_scalar_println_bool_call(self.program, call)
+                    || is_scalar_println_call(self.program, call)
                 {
                     self.has_candidate = true;
                 }
-                // Only the closed Copy-bool stdout effect is a Canonical MIR
-                // node in this island. Other println shapes remain on the
+                // Only the closed Copy-scalar stdout effects are Canonical MIR
+                // nodes in this island. Other println shapes remain on the
                 // explicit mixed compatibility route until their output ABI
                 // and effect contract is independently materialized.
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
-                ) && !is_scalar_println_bool_call(self.program, call)
+                ) && !is_scalar_println_call(self.program, call)
                 {
                     self.mixed = true;
                 }
@@ -457,10 +457,7 @@ fn is_scalar_set_contains_call(
         && is_scalar_collection_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
 }
 
-fn is_scalar_println_bool_call(
-    program: &CheckedProgram,
-    call: &crate::core::ir::ResolvedCall,
-) -> bool {
+fn is_scalar_println_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
     let ResolvedCallee::Builtin(builtin) = &call.callee else {
         return false;
     };
@@ -470,6 +467,8 @@ fn is_scalar_println_bool_call(
     matches!(
         program.resolved_types().get(&call.arguments[0].value.ty),
         Some(ResolvedType::Primitive(PrimitiveType::Bool))
+            | Some(ResolvedType::Primitive(PrimitiveType::I32))
+            | Some(ResolvedType::Primitive(PrimitiveType::I64))
     )
 }
 
@@ -1029,10 +1028,34 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
 /// `ListOp::Len`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
-/// or exact `BuiltinCall::PrintlnBool` has crossed the S11 production boundary.
+/// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
+/// S11 production boundary.
 /// Keeping this fact next to the island contract prevents the CLI and direct
 /// native entry points from growing independent candidate predicates.
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
+    contains_scalar_collection_operation_candidate(program)
+        || program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::BuiltinCall {
+                            kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
+                                | crate::core::mir::types::MirBuiltinKind::PrintlnInt,
+                            ..
+                        }
+                    )
+                })
+            })
+        })
+}
+
+/// Return whether the canonical graph contains a collection operation, as
+/// opposed to only the scalar stdout effect.  Route owners use this narrower
+/// receipt so an unsupported mixed graph containing `println(i32)` does not
+/// accidentally become a collection-island candidate; a pure scalar stdout
+/// graph is admitted by its checker-side `CompleteCoverage` state instead.
+pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> bool {
     let has_list_len = program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -1059,22 +1082,8 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
             })
         })
     });
-    let has_println_bool = program.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction.kind,
-                    MirInstructionKind::BuiltinCall {
-                        kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool,
-                        ..
-                    }
-                )
-            })
-        })
-    });
     has_list_len
         || has_set_contains
-        || has_println_bool
         || program.instances().values().any(|instance| {
             matches!(
                 instance.contract,
@@ -1615,7 +1624,11 @@ impl<'a> ScalarCollectionValidator<'a> {
                 kind,
                 arguments,
             } => {
-                if *kind != crate::core::mir::types::MirBuiltinKind::PrintlnBool {
+                if !matches!(
+                    kind,
+                    crate::core::mir::types::MirBuiltinKind::PrintlnBool
+                        | crate::core::mir::types::MirBuiltinKind::PrintlnInt
+                ) {
                     self.error(format!(
                         "{subject} builtin {kind:?} is outside {SCALAR_COLLECTION_ISLAND}"
                     ));
@@ -1638,9 +1651,19 @@ impl<'a> ScalarCollectionValidator<'a> {
                     return;
                 };
                 self.require_copy_scalar(&argument_ty, subject, "println argument");
-                if !is_bool(&self.program.type_catalog(), &argument_ty) {
+                let valid_input = match *kind {
+                    crate::core::mir::types::MirBuiltinKind::PrintlnBool => {
+                        is_bool(&self.program.type_catalog(), &argument_ty)
+                    }
+                    crate::core::mir::types::MirBuiltinKind::PrintlnInt => {
+                        is_signed_integer(&self.program.type_catalog(), &argument_ty)
+                    }
+                    _ => false,
+                };
+                if !valid_input {
                     self.error(format!(
-                        "{subject} builtin 'println' requires a Copy bool argument"
+                        "{subject} builtin 'println' input does not satisfy its canonical {} contract",
+                        contract.accepted_abi_description()
                     ));
                 }
                 self.require_unit(&result_ty, subject);
@@ -2091,7 +2114,8 @@ mod tests {
             matches!(
                 instruction.kind,
                 super::MirInstructionKind::BuiltinCall {
-                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool,
+                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool
+                        | crate::core::mir::types::MirBuiltinKind::PrintlnInt,
                     ..
                 }
             )
@@ -2100,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_bool_println_from_the_canonical_stdout_effect() {
+    fn rejects_unsupported_println_from_the_canonical_stdout_effect() {
         let tokens = Lexer::new(include_str!(
             "../../../tests/fixtures/mir_native_println_non_bool_rejected.mimi"
         ))
@@ -2114,7 +2138,37 @@ mod tests {
         );
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("non-bool println must fail before a canonical backend");
-        assert!(format!("{error:?}").contains("canonical contract accepts bool"));
+        assert!(format!("{error:?}").contains("canonical contract accepts signed i32 or i64"));
+    }
+
+    #[test]
+    fn admits_signed_integer_println_effect_for_both_widths() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_println_int.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        super::MirInstructionKind::BuiltinCall {
+                            kind: crate::core::mir::types::MirBuiltinKind::PrintlnInt,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+        validate_scalar_collection_island(&program).expect("println integer effect contract");
     }
 
     #[test]

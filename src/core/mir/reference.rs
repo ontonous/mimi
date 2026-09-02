@@ -2997,6 +2997,20 @@ impl<'a> MirReferenceInterpreter<'a> {
                         output.push_str(if value { "true\n" } else { "false\n" });
                         MirRuntimeValue::Unit
                     }
+                    super::types::MirBuiltinKind::PrintlnInt => {
+                        let argument = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "println argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        let MirRuntimeValue::Int(value) = argument else {
+                            return Err(self.error(
+                                &function.owner,
+                                "builtin 'println' received a non-integer value",
+                            ));
+                        };
+                        self.output.borrow_mut().push_str(&format!("{value}\n"));
+                        MirRuntimeValue::Unit
+                    }
                 };
                 values.insert(result.clone(), output);
             }

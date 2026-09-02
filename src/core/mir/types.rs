@@ -102,6 +102,10 @@ pub enum MirBuiltinKind {
     /// part of the MIR contract so reference, bytecode, and native consumers
     /// cannot silently treat `println` as an ordinary legacy call.
     PrintlnBool,
+    /// Write one Copy signed integer followed by a newline. The accepted
+    /// width is checker-owned by the argument TypeDesc: signed i32 and i64
+    /// are the only concrete integer ABIs in this contract.
+    PrintlnInt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,6 +188,21 @@ impl MirBuiltinContract {
                 result_must_be_unit: true,
                 effect: MirBuiltinEffect::StdoutLine,
             },
+            MirBuiltinKind::PrintlnInt => Self {
+                kind,
+                name: "println",
+                arity: 1,
+                input_abi: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                preserves_type: false,
+                requires_copy: true,
+                requires_same_input_type: false,
+                overflow_trap: None,
+                result_must_be_unit: true,
+                effect: MirBuiltinEffect::StdoutLine,
+            },
         }
     }
 
@@ -195,9 +214,26 @@ impl MirBuiltinContract {
             "abs" => Some(Self::for_kind(MirBuiltinKind::Abs)),
             "min" => Some(Self::for_kind(MirBuiltinKind::Min)),
             "max" => Some(Self::for_kind(MirBuiltinKind::Max)),
-            "println" => Some(Self::for_kind(MirBuiltinKind::PrintlnBool)),
             _ => None,
         }
+    }
+
+    /// Resolve a type-directed surface builtin. `println` is deliberately
+    /// not resolved by name alone: its canonical node must record the
+    /// concrete scalar ABI selected by checker-owned TypeDesc facts.
+    pub fn from_builtin_with_abi(id: &BuiltinId, abi: MirAbiClass) -> Option<Self> {
+        if id.as_str() == "println" {
+            let kind = match abi {
+                MirAbiClass::Bool => MirBuiltinKind::PrintlnBool,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } => MirBuiltinKind::PrintlnInt,
+                _ => return None,
+            };
+            return Some(Self::for_kind(kind));
+        }
+        Self::from_builtin(id)
     }
 
     /// The contract admits a second ABI shape for the same polymorphic
@@ -220,6 +256,13 @@ impl MirBuiltinContract {
                 }
             ),
             MirBuiltinKind::PrintlnBool => abi == MirAbiClass::Bool,
+            MirBuiltinKind::PrintlnInt => matches!(
+                abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                }
+            ),
         }
     }
 
@@ -231,6 +274,7 @@ impl MirBuiltinContract {
                     | MirBuiltinKind::Min
                     | MirBuiltinKind::Max
                     | MirBuiltinKind::PrintlnBool
+                    | MirBuiltinKind::PrintlnInt
             )
     }
 
@@ -239,6 +283,7 @@ impl MirBuiltinContract {
             MirBuiltinKind::Abs => "signed i64 or f64",
             MirBuiltinKind::Min | MirBuiltinKind::Max => "signed i64",
             MirBuiltinKind::PrintlnBool => "bool",
+            MirBuiltinKind::PrintlnInt => "signed i32 or i64",
         }
     }
 }
@@ -3305,6 +3350,30 @@ mod tests {
             bits: 64,
             signed: true,
         }));
+    }
+
+    #[test]
+    fn println_int_contract_is_copy_unit_stdout_line_for_both_widths() {
+        let contract = MirBuiltinContract::for_kind(MirBuiltinKind::PrintlnInt);
+
+        assert_eq!(contract.name, "println");
+        assert_eq!(contract.arity, 1);
+        assert!(contract.requires_copy);
+        assert!(contract.result_must_be_unit);
+        assert_eq!(contract.effect, MirBuiltinEffect::StdoutLine);
+        assert!(contract.accepts_abi(MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        }));
+        assert!(contract.accepts_abi(MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        }));
+        assert!(!contract.accepts_abi(MirAbiClass::Integer {
+            bits: 32,
+            signed: false,
+        }));
+        assert!(!contract.accepts_abi(MirAbiClass::Bool));
     }
 
     #[test]
