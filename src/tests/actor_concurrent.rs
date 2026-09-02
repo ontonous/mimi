@@ -95,10 +95,13 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
         },
         0
     );
+    // The handle is detached above, but the dropper is a separate thread.
+    // Join it before observing the completion flag so this test proves the
+    // drop completed instead of racing the scheduler.
+    dropper.join().unwrap();
     assert!(drop_finished.load(Ordering::Acquire));
     actor_test_pause_after_pin(false);
     assert_eq!(call.join().unwrap(), (8, 42));
-    dropper.join().unwrap();
     assert!(drop_finished.load(Ordering::Acquire));
 }
 

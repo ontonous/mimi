@@ -20,8 +20,7 @@ use std::collections::HashMap;
 /// Holds the resolved_* data installed by `from_checked()` and provides
 /// read-only accessor methods.  Execution is handled exclusively by the
 /// bytecode VM (`bytecode::BytecodeVM`).
-pub struct Interpreter<'a> {
-    file: &'a File,
+pub struct Interpreter {
     /// Whether to verify contracts at runtime (used by tests).
     pub verify_contracts: bool,
     /// FFI execution context (shared with the bytecode VM).
@@ -101,14 +100,16 @@ pub struct Interpreter<'a> {
     pub(in crate::interp) resolved_persistent_fields: Option<HashMap<String, Vec<String>>>,
 }
 
-impl<'a> Interpreter<'a> {
-    pub fn from_checked(program: &'a crate::core::CheckedProgram) -> Self {
-        // C2 (permanent): the surface-AST interpreter is the reference execution
-        // semantics for Flow, Actor, Session, and FFI programs. ResolvedInterpreter
-        // covers pure value programs; the explicitly named surface-AST
-        // compatibility owner provides the permanent remainder.
-        let mut interp = Self::new(
-            program.legacy_body_file(crate::core::LegacyBodyConsumer::SurfaceAstInterpreter),
+impl Interpreter {
+    pub fn from_checked(program: &crate::core::CheckedProgram) -> Self {
+        // C2 deletion gate: this constructor is a checked-directory viewer,
+        // not an execution path.  The retired tree-walker used to initialize
+        // it from the retained surface body; all runtime execution now goes
+        // through bytecode/MIR consumers, so install the directory from typed
+        // CheckedProgram facts only.
+        let mut interp = Self::with_runtime(
+            ffi_runtime::FfiRuntime::from_parts(HashMap::new(), HashMap::new(), HashMap::new()),
+            None,
         );
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
         let tables = std::sync::Arc::new(program.build_transition_tables());
@@ -504,10 +505,10 @@ impl<'a> Interpreter<'a> {
         interp
     }
 
-    /// Minimal constructor: initializes FFI runtime from the AST and sets
-    /// all resolved_* directory fields to None.  `from_checked()` overwrites
-    /// them from the CheckedProgram.
-    pub(crate) fn new(file: &'a File) -> Self {
+    /// Minimal legacy helper: initializes FFI runtime from a surface AST and
+    /// sets all resolved_* directory fields to None. The checked-directory
+    /// constructor does not use this helper.
+    pub(crate) fn new(file: &File) -> Self {
         let ffi_runtime = ffi_runtime::FfiRuntime::from_file(file);
         // v0.29.24: first `@max_children(N)` among flows sets process spawn quota.
         let max_children = file.items.iter().find_map(|item| {
@@ -520,8 +521,11 @@ impl<'a> Interpreter<'a> {
                 None
             }
         });
+        Self::with_runtime(ffi_runtime, max_children)
+    }
+
+    fn with_runtime(ffi_runtime: ffi_runtime::FfiRuntime, max_children: Option<usize>) -> Self {
         Self {
-            file,
             verify_contracts: true,
             ffi_runtime,
             max_children,

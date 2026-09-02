@@ -8,7 +8,7 @@ use crate::ffi::Errno;
 /// kept on `Interpreter` because the tree-walker's to_json/from_json builtins
 /// and turbofish from_json::<T> evaluation still call them.
 
-impl<'a> Interpreter<'a> {
+impl Interpreter {
     pub(crate) fn value_to_json(&self, v: &Value) -> Result<serde_json::Value, Errno> {
         self.ffi_runtime.value_to_json(v)
     }

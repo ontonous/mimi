@@ -125,7 +125,7 @@ impl Drop for FfiSharedGuard {
     }
 }
 
-impl<'a> Interpreter<'a> {
+impl Interpreter {
     pub(crate) fn value_to_debug_string(&self, v: &Value) -> String {
         match v {
             Value::Int(n) => format!("{}", n),

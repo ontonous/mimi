@@ -114,7 +114,6 @@ fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
 
     let consumers = [
         LegacyBodyConsumer::CodegenLegacyRemainder,
-        LegacyBodyConsumer::SurfaceAstInterpreter,
         LegacyBodyConsumer::FlowVerifierCompatibility,
         LegacyBodyConsumer::FfiVerifierCompatibility,
         LegacyBodyConsumer::DualVerifierCompatibility,
@@ -127,7 +126,6 @@ fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
         names,
         vec![
             "codegen-legacy-remainder",
-            "surface-ast-interpreter",
             "flow-verifier-compatibility",
             "ffi-verifier-compatibility",
             "dual-verifier-compatibility",
@@ -164,14 +162,13 @@ fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
 }
 
 #[test]
-fn surface_interpreter_access_is_explicitly_tagged() {
-    let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
+fn checked_directory_constructor_does_not_access_legacy_body() {
+    let mut program =
+        crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
+    program.legacy_file.items.clear();
     CheckedProgram::reset_test_legacy_body_access();
     let _interpreter = crate::interp::Interpreter::from_checked(&program);
-    assert_eq!(
-        CheckedProgram::test_legacy_body_access(),
-        vec![LegacyBodyConsumer::SurfaceAstInterpreter]
-    );
+    assert!(CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]

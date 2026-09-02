@@ -20,8 +20,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub(crate) enum LegacyBodyConsumer {
     /// The legacy LLVM fifth pass for body classes not yet lowered to MIR.
     CodegenLegacyRemainder,
-    /// The surface interpreter compatibility path for Flow/actor/session/FFI.
-    SurfaceAstInterpreter,
     /// The legacy Z3 Flow/body compatibility encoder.
     FlowVerifierCompatibility,
     /// The legacy Z3 extern-call-site/body compatibility encoder.
@@ -35,7 +33,6 @@ impl LegacyBodyConsumer {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CodegenLegacyRemainder => "codegen-legacy-remainder",
-            Self::SurfaceAstInterpreter => "surface-ast-interpreter",
             Self::FlowVerifierCompatibility => "flow-verifier-compatibility",
             Self::FfiVerifierCompatibility => "ffi-verifier-compatibility",
             Self::DualVerifierCompatibility => "dual-verifier-compatibility",
@@ -1291,8 +1288,8 @@ impl CheckedProgram {
     ///
     /// # Architecture (0.32.29, irreversible)
     ///
-    /// This is NOT a transitional API. Three consumers permanently need the
-    /// surface AST because their architecture is defined over it:
+    /// This is NOT a transitional API. Four compatibility consumers currently
+    /// need the surface AST because their architecture is defined over it:
     ///
     /// - **C1 codegen fifth pass** (`compile_file_inner`): compiles ineligible
     ///   body classes (capturing lambdas, generics, async, extern ABI wrappers,
@@ -1300,16 +1297,17 @@ impl CheckedProgram {
     ///   eligible subset; the fifth pass handles the permanent remainder.
     ///   The skip guard (`count_basic_blocks != 0`) prevents double-emission.
     ///
-    /// - **C2 interpreter** (`Interpreter::from_checked`): the surface-AST
-    ///   interpreter is the reference execution semantics for Flow, Actor,
-    ///   Session, and FFI programs. `ResolvedInterpreter` covers pure value
-    ///   programs; the surface AST interpreter covers the rest.
+    /// - **C4 Flow verifier compatibility Z3 path**
+    ///   (`flow_verify_file_with_hashes`): unmigrated Flow verification still
+    ///   encodes function bodies as Z3 constraints from the surface AST.
+    /// - **C4 FFI verifier compatibility path**: extern call-site/body
+    ///   contracts still have an AST encoder for un-migrated inputs.
+    /// - **C4 dual-verifier compatibility path**: the secondary Flow/VIR
+    ///   engine remains AST-backed until its obligations are MIR-native.
     ///
-    /// - **C4 verifier compatibility Z3 path** (`flow_verify_file_with_hashes`):
-    ///   unmigrated Flow/FFI verification still encodes function bodies as Z3
-    ///   constraints from the surface AST. The closed S8 silent-local Flow
-    ///   island and flat Copy-record island bypass this path through canonical
-    ///   MIR; the remaining Flow path handles only compatibility shapes.
+    /// The closed S8 silent-local Flow island, flat Copy-record island, and
+    /// other admitted MIR islands bypass these compatibility paths through
+    /// canonical MIR; the remaining paths handle only compatibility shapes.
     ///
     /// # Prohibition
     ///
@@ -1317,8 +1315,8 @@ impl CheckedProgram {
     /// data (signatures, Flow transitions, Actor/Session/Protocol catalogs,
     /// ownership, CFG) is available through typed accessors on
     /// `CheckedProgram`; body-level canonical data is available through
-    /// `resolved_body()` / `callables()`.  A caller here is an explicit
-    /// compatibility boundary and must carry one of the five owner tags
+    /// `resolved_body()` / `callables()`. A caller here is an explicit
+    /// compatibility boundary and must carry one of the four owner tags
     /// above.
     #[cfg(test)]
     pub(crate) fn reset_test_legacy_body_access() {
@@ -1330,9 +1328,9 @@ impl CheckedProgram {
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow().clone())
     }
 
-    pub(crate) fn legacy_body_file(&self, consumer: LegacyBodyConsumer) -> &File {
+    pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> &File {
         #[cfg(test)]
-        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(consumer));
+        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(_consumer));
         &self.legacy_file
     }
 
