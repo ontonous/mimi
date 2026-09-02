@@ -35,7 +35,7 @@
 //!     -> lexer::Lexer::tokenize
 //!     -> parser::Parser::parse_file
 //!     -> core::check
-//!     -> codegen::CodeGenerator::compile_file
+//!     -> codegen::CodeGenerator::compile_checked
 //!     -> object file / executable
 //! ```
 //!

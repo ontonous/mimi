@@ -325,7 +325,8 @@ pub(crate) fn build(
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
                 (codegen.compile_mir_native(&canonical), true)
             }
-            crate::canonical_dispatch::DefaultMirRoute::Legacy => {
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
+                crate::canonical_dispatch::report_legacy_route(_reason);
                 (codegen.compile_checked(&checked_program), false)
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {

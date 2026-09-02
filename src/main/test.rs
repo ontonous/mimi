@@ -141,7 +141,8 @@ pub(crate) fn test(
                     })?;
                 (prog, true)
             }
-            crate::canonical_dispatch::DefaultMirRoute::Legacy => {
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
+                crate::canonical_dispatch::report_legacy_route(_reason);
                 let mut compiler = BytecodeCompiler::new();
                 compiler.install_checked_program(&checked_program);
                 let prog = compiler

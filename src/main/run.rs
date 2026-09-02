@@ -153,7 +153,10 @@ fn run_once(
     } else {
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
-            crate::canonical_dispatch::DefaultMirRoute::Legacy => None,
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
+                crate::canonical_dispatch::report_legacy_route(reason);
+                None
+            }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                 return Err(format!("default Canonical MIR route rejected: {reason}"));
             }

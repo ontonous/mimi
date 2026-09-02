@@ -98,7 +98,8 @@ pub fn disasm_file(path: &Path) -> ! {
                 eprintln!("error: default Canonical MIR route rejected: {}", reason);
                 process::exit(1);
             }
-            crate::canonical_dispatch::DefaultMirRoute::Legacy => {
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
+                crate::canonical_dispatch::report_legacy_route(_reason);
                 let mut compiler = mimi::interp::bytecode::BytecodeCompiler::new();
                 compiler.install_checked_program(&checked_program);
                 match compiler.compile_file(&merged_file) {

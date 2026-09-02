@@ -15,8 +15,38 @@ use mimi::core::mir::reference::MirProgram;
 use mimi::core::CheckedProgram;
 use mimi::verifier::VerifStatus;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyRouteReason {
+    /// No checker-owned migration profile was recognized.
+    OutsideMigratedProfile,
+    /// A compatibility-shaped program did not materialize a migrated MIR
+    /// operation, so it remains outside the current production island.
+    MixedCoverageWithoutMaterializedCandidate,
+}
+
+impl LegacyRouteReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutsideMigratedProfile => "outside-migrated-profile",
+            Self::MixedCoverageWithoutMaterializedCandidate => {
+                "mixed-coverage-without-materialized-candidate"
+            }
+        }
+    }
+}
+
+pub(crate) fn report_legacy_route(reason: LegacyRouteReason) {
+    if std::env::var_os("MIMI_VERBOSE").is_some() {
+        eprintln!("canonical route disposition: legacy ({})", reason.as_str());
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum DefaultMirRoute {
-    Legacy,
+    /// Explicit compatibility route. The reason is part of the route
+    /// disposition so callers cannot mistake an unrecognized program for a
+    /// canonical preflight failure that was silently downgraded.
+    Legacy(LegacyRouteReason),
     Canonical(MirProgram),
     /// A recognized migrated-island candidate failed canonical preflight.
     /// Once an island is recognized, its old production path is deleted and
@@ -87,12 +117,13 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, or a concrete scalar `List.len` operation. The candidate then
-/// has to pass every consumer preflight before any caller starts execution or
-/// LLVM emission. Returning `Legacy` means the program has not entered a
-/// migrated island. Returning `Rejected` means an island was recognized but
-/// canonical preflight failed; callers must report the error and must not
-/// invoke legacy.
+/// record value, a concrete scalar `List.len` operation, an exact S8 Flow
+/// transition, or the concrete non-Copy `Option<string>` variant island. The
+/// candidate then has to pass every consumer preflight before any caller
+/// starts execution or LLVM emission. A `Legacy(reason)` result is an explicit
+/// compatibility disposition for a program that has not entered a migrated
+/// island. `Rejected` means an island was recognized but canonical preflight
+/// failed; callers must report the error and must not invoke legacy.
 pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
@@ -137,7 +168,7 @@ pub(crate) fn select_default_route(
     );
     let flow_candidate = may_contain_single_silent_local_transition(checked, merged_file);
     if !collection_hint && !record_hint && !flow_candidate && !option_string_hint {
-        return DefaultMirRoute::Legacy;
+        return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
 
     let route = match materialize_canonical_route(checked, merged_file) {
@@ -196,7 +227,9 @@ pub(crate) fn select_default_route(
                     "canonical MIR candidate materialization failed",
                 );
             }
-            return DefaultMirRoute::Legacy;
+            return DefaultMirRoute::Legacy(
+                LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
+            );
         }
     };
     let canonical = &route.program;
@@ -252,7 +285,9 @@ pub(crate) fn select_default_route(
         && !flow_route_candidate
         && !option_string_route_candidate
     {
-        return DefaultMirRoute::Legacy;
+        return DefaultMirRoute::Legacy(
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
+        );
     }
 
     // S11: the production unit is a complete scalar List/Set executable
@@ -390,7 +425,7 @@ fn reject_migrated_candidates(
             reason.into()
         ))
     } else {
-        DefaultMirRoute::Legacy
+        DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
     }
 }
 
@@ -547,8 +582,41 @@ mod tests {
         );
         assert!(matches!(
             select_default_route(&checked, &file),
-            DefaultMirRoute::Legacy
+            DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
         ));
+    }
+
+    #[test]
+    fn mixed_compatibility_route_carries_non_materialized_disposition() {
+        let source = r#"
+            func main() -> i32 {
+                let values = [i for i in range(0, 3)]
+                len(values)
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let route = select_default_route(&checked, &file);
+        assert!(
+            matches!(
+                &route,
+                DefaultMirRoute::Legacy(
+                    LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
+                )
+            ),
+            "unexpected compatibility disposition: {route:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_route_reason_has_stable_receipt_names() {
+        assert_eq!(
+            LegacyRouteReason::OutsideMigratedProfile.as_str(),
+            "outside-migrated-profile"
+        );
+        assert_eq!(
+            LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate.as_str(),
+            "mixed-coverage-without-materialized-candidate"
+        );
     }
 
     #[test]

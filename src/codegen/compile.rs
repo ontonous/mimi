@@ -817,9 +817,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    // Used directly by test code; the production dispatch path goes through
-    // compile_file_with_resolved.
+    // Test-only compatibility harness. Production code must enter through
+    // compile_checked, whose route gate owns the explicit legacy remainder.
     #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
         self.compile_file_inner(file, None)
     }
