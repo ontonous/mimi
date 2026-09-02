@@ -2500,10 +2500,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch-move binding target type is absent");
                 return;
             };
-            let index = match self
+            let projection = match self
                 .program
                 .type_catalog()
-                .validate_variant_payload_projection(
+                .validated_variant_payload_projection_contract(
                     scrutinee_ty,
                     &variant.id,
                     &binding.field,
@@ -2515,6 +2515,7 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             };
+            let index = projection.field_index;
             if binding.parameter != block.parameters[arguments.len() + binding_index].value {
                 self.error("switch-move binding parameter disagrees with target block parameter");
                 return;
@@ -2703,10 +2704,10 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch binding target type is absent");
                 return;
             };
-            let index = match self
+            let projection = match self
                 .program
                 .type_catalog()
-                .validate_variant_payload_projection(
+                .validated_variant_payload_projection_contract(
                     scrutinee_ty,
                     &variant.id,
                     &binding.field,
@@ -2718,6 +2719,7 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             };
+            let index = projection.field_index;
             if binding.parameter != block.parameters[arguments.len() + binding_index].value {
                 self.error("switch binding parameter disagrees with target block parameter");
                 return;

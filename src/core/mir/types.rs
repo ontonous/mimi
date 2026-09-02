@@ -13,7 +13,7 @@ use crate::core::ir::{
     ResolvedTypeId, ResolvedTypeTable,
 };
 use crate::core::mir::MirSetOperation;
-use crate::core::{CheckedProgram, NodeId, ResolvedTypeKind};
+use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
 
 pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-12";
 
@@ -595,6 +595,22 @@ pub struct MirVariantDesc {
     pub name: String,
     pub discriminant: u16,
     pub fields: Vec<MirFieldDesc>,
+}
+
+/// Backend-independent receipt for one canonical variant payload projection.
+///
+/// The nominal/variant/field identities and declaration-order index are
+/// resolved together from the TypeDesc graph. Consumers must carry this
+/// receipt into their physical read instruction instead of independently
+/// deriving a tag, index, or arity from a runtime representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantProjectionContract {
+    pub nominal: NominalTypeId,
+    pub variant: NodeId,
+    pub field: NodeId,
+    pub field_index: usize,
+    pub arity: usize,
+    pub field_ty: ResolvedTypeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1262,12 +1278,13 @@ impl MirTypeCatalog {
         result_ty: &ResolvedTypeId,
     ) -> Result<(&MirVariantDesc, usize), String> {
         let variant = self.validated_flat_copy_variant(scrutinee_ty, variant_id)?;
-        let field_index = self.validate_variant_payload_projection(
+        let projection = self.validated_variant_payload_projection_contract(
             scrutinee_ty,
             variant_id,
             field_id,
             result_ty,
         )?;
+        let field_index = projection.field_index;
         if field_index != 0 || variant.fields.len() != 1 {
             return Err(format!(
                 "variant '{}' payload projection is outside the single-payload flat Copy contract",
@@ -3409,33 +3426,33 @@ impl MirTypeCatalog {
         Ok((nominal, variant))
     }
 
-    /// Validate the payload projection made by one variant-switch binding.
-    ///
-    /// A `MirSwitchBinding` carries stable variant-field identity, while the
-    /// physical payload index and its type are layout facts.  Keeping this
-    /// lookup here prevents reference, bytecode, native, and verifier
-    /// consumers from independently re-deriving the active-variant ABI.
-    /// The returned index is declaration order in the canonical TypeDesc.
-    pub fn validate_variant_payload_projection(
+    /// Resolve the complete TypeDesc receipt for one variant-switch payload
+    /// projection. A `MirSwitchBinding` carries stable variant-field
+    /// identity, while the physical payload index, arity, nominal family and
+    /// field type are layout facts. Keeping this lookup here prevents
+    /// reference, bytecode, native, and verifier consumers from independently
+    /// re-deriving the active-variant ABI.
+    pub fn validated_variant_payload_projection_contract(
         &self,
         scrutinee_ty: &ResolvedTypeId,
         variant_id: &NodeId,
         field_id: &NodeId,
         result_ty: &ResolvedTypeId,
-    ) -> Result<usize, String> {
+    ) -> Result<MirVariantProjectionContract, String> {
         self.get(result_ty).ok_or_else(|| {
             format!(
                 "variant payload projection result type '{}' is absent",
                 result_ty.as_str()
             )
         })?;
-        let variant = self.variant(scrutinee_ty, variant_id).ok_or_else(|| {
+        let (nominal, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
+        let nominal = NominalTypeId::new(nominal.to_string()).map_err(|_| {
             format!(
-                "variant payload projection variant '{}' is absent from TypeDesc",
-                variant_id.0
+                "variant payload projection nominal '{}' has invalid identity",
+                nominal
             )
         })?;
-        let (index, field) = variant
+        let (field_index, field) = variant
             .fields
             .iter()
             .enumerate()
@@ -3454,7 +3471,34 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             ));
         }
-        Ok(index)
+        Ok(MirVariantProjectionContract {
+            nominal,
+            variant: variant.id.clone(),
+            field: field.id.clone(),
+            field_index,
+            arity: variant.fields.len(),
+            field_ty: field.ty.clone(),
+        })
+    }
+
+    /// Validate the payload projection made by one variant-switch binding.
+    /// The returned index is declaration order in the canonical TypeDesc;
+    /// callers that need the full identity/arity receipt should use
+    /// [`Self::validated_variant_payload_projection_contract`].
+    pub fn validate_variant_payload_projection(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<usize, String> {
+        self.validated_variant_payload_projection_contract(
+            scrutinee_ty,
+            variant_id,
+            field_id,
+            result_ty,
+        )
+        .map(|contract| contract.field_index)
     }
 
     /// Validate a switch over a canonical variant family.  Exhaustiveness is
@@ -4762,6 +4806,15 @@ mod tests {
                 .expect("Some payload projection"),
             0
         );
+        let projection = catalog
+            .validated_variant_payload_projection_contract(&option_id, &some, &some_field, &i32_id)
+            .expect("Some payload projection contract");
+        assert_eq!(projection.nominal.as_str(), "builtin:type:Option");
+        assert_eq!(projection.variant, some);
+        assert_eq!(projection.field, some_field);
+        assert_eq!(projection.field_index, 0);
+        assert_eq!(projection.arity, 1);
+        assert_eq!(projection.field_ty, i32_id);
         let projection_error = catalog
             .validate_variant_payload_projection(&option_id, &some, &some_field, &bool_id)
             .expect_err("payload result type must match TypeDesc");

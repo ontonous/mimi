@@ -862,7 +862,7 @@ impl MirProgram {
                                     });
                                 }
                                 if let Err(message) = type_catalog
-                                    .validate_variant_payload_projection(
+                                    .validated_variant_payload_projection_contract(
                                         &scrutinee_value.ty,
                                         variant_id,
                                         &binding.field,
@@ -3613,16 +3613,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "switch binding parameter disagrees with target block parameter",
                 ));
             }
-            let field_index = self
+            let projection = self
                 .program
                 .type_catalog()
-                .validate_variant_payload_projection(
+                .validated_variant_payload_projection_contract(
                     scrutinee_ty,
                     actual_variant,
                     &binding.field,
                     &parameter.ty,
                 )
                 .map_err(|message| self.error(&function.owner, message))?;
+            let field_index = projection.field_index;
             let field = payload.get(field_index).cloned().ok_or_else(|| {
                 self.error(
                     &function.owner,
@@ -3720,16 +3721,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "switch-move binding parameter disagrees with target block parameter",
                 ));
             }
-            let index = self
+            let projection = self
                 .program
                 .type_catalog()
-                .validate_variant_payload_projection(
+                .validated_variant_payload_projection_contract(
                     &scrutinee_ty,
                     &actual_variant,
                     &binding.field,
                     &parameter.ty,
                 )
                 .map_err(|message| self.error(&function.owner, message))?;
+            let index = projection.field_index;
             if bound_indices.insert(binding.field.clone(), index).is_some() {
                 return Err(self.error(&function.owner, "switch-move binding field is repeated"));
             }

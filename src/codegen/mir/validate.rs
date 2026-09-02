@@ -1357,7 +1357,7 @@ impl<'a> NativeMirValidator<'a> {
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validate_variant_payload_projection(
+                    .validated_variant_payload_projection_contract(
                         &scrutinee_value.ty,
                         variant_id,
                         &binding.field,
