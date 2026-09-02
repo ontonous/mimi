@@ -2943,17 +2943,18 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate one canonical variant construction.  The instruction carries
-    /// stable variant/member identities; this method supplies the semantic
-    /// discriminant and payload ABI from TypeDesc.
-    pub fn validate_variant_construct(
+    /// Validate one canonical variant construction and return its TypeDesc
+    /// variant descriptor.  The instruction carries stable variant/member
+    /// identities; this method supplies the semantic discriminant and
+    /// payload ABI from TypeDesc.
+    pub fn validated_variant_construct(
         &self,
         result_ty: &ResolvedTypeId,
         nominal: &crate::core::NominalTypeId,
         variant: &NodeId,
         field_ids: &[NodeId],
         field_types: &[ResolvedTypeId],
-    ) -> Result<(), String> {
+    ) -> Result<&MirVariantDesc, String> {
         if field_ids.len() != field_types.len() {
             return Err(format!(
                 "variant '{}' names {} fields but carries {} values",
@@ -2979,7 +2980,21 @@ impl MirTypeCatalog {
             .iter()
             .find(|candidate| candidate.id == *variant)
             .ok_or_else(|| format!("variant '{}' is absent from TypeDesc", variant.0))?;
-        validate_variant_fields(expected, field_ids, field_types)
+        validate_variant_fields(expected, field_ids, field_types).map(|()| expected)
+    }
+
+    /// Validate one canonical variant construction without exposing the
+    /// descriptor to callers that only need a pass/fail result.
+    pub fn validate_variant_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &NodeId,
+        field_ids: &[NodeId],
+        field_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        self.validated_variant_construct(result_ty, nominal, variant, field_ids, field_types)
+            .map(|_| ())
     }
 
     /// Validate the first backend-independent non-Copy variant contract.
@@ -4349,6 +4364,17 @@ mod tests {
                 std::slice::from_ref(&bool_id),
             )
             .is_err());
+        let some_desc = catalog
+            .validated_variant_construct(
+                &option_id,
+                &option_nominal,
+                &some,
+                std::slice::from_ref(&some_field),
+                std::slice::from_ref(&i32_id),
+            )
+            .expect("valid construction returns canonical descriptor");
+        assert_eq!(some_desc.name, "Some");
+        assert_eq!(some_desc.discriminant, 1);
         assert!(catalog
             .validate_variant_construct(
                 &option_id,

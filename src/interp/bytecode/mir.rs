@@ -1901,26 +1901,30 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        let Some((expected_nominal, variants)) =
-            self.program.type_catalog().variant_layout(&result_desc.id)
+        let field_ids = fields
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect::<Vec<_>>();
+        let Some(field_types) = fields
+            .iter()
+            .map(|(_, value)| self.function.values.get(value).map(|info| info.ty.clone()))
+            .collect::<Option<Vec<_>>>()
         else {
-            self.error(format!(
-                "variant result '{}' has no canonical variant layout",
-                result
-            ));
+            self.error("variant payload value is absent from MIR");
             return;
         };
-        if nominal.as_str() != expected_nominal {
-            self.error(format!(
-                "variant nominal '{}' disagrees with TypeDesc nominal '{}'",
-                nominal.as_str(),
-                expected_nominal
-            ));
-            return;
-        }
-        let Some(variant_desc) = variants.iter().find(|candidate| candidate.id == *variant) else {
-            self.error(format!("variant '{}' is absent from TypeDesc", variant.0));
-            return;
+        let variant_desc = match self.program.type_catalog().validated_variant_construct(
+            &result_desc.id,
+            nominal,
+            variant,
+            &field_ids,
+            &field_types,
+        ) {
+            Ok(variant_desc) => variant_desc,
+            Err(message) => {
+                self.error(format!("variant construction rejected: {message}"));
+                return;
+            }
         };
         if let Err(message) = self.supported_type(&result_desc.id) {
             self.error(format!(
@@ -1929,55 +1933,12 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
-        if fields.len() != variant_desc.fields.len() {
-            self.error(format!(
-                "variant '{}' has {} fields but construction carries {}",
-                variant_desc.name,
-                variant_desc.fields.len(),
-                fields.len()
-            ));
-            return;
-        }
         let mut supplied = BTreeMap::new();
         for (field, value) in fields {
-            let Some(field_desc) = variant_desc
-                .fields
-                .iter()
-                .find(|candidate| candidate.id == *field)
-            else {
-                self.error(format!(
-                    "variant field '{}' is absent from TypeDesc",
-                    field.0
-                ));
-                return;
-            };
-            let Some(value_info) = self.function.values.get(value) else {
-                self.error(format!(
-                    "variant field value '{}' is absent from MIR",
-                    value
-                ));
-                return;
-            };
-            if value_info.ty != field_desc.ty {
-                self.error(format!(
-                    "variant field '{}' type '{}' disagrees with layout type '{}'",
-                    field.0,
-                    value_info.ty.as_str(),
-                    field_desc.ty.as_str()
-                ));
-                return;
-            }
             if supplied.insert(field.clone(), value.clone()).is_some() {
                 self.error(format!("variant field '{}' is repeated", field.0));
                 return;
             }
-        }
-        if supplied.len() != variant_desc.fields.len() {
-            self.error(format!(
-                "variant '{}' construction omits a payload field",
-                variant_desc.name
-            ));
-            return;
         }
         if variant_desc.fields.len() > u16::MAX as usize {
             self.error("variant payload arity exceeds bytecode aggregate ABI");

@@ -228,32 +228,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         moving: bool,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let result_ty = self.value_type(result, subject)?;
-        let (expected_nominal, variants) = self
-            .program
-            .type_catalog()
-            .variant_layout(&result_ty)
-            .ok_or_else(|| {
-            NativeMirError::new(subject, "variant result has no canonical TypeDesc layout")
-        })?;
-        if nominal.as_str() != expected_nominal {
-            return Err(NativeMirError::new(
-                subject,
-                format!(
-                    "variant nominal '{}' disagrees with canonical nominal '{}'",
-                    nominal.as_str(),
-                    expected_nominal
-                ),
-            ));
-        }
-        let variant_desc = variants
-            .iter()
-            .find(|candidate| candidate.id == *variant)
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    format!("variant '{}' is absent from TypeDesc", variant.0),
-                )
-            })?;
         let field_ids = fields
             .iter()
             .map(|(field, _)| field.clone())
@@ -262,9 +236,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .iter()
             .map(|(_, value)| self.value_type(value, subject))
             .collect::<Result<Vec<_>, _>>()?;
-        self.program
+        let variant_desc = self
+            .program
             .type_catalog()
-            .validate_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
+            .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let payload_ty = if moving {
             native_non_copy_variant_payload_type(self.program.type_catalog(), &result_ty)?
@@ -300,7 +275,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )?
             .const_zero()
         } else {
-            if fields.len() != 1 || fields[0].0 != variant_desc.fields[0].id {
+            let field = variant_desc.fields.first().ok_or_else(|| {
+                NativeMirError::new(subject, "variant payload has no canonical field")
+            })?;
+            if fields.len() != 1 || fields[0].0 != field.id {
                 return Err(NativeMirError::new(
                     subject,
                     "variant payload fields do not match the canonical TypeDesc field",
