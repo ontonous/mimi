@@ -1,10 +1,12 @@
 //! Wave-1 audit-fix regression tests — codegen_expr2.
 //! Findings: devdocs/full-audit-2026-08-05.md §7 (2026-08-05 full audit).
 //! Discipline: each fix must carry a regression test here; L1 divergences
-//! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via
-//! compile_and_run) — same discipline as the `dual_assert!` macro in
+//! assert BOTH sides (VM via run_source*/bytecode helpers; codegen via the
+//! checked production path) — same discipline as the `dual_assert!` macro in
 //! src/tests/dual_backend.rs (checker gate as applicable, both backends
-//! asserted against the expected output and against each other).
+//! asserted against the expected output and against each other). The
+//! string-slice entries additionally emit a machine-readable stop-ship
+//! receipt: they are deliberately not Canonical MIR shapes yet.
 //!
 //! Fixes covered:
 //! - §7 CRITICAL match.rs array/slice pattern length check + subject test
@@ -16,6 +18,216 @@ use super::*;
 
 fn can_link() -> bool {
     crate::tests::can_link()
+}
+
+const STOP_SHIP_RECEIPT_SCHEMA: &str = "mimi-stop-ship-receipt-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StopShipObservation {
+    Return {
+        value: String,
+        stdout: String,
+    },
+    Trap {
+        class: String,
+        message: String,
+        stdout: String,
+        exit_code: Option<i32>,
+    },
+    NotMaterialized {
+        reason: String,
+    },
+}
+
+impl StopShipObservation {
+    fn canonical_text(&self) -> String {
+        fn escape(value: &str) -> String {
+            value.replace('\\', "\\\\").replace('\n', "\\n")
+        }
+
+        match self {
+            Self::Return { value, stdout } => {
+                format!("return:value={};stdout={}", escape(value), escape(stdout))
+            }
+            Self::Trap {
+                class,
+                message,
+                stdout,
+                exit_code,
+            } => format!(
+                "trap:class={};exit_code={:?};message={};stdout={}",
+                escape(class),
+                exit_code,
+                escape(message),
+                escape(stdout)
+            ),
+            Self::NotMaterialized { reason } => {
+                format!("not-materialized:reason={}", escape(reason))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StopShipReceipt {
+    case_id: &'static str,
+    category: &'static str,
+    disposition: &'static str,
+    route: String,
+    canonical_mir: &'static str,
+    ownership: &'static str,
+    reference: StopShipObservation,
+    vm: StopShipObservation,
+    native: StopShipObservation,
+}
+
+impl StopShipReceipt {
+    /// Stable line-oriented encoding so a receipt can be grepped or ingested
+    /// without depending on Rust's Debug formatting.
+    fn canonical_text(&self) -> String {
+        format!(
+            "schema={}\ncase_id={}\ncategory={}\ndisposition={}\nroute={}\ncanonical_mir={}\nownership={}\nreference={}\nvm={}\nnative={}",
+            STOP_SHIP_RECEIPT_SCHEMA,
+            self.case_id,
+            self.category,
+            self.disposition,
+            self.route,
+            self.canonical_mir,
+            self.ownership,
+            self.reference.canonical_text(),
+            self.vm.canonical_text(),
+            self.native.canonical_text(),
+        )
+    }
+}
+
+fn string_slice_route_boundary(src: &str) -> (String, StopShipObservation) {
+    use std::collections::HashSet;
+
+    let file = parse_prod(src);
+    let checked = crate::core::check_program(&file).expect("string-slice checker witness");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    let route = if admission.has_candidate() {
+        "legacy:mixed-coverage-without-materialized-candidate"
+    } else {
+        "legacy:outside-migrated-profile"
+    };
+
+    let excluded_sources = file
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+            &checked,
+            &excluded_sources,
+        )
+        .expect_err("string slice must remain outside canonical MIR lowering");
+    (
+        route.to_owned(),
+        StopShipObservation::NotMaterialized {
+            reason: format!("canonical MIR construction rejected: {canonical}"),
+        },
+    )
+}
+
+fn normalize_string_slice_trap(text: &str) -> String {
+    let text = text.to_ascii_lowercase();
+    if text.contains("slice") || text.contains("substring") {
+        "trap:string-slice-bounds".into()
+    } else {
+        format!("trap:unclassified:{text}")
+    }
+}
+
+fn assert_string_slice_receipt(
+    case_id: &'static str,
+    src: &str,
+    expected_stdout: &str,
+    expected_return: Option<&str>,
+) {
+    let (route, reference) = string_slice_route_boundary(src);
+    let vm = match expected_return {
+        Some(expected_return) => {
+            let (value, stdout) = checked_run_source_with_stdout(src);
+            let value = format!("{value:?}");
+            assert_eq!(value, expected_return, "VM return value drifted");
+            assert_eq!(stdout.trim(), expected_stdout, "VM output drifted");
+            StopShipObservation::Return { value, stdout }
+        }
+        None => {
+            let error = checked_run_source_result(src).expect_err("VM must trap string slice");
+            assert_eq!(
+                normalize_string_slice_trap(&error),
+                "trap:string-slice-bounds"
+            );
+            StopShipObservation::Trap {
+                class: normalize_string_slice_trap(&error),
+                message: error,
+                stdout: String::new(),
+                exit_code: None,
+            }
+        }
+    };
+
+    let native = checked_codegen_compile_and_observe(src)
+        .expect("production compile_checked native witness must link");
+    let native_observation = match expected_return {
+        Some(expected_return) => {
+            assert_eq!(
+                native.exit_code,
+                Some(0),
+                "native main return status drifted"
+            );
+            let native_value = format!("Int({})", native.exit_code.unwrap());
+            assert_eq!(native_value, expected_return, "native return value drifted");
+            assert_eq!(
+                native.stdout.trim(),
+                expected_stdout,
+                "native output drifted"
+            );
+            StopShipObservation::Return {
+                value: format!("{native_value};process_exit_code={:?}", native.exit_code),
+                stdout: native.stdout.clone(),
+            }
+        }
+        None => {
+            assert_ne!(native.exit_code, Some(0), "native must trap string slice");
+            let class = normalize_string_slice_trap(&native.stderr);
+            assert_eq!(class, "trap:string-slice-bounds");
+            StopShipObservation::Trap {
+                class,
+                message: native.stderr.clone(),
+                stdout: native.stdout.clone(),
+                exit_code: native.exit_code,
+            }
+        }
+    };
+
+    let receipt = StopShipReceipt {
+        case_id,
+        category: "string-slice-dual-backend",
+        disposition: if expected_return.is_some() {
+            "reproduced-green"
+        } else {
+            "intentional-negative"
+        },
+        route,
+        canonical_mir: "not-materialized",
+        ownership: "not-closed: legacy string-slice allocation/ownership contract",
+        reference,
+        vm,
+        native: native_observation,
+    };
+    let text = receipt.canonical_text();
+    assert!(text.starts_with("schema=mimi-stop-ship-receipt-v1\n"));
+    assert!(text.contains("route=legacy:"));
+    assert!(text.contains("canonical_mir=not-materialized"));
+    assert!(text.contains("ownership=not-closed:"));
+    eprintln!("[stop-ship-receipt]\n{text}");
 }
 
 /// Run BOTH backends and assert the trimmed outputs equal `expected` and
@@ -802,7 +1014,8 @@ fn audit2_cgc_string_slice_char_based_dual() {
     if !can_link() {
         return;
     }
-    dual_expected(
+    assert_string_slice_receipt(
+        "audit2_cgc_string_slice_char_based_dual",
         r#"
         func main() -> i32 {
             let s = "hello"
@@ -817,6 +1030,7 @@ fn audit2_cgc_string_slice_char_based_dual() {
         }
     "#,
         "ell\n3\n好世\n2",
+        Some("Int(0)"),
     );
 }
 
@@ -827,7 +1041,8 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
     if !can_link() {
         return;
     }
-    dual_expected(
+    assert_string_slice_receipt(
+        "audit2_cgc_string_slice_negative_wrap_dual",
         r#"
         func main() -> i32 {
             let s = "hello"
@@ -837,6 +1052,7 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
         }
     "#,
         "llo",
+        Some("Int(0)"),
     );
 }
 
@@ -900,24 +1116,18 @@ fn audit2_cgc_string_slice_oob_traps_dual() {
     if !can_link() {
         return;
     }
-    let src = r#"
+    assert_string_slice_receipt(
+        "audit2_cgc_string_slice_oob_traps_dual",
+        r#"
         func main() -> i32 {
             let s = "abc"
             let t = s[0..9]
             println(t)
             0
         }
-    "#;
-    let vm = run_source_result(src);
-    assert!(
-        vm.is_err(),
-        "VM must trap on string slice end out of bounds"
-    );
-    let cg = compile_and_run(src).expect_err("codegen must trap string slice OOB, not clamp");
-    assert!(
-        cg.contains("slice") || cg.contains("substring"),
-        "codegen abort must mention the string slice bound, got: {}",
-        cg
+    "#,
+        "",
+        None,
     );
 }
 

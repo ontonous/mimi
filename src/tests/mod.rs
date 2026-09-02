@@ -792,12 +792,37 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
 /// Compile the linked object to a binary, link against the cached runtime, and
 /// run. Shared by the legacy (`compile_file`) and checked (`compile_checked`)
 /// codegen harnesses since 0.34.30.
-#[allow(clippy::too_many_lines)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeRunObservation {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
 fn link_and_run_module<'ctx>(
     codegen: &crate::codegen::CodeGenerator<'ctx>,
     config: &E2EConfig,
     counter: u64,
 ) -> Result<String, String> {
+    let observation = link_and_observe_module(codegen, config, counter)?;
+    if observation.exit_code != Some(0) {
+        return Err(format!(
+            "exit code {:?}, stderr: {}",
+            observation.exit_code, observation.stderr
+        ));
+    }
+    Ok(observation.stdout)
+}
+
+/// Return a structured native observation even when the program traps.
+/// Compilation and linking failures remain Err; a non-zero child exit is a
+/// semantic observation for receipt consumers.
+#[allow(clippy::too_many_lines)]
+fn link_and_observe_module<'ctx>(
+    codegen: &crate::codegen::CodeGenerator<'ctx>,
+    config: &E2EConfig,
+    counter: u64,
+) -> Result<NativeRunObservation, String> {
     use std::process::Command;
 
     if std::env::var("MIMI_DUMP_IR").is_ok() {
@@ -894,7 +919,11 @@ fn link_and_run_module<'ctx>(
             .output()
             .map_err(|e| format!("run: {}", e))?
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let observation = NativeRunObservation {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code(),
+    };
 
     if std::env::var("MIMI_KEEP_TMP").is_err() {
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -902,16 +931,7 @@ fn link_and_run_module<'ctx>(
         eprintln!("[mimi-test] kept tmp dir: {}", tmp_dir.display());
     }
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "exit code {:?}, stderr: {}",
-            output.status.code(),
-            stderr
-        ));
-    }
-
-    Ok(stdout)
+    Ok(observation)
 }
 
 /// 0.34.30: Run source through checker + checked (resolved) codegen exactly as
@@ -934,6 +954,29 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
         .compile_checked(&checked_program)
         .map_err(|e| format!("{:?}", e))?;
     link_and_run_module(&codegen, &E2EConfig::default(), counter)
+}
+
+/// Production native path with a structured process observation for
+/// stop-ship receipts. This intentionally enters through compile_checked and
+/// therefore cannot use the test-only compile_file compatibility entry.
+pub(crate) fn checked_codegen_compile_and_observe(
+    src: &str,
+) -> Result<NativeRunObservation, String> {
+    let file = parse_prod(src);
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|d| format!("{}", d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_stop_ship_receipt");
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|e| format!("{:?}", e))?;
+    link_and_observe_module(&codegen, &E2EConfig::default(), counter)
 }
 
 /// A2 opt-in production path. Uses an instance-local switch so parallel tests
