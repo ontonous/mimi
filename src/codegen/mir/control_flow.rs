@@ -489,7 +489,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?
             };
-            if bindings.len() != 1 || field_index != 0 || (!flat_copy && variant.fields.len() != 1)
+            if bindings.len() != 1
+                || (!flat_copy && (field_index != 0 || variant.fields.len() != 1))
             {
                 return Err(NativeMirError::new(
                     subject.to_string(),
