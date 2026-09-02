@@ -104,7 +104,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_extract_value(
                 scrutinee_value.into_struct_value(),
-                0,
+                variant_abi.tag_field,
                 "mir_variant_move_tag_load",
             )
             .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?
@@ -183,7 +183,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_extract_value(
                         scrutinee_value.into_struct_value(),
-                        1,
+                        variant_abi.payload_field,
                         "mir_variant_move_drop_payload",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
