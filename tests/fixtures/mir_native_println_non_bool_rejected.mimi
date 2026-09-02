@@ -1,0 +1,10 @@
+// The stdout effect contract is intentionally narrow: println(i32) stays
+// outside the scalar collection island and must fail closed under --mir.
+func main() -> i32 {
+    ensures: result == 0
+    let values: Set<i32> = {4, 1}
+    println(contains(values, 1))
+    println(1)
+    drop(values)
+    0
+}

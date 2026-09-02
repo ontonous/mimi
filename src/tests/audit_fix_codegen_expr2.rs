@@ -343,13 +343,13 @@ fn assert_legacy_return_receipt(
 }
 
 /// Record the remaining mixed Set function-form boundary.  The Set operation
-/// itself is now canonical; this witness still contains `println`, which is
-/// outside the scalar-collection MIR consumer contract.
+/// and single-bool println are canonical; this witness deliberately includes
+/// an integer println, whose output ABI/effect is still outside the island.
 fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
     assert_legacy_return_receipt(
         case_id,
         "set-lowering-return-ownership",
-        "not-closed: scalar collection output builtin is not a Canonical MIR node",
+        "not-closed: scalar collection integer-output effect is not a Canonical MIR node",
         "Set function-form contains",
         "legacy:mixed-coverage-without-materialized-candidate",
         src,
@@ -1184,9 +1184,9 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
     );
 }
 
-/// Set lowering/return-ownership stop-ship receipt.  `contains(Set, T)` now
-/// materializes as SetOp::Contains; this output-bearing witness remains on
-/// the mixed compatibility boundary until println has its own MIR contract.
+/// Set lowering/return-ownership stop-ship receipt.  `contains(Set, T)` and
+/// `println(bool)` now materialize as canonical nodes; the integer println
+/// keeps this deliberately mixed witness on the compatibility boundary.
 #[test]
 fn audit1j_set_function_form_receipt() {
     if !can_link() {
@@ -1198,12 +1198,11 @@ fn audit1j_set_function_form_receipt() {
         func main() -> i32 {
             let s = {4, 1, 1}
             println(contains(s, 1))
-            println(contains(s, 7))
-            println(contains(s, 4))
+            println(1)
             0
         }
     "#,
-        "true\nfalse\ntrue",
+        "true\n1",
     );
 }
 

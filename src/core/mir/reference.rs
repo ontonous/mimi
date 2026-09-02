@@ -5,6 +5,7 @@
 //! against a third semantic oracle. The supported operation set grows with
 //! MIR lowering; unsupported operations fail explicitly.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::core::ir::{
@@ -57,6 +58,12 @@ impl std::fmt::Display for MirExecutionError {
 }
 
 impl std::error::Error for MirExecutionError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirExecutionObservation {
+    pub value: MirRuntimeValue,
+    pub output: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirProgramBuildError {
@@ -1063,6 +1070,30 @@ fn validate_builtin_calls(
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: "builtin result type disagrees with its argument type".into(),
+                    });
+                }
+            }
+            if contract.result_must_be_unit {
+                let valid_unit = result_value.is_some_and(|value| {
+                    type_catalog.get(&value.ty).is_some_and(|descriptor| {
+                        descriptor.layout == super::types::MirLayout::Unit
+                            && descriptor.abi == super::types::MirAbiClass::Unit
+                            && descriptor.ownership == super::types::MirOwnership::Copy
+                            && descriptor.glue
+                                == (super::types::MirGlueContract {
+                                    move_out: super::types::MirGlueKind::Noop,
+                                    clone: super::types::MirGlueKind::Noop,
+                                    drop: super::types::MirGlueKind::Noop,
+                                })
+                    })
+                });
+                if !valid_unit {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "builtin '{}' result must be the canonical Copy unit TypeDesc",
+                            contract.name
+                        ),
                     });
                 }
             }
@@ -2225,6 +2256,7 @@ fn is_non_copy(function: &MirFunction, type_catalog: &MirTypeCatalog, value: &Mi
 pub struct MirReferenceInterpreter<'a> {
     program: &'a MirProgram,
     max_steps: usize,
+    output: RefCell<String>,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -2232,6 +2264,7 @@ impl<'a> MirReferenceInterpreter<'a> {
         Self {
             program,
             max_steps: 1_000_000,
+            output: RefCell::new(String::new()),
         }
     }
 
@@ -2245,13 +2278,27 @@ impl<'a> MirReferenceInterpreter<'a> {
         owner: &NodeId,
         arguments: &[MirRuntimeValue],
     ) -> Result<MirRuntimeValue, MirExecutionError> {
+        self.execute_with_output(owner, arguments)
+            .map(|observation| observation.value)
+    }
+
+    pub fn execute_with_output(
+        &self,
+        owner: &NodeId,
+        arguments: &[MirRuntimeValue],
+    ) -> Result<MirExecutionObservation, MirExecutionError> {
+        self.output.borrow_mut().clear();
         let function = self
             .program
             .functions
             .get(owner)
             .ok_or_else(|| self.error(owner, "function is absent from MIR program"))?;
         let mut steps = 0;
-        self.execute_function(function, arguments, &mut steps)
+        let value = self.execute_function(function, arguments, &mut steps)?;
+        Ok(MirExecutionObservation {
+            value,
+            output: self.output.borrow().clone(),
+        })
     }
 
     fn execute_function(
@@ -2934,6 +2981,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 ))
                             }
                         }
+                    }
+                    super::types::MirBuiltinKind::PrintlnBool => {
+                        let argument = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "println argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        let MirRuntimeValue::Bool(value) = argument else {
+                            return Err(self.error(
+                                &function.owner,
+                                "builtin 'println' received a non-bool value",
+                            ));
+                        };
+                        let mut output = self.output.borrow_mut();
+                        output.push_str(if value { "true\n" } else { "false\n" });
+                        MirRuntimeValue::Unit
                     }
                 };
                 values.insert(result.clone(), output);

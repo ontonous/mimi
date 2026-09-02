@@ -29,6 +29,7 @@ use z3::Sort;
 enum SymbolicValue {
     Int(Int),
     Bool(Bool),
+    Unit,
     /// An owned value whose payload is intentionally opaque to the arithmetic
     /// contract domain.  The exact TypeDesc identity is retained so the
     /// verifier can still prove that Clone/Move/Drop operate on the same
@@ -410,6 +411,9 @@ fn symbolic_value_for_type(
         ));
     }
     match &descriptor.layout {
+        MirLayout::Unit if descriptor.abi == MirAbiClass::Unit => {
+            Ok((SymbolicValue::Unit, Vec::new()))
+        }
         MirLayout::Scalar => match descriptor.abi {
             MirAbiClass::Integer {
                 bits: 32 | 64,
@@ -1319,6 +1323,7 @@ fn eval_instruction(
                 (MirBuiltinKind::Max, [SymbolicValue::Int(left), SymbolicValue::Int(right)]) => {
                     SymbolicValue::Int(left.ge(right).ite(left, right))
                 }
+                (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
                 _ => return Err("MIR builtin is outside scalar verifier contract".into()),
             };
             ensure_result_shape(function, catalog, result, &output)?;
@@ -2241,6 +2246,7 @@ fn symbolic_matches_type(
         return false;
     };
     match (&descriptor.layout, &descriptor.abi, value) {
+        (MirLayout::Unit, MirAbiClass::Unit, SymbolicValue::Unit) => true,
         (
             MirLayout::Scalar,
             MirAbiClass::Integer {
@@ -2520,6 +2526,7 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
         SymbolicValue::Int(_)
+        | SymbolicValue::Unit
         | SymbolicValue::Opaque { .. }
         | SymbolicValue::Tuple(_)
         | SymbolicValue::Record { .. }

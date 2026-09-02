@@ -378,9 +378,59 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             MirBuiltinKind::Min => "mir_min",
                             MirBuiltinKind::Max => "mir_max",
                             MirBuiltinKind::Abs => unreachable!(),
+                            MirBuiltinKind::PrintlnBool => unreachable!(),
                         },
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
+            MirBuiltinKind::PrintlnBool => {
+                let is_true = self
+                    .generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        left,
+                        left.get_type().const_zero(),
+                        "mir_println_bool",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let true_text = self
+                    .generator
+                    .builder
+                    .build_global_string_ptr("true", "mir_println_true")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let false_text = self
+                    .generator
+                    .builder
+                    .build_global_string_ptr("false", "mir_println_false")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let text = self
+                    .generator
+                    .builder
+                    .build_select(
+                        is_true,
+                        true_text.as_pointer_value(),
+                        false_text.as_pointer_value(),
+                        "mir_println_text",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    .into_pointer_value();
+                let puts = self
+                    .generator
+                    .get_runtime_fn("puts")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.generator
+                    .builder
+                    .build_call(
+                        puts,
+                        &[BasicMetadataValueEnum::PointerValue(text)],
+                        "mir_println_call",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                // Unit has no physical LLVM value.  The MIR result slot is
+                // never observed by a valid caller; keep a harmless scalar
+                // placeholder for the emitter's value table.
+                Ok(self.generator.context.i64_type().const_zero().into())
             }
         }
         .map(|value| {

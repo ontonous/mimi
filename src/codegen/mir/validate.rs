@@ -135,7 +135,7 @@ impl<'a> NativeMirValidator<'a> {
         &mut self,
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
-        allow_unit_result: bool,
+        _allow_unit_result: bool,
     ) {
         let Some(desc) = self.program.type_catalog().get(ty) else {
             self.errors.push(NativeMirError::new(
@@ -156,6 +156,15 @@ impl<'a> NativeMirValidator<'a> {
             desc.layout,
             MirLayout::Option { .. } | MirLayout::Result { .. }
         );
+        let is_unit = desc.abi == MirAbiClass::Unit
+            && desc.layout == MirLayout::Unit
+            && desc.ownership == MirOwnership::Copy
+            && desc.glue
+                == (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                });
         let supported = if is_reference {
             match self.program.type_catalog().validate_reference_type(ty) {
                 Ok(_) => true,
@@ -238,9 +247,7 @@ impl<'a> NativeMirValidator<'a> {
                     signed: true,
                 } | MirAbiClass::Bool
             ) && desc.layout == MirLayout::Scalar)
-                || (allow_unit_result
-                    && desc.abi == MirAbiClass::Unit
-                    && desc.layout == MirLayout::Unit)
+                || is_unit
                 || self.validate_flat_copy_record(ty, subject)
         };
         if !supported {
@@ -684,7 +691,10 @@ impl<'a> NativeMirValidator<'a> {
                 self.validate_value(function, result, "builtin result");
                 let supported_kind = matches!(
                     kind,
-                    MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
+                    MirBuiltinKind::Abs
+                        | MirBuiltinKind::Min
+                        | MirBuiltinKind::Max
+                        | MirBuiltinKind::PrintlnBool
                 );
                 if !supported_kind {
                     self.errors.push(NativeMirError::new(
@@ -692,10 +702,10 @@ impl<'a> NativeMirValidator<'a> {
                         "builtin kind is not in native MIR contract",
                     ));
                 }
-                for value in arguments.iter().chain(std::iter::once(result)) {
+                for (index, argument) in arguments.iter().enumerate() {
                     let Some(desc) = function
                         .values
-                        .get(value)
+                        .get(argument)
                         .and_then(|value| self.program.type_catalog().get(&value.ty))
                     else {
                         continue;
@@ -715,11 +725,50 @@ impl<'a> NativeMirValidator<'a> {
                         self.errors.push(NativeMirError::new(
                             subject,
                             format!(
-                                "builtin '{}' TypeDesc/ABI is outside native scalar contract",
-                                contract.name
+                                "builtin '{}' argument {index} TypeDesc/ABI is outside native scalar contract",
+                                contract.name,
                             ),
                         ));
                     }
+                }
+                let Some(result_desc) = function
+                    .values
+                    .get(result)
+                    .and_then(|value| self.program.type_catalog().get(&value.ty))
+                else {
+                    return;
+                };
+                let valid_result = if contract.result_must_be_unit {
+                    result_desc.layout == MirLayout::Unit
+                        && result_desc.abi == MirAbiClass::Unit
+                        && result_desc.ownership == MirOwnership::Copy
+                        && result_desc.glue
+                            == (MirGlueContract {
+                                move_out: MirGlueKind::Noop,
+                                clone: MirGlueKind::Noop,
+                                drop: MirGlueKind::Noop,
+                            })
+                } else {
+                    contract.accepts_abi(result_desc.abi)
+                        && contract.accepts_layout(&result_desc.layout)
+                        && result_desc.ownership == MirOwnership::Copy
+                        && (!matches!(
+                            kind,
+                            MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
+                        ) || result_desc.abi
+                            == MirAbiClass::Integer {
+                                bits: 64,
+                                signed: true,
+                            })
+                };
+                if !valid_result {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "builtin '{}' result TypeDesc/ABI is outside native scalar contract",
+                            contract.name
+                        ),
+                    ));
                 }
             }
             MirInstructionKind::Call {

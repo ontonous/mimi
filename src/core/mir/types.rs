@@ -98,6 +98,16 @@ pub enum MirBuiltinKind {
     /// Signed i64 maximum. Narrower widths and floating-point finiteness are
     /// deliberately outside this first comparison contract.
     Max,
+    /// Write one Copy boolean followed by a newline. The output effect is
+    /// part of the MIR contract so reference, bytecode, and native consumers
+    /// cannot silently treat `println` as an ordinary legacy call.
+    PrintlnBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirBuiltinEffect {
+    Pure,
+    StdoutLine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +120,8 @@ pub struct MirBuiltinContract {
     pub requires_copy: bool,
     pub requires_same_input_type: bool,
     pub overflow_trap: Option<&'static str>,
+    pub result_must_be_unit: bool,
+    pub effect: MirBuiltinEffect,
 }
 
 impl MirBuiltinContract {
@@ -127,6 +139,8 @@ impl MirBuiltinContract {
                 requires_copy: true,
                 requires_same_input_type: false,
                 overflow_trap: Some("E0802"),
+                result_must_be_unit: false,
+                effect: MirBuiltinEffect::Pure,
             },
             MirBuiltinKind::Min => Self {
                 kind,
@@ -140,6 +154,8 @@ impl MirBuiltinContract {
                 requires_copy: true,
                 requires_same_input_type: true,
                 overflow_trap: None,
+                result_must_be_unit: false,
+                effect: MirBuiltinEffect::Pure,
             },
             MirBuiltinKind::Max => Self {
                 kind,
@@ -153,6 +169,20 @@ impl MirBuiltinContract {
                 requires_copy: true,
                 requires_same_input_type: true,
                 overflow_trap: None,
+                result_must_be_unit: false,
+                effect: MirBuiltinEffect::Pure,
+            },
+            MirBuiltinKind::PrintlnBool => Self {
+                kind,
+                name: "println",
+                arity: 1,
+                input_abi: MirAbiClass::Bool,
+                preserves_type: false,
+                requires_copy: true,
+                requires_same_input_type: false,
+                overflow_trap: None,
+                result_must_be_unit: true,
+                effect: MirBuiltinEffect::StdoutLine,
             },
         }
     }
@@ -165,6 +195,7 @@ impl MirBuiltinContract {
             "abs" => Some(Self::for_kind(MirBuiltinKind::Abs)),
             "min" => Some(Self::for_kind(MirBuiltinKind::Min)),
             "max" => Some(Self::for_kind(MirBuiltinKind::Max)),
+            "println" => Some(Self::for_kind(MirBuiltinKind::PrintlnBool)),
             _ => None,
         }
     }
@@ -188,20 +219,26 @@ impl MirBuiltinContract {
                     signed: true,
                 }
             ),
+            MirBuiltinKind::PrintlnBool => abi == MirAbiClass::Bool,
         }
     }
 
     pub fn accepts_layout(self, layout: &MirLayout) -> bool {
-        matches!(
-            self.kind,
-            MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
-        ) && matches!(layout, MirLayout::Scalar)
+        matches!(layout, MirLayout::Scalar)
+            && matches!(
+                self.kind,
+                MirBuiltinKind::Abs
+                    | MirBuiltinKind::Min
+                    | MirBuiltinKind::Max
+                    | MirBuiltinKind::PrintlnBool
+            )
     }
 
     pub fn accepted_abi_description(self) -> &'static str {
         match self.kind {
             MirBuiltinKind::Abs => "signed i64 or f64",
             MirBuiltinKind::Min | MirBuiltinKind::Max => "signed i64",
+            MirBuiltinKind::PrintlnBool => "bool",
         }
     }
 }
@@ -3227,8 +3264,8 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 #[cfg(test)]
 mod tests {
     use super::{
-        MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
-        MirTypeKind,
+        MirAbiClass, MirBuiltinContract, MirBuiltinEffect, MirBuiltinKind, MirGlueKind,
+        MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog, MirTypeKind,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
@@ -3250,6 +3287,24 @@ mod tests {
             }
         );
         assert!(!descriptor.needs_drop_glue);
+    }
+
+    #[test]
+    fn println_bool_contract_is_copy_unit_stdout_line() {
+        let contract = MirBuiltinContract::for_kind(MirBuiltinKind::PrintlnBool);
+
+        assert_eq!(contract.name, "println");
+        assert_eq!(contract.arity, 1);
+        assert_eq!(contract.input_abi, MirAbiClass::Bool);
+        assert!(contract.requires_copy);
+        assert!(contract.result_must_be_unit);
+        assert_eq!(contract.effect, MirBuiltinEffect::StdoutLine);
+        assert!(contract.accepts_layout(&MirLayout::Scalar));
+        assert!(contract.accepts_abi(MirAbiClass::Bool));
+        assert!(!contract.accepts_abi(MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        }));
     }
 
     #[test]

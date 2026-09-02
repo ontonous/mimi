@@ -2114,6 +2114,130 @@ fn canonical_mir_native_set_function_contains_matches_reference_and_default() {
 }
 
 #[test]
+fn canonical_mir_set_contains_println_bool_matches_all_production_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_set_contains_println.mimi");
+    let expected = "true\nfalse\ntrue\n";
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical Set/println MIR dump");
+    assert!(mir.status.success());
+    let mir_stdout = String::from_utf8_lossy(&mir.stdout);
+    assert!(mir_stdout.contains("SetOp::Contains") || mir_stdout.contains("set_op"));
+    assert!(
+        mir_stdout.contains("PrintlnBool"),
+        "MIR omitted println(bool):\n{mir_stdout}"
+    );
+
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical Set/println reference run");
+    assert_eq!(reference.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&reference.stdout), expected);
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Set/println run");
+    assert_eq!(default_run.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&default_run.stdout), expected);
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-set-contains-println-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical Set/println native build");
+    assert!(
+        build.status.success(),
+        "canonical Set/println native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical Set/println native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), expected);
+
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default Set/println native IR build");
+    assert!(default_ir.status.success());
+    let ir = String::from_utf8_lossy(&default_ir.stdout);
+    assert!(ir.contains("define i32 @main()"));
+    assert!(ir.contains("call i32 @puts"));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Set/println verifier");
+    assert!(
+        verification.status.success(),
+        "default Set/println verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_rejects_non_bool_println_before_any_backend() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_println_non_bool_rejected.mimi");
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical println build");
+    assert!(!explicit.status.success());
+    let stderr = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        stderr.contains("canonical contract accepts bool"),
+        "non-bool println lost its stable canonical diagnostic:\n{stderr}"
+    );
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn compatibility non-bool println run");
+    assert!(default.status.success());
+    assert_eq!(String::from_utf8_lossy(&default.stdout), "true\n1\n");
+}
+
+#[test]
 fn canonical_default_does_not_promote_list_function_contains() {
     let fixture = project_root()
         .join("tests")

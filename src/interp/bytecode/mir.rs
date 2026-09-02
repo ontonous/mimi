@@ -659,6 +659,30 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
+        if contract.result_must_be_unit {
+            let valid_unit = self
+                .program
+                .type_catalog()
+                .get(&result_info.ty)
+                .is_some_and(|descriptor| {
+                    descriptor.layout == MirLayout::Unit
+                        && descriptor.abi == MirAbiClass::Unit
+                        && descriptor.ownership == MirOwnership::Copy
+                        && descriptor.glue
+                            == (crate::core::mir::types::MirGlueContract {
+                                move_out: MirGlueKind::Noop,
+                                clone: MirGlueKind::Noop,
+                                drop: MirGlueKind::Noop,
+                            })
+                });
+            if !valid_unit {
+                self.error(format!(
+                    "builtin '{}' result must be the canonical Copy unit TypeDesc",
+                    contract.name
+                ));
+                return;
+            }
+        }
         let Some(rd) = self.reg(result) else { return };
         // Builtin operands use the same consecutive range ABI as calls.  The
         // copies are explicit so MIR value register allocation remains an
@@ -2730,7 +2754,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::compile_mir_program;
-    use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use crate::core::mir::reference::{
+        MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
+    };
     use crate::core::mir::{MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
@@ -2840,12 +2866,12 @@ mod tests {
     }
 
     fn reference_observation(
-        result: Result<MirRuntimeValue, crate::core::mir::reference::MirExecutionError>,
+        result: Result<MirExecutionObservation, crate::core::mir::reference::MirExecutionError>,
     ) -> DifferentialObservation {
         match result {
-            Ok(value) => DifferentialObservation {
-                outcome: DifferentialOutcome::Return(value),
-                output: String::new(),
+            Ok(observation) => DifferentialObservation {
+                outcome: DifferentialOutcome::Return(observation.value),
+                output: observation.output,
             },
             Err(error) => DifferentialObservation {
                 outcome: DifferentialOutcome::Error {
@@ -2914,8 +2940,9 @@ mod tests {
         let mir = MirProgram::from_checked_program(&checked)
             .map_err(|error| DifferentialHarnessError::CanonicalMir(format!("{error:?}")))?;
         let owner = crate::core::NodeId("function:main".into());
-        let reference =
-            reference_observation(MirReferenceInterpreter::new(&mir).execute(&owner, &[]));
+        let reference = reference_observation(
+            MirReferenceInterpreter::new(&mir).execute_with_output(&owner, &[]),
+        );
 
         // The canonical production backend is compiled from MIR only.  Its
         // AST-free program is an explicit contract of this harness.
@@ -3016,6 +3043,20 @@ mod tests {
             assert!(report.mir_bytecode.output.is_empty());
             assert!(report.legacy_bytecode.output.is_empty());
         }
+    }
+
+    #[test]
+    fn canonical_mir_differential_covers_set_contains_stdout_effect() {
+        let source = include_str!("../../../tests/fixtures/mir_native_set_contains_println.mimi");
+        let report = run_canonical_differential(source)
+            .expect("Set.contains plus println(bool) differential");
+        assert!(report.mir_text.contains("set_op"));
+        assert!(report.mir_text.contains("PrintlnBool"));
+        assert_eq!(report.reference.output, "true\nfalse\ntrue\n");
+        assert_eq!(report.mir_bytecode.output, report.reference.output);
+        assert_eq!(report.legacy_bytecode.output, report.reference.output);
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
     }
 
     #[test]

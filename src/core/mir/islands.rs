@@ -301,14 +301,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 if is_scalar_set_contains_call(self.program, call) {
                     self.has_candidate = true;
                 }
-                // `println` is not a Canonical MIR node in this island.  It
-                // must keep a Set/collection witness on the explicit mixed
-                // compatibility route instead of allowing the new contains
-                // admission to fail later during MIR materialization.
+                // Only the closed Copy-bool stdout effect is a Canonical MIR
+                // node in this island. Other println shapes remain on the
+                // explicit mixed compatibility route until their output ABI
+                // and effect contract is independently materialized.
                 if matches!(
                     &call.callee,
                     ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
-                ) {
+                ) && !is_scalar_println_bool_call(self.program, call)
+                {
                     self.mixed = true;
                 }
                 for argument in &call.arguments {
@@ -450,6 +451,22 @@ fn is_scalar_set_contains_call(
         && call.arguments.len() == 2
         && is_resolved_set_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
         && is_scalar_collection_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_scalar_println_bool_call(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    if builtin.as_str() != "println" || call.arguments.len() != 1 {
+        return false;
+    }
+    matches!(
+        program.resolved_types().get(&call.arguments[0].value.ty),
+        Some(ResolvedType::Primitive(PrimitiveType::Bool))
+    )
 }
 
 fn is_resolved_set_type(
@@ -1575,6 +1592,41 @@ impl<'a> ScalarCollectionValidator<'a> {
                     ));
                 }
             }
+            MirInstructionKind::BuiltinCall {
+                result,
+                kind,
+                arguments,
+            } => {
+                if *kind != crate::core::mir::types::MirBuiltinKind::PrintlnBool {
+                    self.error(format!(
+                        "{subject} builtin {kind:?} is outside {SCALAR_COLLECTION_ISLAND}"
+                    ));
+                    return;
+                }
+                let contract = crate::core::mir::types::MirBuiltinContract::for_kind(*kind);
+                if arguments.len() != contract.arity {
+                    self.error(format!(
+                        "{subject} builtin '{}' has {} arguments; contract requires {}",
+                        contract.name,
+                        arguments.len(),
+                        contract.arity
+                    ));
+                    return;
+                }
+                let Some(argument_ty) = self.value_type(function, &arguments[0], subject) else {
+                    return;
+                };
+                let Some(result_ty) = self.value_type(function, result, subject) else {
+                    return;
+                };
+                self.require_copy_scalar(&argument_ty, subject, "println argument");
+                if !is_bool(&self.program.type_catalog(), &argument_ty) {
+                    self.error(format!(
+                        "{subject} builtin 'println' requires a Copy bool argument"
+                    ));
+                }
+                self.require_unit(&result_ty, subject);
+            }
             MirInstructionKind::Nop => {}
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }
@@ -1584,8 +1636,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::ConstructVariant { .. }
             | MirInstructionKind::ConstructVariantMove { .. }
             | MirInstructionKind::UpdateRecord { .. }
-            | MirInstructionKind::FlowTransition { .. }
-            | MirInstructionKind::BuiltinCall { .. } => self.error(format!(
+            | MirInstructionKind::FlowTransition { .. } => self.error(format!(
                 "{subject} MIR operation is outside {SCALAR_COLLECTION_ISLAND}"
             )),
         }
@@ -1996,6 +2047,56 @@ mod tests {
             .execute(&crate::core::NodeId("function:main".into()), &[])
             .expect("reference SetOp::Contains execution");
         assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn admits_bool_println_as_a_canonical_stdout_effect() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_set_contains_println.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let instructions = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .collect::<Vec<_>>();
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                super::MirInstructionKind::BuiltinCall {
+                    kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool,
+                    ..
+                }
+            )
+        }));
+        validate_scalar_collection_island(&program).expect("println(bool) effect contract");
+    }
+
+    #[test]
+    fn rejects_non_bool_println_from_the_canonical_stdout_effect() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_println_non_bool_rejected.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::MixedCoverage
+        );
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-bool println must fail before a canonical backend");
+        assert!(format!("{error:?}").contains("canonical contract accepts bool"));
     }
 
     #[test]
