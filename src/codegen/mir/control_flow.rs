@@ -202,6 +202,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &scrutinee_ty,
                     variant,
                     variant_abi,
+                    false,
                     scrutinee_value,
                     drop_predecessor,
                     subject,
@@ -227,6 +228,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &scrutinee_ty,
                     variant,
                     variant_abi,
+                    false,
                     scrutinee_value,
                     current,
                     subject,
@@ -343,6 +345,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &scrutinee_ty,
                 &variant,
                 variant_abi,
+                true,
                 scrutinee_value,
                 current,
                 subject,
@@ -428,6 +431,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         scrutinee_ty: &crate::core::ResolvedTypeId,
         variant: &crate::core::mir::types::MirVariantDesc,
         variant_abi: NativeVariantAbi,
+        flat_copy: bool,
         scrutinee: BasicValueEnum<'ctx>,
         predecessor: BasicBlock<'ctx>,
         subject: &MirBlockId,
@@ -463,17 +467,30 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         "variant payload binding target type is absent",
                     )
                 })?;
-            let field_index = self
-                .program
-                .type_catalog()
-                .validate_variant_payload_projection(
-                    scrutinee_ty,
-                    &variant.id,
-                    &bindings[0].field,
-                    &parameter.ty,
-                )
-                .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
-            if bindings.len() != 1 || field_index != 0 || variant.fields.len() != 1 {
+            let field_index = if flat_copy {
+                self.program
+                    .type_catalog()
+                    .validated_flat_copy_payload_projection(
+                        scrutinee_ty,
+                        &variant.id,
+                        &bindings[0].field,
+                        &parameter.ty,
+                    )
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+                    .1
+            } else {
+                self.program
+                    .type_catalog()
+                    .validate_variant_payload_projection(
+                        scrutinee_ty,
+                        &variant.id,
+                        &bindings[0].field,
+                        &parameter.ty,
+                    )
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+            };
+            if bindings.len() != 1 || field_index != 0 || (!flat_copy && variant.fields.len() != 1)
+            {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "variant payload binding is outside the single-payload native contract",

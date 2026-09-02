@@ -1250,6 +1250,33 @@ impl MirTypeCatalog {
             .ok_or_else(|| format!("variant '{}' is absent from TypeDesc", variant_id.0))
     }
 
+    /// Validate the native flat Copy payload projection and return its
+    /// canonical variant descriptor plus declaration-order field index.
+    /// Native consumers must not repeat the single-payload/field-zero shape
+    /// checks after selecting a variant descriptor.
+    pub fn validated_flat_copy_payload_projection(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<(&MirVariantDesc, usize), String> {
+        let variant = self.validated_flat_copy_variant(scrutinee_ty, variant_id)?;
+        let field_index = self.validate_variant_payload_projection(
+            scrutinee_ty,
+            variant_id,
+            field_id,
+            result_ty,
+        )?;
+        if field_index != 0 || variant.fields.len() != 1 {
+            return Err(format!(
+                "variant '{}' payload projection is outside the single-payload flat Copy contract",
+                variant.name
+            ));
+        }
+        Ok((variant, field_index))
+    }
+
     /// Validate the argument side of the first concrete generic MIR
     /// instance contract.  This is deliberately narrower than the complete
     /// scalar universe: native and MIR verifier must agree on signed i32/i64
@@ -4469,6 +4496,18 @@ mod tests {
             .validated_flat_copy_variant(&option_id, &some)
             .expect("flat Copy Some descriptor");
         assert_eq!(flat_some.id, some);
+        let (projected_variant, projected_index) = catalog
+            .validated_flat_copy_payload_projection(&option_id, &some, &some_field, &i32_id)
+            .expect("flat Copy payload projection");
+        assert_eq!(projected_variant.id, some);
+        assert_eq!(projected_index, 0);
+        let projected_error = catalog
+            .validated_flat_copy_payload_projection(&option_id, &some, &some_field, &bool_id)
+            .expect_err("flat Copy payload type drift must fail closed");
+        assert!(
+            projected_error.contains("disagrees with result type"),
+            "{projected_error}"
+        );
         let flat_missing = catalog
             .validated_flat_copy_variant(
                 &option_id,
