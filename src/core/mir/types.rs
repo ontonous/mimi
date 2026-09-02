@@ -1861,6 +1861,29 @@ impl MirTypeCatalog {
             })
     }
 
+    /// Return the canonical nominal and active drop plan for one runtime
+    /// variant value.  The plan validator proves the complete recursive glue
+    /// graph and stable variant identity; runtime consumers may then use the
+    /// plan length to check their concrete payload without re-deriving layout
+    /// arity from a runtime representation.
+    pub fn validated_variant_drop_contract(
+        &self,
+        ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+    ) -> Result<(&str, &MirVariantDropGluePlan), String> {
+        let expected_nominal = self
+            .variant_layout(ty)
+            .map(|(nominal, _)| nominal)
+            .ok_or_else(|| {
+                format!(
+                    "type '{}' has no canonical Option/Result variant layout",
+                    ty.as_str()
+                )
+            })?;
+        let plan = self.validated_variant_drop_plan(ty, variant_id)?;
+        Ok((expected_nominal, plan))
+    }
+
     /// Validate the recursive product glue graph for one operation.  The
     /// caller still owns the choice of operation; this method only follows
     /// canonical child descriptors and never consults a backend ABI.
@@ -4059,6 +4082,15 @@ mod tests {
                 .index,
             0
         );
+        let (drop_nominal, drop_plan) = catalog
+            .validated_variant_drop_contract(&option_id, &some_id)
+            .expect("Some runtime drop contract");
+        assert_eq!(drop_nominal, "builtin:type:Option");
+        assert_eq!(drop_plan.fields[0].index, 0);
+        let drop_contract_error = catalog
+            .validated_variant_drop_contract(&string_id, &some_id)
+            .expect_err("bare string has no variant drop contract");
+        assert!(drop_contract_error.contains("variant layout"));
         assert!(catalog
             .validated_variant_drop_plan(&option_id, &none_id)
             .expect("None drop plan")

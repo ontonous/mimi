@@ -3492,37 +3492,18 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "variant drop value is not a canonical Variant",
                     ));
                 };
-                let Some((expected_nominal, expected_variants)) =
-                    self.program.type_catalog().variant_layout(ty)
-                else {
-                    return Err(self.error(
-                        &function.owner,
-                        "variant drop value has no canonical TypeDesc layout",
-                    ));
-                };
+                let (expected_nominal, plan) = self
+                    .program
+                    .type_catalog()
+                    .validated_variant_drop_contract(ty, &variant)
+                    .map_err(|message| self.error(&function.owner, message))?;
                 if nominal.as_str() != expected_nominal {
                     return Err(self.error(
                         &function.owner,
                         "variant drop nominal disagrees with TypeDesc",
                     ));
                 }
-                let Some(expected_variant) = expected_variants
-                    .iter()
-                    .find(|candidate| candidate.id == variant)
-                else {
-                    return Err(self.error(
-                        &function.owner,
-                        "variant drop discriminant is absent from TypeDesc",
-                    ));
-                };
-                let plan = self
-                    .program
-                    .type_catalog()
-                    .validated_variant_drop_plan(ty, &variant)
-                    .map_err(|message| self.error(&function.owner, message))?;
-                if payload.len() != expected_variant.fields.len()
-                    || plan.fields.len() != expected_variant.fields.len()
-                {
+                if payload.len() != plan.fields.len() {
                     return Err(self.error(
                         &function.owner,
                         "variant drop value disagrees with TypeDesc arity",
@@ -3683,31 +3664,18 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "switch-move scrutinee is not a canonical Variant",
             ));
         };
-        let Some((expected_nominal, _)) = self.program.type_catalog().variant_layout(&scrutinee_ty)
-        else {
-            return Err(self.error(
-                &function.owner,
-                "switch-move scrutinee has no canonical variant layout",
-            ));
-        };
+        let (expected_nominal, plan) = self
+            .program
+            .type_catalog()
+            .validated_variant_drop_contract(&scrutinee_ty, &actual_variant)
+            .map_err(|message| self.error(&function.owner, message))?;
         if actual_nominal.as_str() != expected_nominal {
             return Err(self.error(
                 &function.owner,
                 "switch-move variant nominal disagrees with TypeDesc",
             ));
         }
-        let variant = self
-            .program
-            .type_catalog()
-            .variant(&scrutinee_ty, &actual_variant)
-            .cloned()
-            .ok_or_else(|| {
-                self.error(
-                    &function.owner,
-                    "switch-move variant is absent from TypeDesc",
-                )
-            })?;
-        if payload.len() != variant.fields.len() {
+        if payload.len() != plan.fields.len() {
             return Err(self.error(
                 &function.owner,
                 "switch-move payload arity disagrees with TypeDesc",
@@ -3730,12 +3698,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             self.drop_runtime_value(function, &scrutinee_ty, value)?;
             return Ok(incoming);
         }
-        let plan = self
-            .program
-            .type_catalog()
-            .validated_variant_drop_plan(&scrutinee_ty, &actual_variant)
-            .map_err(|message| self.error(&function.owner, message))?
-            .clone();
+        let plan = plan.clone();
         let mut bound_indices = BTreeMap::new();
         for (binding_index, binding) in arm.bindings.iter().enumerate() {
             let target_parameter = function
