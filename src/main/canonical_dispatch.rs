@@ -10,9 +10,7 @@
 use std::collections::HashSet;
 
 use mimi::ast::File;
-use mimi::core::ir::{ResolvedType, ResolvedTypeId};
 use mimi::core::mir::reference::MirProgram;
-use mimi::core::mir::MirGenericInstanceContract;
 use mimi::core::CheckedProgram;
 use mimi::verifier::VerifStatus;
 
@@ -73,17 +71,30 @@ pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
-    let set_candidate = may_contain_typed_set_facade(checked, merged_file);
-    let record_candidate = may_contain_user_record(checked, merged_file);
-    let complete_record_candidate = record_candidate
-        && mimi::core::mir::classify_flat_copy_record_admission(checked)
-            == mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage;
+    // Admission is checker-owned and must be decided before MIR construction.
+    // Keep the dispatcher from growing a second Set/record type walk: the
+    // same admission result is also used by the public verifier boundary.
+    let collection_admission = mimi::core::mir::classify_scalar_collection_admission(checked);
+    let collection_hint = merged_file.imports.is_empty()
+        && !matches!(
+            collection_admission,
+            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+        );
+    let complete_collection_candidate = matches!(
+        collection_admission,
+        mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    );
+    let record_admission = mimi::core::mir::classify_flat_copy_record_admission(checked);
+    let record_hint = !matches!(
+        record_admission,
+        mimi::core::mir::FlatCopyRecordAdmission::OutsideProfile
+    );
+    let complete_record_candidate = matches!(
+        record_admission,
+        mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+    );
     let flow_candidate = may_contain_single_silent_local_transition(checked, merged_file);
-    // List.len is probed only for import-free programs. The canonical graph
-    // itself is the typed fact source: after lowering, an actual ListOp::Len
-    // is evidence that the shared TypeDesc contract admitted the operation.
-    let list_len_probe_allowed = merged_file.imports.is_empty();
-    if !set_candidate && !record_candidate && !list_len_probe_allowed && !flow_candidate {
+    if !collection_hint && !record_hint && !flow_candidate {
         return DefaultMirRoute::Legacy;
     }
 
@@ -92,35 +103,49 @@ pub(crate) fn select_default_route(
         Err(error) => {
             return reject_migrated_candidates(
                 flow_candidate,
-                set_candidate,
+                complete_collection_candidate,
                 complete_record_candidate,
                 format!("canonical MIR construction failed: {error}"),
             )
         }
     };
-    let set_instance = canonical.instances().values().any(|instance| {
-        matches!(
-            instance.contract,
-            MirGenericInstanceContract::ScalarSetFacade { .. }
-        )
-    });
     let copy_record = mimi::core::mir::contains_flat_copy_record_candidate(&canonical);
-    let list_len_operation = canonical_has_list_len(&canonical);
-    let collection_candidate = mimi::core::mir::contains_scalar_collection_candidate(&canonical);
+    let materialized_collection_candidate =
+        mimi::core::mir::contains_scalar_collection_candidate(&canonical);
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(&canonical);
-    let record_route_candidate = record_candidate && (copy_record || complete_record_candidate);
-    if (!set_candidate || !set_instance)
-        && (!record_candidate || !copy_record)
-        && (!list_len_probe_allowed || !list_len_operation)
-        && (!flow_candidate || !flow_transition_operation)
+    // Mixed coverage remains a compatibility boundary only when construction
+    // proves that no migrated operation was materialized.  A Complete
+    // admission missing its receipt, however, is a hard route failure.
+    let collection_route_candidate =
+        complete_collection_candidate || (collection_hint && materialized_collection_candidate);
+    let record_route_candidate = complete_record_candidate || (record_hint && copy_record);
+    if (complete_collection_candidate && !materialized_collection_candidate)
+        || (complete_record_candidate && !copy_record)
+        || (flow_candidate && !flow_transition_operation)
     {
         return reject_migrated_candidates(
             flow_candidate,
-            collection_candidate || (record_candidate && copy_record),
+            collection_route_candidate || (record_route_candidate && copy_record),
             record_route_candidate,
             "canonical graph did not materialize the selected production operation",
         );
+    }
+
+    // A mixed program is not a partial canonical program.  If its graph does
+    // contain a migrated boundary, keep the old path deleted for that
+    // boundary and reject the whole route.  If it contains no such operation,
+    // it remains an explicit compatibility input and may use Legacy.
+    if record_route_candidate && !complete_record_candidate {
+        return reject_migrated_candidates(
+            flow_candidate,
+            collection_route_candidate,
+            true,
+            "flat Copy record materialized inside mixed coverage",
+        );
+    }
+    if !collection_route_candidate && !record_route_candidate && !flow_candidate {
+        return DefaultMirRoute::Legacy;
     }
 
     // S11: the production unit is a complete scalar List/Set executable
@@ -129,7 +154,7 @@ pub(crate) fn select_default_route(
     // preflight.  A real materialized Set facade or List.len operation is
     // therefore either inside this finite envelope or rejected; it cannot
     // re-enter the legacy route.
-    if collection_candidate {
+    if materialized_collection_candidate {
         if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(&canonical) {
             return reject_migrated_candidates(
                 flow_candidate,
@@ -151,7 +176,7 @@ pub(crate) fn select_default_route(
     if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
         return reject_migrated_candidates(
             flow_candidate,
-            collection_candidate,
+            collection_route_candidate,
             record_route_candidate,
             format!("verifier capability gate failed: {error:?}"),
         );
@@ -163,7 +188,7 @@ pub(crate) fn select_default_route(
     if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&canonical) {
         return reject_migrated_candidates(
             flow_candidate,
-            collection_candidate,
+            collection_route_candidate,
             record_route_candidate,
             format!("MIR-bytecode preflight failed: {errors:?}"),
         );
@@ -171,7 +196,7 @@ pub(crate) fn select_default_route(
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&canonical) {
         return reject_migrated_candidates(
             flow_candidate,
-            collection_candidate,
+            collection_route_candidate,
             record_route_candidate,
             format!("native MIR preflight failed: {errors:?}"),
         );
@@ -191,7 +216,7 @@ pub(crate) fn select_default_route(
         Err(error) => {
             return reject_migrated_candidates(
                 flow_candidate,
-                collection_candidate,
+                collection_route_candidate,
                 record_route_candidate,
                 format!("verifier contract pass failed: {error}"),
             )
@@ -200,7 +225,7 @@ pub(crate) fn select_default_route(
     if !verifier_ready {
         return reject_migrated_candidates(
             flow_candidate,
-            collection_candidate,
+            collection_route_candidate,
             record_route_candidate,
             "verifier returned an unsupported or inconclusive result",
         );
@@ -235,22 +260,6 @@ fn reject_migrated_candidates(
     }
 }
 
-fn canonical_has_list_len(canonical: &MirProgram) -> bool {
-    canonical.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction.kind,
-                    mimi::core::mir::MirInstructionKind::ListOp {
-                        operation: mimi::core::mir::MirListOperation::Len,
-                        ..
-                    }
-                )
-            })
-        })
-    })
-}
-
 fn may_contain_single_silent_local_transition(
     checked: &CheckedProgram,
     merged_file: &File,
@@ -263,111 +272,6 @@ fn may_contain_single_silent_local_transition(
         return false;
     }
     mimi::core::mir::is_s8_flow_transition_candidate(checked)
-}
-
-fn may_contain_user_record(checked: &CheckedProgram, merged_file: &File) -> bool {
-    let excluded_sources = merged_file
-        .sources
-        .records()
-        .iter()
-        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-        .map(|record| record.id)
-        .collect::<HashSet<_>>();
-    checked.type_defs().values().any(|type_def| {
-        type_def.kind == mimi::core::ResolvedTypeKind::Record
-            && !excluded_sources.contains(&type_def.origin.user_span().source_id)
-    })
-}
-
-fn may_contain_typed_set_facade(checked: &CheckedProgram, merged_file: &File) -> bool {
-    let excluded_sources = merged_file
-        .sources
-        .records()
-        .iter()
-        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-        .map(|record| record.id)
-        .collect::<HashSet<_>>();
-    let types = checked.resolved_types();
-
-    checked.callables().values().any(|callable| {
-        if excluded_sources.contains(&callable.body.root.origin.user_span().source_id)
-            || callable.signature.generic_parameters.is_empty()
-        {
-            return false;
-        }
-        callable.signature.parameters.iter().any(|parameter| {
-            mentions_generic_set(
-                &parameter.ty,
-                types,
-                &callable.signature.generic_parameters,
-                &mut HashSet::new(),
-            )
-        }) || mentions_generic_set(
-            &callable.signature.result,
-            types,
-            &callable.signature.generic_parameters,
-            &mut HashSet::new(),
-        )
-    })
-}
-
-fn mentions_generic_set(
-    id: &ResolvedTypeId,
-    types: &mimi::core::ir::ResolvedTypeTable,
-    generic_parameters: &[mimi::core::NodeId],
-    seen: &mut HashSet<ResolvedTypeId>,
-) -> bool {
-    if !seen.insert(id.clone()) {
-        return false;
-    }
-    let Some(ty) = types.get(id) else {
-        return false;
-    };
-    match ty {
-        ResolvedType::Nominal {
-            item, arguments, ..
-        } => {
-            (item.as_str() == "builtin:type:Set"
-                && arguments.iter().any(|argument| {
-                    contains_generic_parameter(
-                        argument,
-                        types,
-                        generic_parameters,
-                        &mut HashSet::new(),
-                    )
-                }))
-                || arguments
-                    .iter()
-                    .any(|argument| mentions_generic_set(argument, types, generic_parameters, seen))
-        }
-        ResolvedType::Option(inner)
-        | ResolvedType::CBuffer(inner)
-        | ResolvedType::Ownership { target: inner, .. }
-        | ResolvedType::Newtype { inner, .. }
-        | ResolvedType::Slice(inner)
-        | ResolvedType::RawPointer { target: inner, .. } => {
-            mentions_generic_set(inner, types, generic_parameters, seen)
-        }
-        ResolvedType::Result { ok, error } => {
-            mentions_generic_set(ok, types, generic_parameters, seen)
-                || mentions_generic_set(error, types, generic_parameters, seen)
-        }
-        ResolvedType::Tuple(items) => items
-            .iter()
-            .any(|item| mentions_generic_set(item, types, generic_parameters, seen)),
-        ResolvedType::Array { element, .. } => {
-            mentions_generic_set(element, types, generic_parameters, seen)
-        }
-        ResolvedType::Function {
-            parameters, result, ..
-        } => {
-            parameters
-                .iter()
-                .any(|parameter| mentions_generic_set(parameter, types, generic_parameters, seen))
-                || mentions_generic_set(result, types, generic_parameters, seen)
-        }
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -388,6 +292,21 @@ mod tests {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_record_copy.mimi"
         ));
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn copy_record_update_is_complete_and_uses_canonical_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_record_update.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
         assert!(matches!(
             select_default_route(&checked, &file),
             DefaultMirRoute::Canonical(_)
@@ -479,47 +398,52 @@ mod tests {
         assert!(reason.contains("S11 scalar collection candidate"));
         assert!(reason.contains("copy-scalar-collection-v1"));
     }
-}
 
-fn contains_generic_parameter(
-    id: &ResolvedTypeId,
-    types: &mimi::core::ir::ResolvedTypeTable,
-    generic_parameters: &[mimi::core::NodeId],
-    seen: &mut HashSet<ResolvedTypeId>,
-) -> bool {
-    if !seen.insert(id.clone()) {
-        return false;
+    #[test]
+    fn uncalled_generic_set_template_stays_outside_collection_route() {
+        let source = r#"
+            func passthrough<T>(value: Set<T>) -> Set<T> { value }
+
+            func main() -> i32 { 42 }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Legacy
+        ));
     }
-    match types.get(id) {
-        Some(ResolvedType::GenericParameter(parameter)) => generic_parameters.contains(parameter),
-        Some(ResolvedType::Nominal { arguments, .. }) => arguments
-            .iter()
-            .any(|argument| contains_generic_parameter(argument, types, generic_parameters, seen)),
-        Some(ResolvedType::Option(inner))
-        | Some(ResolvedType::CBuffer(inner))
-        | Some(ResolvedType::Ownership { target: inner, .. })
-        | Some(ResolvedType::Newtype { inner, .. })
-        | Some(ResolvedType::Slice(inner))
-        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
-            contains_generic_parameter(inner, types, generic_parameters, seen)
-        }
-        Some(ResolvedType::Result { ok, error }) => {
-            contains_generic_parameter(ok, types, generic_parameters, seen)
-                || contains_generic_parameter(error, types, generic_parameters, seen)
-        }
-        Some(ResolvedType::Tuple(items)) => items
-            .iter()
-            .any(|item| contains_generic_parameter(item, types, generic_parameters, seen)),
-        Some(ResolvedType::Function {
-            parameters, result, ..
-        }) => {
-            parameters.iter().any(|parameter| {
-                contains_generic_parameter(parameter, types, generic_parameters, seen)
-            }) || contains_generic_parameter(result, types, generic_parameters, seen)
-        }
-        Some(ResolvedType::Array { element, .. }) => {
-            contains_generic_parameter(element, types, generic_parameters, seen)
-        }
-        _ => false,
+
+    #[test]
+    fn unsupported_set_facade_candidate_cannot_reenter_legacy_route() {
+        let source = r#"
+            func bad<T>(value: Set<T>) -> Set<T> { value }
+
+            func main() -> i32 {
+                let values: Set<i32> = {1, 2}
+                let result = bad(values)
+                drop(result)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("an admitted but unsupported Set facade must fail closed");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("canonical MIR construction failed"),
+            "{reason}"
+        );
     }
 }

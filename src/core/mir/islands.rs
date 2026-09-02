@@ -607,10 +607,14 @@ pub enum FlatCopyRecordAdmission {
 /// program containing generic templates, imports, effects, or other semantic
 /// consumers not yet covered by this island.
 pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopyRecordAdmission {
+    let unsupported_record_declared = program.type_defs().values().any(|definition| {
+        definition.kind == crate::core::ResolvedTypeKind::Record
+            && !is_flat_copy_record_definition(program, definition)
+    });
     let record_ids = program
         .type_defs()
         .values()
-        .filter(|definition| definition.kind == crate::core::ResolvedTypeKind::Record)
+        .filter(|definition| is_flat_copy_record_definition(program, definition))
         .map(|definition| definition.node_id.0.clone())
         .collect::<BTreeSet<_>>();
     if record_ids.is_empty() {
@@ -622,11 +626,180 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
         return FlatCopyRecordAdmission::OutsideProfile;
     }
 
-    if has_mixed_coverage(program) {
+    if unsupported_record_declared
+        || has_mixed_coverage(program)
+        || flat_record_body_has_unmigrated_shape(program)
+    {
         FlatCopyRecordAdmission::MixedCoverage
     } else {
         FlatCopyRecordAdmission::CompleteCoverage
     }
+}
+
+/// Check the checker-owned shape that the flat record island is allowed to
+/// admit.  This mirrors the public TypeDesc contract without constructing MIR:
+/// the declaration must be concrete, non-empty, and every resolved field must
+/// be one of the signed scalar/bool leaves accepted by `validate_copy_scalar`.
+fn is_flat_copy_record_definition(
+    program: &CheckedProgram,
+    definition: &crate::core::ResolvedTypeDef,
+) -> bool {
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || !definition.generic_parameters.is_empty()
+        || definition.fields.is_empty()
+    {
+        return false;
+    }
+
+    definition.fields.iter().all(|(name, _)| {
+        definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_ty| program.resolved_types().get(field_ty))
+            .is_some_and(|field_ty| {
+                matches!(
+                    field_ty,
+                    ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                    )
+                )
+            })
+    })
+}
+
+/// Keep the flat-record island closed over the complete typed body, not only
+/// over the record declaration.  MIR Phase 0 currently admits scalar
+/// expressions, record construction/projection, direct user calls, and
+/// structured `if`; collection values, builtin/runtime calls, loops,
+/// concurrency, and higher-order expressions belong to other islands.
+fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
+    fn expr_has_unmigrated_shape(expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::List(_)
+            | ResolvedExprKind::Map(_)
+            | ResolvedExprKind::Set(_)
+            | ResolvedExprKind::Tuple(_)
+            | ResolvedExprKind::Comprehension { .. }
+            | ResolvedExprKind::OptionalChain { .. }
+            | ResolvedExprKind::Try { .. }
+            | ResolvedExprKind::Range { .. }
+            | ResolvedExprKind::Slice { .. }
+            | ResolvedExprKind::Spawn(_)
+            | ResolvedExprKind::Await(_)
+            | ResolvedExprKind::FString(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::TypeValue(_)
+            | ResolvedExprKind::Comptime(_)
+            | ResolvedExprKind::Quote(_)
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::TypeOf(_) => true,
+            ResolvedExprKind::Project { value, projection } => {
+                !matches!(projection, ResolvedValueProjection::Field(_))
+                    || expr_has_unmigrated_shape(value)
+                    || matches!(projection, ResolvedValueProjection::Index(_))
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                expr_has_unmigrated_shape(left) || expr_has_unmigrated_shape(right)
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. } => expr_has_unmigrated_shape(operand),
+            // `old` is a verifier contract wrapper around an otherwise
+            // ordinary scalar/record expression, not a runtime shape.
+            ResolvedExprKind::Old(value) => expr_has_unmigrated_shape(value),
+            ResolvedExprKind::Call(call) => {
+                matches!(
+                    call.callee,
+                    crate::core::ir::ResolvedCallee::Builtin(ref builtin)
+                        if !matches!(builtin.as_str(), "Some" | "None" | "Ok" | "Err")
+                ) || !call.effects.is_empty()
+                    || !call.session.is_empty()
+                    || call.permission.is_some()
+                    || call
+                        .arguments
+                        .iter()
+                        .any(|argument| expr_has_unmigrated_shape(&argument.value))
+            }
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                rest.as_ref()
+                    .is_some_and(|value| expr_has_unmigrated_shape(value))
+                    || fields
+                        .iter()
+                        .any(|field| expr_has_unmigrated_shape(&field.value))
+            }
+            ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+                block_has_unmigrated_shape(block)
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                expr_has_unmigrated_shape(condition)
+                    || block_has_unmigrated_shape(then_block)
+                    || block_has_unmigrated_shape(else_block)
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                expr_has_unmigrated_shape(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_unmigrated_shape)
+                            || expr_has_unmigrated_shape(&arm.body)
+                    })
+            }
+            ResolvedExprKind::Lambda(lambda) => block_has_unmigrated_shape(&lambda.body),
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Load(_)
+            | ResolvedExprKind::Constant(_) => false,
+        }
+    }
+
+    fn block_has_unmigrated_shape(block: &crate::core::ir::ResolvedBlock) -> bool {
+        block.statements.iter().any(|statement| {
+            if !statement.backend_requirements.is_empty() {
+                return true;
+            }
+            match &statement.kind {
+                ResolvedStmtKind::Bind { initializer, .. } => {
+                    initializer.as_ref().is_some_and(expr_has_unmigrated_shape)
+                }
+                ResolvedStmtKind::Assign { value, .. }
+                | ResolvedStmtKind::Expr(value)
+                | ResolvedStmtKind::Contract {
+                    condition: value, ..
+                } => expr_has_unmigrated_shape(value),
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    value.as_ref().is_some_and(expr_has_unmigrated_shape)
+                }
+                ResolvedStmtKind::While { .. }
+                | ResolvedStmtKind::WhileLet { .. }
+                | ResolvedStmtKind::IfLet { .. }
+                | ResolvedStmtKind::Loop(_)
+                | ResolvedStmtKind::For { .. }
+                | ResolvedStmtKind::Math(_)
+                | ResolvedStmtKind::Scope { .. }
+                | ResolvedStmtKind::Pinned { .. }
+                | ResolvedStmtKind::NestedCallable(_) => true,
+                ResolvedStmtKind::Continue | ResolvedStmtKind::Drop(_) => false,
+            }
+        }) || block
+            .result
+            .as_ref()
+            .is_some_and(|value| expr_has_unmigrated_shape(value))
+    }
+
+    program
+        .resolved_bodies()
+        .values()
+        .filter(|body| !is_prelude_origin(program, &body.root.origin))
+        .any(|body| block_has_unmigrated_shape(&body.root))
+}
+
+fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {
+    program
+        .source_registry()
+        .key(origin.user_span().source_id)
+        .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
 }
 
 fn has_mixed_coverage(program: &CheckedProgram) -> bool {
@@ -642,8 +815,14 @@ fn has_mixed_coverage(program: &CheckedProgram) -> bool {
         || !program.sessions().is_empty()
         || !program.actors().is_empty()
         || !program.capabilities().is_empty()
-        || !program.traits().is_empty()
-        || !program.impls().is_empty()
+        || program
+            .traits()
+            .values()
+            .any(|trait_def| !is_prelude_origin(program, &trait_def.origin))
+        || program
+            .impls()
+            .values()
+            .any(|impl_def| !is_prelude_origin(program, &impl_def.origin))
         || !program.extern_blocks().is_empty()
         || program
             .transitions()
@@ -657,20 +836,28 @@ fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                         && definition.kind != crate::core::ResolvedTypeKind::Alias
                         && definition.kind != crate::core::ResolvedTypeKind::Newtype)
         })
-        || program.functions().values().any(|function| {
-            !function.generics.is_empty()
-                || !function.generic_binders.is_empty()
-                || !function.effects.is_empty()
-                || function.is_async
-                || function.is_comptime
-                || function.extern_abi.is_some()
-        })
-        || program.callables().values().any(|callable| {
-            !callable.signature.generic_parameters.is_empty()
-                || !callable.signature.effects.is_empty()
-                || !callable.body.captures.is_empty()
-                || !callable.body.default_values.is_empty()
-        })
+        || program
+            .functions()
+            .values()
+            .filter(|function| !is_prelude_origin(program, &function.origin))
+            .any(|function| {
+                !function.generics.is_empty()
+                    || !function.generic_binders.is_empty()
+                    || !function.effects.is_empty()
+                    || function.is_async
+                    || function.is_comptime
+                    || function.extern_abi.is_some()
+            })
+        || program
+            .callables()
+            .values()
+            .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
+            .any(|callable| {
+                !callable.signature.generic_parameters.is_empty()
+                    || !callable.signature.effects.is_empty()
+                    || !callable.body.captures.is_empty()
+                    || !callable.body.default_values.is_empty()
+            })
         // The closed record verifier island proves value semantics for Copy
         // records. A view/mutate parameter is a borrow/effect contract with a
         // separate ownership proof and must remain on the compatibility

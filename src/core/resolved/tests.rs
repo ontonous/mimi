@@ -92,15 +92,18 @@ fn checked_program_owns_its_migration_body_input() {
         program.functions().len() > 0,
         "checked program must own functions, not raw AST items"
     );
-    // 0.33 Phase F: use bytecode VM (tree-walker removed).
-    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
-    compiler.install_checked_program(&program);
-    let prog = compiler
-        .compile_file(program.raw_ast())
-        .expect("bytecode compile owned checked program");
+    // The checked program owns the canonical frontend-to-MIR boundary.  This
+    // test used to exercise the compatibility bytecode compiler through
+    // `raw_ast()`, which made an ownership test depend on the very legacy
+    // source consumer that the migration is removing.  Compile the same
+    // checked program through the AST-free MIR backend instead.
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical MIR from owned checked program");
+    let prog = crate::interp::bytecode::compile_mir_program(&mir)
+        .expect("MIR bytecode from owned checked program");
     let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
     let result = vm
-        .call_named("main", vec![])
+        .call_named("function:main", vec![])
         .expect("run owned checked program");
     assert!(matches!(result, crate::interp::Value::Int(42)));
 }
