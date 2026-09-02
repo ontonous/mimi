@@ -2826,7 +2826,48 @@ impl BytecodeVM {
                         .collect();
                     self.set_reg(rd, Value::Variant(tag, payload));
                 }
-                Op::DestructureVariantMove { ra, base, arity } => {
+                Op::DestructureVariantMove {
+                    ra,
+                    base,
+                    arity,
+                    variant_tag,
+                } => {
+                    let (actual_tag, payload_len) = match self.get_reg(ra) {
+                        Value::Variant(tag, payload) => (tag.as_str(), payload.len()),
+                        value => {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: expected Variant value, got {}",
+                                value
+                            )));
+                        }
+                    };
+                    let expected_tag = match proto.constants.get(variant_tag as usize) {
+                        Some(ConstValue::Str(tag)) => tag.as_str(),
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: tag constant {} is not a string",
+                                variant_tag
+                            )));
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: tag constant {} is absent",
+                                variant_tag
+                            )));
+                        }
+                    };
+                    if actual_tag != expected_tag {
+                        return Err(InterpError::new(format!(
+                            "variant destructure: expected tag '{}', got '{}'",
+                            expected_tag, actual_tag
+                        )));
+                    }
+                    if payload_len != arity as usize {
+                        return Err(InterpError::new(format!(
+                            "variant destructure: expected {} payload fields, got {}",
+                            arity, payload_len
+                        )));
+                    }
                     let value = {
                         let frame = self.cur_frame_mut();
                         std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
@@ -2836,13 +2877,6 @@ impl BytecodeVM {
                             "variant destructure: expected Variant value",
                         ));
                     };
-                    if payload.len() != arity as usize {
-                        return Err(InterpError::new(format!(
-                            "variant destructure: expected {} payload fields, got {}",
-                            arity,
-                            payload.len()
-                        )));
-                    }
                     for (index, value) in payload.into_iter().enumerate() {
                         self.set_reg(base + index as u16, value);
                     }

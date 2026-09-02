@@ -2468,10 +2468,12 @@ impl<'a> FunctionEmitter<'a> {
         for _ in 1..variant.fields.len() {
             self.proto.alloc_reg();
         }
+        let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
         self.proto.emit(Op::DestructureVariantMove {
             ra: scrutinee,
             base: payload_base,
             arity: variant.fields.len() as u16,
+            variant_tag,
         });
         for (index, field) in variant.fields.iter().enumerate().rev() {
             if !bindings.iter().any(|binding| binding.field == field.id) {
@@ -4222,6 +4224,50 @@ mod tests {
             crate::core::mir::reference::MirRuntimeValue::String("owned".into())
         );
         assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn rejects_variant_destructure_tag_drift_before_moving_payload() {
+        let source =
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(reference, MirRuntimeValue::String("owned".into()));
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let forged_tag = main.add_const(crate::interp::bytecode::ConstValue::Str("Err".into()));
+        let (destructure, scrutinee) = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::DestructureVariantMove {
+                    ra, variant_tag, ..
+                } => Some((variant_tag, *ra)),
+                _ => None,
+            })
+            .expect("canonical switch-move destructure");
+        *destructure = forged_tag;
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("corrupted active-variant tag must fail closed");
+        assert!(error
+            .message()
+            .contains("variant destructure: expected tag 'Err', got 'Some'"));
+        assert!(matches!(
+            vm.get_reg(scrutinee),
+            Value::Variant(tag, _) if tag == "Some"
+        ));
     }
 
     #[test]

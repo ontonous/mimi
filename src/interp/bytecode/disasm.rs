@@ -699,14 +699,30 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 *base as u16 + arity.saturating_sub(1)
             )
         }
-        Op::DestructureVariantMove { ra, base, arity } => format!(
-            "{:04}  {:<16} destructure_variant_move r{} -> r{}..r{}",
-            pc,
-            name,
+        Op::DestructureVariantMove {
             ra,
             base,
-            *base as u16 + arity.saturating_sub(1)
-        ),
+            arity,
+            variant_tag,
+        } => {
+            let tag = proto
+                .constants
+                .get(*variant_tag as usize)
+                .map(|constant| match constant {
+                    ConstValue::Str(tag) => tag.as_str(),
+                    _ => "?",
+                })
+                .unwrap_or("?");
+            format!(
+                "{:04}  {:<16} destructure_variant_move<{}> r{} -> r{}..r{}",
+                pc,
+                name,
+                tag,
+                ra,
+                base,
+                *base as u16 + arity.saturating_sub(1)
+            )
+        }
         Op::VariantTag { rd, ra } => format!("{:04}  {:<16} r{} = tag(r{})", pc, name, rd, ra),
         Op::VariantPayload { rd, ra, idx } => format!(
             "{:04}  {:<16} r{} = payload(r{}, {})",
