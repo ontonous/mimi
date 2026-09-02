@@ -626,16 +626,56 @@ impl BytecodeVM {
                     // Dropping the owned product recursively drops its fields;
                     // the MIR emitter already proved the TypeDesc schedule.
                 }
-                Op::DropVariant { ra } => {
-                    let frame = self.cur_frame_mut();
-                    let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
-                    if !matches!(&value, Value::Variant(_, _)) {
+                Op::DropVariant { ra, shapes } => {
+                    let (actual_tag, payload_len) = match self.get_reg(ra) {
+                        Value::Variant(tag, payload) => (tag.as_str(), payload.len()),
+                        value => {
+                            return Err(InterpError::new(format!(
+                                "variant drop: expected Variant, got {}",
+                                value
+                            )));
+                        }
+                    };
+                    let expected_arity = match proto.constants.get(shapes as usize) {
+                        Some(ConstValue::VariantShapes(shapes)) => shapes
+                            .iter()
+                            .find(|(tag, _)| tag == actual_tag)
+                            .map(|(_, arity)| *arity),
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "variant drop: shapes constant {} is not a VariantShapes table",
+                                shapes
+                            )));
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "variant drop: shapes constant {} is absent",
+                                shapes
+                            )));
+                        }
+                    };
+                    let Some(expected_arity) = expected_arity else {
                         return Err(InterpError::new(format!(
-                            "variant drop: expected Variant, got {}",
-                            value
+                            "variant drop: tag '{}' is absent from canonical drop shapes",
+                            actual_tag
+                        )));
+                    };
+                    if payload_len != expected_arity as usize {
+                        return Err(InterpError::new(format!(
+                            "variant drop: tag '{}' expects {} payload fields, got {}",
+                            actual_tag, expected_arity, payload_len
                         )));
                     }
-                    // The MIR adapter proves the active-variant payload plan;
+                    let value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::Variant(_, _payload) = value else {
+                        return Err(InterpError::new(
+                            "variant drop: expected Variant after shape validation",
+                        ));
+                    };
+                    // The MIR adapter proves the recursive child drop plan;
                     // moving the whole value into this op lets Rust recursively
                     // release every owned payload without a second type pass.
                 }
@@ -1612,6 +1652,7 @@ impl BytecodeVM {
                         | Some(ConstValue::LambdaSpec { .. })
                         | Some(ConstValue::Pattern(_))
                         | Some(ConstValue::StrVec(_))
+                        | Some(ConstValue::VariantShapes(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -4343,6 +4384,7 @@ impl BytecodeVM {
             ConstValue::LambdaSpec { .. } => Value::Unit,
             ConstValue::Pattern(_) => Value::Unit,
             ConstValue::StrVec(_) => Value::Unit,
+            ConstValue::VariantShapes(_) => Value::Unit,
         }
     }
 

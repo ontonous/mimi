@@ -452,7 +452,7 @@ impl<'a> FunctionEmitter<'a> {
                         MirLayout::Record { fields, .. } => fields.len(),
                         MirLayout::Option { .. } | MirLayout::Result { .. } => {
                             let Some(ra) = self.reg(value) else { return };
-                            self.proto.emit(Op::DropVariant { ra });
+                            self.emit_drop_variant(ra, &desc.id);
                             return;
                         }
                         layout => {
@@ -2404,7 +2404,7 @@ impl<'a> FunctionEmitter<'a> {
                     has_default = true;
                     self.emit_edge_arguments(&arm.target, &arm.arguments);
                     if consume_scrutinee {
-                        self.proto.emit(Op::DropVariant { ra: scrutinee_reg });
+                        self.emit_drop_variant(scrutinee_reg, &scrutinee_info.ty);
                     }
                     let jump = self.proto.emit(Op::Jmp { offset: 0 });
                     self.pending_jumps.push((jump, arm.target.clone()));
@@ -2434,7 +2434,7 @@ impl<'a> FunctionEmitter<'a> {
     ) {
         if bindings.is_empty() {
             self.emit_edge_arguments(&target, arguments);
-            self.proto.emit(Op::DropVariant { ra: scrutinee });
+            self.emit_drop_variant(scrutinee, scrutinee_ty);
             return;
         }
         let Some(block) = self.function.blocks.get(&target) else {
@@ -2524,6 +2524,51 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    fn emit_drop_variant(&mut self, register: Reg, ty: &crate::core::ResolvedTypeId) {
+        let (nominal, variants) = match self
+            .program
+            .type_catalog()
+            .validated_variant_drop_contract_table(ty)
+        {
+            Ok(contract) => contract,
+            Err(message) => {
+                self.error(format!(
+                    "variant drop type '{}' is unsupported: {message}",
+                    ty.as_str()
+                ));
+                return;
+            }
+        };
+        if variants.is_empty() {
+            self.error(format!(
+                "variant drop type '{}' has an empty canonical variant table",
+                nominal
+            ));
+            return;
+        }
+        let mut tags = std::collections::BTreeSet::new();
+        let mut shapes = Vec::with_capacity(variants.len());
+        for variant in variants {
+            if !tags.insert(&variant.name) {
+                self.error(format!(
+                    "variant drop type '{}' has duplicate bytecode tag '{}'",
+                    nominal, variant.name
+                ));
+                return;
+            }
+            if variant.fields.len() > u16::MAX as usize {
+                self.error("variant drop payload arity exceeds bytecode ABI");
+                return;
+            }
+            shapes.push((variant.name.clone(), variant.fields.len() as u16));
+        }
+        let shapes = self.proto.add_const(ConstValue::VariantShapes(shapes));
+        self.proto.emit(Op::DropVariant {
+            ra: register,
+            shapes,
+        });
+    }
+
     fn emit_drop_register(&mut self, register: Reg, ty: &crate::core::ResolvedTypeId) {
         let Some(descriptor) = self.program.type_catalog().get(ty) else {
             self.error(format!("drop register type '{}' is absent", ty.as_str()));
@@ -2558,7 +2603,7 @@ impl<'a> FunctionEmitter<'a> {
                     });
                 }
                 MirLayout::Option { .. } | MirLayout::Result { .. } => {
-                    self.proto.emit(Op::DropVariant { ra: register });
+                    self.emit_drop_variant(register, ty);
                 }
                 layout => self.error(format!(
                     "drop register type '{}' has unsupported aggregate layout {:?}",
@@ -4266,6 +4311,50 @@ mod tests {
             .contains("variant destructure: expected tag 'Err', got 'Some'"));
         assert!(matches!(
             vm.get_reg(scrutinee),
+            Value::Variant(tag, _) if tag == "Some"
+        ));
+    }
+
+    #[test]
+    fn rejects_variant_drop_shape_drift_before_consuming_source() {
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let forged_shapes = main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(
+            vec![("Err".into(), 1)],
+        ));
+        let (drop_shapes, source_reg) = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::DropVariant { ra, shapes } => Some((shapes, *ra)),
+                _ => None,
+            })
+            .expect("canonical variant drop");
+        *drop_shapes = forged_shapes;
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("corrupted variant drop shape must fail closed");
+        assert!(error
+            .message()
+            .contains("variant drop: tag 'Some' is absent from canonical drop shapes"));
+        assert!(matches!(
+            vm.get_reg(source_reg),
             Value::Variant(tag, _) if tag == "Some"
         ));
     }

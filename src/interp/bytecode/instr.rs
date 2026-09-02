@@ -88,9 +88,10 @@ pub enum Op {
         arity: u16,
     },
     /// Consume an owned Option/Result variant after the MIR TypeDesc
-    /// validator has proved every active-variant payload drop plan.
+    /// validator has proved the complete variant drop-shape table.
     DropVariant {
         ra: Reg,
+        shapes: ConstIdx,
     },
 
     // ═══════════════════════════════════════════════════════════
@@ -1234,7 +1235,7 @@ impl Op {
             | RetUnit
             | FaultRetEarly => false,
             Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
-            Drop { ra } | DropAggregate { ra, .. } | DropVariant { ra } => *ra == reg,
+            Drop { ra } | DropAggregate { ra, .. } | DropVariant { ra, .. } => *ra == reg,
             DestructureVariantMove { ra, .. } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
@@ -1434,6 +1435,10 @@ pub enum ConstValue {
     Pattern(crate::ast::Pattern),
     /// String vector constant (for QuoteRecord field names).
     StrVec(Vec<String>),
+    /// Canonical variant drop shapes encoded for the bytecode physical ABI.
+    /// Each pair is (active tag, payload arity), copied only from a validated
+    /// MIR TypeDesc table; the VM must reject tags or payloads outside it.
+    VariantShapes(Vec<(String, u16)>),
 }
 
 impl FunctionProto {

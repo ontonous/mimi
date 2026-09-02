@@ -190,6 +190,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
+                ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -373,6 +374,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
+                ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -484,7 +486,10 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} drop_aggregate r{} (arity={})",
             pc, name, ra, arity
         ),
-        Op::DropVariant { ra } => format!("{:04}  {:<16} drop_variant r{}", pc, name, ra),
+        Op::DropVariant { ra, shapes } => format!(
+            "{:04}  {:<16} drop_variant r{} [shapes const {}]",
+            pc, name, ra, shapes
+        ),
         Op::TupleGet { rd, ra, idx } => {
             format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx)
         }
@@ -910,6 +915,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::LambdaSpec { .. } => "lambda_spec".to_string(),
             ConstValue::Pattern(p) => format!("pattern {:?}", p),
             ConstValue::StrVec(v) => format!("strvec {:?}", v),
+            ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

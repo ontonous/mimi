@@ -1884,6 +1884,25 @@ impl MirTypeCatalog {
         Ok((expected_nominal, plan))
     }
 
+    /// Return the complete canonical variant table after proving the
+    /// recursive drop-glue graph.  A variant drop opcode may be reached from
+    /// a default arm or a scope exit, so it cannot select one active variant
+    /// statically; consumers must carry this whole TypeDesc table instead of
+    /// reconstructing tag/arity pairs from a runtime representation.
+    pub fn validated_variant_drop_contract_table(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(&str, &[MirVariantDesc]), String> {
+        let (expected_nominal, variants) = self.variant_layout(ty).ok_or_else(|| {
+            format!(
+                "type '{}' has no canonical Option/Result variant layout",
+                ty.as_str()
+            )
+        })?;
+        self.validate_variant_glue(ty, MirGlueOperation::Drop)?;
+        Ok((expected_nominal, variants))
+    }
+
     /// Validate the recursive product glue graph for one operation.  The
     /// caller still owns the choice of operation; this method only follows
     /// canonical child descriptors and never consults a backend ABI.
@@ -4120,10 +4139,25 @@ mod tests {
             .expect("Some runtime drop contract");
         assert_eq!(drop_nominal, "builtin:type:Option");
         assert_eq!(drop_plan.fields[0].index, 0);
+        let (drop_table_nominal, drop_table) = catalog
+            .validated_variant_drop_contract_table(&option_id)
+            .expect("complete Option variant drop contract");
+        assert_eq!(drop_table_nominal, "builtin:type:Option");
+        assert_eq!(
+            drop_table
+                .iter()
+                .map(|variant| (variant.name.as_str(), variant.fields.len()))
+                .collect::<Vec<_>>(),
+            vec![("None", 0), ("Some", 1)]
+        );
         let drop_contract_error = catalog
             .validated_variant_drop_contract(&string_id, &some_id)
             .expect_err("bare string has no variant drop contract");
         assert!(drop_contract_error.contains("variant layout"));
+        let drop_table_error = catalog
+            .validated_variant_drop_contract_table(&string_id)
+            .expect_err("bare string has no variant drop contract table");
+        assert!(drop_table_error.contains("variant layout"));
         assert!(catalog
             .validated_variant_drop_plan(&option_id, &none_id)
             .expect("None drop plan")
