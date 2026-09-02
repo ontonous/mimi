@@ -1,0 +1,7 @@
+// Standalone scalar stdout island: no collection operation is needed.
+func main() -> i32 {
+    ensures: result == 0
+    println(1 == 1)
+    println(1 == 2)
+    0
+}

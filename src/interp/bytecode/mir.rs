@@ -3060,6 +3060,21 @@ mod tests {
     }
 
     #[test]
+    fn canonical_mir_differential_covers_standalone_stdout_effect() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_println_bool_standalone.mimi");
+        let report =
+            run_canonical_differential(source).expect("standalone println(bool) differential");
+        assert!(!report.mir_text.contains("set_op"));
+        assert!(report.mir_text.contains("PrintlnBool"));
+        assert_eq!(report.reference.output, "true\nfalse\n");
+        assert_eq!(report.mir_bytecode.output, report.reference.output);
+        assert_eq!(report.legacy_bytecode.output, report.reference.output);
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
+    }
+
+    #[test]
     fn canonical_mir_differential_preserves_ownership_artifact() {
         let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let value = Named { name: \"owned\", count: 41 }; drop(value); 42 }";
         let report = run_canonical_differential(source).expect("record ownership differential");

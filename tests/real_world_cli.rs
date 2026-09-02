@@ -2238,6 +2238,71 @@ fn canonical_mir_rejects_non_bool_println_before_any_backend() {
 }
 
 #[test]
+fn canonical_mir_standalone_bool_println_uses_default_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_println_bool_standalone.mimi");
+    let expected = "true\nfalse\n";
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone println MIR dump");
+    assert!(mir.status.success());
+    let mir_stdout = String::from_utf8_lossy(&mir.stdout);
+    assert!(mir_stdout.contains("PrintlnBool"));
+    assert!(!mir_stdout.contains("SetOp::") && !mir_stdout.contains("ListOp::"));
+
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn standalone canonical run");
+    assert_eq!(explicit.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&explicit.stdout), expected);
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone default run");
+    assert_eq!(default_run.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&default_run.stdout), expected);
+
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn standalone default native build");
+    assert!(
+        default_ir.status.success(),
+        "standalone default native build failed:\n{}",
+        String::from_utf8_lossy(&default_ir.stderr)
+    );
+    let ir = String::from_utf8_lossy(&default_ir.stdout);
+    assert!(ir.contains("define i32 @main()"));
+    assert!(ir.contains("call i32 @puts"));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn standalone verifier");
+    assert!(verification.status.success());
+    assert!(String::from_utf8_lossy(&verification.stdout)
+        .contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
 fn canonical_default_does_not_promote_list_function_contains() {
     let fixture = project_root()
         .join("tests")

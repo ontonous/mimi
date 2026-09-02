@@ -607,6 +607,45 @@ mod tests {
     }
 
     #[test]
+    fn standalone_bool_println_enters_canonical_route() {
+        let source = r#"
+            func main() -> i32 {
+                println(1 == 1)
+                println(1 == 2)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn standalone_non_bool_println_stays_outside_migrated_route() {
+        let source = r#"
+            func main() -> i32 {
+                println(1)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
+        ));
+    }
+
+    #[test]
     fn scalar_collection_with_non_bool_println_stays_on_explicit_compatibility_route() {
         let source = r#"
             func main() -> i32 {

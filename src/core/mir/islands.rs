@@ -41,7 +41,8 @@ pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
 /// compatibility boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarCollectionAdmission {
-    /// No typed List.len or concrete scalar Set-facade call is present.
+    /// No typed List.len, concrete scalar Set-facade call, or Copy-bool
+    /// stdout effect is present.
     OutsideProfile,
     /// A collection candidate exists, but the whole checked program contains
     /// imports, unsupported effects, managed values, or another unresolved
@@ -59,7 +60,8 @@ pub enum ScalarCollectionAdmission {
 /// the retained source file, invoke a backend, or infer a candidate from the
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
-/// identity/Set facade family can make them part of this island.
+/// identity/Set facade family or the exact Copy-bool stdout effect can make
+/// them part of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
@@ -298,7 +300,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 if is_scalar_set_facade_call(self.program, call) {
                     self.has_candidate = true;
                 }
-                if is_scalar_set_contains_call(self.program, call) {
+                if is_scalar_set_contains_call(self.program, call)
+                    || is_scalar_println_bool_call(self.program, call)
+                {
                     self.has_candidate = true;
                 }
                 // Only the closed Copy-bool stdout effect is a Canonical MIR
@@ -1020,14 +1024,14 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 }
 
 /// Return whether the canonical graph contains an operation that the default
-/// scalar collection selector recognizes as a migrated production candidate.
+/// scalar production selector recognizes as a migrated production candidate.
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len`, `SetOp::Contains`, or checker-owned `ScalarSetFacade` instance
-/// has crossed the S11 production boundary.  Keeping this fact next to the
-/// island contract prevents the CLI and direct native entry points from
-/// growing independent candidate predicates.
+/// `ListOp::Len`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
+/// or exact `BuiltinCall::PrintlnBool` has crossed the S11 production boundary.
+/// Keeping this fact next to the island contract prevents the CLI and direct
+/// native entry points from growing independent candidate predicates.
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
     let has_list_len = program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
@@ -1055,8 +1059,22 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
             })
         })
     });
+    let has_println_bool = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::BuiltinCall {
+                        kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool,
+                        ..
+                    }
+                )
+            })
+        })
+    });
     has_list_len
         || has_set_contains
+        || has_println_bool
         || program.instances().values().any(|instance| {
             matches!(
                 instance.contract,
@@ -1951,8 +1969,8 @@ fn binary_supported(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_scalar_collection_admission, validate_scalar_collection_island,
-        ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+        classify_scalar_collection_admission, contains_scalar_collection_candidate,
+        validate_scalar_collection_island, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
     };
     use crate::core::mir::reference::MirProgram;
     use crate::lexer::Lexer;
@@ -2097,6 +2115,37 @@ mod tests {
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("non-bool println must fail before a canonical backend");
         assert!(format!("{error:?}").contains("canonical contract accepts bool"));
+    }
+
+    #[test]
+    fn admits_standalone_bool_println_without_a_collection_candidate() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_println_bool_standalone.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert!(contains_scalar_collection_candidate(&program));
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        super::MirInstructionKind::BuiltinCall {
+                            kind: crate::core::mir::types::MirBuiltinKind::PrintlnBool,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+        validate_scalar_collection_island(&program).expect("standalone stdout effect contract");
     }
 
     #[test]
