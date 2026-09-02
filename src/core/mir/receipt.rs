@@ -15,6 +15,12 @@ pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 /// Schema prefix for the semantic MIR identity digest.
 pub const MIR_IDENTITY_SCHEMA: &str = "mimi-canonical-mir-identity-v1";
 
+/// Versioned contract used by every current MIR consumer before execution or
+/// backend lowering. A route receipt records this separately from the MIR
+/// digest so validator evolution cannot masquerade as a program identity
+/// change.
+pub const MIR_ROUTE_VALIDATOR_CONTRACT_ID: &str = "mimi-mir-route-validator-v1";
+
 /// Immutable audit witness shared by reference, bytecode, native, and
 /// verifier route tests.  The digest fields are independent so a report can
 /// distinguish a TypeDesc/ownership drift from a whole-program MIR drift.
@@ -24,7 +30,9 @@ pub struct CanonicalMirRouteReceipt {
     pub profile: String,
     pub mir_digest: String,
     pub type_desc_digest: String,
+    pub abi_digest: String,
     pub ownership_digest: String,
+    pub flow_transition_digest: String,
     pub root_owners: Vec<NodeId>,
 }
 
@@ -43,13 +51,16 @@ impl MirProgram {
     /// validity and island capability gates.
     pub fn route_receipt(&self, profile: impl Into<String>) -> CanonicalMirRouteReceipt {
         let type_desc_text = self.type_catalog().canonical_text();
+        let abi_text = self.type_catalog().abi_canonical_text();
         let ownership_text = canonical_ownership_text(self);
         CanonicalMirRouteReceipt {
             schema: MIR_ROUTE_RECEIPT_SCHEMA,
             profile: profile.into(),
             mir_digest: self.canonical_digest(),
             type_desc_digest: digest(type_desc_text),
+            abi_digest: digest(abi_text),
             ownership_digest: digest(ownership_text),
+            flow_transition_digest: digest(canonical_transition_text(self)),
             root_owners: canonical_root_owners(self),
         }
     }
@@ -92,6 +103,14 @@ fn canonical_ownership_text(program: &MirProgram) -> String {
         text.push_str(&function.owner.0);
         text.push('\n');
         text.push_str(&function.ownership.canonical_text());
+    }
+    text
+}
+
+fn canonical_transition_text(program: &MirProgram) -> String {
+    let mut text = String::from("mimi-flow-transition-contract-v1\n");
+    for transition in program.transitions().values() {
+        text.push_str(&transition.canonical_text());
     }
     text
 }

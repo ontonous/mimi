@@ -2774,6 +2774,26 @@ impl MirTypeCatalog {
         }
         output
     }
+
+    /// Return the ABI-facing portion of the TypeDesc contract in a stable
+    /// order. This is separate from `canonical_text` so a route receipt can
+    /// distinguish an ABI/layout/glue change from other descriptor facts
+    /// without either backend reconstructing the contract.
+    pub fn abi_canonical_text(&self) -> String {
+        let mut output = format!("mir.abi-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
+        for (id, descriptor) in &self.entries {
+            output.push_str(&format!(
+                "{} layout={:?} abi={:?} glue={:?} drop={} clone={}\n",
+                id.as_str(),
+                descriptor.layout,
+                descriptor.abi,
+                descriptor.glue,
+                descriptor.needs_drop_glue,
+                descriptor.needs_clone_glue,
+            ));
+        }
+        output
+    }
 }
 
 fn validate_variant_fields(

@@ -1005,6 +1005,118 @@ fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
 }
 
 #[test]
+fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_flow_transition.mimi");
+    let file = parse_memory_source(source, "mir-s8-four-consumer-receipt").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("exact S8 route must materialize");
+    assert_eq!(
+        route.admission.flow,
+        crate::core::mir::S8FlowAdmission::CompleteCoverage
+    );
+    assert!(route.materialized_flow_candidate);
+    let canonical = route.program;
+    let profile = crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition.as_str();
+    let receipt = canonical.route_receipt(profile);
+    assert_eq!(receipt.schema, crate::core::mir::MIR_ROUTE_RECEIPT_SCHEMA);
+    assert_eq!(receipt.profile, profile);
+    assert_eq!(receipt.mir_digest.len(), 64);
+    assert_eq!(receipt.type_desc_digest.len(), 64);
+    assert_eq!(receipt.abi_digest.len(), 64);
+    assert_eq!(receipt.ownership_digest.len(), 64);
+    assert_eq!(receipt.flow_transition_digest.len(), 64);
+    assert!(receipt
+        .root_owners
+        .iter()
+        .any(|owner| owner.0 == "function:main"));
+
+    // The receipt is an immutable identity witness, not a backend input. All
+    // four consumers below receive this same MIR object and no consumer may
+    // reopen CheckedProgram or the source AST.
+    crate::verifier::validate_mir_capabilities(&canonical).expect("MIR verifier capability");
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(42)
+    );
+    let bytecode =
+        crate::interp::bytecode::compile_mir_program(&canonical).expect("MIR bytecode compilation");
+    let mut bytecode_vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    assert_eq!(bytecode_vm.run().expect("MIR bytecode execution"), 42);
+
+    crate::codegen::mir::validate_mir_native(&canonical).expect("native MIR validation");
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "s28_s8_receipt");
+    codegen
+        .compile_mir_native(&canonical)
+        .expect("native MIR compilation");
+
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let mir_results =
+        crate::verifier::verify_mir(&canonical, source_hash.clone()).expect("MIR verifier");
+    assert!(mir_results.is_empty(), "fixture has no contracts");
+
+    // The thread-local tripwires isolate this proof from unrelated parallel
+    // tests: verify_checked and verify_checked_dual must each materialize once
+    // and must not touch the compatibility raw-AST accessor.
+    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::mir::reset_test_route_materialization_count();
+    assert!(
+        crate::verifier::verify_checked(&checked, source_hash.clone())
+            .expect("public verifier")
+            .is_empty()
+    );
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+
+    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::mir::reset_test_route_materialization_count();
+    assert!(crate::verifier::verify_checked_dual(&checked, source_hash)
+        .expect("dual public verifier")
+        .is_empty());
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+
+    // Recomputing the audit witness after all consumers proves that no
+    // backend mutated the canonical graph or its side tables.
+    assert_eq!(receipt, canonical.route_receipt(profile));
+    assert_eq!(
+        receipt,
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect("repeat canonical materialization")
+            .route_receipt(profile)
+    );
+    assert_eq!(
+        crate::core::mir::MIR_ROUTE_VALIDATOR_CONTRACT_ID,
+        "mimi-mir-route-validator-v1"
+    );
+}
+
+#[test]
+fn malformed_s8_mir_missing_transition_contract_is_rejected_before_consumers() {
+    let source = include_str!("../../tests/fixtures/mir_native_flow_transition.mimi");
+    let file = parse_memory_source(source, "mir-s8-invalid-transition").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let error =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            canonical.functions().clone(),
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect_err("FlowTransition without its contract must be rejected by MIR validation");
+    assert!(error.iter().any(|error| {
+        error.message.contains("transition") && error.message.contains("contract")
+    }));
+}
+
+#[test]
 fn public_checked_verifier_routes_closed_s8_flow_to_mir() {
     require_z3!();
     let source = r#"

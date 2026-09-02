@@ -23,6 +23,22 @@ use super::{
     is_s8_flow_transition_candidate, FlatCopyRecordAdmission, ScalarCollectionAdmission,
 };
 
+#[cfg(test)]
+thread_local! {
+    static TEST_ROUTE_MATERIALIZATION_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_route_materialization_count() {
+    TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn test_route_materialization_count() -> usize {
+    TEST_ROUTE_MATERIALIZATION_COUNT.with(std::cell::Cell::get)
+}
+
 /// The already-admitted production island whose materialization failed or
 /// lacked its canonical operation receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +187,8 @@ pub fn materialize_canonical_mir_route(
     program: &CheckedProgram,
     excluded_sources: Option<&HashSet<crate::span::SourceId>>,
 ) -> Result<CanonicalMirRouteMaterialization, CanonicalMirRouteMaterializationError> {
+    #[cfg(test)]
+    TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
     let canonical = match excluded_sources {
         Some(excluded_sources) => {

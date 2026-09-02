@@ -8,6 +8,12 @@ use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_RAW_AST_CALL_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1276,7 +1282,19 @@ impl CheckedProgram {
     /// Flow transitions, Actor/Session/Protocol catalogs, ownership, CFG) is
     /// available through the typed accessor methods on `CheckedProgram`.
     /// If you need body-level data, use `resolved_body()` / `callables()`.
+    #[cfg(test)]
+    pub(crate) fn reset_test_raw_ast_call_count() {
+        TEST_RAW_AST_CALL_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_raw_ast_call_count() -> usize {
+        TEST_RAW_AST_CALL_COUNT.with(std::cell::Cell::get)
+    }
+
     pub(crate) fn raw_ast(&self) -> &File {
+        #[cfg(test)]
+        TEST_RAW_AST_CALL_COUNT.with(|count| count.set(count.get() + 1));
         &self.legacy_file
     }
 

@@ -35,12 +35,17 @@ pub use islands::{
     contains_scalar_collection_candidate, validate_scalar_collection_island,
     FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
-pub use receipt::{CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA};
+pub use receipt::{
+    CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA,
+    MIR_ROUTE_VALIDATOR_CONTRACT_ID,
+};
 pub use route::{
     classify_canonical_mir_route_admission, materialize_canonical_mir_route,
     CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
     CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, S8FlowAdmission,
 };
+#[cfg(test)]
+pub(crate) use route::{reset_test_route_materialization_count, test_route_materialization_count};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.
