@@ -566,66 +566,69 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<Option<crate::core::mir::reference::MirProgram>, Vec<crate::diagnostic::Diagnostic>>
     {
-        // Admission is checker-owned and must happen before materialization.
-        // In particular, a complete scalar-collection program must not turn a
-        // MIR construction error into the old E0723/legacy path.  Mixed
-        // coverage remains an explicit compatibility boundary until the
-        // whole-program profile is closed; it is not the same state as a
-        // complete profile whose canonical producer failed.
-        let collection_admission = crate::core::mir::classify_scalar_collection_admission(program);
-        let record_admission = crate::core::mir::classify_flat_copy_record_admission(program);
-        let complete_collection_admission = matches!(
-            collection_admission,
-            crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
-        );
-        let complete_record_admission = matches!(
-            record_admission,
-            crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
-        );
-        let canonical = match crate::core::mir::reference::MirProgram::from_checked_program(program)
-        {
-            Ok(canonical) => canonical,
-            Err(error) => {
-                if complete_collection_admission {
-                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+        // The shared core-MIR envelope performs checker-owned admission,
+        // canonical construction, and operation materialization before this
+        // direct native entry can approach LLVM.  Complete failures are hard;
+        // Mixed/Outside remains an explicit compatibility boundary.
+        let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
+            Ok(route) => route,
+            Err(crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
+                profile,
+                stage,
+                message,
+            }) => {
+                let (code, detail) = match (profile, stage) {
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
                         "MIR-LOWERING-001",
                         format!(
-                            "complete scalar collection MIR island construction failed: {error}"
+                            "complete scalar collection MIR island construction failed: {message}"
                         ),
-                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-                    )]);
-                }
-                if complete_record_admission {
-                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete scalar collection MIR island materialization failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
                         "MIR-LOWERING-001",
                         format!(
-                            "complete flat Copy-record MIR island construction failed: {error}"
+                            "complete flat Copy-record MIR island construction failed: {message}"
                         ),
-                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-                    )]);
-                }
-                return Ok(None);
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete flat Copy-record MIR island materialization failed: {message}"
+                        ),
+                    ),
+                };
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    code,
+                    detail,
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
             }
+            Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+                ..
+            }) => return Ok(None),
         };
-        let scalar_collection_candidate =
-            crate::core::mir::contains_scalar_collection_candidate(&canonical);
-        let flat_copy_record_candidate =
-            crate::core::mir::contains_flat_copy_record_candidate(&canonical);
+        let canonical = &route.program;
+        let scalar_collection_candidate = route.materialized_collection_candidate;
+        let flat_copy_record_candidate = route.materialized_record_candidate;
         if !scalar_collection_candidate && !flat_copy_record_candidate {
-            if complete_collection_admission {
-                return Err(vec![crate::diagnostic::Diagnostic::error_code(
-                    "MIR-COVERAGE-001",
-                    "complete scalar collection admission did not materialize a native collection boundary",
-                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-                )]);
-            }
-            if complete_record_admission {
-                return Err(vec![crate::diagnostic::Diagnostic::error_code(
-                    "MIR-COVERAGE-001",
-                    "complete flat Copy-record admission did not materialize a native record boundary",
-                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-                )]);
-            }
             return Ok(None);
         }
 
@@ -691,7 +694,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
             )]);
         }
-        Ok(Some(canonical))
+        Ok(Some(route.program))
     }
 
     fn mir_gate_diagnostics(

@@ -22,6 +22,7 @@ mod islands;
 pub mod lower;
 mod receipt;
 pub mod reference;
+mod route;
 pub mod types;
 
 pub use contracts::{
@@ -35,6 +36,11 @@ pub use islands::{
     FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
 pub use receipt::{CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA};
+pub use route::{
+    classify_canonical_mir_route_admission, materialize_canonical_mir_route,
+    CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
+    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile,
+};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.

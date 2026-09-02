@@ -291,18 +291,10 @@ fn verify_closed_scalar_collection_mir(
     {
         return Ok(None);
     }
-    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
-        .map_err(|error| {
-            format!(
-                "MIR-MATERIALIZATION-001: scalar collection verifier island construction failed: {error}"
-            )
-        })?;
-    if !crate::core::mir::contains_scalar_collection_candidate(&canonical) {
-        return Err(
-            "MIR-COVERAGE-001: complete scalar collection admission did not materialize a production operation"
-                .into(),
-        );
-    }
+    let route = crate::core::mir::materialize_canonical_mir_route(program, None)
+        .map_err(|error| format!("MIR-MATERIALIZATION-001: {error}"))?;
+    let canonical = &route.program;
+    debug_assert!(route.materialized_collection_candidate);
     crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
         format!(
             "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
@@ -348,18 +340,10 @@ fn verify_closed_flat_copy_record_mir(
         | crate::core::mir::FlatCopyRecordAdmission::MixedCoverage => return Ok(None),
         crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage => {}
     }
-    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
-        .map_err(|error| {
-            format!(
-                "MIR-MATERIALIZATION-001: flat Copy-record verifier island construction failed: {error}"
-            )
-        })?;
-    if !crate::core::mir::contains_flat_copy_record_candidate(&canonical) {
-        return Err(
-            "MIR-COVERAGE-001: complete flat Copy-record admission did not materialize a record boundary"
-                .into(),
-        );
-    }
+    let route = crate::core::mir::materialize_canonical_mir_route(program, None)
+        .map_err(|error| format!("MIR-MATERIALIZATION-001: {error}"))?;
+    let canonical = &route.program;
+    debug_assert!(route.materialized_record_candidate);
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(
             "MIR-CAPABILITY-001: canonical verifier rejected the flat Copy-record island: {errors:?}"

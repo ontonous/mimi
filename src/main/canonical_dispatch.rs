@@ -23,6 +23,27 @@ pub(crate) enum DefaultMirRoute {
     Rejected(String),
 }
 
+/// Materialize the production route graph with only the known prelude
+/// compatibility source excluded.  Admission and materialization receipts
+/// come from the shared core-MIR boundary, so direct native and verifier
+/// callers cannot grow a second frontend route policy.
+pub(crate) fn materialize_canonical_route(
+    checked: &CheckedProgram,
+    merged_file: &File,
+) -> Result<
+    mimi::core::mir::CanonicalMirRouteMaterialization,
+    mimi::core::mir::CanonicalMirRouteMaterializationError,
+> {
+    let excluded_sources = merged_file
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    mimi::core::mir::materialize_canonical_mir_route(checked, Some(&excluded_sources))
+}
+
 /// Build the production MIR graph while excluding only the known prelude
 /// compatibility source.  User and imported sources remain in the graph and
 /// are all required to lower and validate.
@@ -30,6 +51,10 @@ pub(crate) fn build_canonical_program(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> Result<MirProgram, String> {
+    // Explicit `--mir` is a construction/inspection request rather than a
+    // default-route admission. Preserve the canonical builder's detailed
+    // lowering/validation diagnostics here; the default selector uses the
+    // shared route envelope above for Complete-vs-Compatibility disposition.
     build_canonical_program_for_sources(checked, merged_file, None)
 }
 
@@ -71,10 +96,11 @@ pub(crate) fn select_default_route(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> DefaultMirRoute {
-    // Admission is checker-owned and must be decided before MIR construction.
-    // Keep the dispatcher from growing a second Set/record type walk: the
-    // same admission result is also used by the public verifier boundary.
-    let collection_admission = mimi::core::mir::classify_scalar_collection_admission(checked);
+    // Admission is checker-owned and must happen before MIR construction.
+    // The shared envelope also owns the materialization receipts, preventing
+    // this selector from growing a second Set/record lowering walk.
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    let collection_admission = admission.collection;
     // Imported stdlib facades are part of the production island once their
     // concrete operations materialize in MIR.  Do not use the retained File
     // import list as a second route policy: checker admission records the
@@ -90,7 +116,7 @@ pub(crate) fn select_default_route(
         collection_admission,
         mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
     );
-    let record_admission = mimi::core::mir::classify_flat_copy_record_admission(checked);
+    let record_admission = admission.record;
     let record_hint = !matches!(
         record_admission,
         mimi::core::mir::FlatCopyRecordAdmission::OutsideProfile
@@ -104,32 +130,58 @@ pub(crate) fn select_default_route(
         return DefaultMirRoute::Legacy;
     }
 
-    let canonical = match build_canonical_program(checked, merged_file) {
-        Ok(canonical) => canonical,
-        Err(error) => {
+    let route = match materialize_canonical_route(checked, merged_file) {
+        Ok(route) => route,
+        Err(mimi::core::mir::CanonicalMirRouteMaterializationError::Complete {
+            profile,
+            stage,
+            message,
+        }) => {
+            let reason = match stage {
+                mimi::core::mir::CanonicalMirRouteFailureStage::Construction => {
+                    format!("canonical MIR construction failed: {message}")
+                }
+                mimi::core::mir::CanonicalMirRouteFailureStage::Coverage => {
+                    format!("canonical graph did not materialize the selected production operation: {message}")
+                }
+            };
             return reject_migrated_candidates(
                 flow_candidate,
-                complete_collection_candidate,
-                complete_record_candidate,
-                format!("canonical MIR construction failed: {error}"),
-            )
+                matches!(
+                    profile,
+                    mimi::core::mir::CanonicalMirRouteProfile::ScalarCollection
+                ),
+                matches!(
+                    profile,
+                    mimi::core::mir::CanonicalMirRouteProfile::FlatCopyRecord
+                ),
+                reason,
+            );
+        }
+        Err(mimi::core::mir::CanonicalMirRouteMaterializationError::Compatibility { message }) => {
+            if flow_candidate {
+                return reject_migrated_candidates(
+                    true,
+                    false,
+                    false,
+                    format!("canonical MIR compatibility materialization failed: {message}"),
+                );
+            }
+            return DefaultMirRoute::Legacy;
         }
     };
-    let copy_record = mimi::core::mir::contains_flat_copy_record_candidate(&canonical);
-    let materialized_collection_candidate =
-        mimi::core::mir::contains_scalar_collection_candidate(&canonical);
+    let canonical = &route.program;
+    let copy_record = route.materialized_record_candidate;
+    let materialized_collection_candidate = route.materialized_collection_candidate;
     let flow_transition_operation =
-        mimi::core::mir::contains_s8_flow_transition_candidate(&canonical);
+        mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
     // Mixed coverage remains a compatibility boundary only when construction
     // proves that no migrated operation was materialized.  A Complete
     // admission missing its receipt, however, is a hard route failure.
     let collection_route_candidate =
         complete_collection_candidate || (collection_hint && materialized_collection_candidate);
     let record_route_candidate = complete_record_candidate || (record_hint && copy_record);
-    if (complete_collection_candidate && !materialized_collection_candidate)
-        || (complete_record_candidate && !copy_record)
-        || (flow_candidate && !flow_transition_operation)
-    {
+    if flow_candidate && !flow_transition_operation {
         return reject_migrated_candidates(
             flow_candidate,
             collection_route_candidate || (record_route_candidate && copy_record),
@@ -237,7 +289,7 @@ pub(crate) fn select_default_route(
         );
     }
 
-    DefaultMirRoute::Canonical(canonical)
+    DefaultMirRoute::Canonical(route.program)
 }
 
 fn reject_migrated_candidates(
