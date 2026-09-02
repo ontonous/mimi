@@ -2252,17 +2252,14 @@ impl<'a> FunctionEmitter<'a> {
                     Ok(())
                 }
                 MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => {
-                    if desc.ownership != MirOwnership::Copy
-                        && (desc.glue.move_out != MirGlueKind::Aggregate
-                            || desc.glue.clone != MirGlueKind::Aggregate
-                            || desc.glue.drop != MirGlueKind::Aggregate
-                            || desc.variant_drop_plan.is_none())
-                    {
-                        return Err(format!(
-                            "type '{}' has ownership {:?} without a canonical variant glue/drop plan",
-                            ty.as_str(),
-                            desc.ownership
-                        ));
+                    if desc.ownership != MirOwnership::Copy {
+                        for operation in [
+                            crate::core::mir::types::MirGlueOperation::MoveOut,
+                            crate::core::mir::types::MirGlueOperation::Clone,
+                            crate::core::mir::types::MirGlueOperation::Drop,
+                        ] {
+                            self.program.type_catalog().validate_glue(ty, operation)?;
+                        }
                     }
                     for variant in variants {
                         for field in &variant.fields {

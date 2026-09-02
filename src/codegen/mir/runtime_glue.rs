@@ -349,14 +349,35 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .ok_or_else(|| NativeMirError::new(subject, "variant drop has no TypeDesc layout"))?;
         let payload_variant = variants
             .iter()
-            .find(|variant| variant.fields.len() == 1)
+            .find(|variant| variant.id.0 == "builtin:variant:Option::Some")
             .ok_or_else(|| {
                 NativeMirError::new(subject, "variant drop has no owned payload variant")
             })?;
         let empty_variant = variants
             .iter()
-            .find(|variant| variant.fields.is_empty())
+            .find(|variant| variant.id.0 == "builtin:variant:Option::None")
             .ok_or_else(|| NativeMirError::new(subject, "variant drop has no empty variant"))?;
+        let payload_plan = self
+            .program
+            .type_catalog()
+            .validated_variant_drop_plan(ty, &payload_variant.id)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let empty_plan = self
+            .program
+            .type_catalog()
+            .validated_variant_drop_plan(ty, &empty_variant.id)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        if payload_variant.fields.len() != 1
+            || payload_plan.fields.len() != 1
+            || payload_plan.fields[0].index != 0
+            || !empty_variant.fields.is_empty()
+            || !empty_plan.fields.is_empty()
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "variant drop plan is outside the canonical Option<string> ABI",
+            ));
+        }
         let aggregate = value.into_struct_value();
         let tag = self
             .generator

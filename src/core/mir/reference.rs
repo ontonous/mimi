@@ -3515,21 +3515,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "variant drop discriminant is absent from TypeDesc",
                     ));
                 };
-                let descriptor = self
+                let plan = self
                     .program
                     .type_catalog()
-                    .get(ty)
-                    .ok_or_else(|| self.error(&function.owner, "drop value has no TypeDesc"))?;
-                let Some(plan) = descriptor
-                    .variant_drop_plan
-                    .as_ref()
-                    .and_then(|plans| plans.iter().find(|plan| plan.variant == variant))
-                else {
-                    return Err(self.error(
-                        &function.owner,
-                        "variant drop value has no variant drop plan",
-                    ));
-                };
+                    .validated_variant_drop_plan(ty, &variant)
+                    .map_err(|message| self.error(&function.owner, message))?;
                 if payload.len() != expected_variant.fields.len()
                     || plan.fields.len() != expected_variant.fields.len()
                 {
@@ -3740,17 +3730,12 @@ impl<'a> MirReferenceInterpreter<'a> {
             self.drop_runtime_value(function, &scrutinee_ty, value)?;
             return Ok(incoming);
         }
-        let descriptor = self
+        let plan = self
             .program
             .type_catalog()
-            .get(&scrutinee_ty)
-            .ok_or_else(|| self.error(&function.owner, "switch-move has no TypeDesc"))?;
-        let plan = descriptor
-            .variant_drop_plan
-            .as_ref()
-            .and_then(|plans| plans.iter().find(|plan| plan.variant == actual_variant))
-            .cloned()
-            .ok_or_else(|| self.error(&function.owner, "switch-move variant has no drop plan"))?;
+            .validated_variant_drop_plan(&scrutinee_ty, &actual_variant)
+            .map_err(|message| self.error(&function.owner, message))?
+            .clone();
         let mut bound_indices = BTreeMap::new();
         for (binding_index, binding) in arm.bindings.iter().enumerate() {
             let target_parameter = function

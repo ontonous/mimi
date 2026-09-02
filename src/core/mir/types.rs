@@ -1779,6 +1779,34 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Return one active variant's already-validated drop schedule.
+    ///
+    /// The plan is selected by stable variant identity, never by payload
+    /// arity or a backend representation.  Consumers may use the returned
+    /// declaration indices to schedule child drops after this method has
+    /// validated the complete recursive variant glue graph.
+    pub fn validated_variant_drop_plan(
+        &self,
+        ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+    ) -> Result<&MirVariantDropGluePlan, String> {
+        self.validate_variant_glue(ty, MirGlueOperation::Drop)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        descriptor
+            .variant_drop_plan
+            .as_ref()
+            .and_then(|plans| plans.iter().find(|plan| plan.variant == *variant_id))
+            .ok_or_else(|| {
+                format!(
+                    "type '{}' has no drop plan for variant '{}'",
+                    ty.as_str(),
+                    variant_id.0
+                )
+            })
+    }
+
     /// Validate the recursive product glue graph for one operation.  The
     /// caller still owns the choice of operation; this method only follows
     /// canonical child descriptors and never consults a backend ABI.
@@ -3806,6 +3834,28 @@ mod tests {
         assert_eq!(plans[1].fields[0].index, 0);
         assert_eq!(plans[1].fields[0].ty, string_id);
         assert_eq!(plans[1].fields[0].glue, MirGlueKind::OwnedString);
+        let some_id = crate::core::NodeId("builtin:variant:Option::Some".into());
+        let none_id = crate::core::NodeId("builtin:variant:Option::None".into());
+        assert_eq!(
+            catalog
+                .validated_variant_drop_plan(&option_id, &some_id)
+                .expect("Some drop plan")
+                .fields[0]
+                .index,
+            0
+        );
+        assert!(catalog
+            .validated_variant_drop_plan(&option_id, &none_id)
+            .expect("None drop plan")
+            .fields
+            .is_empty());
+        let missing = catalog
+            .validated_variant_drop_plan(
+                &option_id,
+                &crate::core::NodeId("builtin:variant:Option::Missing".into()),
+            )
+            .expect_err("unknown active variant must fail closed");
+        assert!(missing.contains("no drop plan for variant"), "{missing}");
         for operation in [
             MirGlueOperation::MoveOut,
             MirGlueOperation::Clone,
