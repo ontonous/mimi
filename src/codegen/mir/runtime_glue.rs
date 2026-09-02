@@ -342,32 +342,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), ty, true)?;
-        let (empty_variant, payload_variant, _payload_field) = self
+        let (empty_variant, payload_variant, _payload_plan, _empty_plan) = self
             .program
             .type_catalog()
-            .validated_option_string_payload(ty)
+            .validated_option_string_drop_contract(ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let payload_plan = self
-            .program
-            .type_catalog()
-            .validated_variant_drop_plan(ty, &payload_variant.id)
-            .map_err(|message| NativeMirError::new(subject, message))?;
-        let empty_plan = self
-            .program
-            .type_catalog()
-            .validated_variant_drop_plan(ty, &empty_variant.id)
-            .map_err(|message| NativeMirError::new(subject, message))?;
-        if payload_variant.fields.len() != 1
-            || payload_plan.fields.len() != 1
-            || payload_plan.fields[0].index != 0
-            || !empty_variant.fields.is_empty()
-            || !empty_plan.fields.is_empty()
-        {
-            return Err(NativeMirError::new(
-                subject,
-                "variant drop plan is outside the canonical Option<string> ABI",
-            ));
-        }
         let aggregate = value.into_struct_value();
         let tag = self
             .generator

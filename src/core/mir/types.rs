@@ -3186,6 +3186,36 @@ impl MirTypeCatalog {
         Ok((none, some, payload))
     }
 
+    /// Return the complete Option<string> variant/drop contract for a drop
+    /// emitter.  This selects stable None/Some descriptors and proves their
+    /// canonical drop-plan shapes before a backend can branch on the tag.
+    pub fn validated_option_string_drop_contract(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<
+        (
+            &MirVariantDesc,
+            &MirVariantDesc,
+            &MirVariantDropGluePlan,
+            &MirVariantDropGluePlan,
+        ),
+        String,
+    > {
+        let (none, some, _) = self.validated_option_string_payload(ty)?;
+        let payload_plan = self.validated_variant_drop_plan(ty, &some.id)?;
+        let empty_plan = self.validated_variant_drop_plan(ty, &none.id)?;
+        if payload_plan.fields.len() != 1
+            || payload_plan.fields[0].index != 0
+            || !empty_plan.fields.is_empty()
+        {
+            return Err(
+                "Option<string> variant drop plans are outside the canonical one-payload ABI"
+                    .into(),
+            );
+        }
+        Ok((none, some, payload_plan, empty_plan))
+    }
+
     /// Resolve one active variant from the already-validated narrow
     /// Option<string> contract.  Consumers must select by stable identity;
     /// payload arity and physical representation are not variant semantics.
@@ -4008,6 +4038,13 @@ mod tests {
             .expect("None drop plan")
             .fields
             .is_empty());
+        let (drop_none, drop_some, some_plan, none_plan) = catalog
+            .validated_option_string_drop_contract(&option_id)
+            .expect("canonical Option<string> drop contract");
+        assert_eq!(drop_none.id, none_id);
+        assert_eq!(drop_some.id, some_id);
+        assert_eq!(some_plan.fields[0].index, 0);
+        assert!(none_plan.fields.is_empty());
         let missing = catalog
             .validated_variant_drop_plan(
                 &option_id,
