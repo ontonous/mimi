@@ -3037,6 +3037,32 @@ impl MirTypeCatalog {
         validate_variant_fields(expected, field_ids, field_types).map(|()| expected)
     }
 
+    /// Validate a variant construction and expose the payload shape admitted
+    /// by the current native single-payload ABI.  The ordinary construction
+    /// contract remains responsible for field identity and type equality;
+    /// this narrower view only turns the already-proven descriptor into an
+    /// optional canonical payload field.  Consumers must not rediscover
+    /// payload arity with a target aggregate or a surface representation.
+    pub fn validated_single_payload_variant_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &NodeId,
+        field_ids: &[NodeId],
+        field_types: &[ResolvedTypeId],
+    ) -> Result<(&MirVariantDesc, Option<&MirFieldDesc>), String> {
+        let variant_desc =
+            self.validated_variant_construct(result_ty, nominal, variant, field_ids, field_types)?;
+        if variant_desc.fields.len() > 1 {
+            return Err(format!(
+                "variant '{}' has {} payload fields; the single-payload native ABI allows at most one",
+                variant_desc.name,
+                variant_desc.fields.len()
+            ));
+        }
+        Ok((variant_desc, variant_desc.fields.first()))
+    }
+
     /// Validate one canonical variant construction without exposing the
     /// descriptor to callers that only need a pass/fail result.
     pub fn validate_variant_construct(
@@ -4509,7 +4535,7 @@ mod tests {
         let option_id = table
             .intern_resolved(ResolvedType::Option(i32_id.clone()))
             .expect("option");
-        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
         let option_nominal =
             crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
         let some = crate::core::NodeId("builtin:variant:Option::Some".into());
@@ -4559,6 +4585,37 @@ mod tests {
             .expect("valid construction returns canonical descriptor");
         assert_eq!(some_desc.name, "Some");
         assert_eq!(some_desc.discriminant, 1);
+        let (constructed_some, constructed_payload) = catalog
+            .validated_single_payload_variant_construct(
+                &option_id,
+                &option_nominal,
+                &some,
+                std::slice::from_ref(&some_field),
+                std::slice::from_ref(&i32_id),
+            )
+            .expect("single-payload construction contract");
+        assert_eq!(constructed_some.id, some);
+        assert_eq!(constructed_payload.expect("Some payload").id, some_field);
+        let constructed_none = catalog
+            .validated_single_payload_variant_construct(
+                &option_id,
+                &option_nominal,
+                &crate::core::NodeId("builtin:variant:Option::None".into()),
+                &[],
+                &[],
+            )
+            .expect("zero-payload construction contract");
+        assert!(constructed_none.1.is_none());
+        let single_payload_error = catalog
+            .validated_single_payload_variant_construct(
+                &option_id,
+                &option_nominal,
+                &some,
+                std::slice::from_ref(&some_field),
+                std::slice::from_ref(&bool_id),
+            )
+            .expect_err("single-payload construction must preserve type rejection");
+        assert!(single_payload_error.contains("disagrees with layout type"));
         let flat_some = catalog
             .validated_flat_copy_variant(&option_id, &some)
             .expect("flat Copy Some descriptor");
@@ -4600,12 +4657,36 @@ mod tests {
             target: crate::core::mir::MirBlockId::new("bb:some").expect("block"),
             arguments: Vec::new(),
             bindings: Vec::new(),
-            case: crate::core::mir::MirSwitchCase::Variant(some),
+            case: crate::core::mir::MirSwitchCase::Variant(some.clone()),
         };
         let error = catalog
             .validate_switch(&option_id, &[only_some])
             .expect_err("missing None must fail closed");
         assert!(error.contains("None"));
+
+        let extra_field = crate::core::NodeId("builtin:variant:Option::Some/payload:1".into());
+        let mut forged = catalog.get(&option_id).expect("option descriptor").clone();
+        let MirLayout::Option { variants, .. } = &mut forged.layout else {
+            unreachable!("Option layout");
+        };
+        let forged_some = variants
+            .iter_mut()
+            .find(|candidate| candidate.id == some)
+            .expect("Some variant");
+        let mut second_field = forged_some.fields[0].clone();
+        second_field.id = extra_field.clone();
+        forged_some.fields.push(second_field);
+        catalog.replace_for_test_only(option_id.clone(), forged);
+        let multi_payload_error = catalog
+            .validated_single_payload_variant_construct(
+                &option_id,
+                &option_nominal,
+                &some,
+                &[some_field, extra_field],
+                &[i32_id.clone(), i32_id],
+            )
+            .expect_err("multi-payload native construction must fail closed");
+        assert!(multi_payload_error.contains("single-payload native ABI"));
     }
 
     #[test]

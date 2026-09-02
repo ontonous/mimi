@@ -236,10 +236,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .iter()
             .map(|(_, value)| self.value_type(value, subject))
             .collect::<Result<Vec<_>, _>>()?;
-        let variant_desc = self
+        let (variant_desc, payload_field) = self
             .program
             .type_catalog()
-            .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
+            .validated_single_payload_variant_construct(
+                &result_ty,
+                nominal,
+                variant,
+                &field_ids,
+                &field_types,
+            )
             .map_err(|message| NativeMirError::new(subject, message))?;
         let (variant_abi, payload_ty) =
             native_variant_abi(self.program.type_catalog(), &result_ty, moving)?;
@@ -264,24 +270,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_struct_value();
-        let payload = if fields.is_empty() {
+        let payload = if let Some(_payload_field) = payload_field {
+            let (_, value) = fields
+                .first()
+                .ok_or_else(|| NativeMirError::new(subject, "variant payload value is absent"))?;
+            self.value(value, subject)?
+        } else {
             native_basic_type(
                 self.generator.context,
                 self.program.type_catalog(),
                 &payload_ty,
             )?
             .const_zero()
-        } else {
-            let field = variant_desc.fields.first().ok_or_else(|| {
-                NativeMirError::new(subject, "variant payload has no canonical field")
-            })?;
-            if fields.len() != 1 || fields[0].0 != field.id {
-                return Err(NativeMirError::new(
-                    subject,
-                    "variant payload fields do not match the canonical TypeDesc field",
-                ));
-            }
-            self.value(&fields[0].1, subject)?
         };
         aggregate = self
             .generator
