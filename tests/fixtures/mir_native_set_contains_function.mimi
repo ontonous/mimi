@@ -1,0 +1,9 @@
+// Canonical scalar Set contract: the bare contains(Set<T>, T) spelling lowers
+// to the same SetOp::Contains node as the method spelling.
+func main() -> i32 {
+    ensures: result == 42
+    let values: Set<i32> = {4, 1, 1}
+    let present = contains(values, 1)
+    drop(values)
+    if present { 42 } else { 0 }
+}

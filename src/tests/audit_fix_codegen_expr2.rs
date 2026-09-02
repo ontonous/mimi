@@ -342,15 +342,16 @@ fn assert_legacy_return_receipt(
     eprintln!("[stop-ship-receipt]\n{text}");
 }
 
-/// Record the existing Set function-form `contains(set, value)` boundary.
-/// This is a disposition receipt, not an admission expansion.
+/// Record the remaining mixed Set function-form boundary.  The Set operation
+/// itself is now canonical; this witness still contains `println`, which is
+/// outside the scalar-collection MIR consumer contract.
 fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
     assert_legacy_return_receipt(
         case_id,
         "set-lowering-return-ownership",
-        "not-closed: Set function-form builtin ABI/glue contract",
+        "not-closed: scalar collection output builtin is not a Canonical MIR node",
         "Set function-form contains",
-        "legacy:outside-migrated-profile",
+        "legacy:mixed-coverage-without-materialized-candidate",
         src,
         expected_stdout,
         None,
@@ -1183,9 +1184,9 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
     );
 }
 
-/// Set lowering/return-ownership stop-ship receipt.  The existing function
-/// form is intentionally kept outside the canonical Set facade island until
-/// its MIR builtin, TypeDesc/glue and all-consumer contract exist.
+/// Set lowering/return-ownership stop-ship receipt.  `contains(Set, T)` now
+/// materializes as SetOp::Contains; this output-bearing witness remains on
+/// the mixed compatibility boundary until println has its own MIR contract.
 #[test]
 fn audit1j_set_function_form_receipt() {
     if !can_link() {

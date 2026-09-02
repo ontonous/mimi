@@ -2004,6 +2004,161 @@ fn canonical_mir_native_set_to_list_matches_reference() {
 }
 
 #[test]
+fn canonical_mir_native_set_function_contains_matches_reference_and_default() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_set_contains_function.mimi");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical Set function-form MIR dump");
+    assert!(
+        mir.status.success(),
+        "canonical Set function-form MIR dump failed:\n{}",
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&mir.stdout).contains("set_op")
+            && String::from_utf8_lossy(&mir.stdout).contains("Contains"),
+        "bare contains(Set, T) did not materialize as the canonical SetOp:\n{}",
+        String::from_utf8_lossy(&mir.stdout)
+    );
+
+    let reference = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical Set function-form reference run");
+    assert_eq!(
+        reference.status.code(),
+        Some(42),
+        "canonical Set function-form reference run failed:\n{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-set-contains-function-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical Set function-form native build");
+    assert!(
+        build.status.success(),
+        "canonical Set function-form native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical Set function-form native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(42));
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Set function-form run");
+    assert_eq!(
+        default_run.status.code(),
+        Some(42),
+        "default Set function-form run failed:\n{}",
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default Set function-form native build");
+    assert!(default_ir.status.success());
+    assert!(
+        String::from_utf8_lossy(&default_ir.stdout).contains("define i32 @main()"),
+        "default build did not select canonical Set contains:\n{}",
+        String::from_utf8_lossy(&default_ir.stdout)
+    );
+
+    let default_verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Set function-form verifier");
+    assert!(
+        default_verification.status.success(),
+        "default Set function-form verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&default_verification.stdout),
+        String::from_utf8_lossy(&default_verification.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&default_verification.stdout)
+            .contains("canonical MIR ensures contract proven"),
+        "default verifier did not consume the canonical Set program:\n{}",
+        String::from_utf8_lossy(&default_verification.stdout)
+    );
+}
+
+#[test]
+fn canonical_default_does_not_promote_list_function_contains() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_list_contains_rejected.mimi");
+
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected List function-form contains build");
+    assert!(
+        !explicit.status.success(),
+        "List contains unexpectedly entered canonical MIR:\n{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&explicit.stderr).contains("not a materialized MIR function")
+            || String::from_utf8_lossy(&explicit.stderr).contains("canonical MIR"),
+        "List contains rejection lost its stable canonical boundary:\n{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+
+    let default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn compatibility List function-form contains build");
+    assert!(
+        default.status.success(),
+        "compatibility List contains build failed:\n{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&default.stdout).contains("mimi_mir_set"),
+        "List contains was promoted to the canonical Set backend:\n{}",
+        String::from_utf8_lossy(&default.stdout)
+    );
+}
+
+#[test]
 fn canonical_mir_std_set_generic_facade_is_atomic_across_consumers() {
     let fixture = project_root()
         .join("tests")

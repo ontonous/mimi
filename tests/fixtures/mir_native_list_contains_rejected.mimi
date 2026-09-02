@@ -1,0 +1,8 @@
+// List contains remains outside the SetOp contract.  Explicit MIR must reject
+// it before any consumer; default routing may retain the compatibility path.
+func main() -> i32 {
+    let values: List<i32> = [4, 1, 7]
+    let present = contains(values, 1)
+    drop(values)
+    if present { 42 } else { 0 }
+}

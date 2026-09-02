@@ -1454,7 +1454,7 @@ impl<'a> Lowerer<'a> {
                         }
                     };
                     self.emit(&expression.node_id, "construct_variant", instruction);
-                } else if is_set_builtin(call) {
+                } else if is_set_builtin(call, self.type_catalog) {
                     if let Some((operation, set, argument)) = set_builtin_contract(call, &arguments)
                     {
                         self.emit(
@@ -2277,7 +2277,7 @@ fn set_builtin_contract(
     let operation = match builtin.as_str() {
         "builtin.method.set.size" | "builtin.method.set.len" => super::MirSetOperation::Size,
         "builtin.method.set.is_empty" => super::MirSetOperation::IsEmpty,
-        "builtin.method.set.contains" => super::MirSetOperation::Contains,
+        "builtin.method.set.contains" | "contains" => super::MirSetOperation::Contains,
         "builtin.method.set.insert" => super::MirSetOperation::Insert,
         "builtin.method.set.remove" => super::MirSetOperation::Remove,
         // Keep this identity visible but outside this slice's contract: the
@@ -2301,10 +2301,20 @@ fn set_builtin_contract(
     Some((operation, set, argument))
 }
 
-fn is_set_builtin(call: &ResolvedCall) -> bool {
+fn is_set_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) -> bool {
     let ResolvedCallee::Builtin(builtin) = &call.callee else {
         return false;
     };
+    if builtin.as_str() == "contains" {
+        return call.arguments.len() == 2
+            && type_catalog.is_some_and(|catalog| {
+                catalog
+                    .get(&call.arguments[0].value.ty)
+                    .is_some_and(|descriptor| {
+                        matches!(descriptor.layout, super::types::MirLayout::Set { .. })
+                    })
+            });
+    }
     matches!(
         builtin.as_str(),
         "builtin.method.set.size"

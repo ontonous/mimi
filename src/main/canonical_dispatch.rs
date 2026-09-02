@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn set_function_form_contains_stays_outside_collection_route() {
+    fn set_function_form_contains_with_output_stays_on_mixed_route() {
         let source = r#"
             func main() -> i32 {
                 let values = {4, 1, 1}
@@ -598,11 +598,11 @@ mod tests {
         let (checked, file) = checked(source);
         assert_eq!(
             mimi::core::mir::classify_scalar_collection_admission(&checked),
-            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+            mimi::core::mir::ScalarCollectionAdmission::MixedCoverage
         );
         assert!(matches!(
             select_default_route(&checked, &file),
-            DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
+            DefaultMirRoute::Legacy(LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate)
         ));
     }
 

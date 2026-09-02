@@ -298,6 +298,19 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 if is_scalar_set_facade_call(self.program, call) {
                     self.has_candidate = true;
                 }
+                if is_scalar_set_contains_call(self.program, call) {
+                    self.has_candidate = true;
+                }
+                // `println` is not a Canonical MIR node in this island.  It
+                // must keep a Set/collection witness on the explicit mixed
+                // compatibility route instead of allowing the new contains
+                // admission to fail later during MIR materialization.
+                if matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println"
+                ) {
+                    self.mixed = true;
+                }
                 for argument in &call.arguments {
                     self.visit_expr(&argument.value, concrete);
                 }
@@ -424,6 +437,38 @@ fn is_list_len_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCa
     matches!(builtin.as_str(), "len" | "builtin.method.list.len")
         && call.arguments.len() == 1
         && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_scalar_set_contains_call(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    builtin.as_str() == "contains"
+        && call.arguments.len() == 2
+        && is_resolved_set_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+        && is_scalar_collection_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_resolved_set_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal { item, .. }) => item.as_str() == "builtin:type:Set",
+        Some(ResolvedType::Reference { target, .. })
+        | Some(ResolvedType::Ownership { target, .. })
+        | Some(ResolvedType::Newtype { inner: target, .. }) => {
+            is_resolved_set_type(program, target, seen)
+        }
+        _ => false,
+    }
 }
 
 fn is_resolved_list_type(
@@ -962,10 +1007,10 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len` or a checker-owned `ScalarSetFacade` instance has crossed the
-/// S11 production boundary.  Keeping this fact next to the island contract
-/// prevents the CLI and direct native entry points from growing independent
-/// candidate predicates.
+/// `ListOp::Len`, `SetOp::Contains`, or checker-owned `ScalarSetFacade` instance
+/// has crossed the S11 production boundary.  Keeping this fact next to the
+/// island contract prevents the CLI and direct native entry points from
+/// growing independent candidate predicates.
 pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
     let has_list_len = program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
@@ -980,7 +1025,21 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
             })
         })
     });
+    let has_set_contains = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::SetOp {
+                        operation: super::MirSetOperation::Contains,
+                        ..
+                    }
+                )
+            })
+        })
+    });
     has_list_len
+        || has_set_contains
         || program.instances().values().any(|instance| {
             matches!(
                 instance.contract,
@@ -1903,6 +1962,40 @@ mod tests {
             classify_scalar_collection_admission(&checked),
             ScalarCollectionAdmission::CompleteCoverage
         );
+    }
+
+    #[test]
+    fn admits_bare_set_contains_and_materializes_the_shared_set_operation() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_set_contains_function.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        super::MirInstructionKind::SetOp {
+                            operation: crate::core::mir::MirSetOperation::Contains,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+        validate_scalar_collection_island(&program).expect("SetOp::Contains contract");
+        let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference SetOp::Contains execution");
+        assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
     }
 
     #[test]
