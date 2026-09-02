@@ -5,8 +5,8 @@
 //! checked production path) — same discipline as the `dual_assert!` macro in
 //! src/tests/dual_backend.rs (checker gate as applicable, both backends
 //! asserted against the expected output and against each other). The
-//! string-slice entries additionally emit a machine-readable stop-ship
-//! receipt: they are deliberately not Canonical MIR shapes yet.
+//! stop-ship entries additionally emit a machine-readable receipt: they are
+//! deliberately not Canonical MIR shapes yet.
 //!
 //! Fixes covered:
 //! - §7 CRITICAL match.rs array/slice pattern length check + subject test
@@ -101,11 +101,11 @@ impl StopShipReceipt {
     }
 }
 
-fn string_slice_route_boundary(src: &str) -> (String, StopShipObservation) {
+fn canonical_route_boundary(src: &str, label: &str) -> (String, StopShipObservation) {
     use std::collections::HashSet;
 
     let file = parse_prod(src);
-    let checked = crate::core::check_program(&file).expect("string-slice checker witness");
+    let checked = crate::core::check_program(&file).expect("stop-ship checker witness");
     let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
     let route = if admission.has_candidate() {
         "legacy:mixed-coverage-without-materialized-candidate"
@@ -121,17 +121,23 @@ fn string_slice_route_boundary(src: &str) -> (String, StopShipObservation) {
         .map(|record| record.id)
         .collect::<HashSet<_>>();
     let canonical =
-        crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+        match crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
             &checked,
             &excluded_sources,
-        )
-        .expect_err("string slice must remain outside canonical MIR lowering");
+        ) {
+            Ok(_) => panic!("{label} must remain outside canonical MIR lowering"),
+            Err(error) => error,
+        };
     (
         route.to_owned(),
         StopShipObservation::NotMaterialized {
             reason: format!("canonical MIR construction rejected: {canonical}"),
         },
     )
+}
+
+fn string_slice_route_boundary(src: &str) -> (String, StopShipObservation) {
+    canonical_route_boundary(src, "string slice")
 }
 
 fn normalize_string_slice_trap(text: &str) -> String {
@@ -225,6 +231,60 @@ fn assert_string_slice_receipt(
     let text = receipt.canonical_text();
     assert!(text.starts_with("schema=mimi-stop-ship-receipt-v1\n"));
     assert!(text.contains("route=legacy:"));
+    assert!(text.contains("canonical_mir=not-materialized"));
+    assert!(text.contains("ownership=not-closed:"));
+    eprintln!("[stop-ship-receipt]\n{text}");
+}
+
+/// Record the existing Set function-form `contains(set, value)` boundary.
+/// The checked VM and production native compatibility path currently agree,
+/// but canonical MIR rejects the builtin call before any consumer can claim a
+/// Set ownership contract.  This is a disposition receipt, not an admission
+/// expansion.
+fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
+    let (route, reference) = canonical_route_boundary(src, "Set function-form contains");
+    let (value, stdout) = checked_run_source_with_stdout(src);
+    let value = format!("{value:?}");
+    assert_eq!(value, "Int(0)", "checked VM return value drifted");
+    assert_eq!(stdout.trim(), expected_stdout.trim(), "VM output drifted");
+    let vm = StopShipObservation::Return {
+        value,
+        stdout: stdout.clone(),
+    };
+
+    let native = checked_codegen_compile_and_observe(src)
+        .expect("production compile_checked native witness must link");
+    assert_eq!(native.exit_code, Some(0), "native return status drifted");
+    assert_eq!(
+        native.stdout.trim(),
+        expected_stdout.trim(),
+        "native output drifted"
+    );
+    assert_eq!(
+        native.stdout.trim(),
+        stdout.trim(),
+        "Set VM/native output diverged"
+    );
+    let native = StopShipObservation::Return {
+        value: format!("Int(0);process_exit_code={:?}", native.exit_code),
+        stdout: native.stdout,
+    };
+
+    let receipt = StopShipReceipt {
+        case_id,
+        category: "set-lowering-return-ownership",
+        disposition: "reproduced-green",
+        route,
+        canonical_mir: "not-materialized",
+        ownership: "not-closed: Set function-form builtin ABI/glue contract",
+        reference,
+        vm,
+        native,
+    };
+    let text = receipt.canonical_text();
+    assert!(text.starts_with("schema=mimi-stop-ship-receipt-v1\n"));
+    assert!(text.contains(&format!("case_id={case_id}\n")));
+    assert!(text.contains("route=legacy:outside-migrated-profile"));
     assert!(text.contains("canonical_mir=not-materialized"));
     assert!(text.contains("ownership=not-closed:"));
     eprintln!("[stop-ship-receipt]\n{text}");
@@ -1053,6 +1113,29 @@ fn audit2_cgc_string_slice_negative_wrap_dual() {
     "#,
         "llo",
         Some("Int(0)"),
+    );
+}
+
+/// Set lowering/return-ownership stop-ship receipt.  The existing function
+/// form is intentionally kept outside the canonical Set facade island until
+/// its MIR builtin, TypeDesc/glue and all-consumer contract exist.
+#[test]
+fn audit1j_set_function_form_receipt() {
+    if !can_link() {
+        return;
+    }
+    assert_set_contains_receipt(
+        "audit_1j_contains_set_haystack_fn_form",
+        r#"
+        func main() -> i32 {
+            let s = {4, 1, 1}
+            println(contains(s, 1))
+            println(contains(s, 7))
+            println(contains(s, 4))
+            0
+        }
+    "#,
+        "true\nfalse\ntrue",
     );
 }
 

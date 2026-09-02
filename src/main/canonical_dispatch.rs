@@ -587,6 +587,26 @@ mod tests {
     }
 
     #[test]
+    fn set_function_form_contains_stays_outside_collection_route() {
+        let source = r#"
+            func main() -> i32 {
+                let values = {4, 1, 1}
+                println(contains(values, 1))
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
+        ));
+    }
+
+    #[test]
     fn mixed_compatibility_route_carries_non_materialized_disposition() {
         let source = r#"
             func main() -> i32 {
