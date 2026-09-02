@@ -1264,10 +1264,11 @@ impl CheckedProgram {
     ///   Session, and FFI programs. `ResolvedInterpreter` covers pure value
     ///   programs; the surface AST interpreter covers the rest.
     ///
-    /// - **C4 verifier Z3 path** (`flow_verify_file_with_hashes`): the Flow
-    ///   verifier encodes function bodies as Z3 constraints from the surface
-    ///   AST. The Resolved IR contract path (`verify_checked_contracts`) handles
-    ///   direct requires/ensures; the Z3 Flow path handles transition invariants.
+    /// - **C4 verifier compatibility Z3 path** (`flow_verify_file_with_hashes`):
+    ///   unmigrated Flow/FFI verification still encodes function bodies as Z3
+    ///   constraints from the surface AST. The closed S8 silent-local Flow
+    ///   island and flat Copy-record island bypass this path through canonical
+    ///   MIR; the remaining Flow path handles only compatibility shapes.
     ///
     /// # Prohibition
     ///

@@ -77,9 +77,11 @@ pub fn verify_source_with(
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
 /// tamper detection). Pass an empty string if source text is unavailable.
 ///
-/// When Z3 is available, delegates to the Flow verifier state machine
-/// (which still uses `legacy_body_file()` for AST-based function body
-/// encoding). When Z3 is unavailable, uses CheckedProgram-based mock
+/// Closed S8 Flow and flat Copy-record programs are verified from one
+/// canonical MIR graph. Other programs remain on the explicit compatibility
+/// boundary: when Z3 is available, they delegate to the Flow verifier state
+/// machine (which still uses `legacy_body_file()` for AST-based function body
+/// encoding); when Z3 is unavailable, they use CheckedProgram-based mock
 /// verification, bypassing `legacy_body_file()` entirely.
 ///
 /// Note: The Resolved IR contract path (verify_checked_contracts) is used
@@ -95,6 +97,9 @@ pub fn verify_checked(
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
     if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
+    if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
         return Ok(results);
     }
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
@@ -240,6 +245,9 @@ pub fn verify_checked_dual(
     if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
         return Ok(results);
     }
+    if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
     if !is_z3_available() {
         // C4 mock path: from CheckedProgram, no raw_ast needed.
@@ -301,6 +309,46 @@ fn verify_closed_flat_copy_record_mir(
     // while canonical MIR owners carry the stable `function:` NodeId prefix.
     // Keep that public API identity stable at the adapter boundary; the
     // proof artifact still records the canonical MIR engine and hash.
+    for result in &mut results {
+        if let Some(name) = result.func_name.strip_prefix("function:") {
+            result.func_name = name.to_string();
+        }
+    }
+    Ok(Some(results))
+}
+
+/// Verify the already-closed S8 silent-local Flow island from canonical MIR.
+///
+/// The public checked verifier is a program-level API.  Once checker-owned
+/// eligibility has established the exact S8 profile, its old AST/Flow engine
+/// is no longer a valid consumer for this request.  Construction, materialized
+/// operation coverage, MIR capability, and the MIR verifier are therefore one
+/// hard-fail-closed chain.  Programs outside the exact profile return `None` so
+/// the existing compatibility verifier remains an explicit boundary for
+/// unmigrated Flow features.
+fn verify_closed_s8_flow_mir(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    if !is_z3_available() || !crate::core::mir::is_exact_s8_flow_transition(program) {
+        return Ok(None);
+    }
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
+        .map_err(|error| {
+            format!("MIR-MATERIALIZATION-001: S8 Flow verifier island construction failed: {error}")
+        })?;
+    if !crate::core::mir::contains_s8_flow_transition_candidate(&canonical) {
+        return Err(
+            "MIR-COVERAGE-001: exact S8 Flow admission did not materialize a FlowTransition boundary"
+                .into(),
+        );
+    }
+    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+        format!("MIR-CAPABILITY-001: canonical verifier rejected the S8 Flow island: {errors:?}")
+    })?;
+    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
+    // Keep the public checked-verifier display contract stable while retaining
+    // the canonical `function:<name>` owner in the MIR proof artifact/hash.
     for result in &mut results {
         if let Some(name) = result.func_name.strip_prefix("function:") {
             result.func_name = name.to_string();

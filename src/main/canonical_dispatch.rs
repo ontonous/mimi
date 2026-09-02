@@ -107,7 +107,8 @@ pub(crate) fn select_default_route(
     let copy_record = mimi::core::mir::contains_flat_copy_record_candidate(&canonical);
     let list_len_operation = canonical_has_list_len(&canonical);
     let collection_candidate = mimi::core::mir::contains_scalar_collection_candidate(&canonical);
-    let flow_transition_operation = canonical_has_flow_transition(&canonical);
+    let flow_transition_operation =
+        mimi::core::mir::contains_s8_flow_transition_candidate(&canonical);
     let record_route_candidate = record_candidate && (copy_record || complete_record_candidate);
     if (!set_candidate || !set_instance)
         && (!record_candidate || !copy_record)
@@ -244,19 +245,6 @@ fn canonical_has_list_len(canonical: &MirProgram) -> bool {
                         operation: mimi::core::mir::MirListOperation::Len,
                         ..
                     }
-                )
-            })
-        })
-    })
-}
-
-fn canonical_has_flow_transition(canonical: &MirProgram) -> bool {
-    canonical.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction.kind,
-                    mimi::core::mir::MirInstructionKind::FlowTransition { .. }
                 )
             })
         })
@@ -414,7 +402,9 @@ mod tests {
             panic!("the closed silent-local Flow island should select canonical MIR");
         };
         assert_eq!(program.transitions().len(), 1);
-        assert!(canonical_has_flow_transition(&program));
+        assert!(mimi::core::mir::contains_s8_flow_transition_candidate(
+            &program
+        ));
     }
 
     #[test]

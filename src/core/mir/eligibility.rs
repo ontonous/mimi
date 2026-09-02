@@ -113,7 +113,23 @@ pub fn is_exact_s8_flow_transition(program: &CheckedProgram) -> bool {
         return false;
     };
     let mut saw_transition_call = false;
-    is_exact_s8_body(main, &transition.id, &mut saw_transition_call)
+    let only_closed_island_callables = program.functions().values().all(|function| {
+        if function.node_id == NodeId("function:main".into())
+            || function.node_id == transition.node_id
+        {
+            return true;
+        }
+        // The CLI installs the checker-known prelude before checking. Prelude
+        // helpers are declaration dependencies outside the user S8 island;
+        // every other callable must be accounted for by the whole-program
+        // admission rather than silently omitted from the verifier receipt.
+        program
+            .source_registry()
+            .key(function.origin.user_span().source_id)
+            .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+    });
+    only_closed_island_callables
+        && is_exact_s8_body(main, &transition.id, &mut saw_transition_call)
         && is_exact_s8_body(transition_body, &transition.id, &mut saw_transition_call)
         && saw_transition_call
 }
@@ -255,6 +271,15 @@ mod tests {
     fn keeps_unsupported_body_as_candidate_but_outside_exact_island() {
         let program = checked(
             "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) println(c2.n) c2.n }",
+        );
+        assert!(is_s8_flow_transition_candidate(&program));
+        assert!(!is_exact_s8_flow_transition(&program));
+    }
+
+    #[test]
+    fn rejects_an_unrelated_user_callable_from_the_exact_island() {
+        let program = checked(
+            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func helper() -> i32 { println(7) 7 } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
         );
         assert!(is_s8_flow_transition_candidate(&program));
         assert!(!is_exact_s8_flow_transition(&program));

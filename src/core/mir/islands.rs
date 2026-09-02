@@ -297,6 +297,26 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
     })
 }
 
+/// Return whether the canonical executable graph contains the S8 silent-local
+/// Flow transition operation.
+///
+/// The checker-owned `is_exact_s8_flow_transition` predicate decides whether a
+/// whole checked program may enter the closed S8 island.  This MIR-side
+/// predicate is the corresponding materialization receipt for consumers: it
+/// prevents a verifier or backend from treating a successful construction with
+/// no actual `FlowTransition` node as proof that the admitted operation was
+/// lowered.  The operation itself is validated by the shared MIR capability
+/// gates before any consumer uses it.
+pub fn contains_s8_flow_transition_candidate(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::FlowTransition { .. })
+            })
+        })
+    })
+}
+
 /// Validate the current scalar List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR

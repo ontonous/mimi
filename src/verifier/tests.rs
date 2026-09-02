@@ -891,6 +891,70 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
 }
 
 #[test]
+fn public_checked_verifier_routes_closed_s8_flow_to_mir() {
+    require_z3!();
+    let source = r#"
+        flow Counter {
+            state Zero { n: i32 }
+            transition inc(Zero) -> Zero {
+                return Zero { n: self.n + 1 }
+            }
+        }
+
+        func main() -> i32 {
+            let c = Zero { n: 41 }
+            let c2 = Counter::inc(c)
+            c2.n
+        }
+    "#;
+    let file = parse_memory_source(source, "mir-s8-public-api").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert!(crate::core::mir::is_exact_s8_flow_transition(&program));
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    let mir_route = verify_closed_s8_flow_mir(&program, source_hash.clone())
+        .expect("closed S8 MIR verifier route");
+    assert!(
+        mir_route.is_some(),
+        "exact S8 must be owned by the MIR route"
+    );
+    let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
+    assert!(verify_result.is_empty());
+    assert!(mir_route.unwrap().is_empty());
+
+    let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    assert!(dual_result.is_empty());
+}
+
+#[test]
+fn public_checked_verifier_does_not_overmatch_non_exact_s8_flow() {
+    require_z3!();
+    let source = r#"
+        flow Counter {
+            state Zero { n: i32 }
+            transition inc(Zero) -> Zero {
+                return Zero { n: self.n + 1 }
+            }
+        }
+
+        func main() -> i32 {
+            let c = Zero { n: 41 }
+            let c2 = Counter::inc(c)
+            println(c2.n)
+            c2.n
+        }
+    "#;
+    let file = parse_memory_source(source, "mir-s8-non-exact").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert!(crate::core::mir::is_s8_flow_transition_candidate(&program));
+    assert!(!crate::core::mir::is_exact_s8_flow_transition(&program));
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    assert!(verify_closed_s8_flow_mir(&program, source_hash)
+        .expect("non-exact S8 remains outside the closed MIR verifier island")
+        .is_none());
+}
+
+#[test]
 fn flat_copy_record_admission_is_checker_owned_before_materialization() {
     let source = include_str!("../../tests/fixtures/mir_verifier_record_contract.mimi");
     let file = parse_memory_source(source, "mir-record-admission").expect("parse");
