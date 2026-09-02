@@ -204,7 +204,7 @@ impl<'a> CapabilityGate<'a> {
                 Ok(())
             }
             MirLayout::Tuple(elements) => {
-                self.require_copy_aggregate(ty, &descriptor)?;
+                catalog.validate_recursive_tuple_abi(ty)?;
                 for element in elements {
                     self.validate_type(element, "tuple element");
                 }
@@ -1240,6 +1240,39 @@ mod tests {
             "../../tests/fixtures/mir_native_option_string.mimi"
         ));
         validate_mir_capabilities(&program).expect("Option<string> verifier capability");
+    }
+
+    #[test]
+    fn accepts_recursive_owned_tuple_contract() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_recursive_tuple.mimi"
+        ));
+        validate_mir_capabilities(&program).expect("recursive tuple verifier capability");
+        let tuple = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (matches!(descriptor.layout, MirLayout::Tuple(ref fields) if fields.len() == 2)
+                    && descriptor.ownership == MirOwnership::Move)
+                    .then(|| ty.clone())
+            })
+            .expect("recursive Move tuple TypeDesc");
+        program
+            .type_catalog()
+            .validate_recursive_tuple_abi(&tuple)
+            .expect("shared recursive tuple TypeDesc contract");
+    }
+
+    #[test]
+    fn rejects_recursive_tuple_with_list_child_before_verifier_consumption() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_recursive_tuple_rejected.mimi"
+        ));
+        let errors = validate_mir_capabilities(&program)
+            .expect_err("tuple with List child must remain outside verifier capability");
+        assert!(errors
+            .iter()
+            .any(|error| { error.contains("scalar/String/tuple ABI") || error.contains("List") }));
     }
 
     #[test]

@@ -1658,6 +1658,134 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the concrete recursive tuple product contract shared by the
+    /// native and MIR-verifier consumers.  This is intentionally narrower
+    /// than the general aggregate glue graph: tuple leaves may only be a
+    /// Copy scalar or the canonical owned String, and aggregate children may
+    /// only be another tuple.  Keeping this rule in the TypeDesc catalog
+    /// prevents a backend from silently widening the ABI by inspecting its
+    /// physical struct representation.
+    pub fn validate_recursive_tuple_abi(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let mut visiting = BTreeSet::new();
+        self.validate_recursive_tuple_abi_inner(ty, &mut visiting)
+    }
+
+    fn validate_recursive_tuple_abi_inner(
+        &self,
+        ty: &ResolvedTypeId,
+        visiting: &mut BTreeSet<ResolvedTypeId>,
+    ) -> Result<(), String> {
+        if !visiting.insert(ty.clone()) {
+            return Err(format!(
+                "tuple TypeDesc '{}' contains a recursive ABI cycle",
+                ty.as_str()
+            ));
+        }
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::Tuple(elements) = &descriptor.layout else {
+            return Err(format!(
+                "type '{}' is not a canonical tuple layout",
+                ty.as_str()
+            ));
+        };
+        if elements.is_empty() {
+            return Err(format!(
+                "tuple TypeDesc '{}' has no fields in the scalar/String/tuple ABI",
+                ty.as_str()
+            ));
+        }
+        if !matches!(
+            &descriptor.kind,
+            MirTypeKind::Tuple { arity } if *arity == elements.len()
+        ) {
+            return Err(format!(
+                "tuple TypeDesc '{}' kind/layout arity disagrees",
+                ty.as_str()
+            ));
+        }
+        if descriptor.abi != MirAbiClass::Aggregate {
+            return Err(format!(
+                "tuple TypeDesc '{}' has ABI {:?}, expected Aggregate",
+                ty.as_str(),
+                descriptor.abi
+            ));
+        }
+
+        let noop = MirGlueContract {
+            move_out: MirGlueKind::Noop,
+            clone: MirGlueKind::Noop,
+            drop: MirGlueKind::Noop,
+        };
+        if descriptor.ownership == MirOwnership::Copy {
+            if descriptor.glue != noop
+                || descriptor.needs_drop_glue
+                || descriptor.needs_clone_glue
+                || descriptor.drop_plan.is_some()
+            {
+                return Err(format!(
+                    "Copy tuple TypeDesc '{}' does not carry the canonical no-op glue contract",
+                    ty.as_str()
+                ));
+            }
+        } else {
+            if descriptor.ownership != MirOwnership::Move {
+                return Err(format!(
+                    "tuple TypeDesc '{}' ownership {:?} is outside the concrete Move contract",
+                    ty.as_str(),
+                    descriptor.ownership
+                ));
+            }
+            let aggregate = MirGlueContract {
+                move_out: MirGlueKind::Aggregate,
+                clone: MirGlueKind::Aggregate,
+                drop: MirGlueKind::Aggregate,
+            };
+            if descriptor.glue != aggregate
+                || !descriptor.needs_drop_glue
+                || !descriptor.needs_clone_glue
+                || descriptor.drop_plan.is_none()
+            {
+                return Err(format!(
+                    "tuple TypeDesc '{}' aggregate glue/drop plan is incomplete",
+                    ty.as_str()
+                ));
+            }
+            for operation in [
+                MirGlueOperation::MoveOut,
+                MirGlueOperation::Clone,
+                MirGlueOperation::Drop,
+            ] {
+                self.validate_glue(ty, operation)?;
+            }
+        }
+
+        for (index, element) in elements.iter().enumerate() {
+            let supported = self.validate_copy_scalar(element).is_ok()
+                || self.validate_owned_string(element).is_ok()
+                || self
+                    .get(element)
+                    .is_some_and(|descriptor| matches!(descriptor.layout, MirLayout::Tuple(_)));
+            if !supported {
+                return Err(format!(
+                    "tuple '{}' field {} type '{}' is outside the scalar/String/tuple ABI",
+                    ty.as_str(),
+                    index,
+                    element.as_str()
+                ));
+            }
+            if self
+                .get(element)
+                .is_some_and(|descriptor| matches!(descriptor.layout, MirLayout::Tuple(_)))
+            {
+                self.validate_recursive_tuple_abi_inner(element, visiting)?;
+            }
+        }
+        visiting.remove(ty);
+        Ok(())
+    }
+
     fn materialize_product_glue(&mut self) {
         let ids = self.entries.keys().cloned().collect::<Vec<_>>();
         for id in ids {

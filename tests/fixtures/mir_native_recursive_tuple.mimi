@@ -3,6 +3,7 @@ func make_nested() -> ((string, i32), bool) {
 }
 
 func consume_nested(value: ((string, i32), bool)) -> i32 {
+    ensures: result == 42
     drop(value);
     42
 }

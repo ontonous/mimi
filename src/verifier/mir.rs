@@ -391,9 +391,15 @@ fn symbolic_value_for_type(
         && descriptor.glue.drop == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.drop_plan.is_some();
     let move_owned_option_string = catalog.validate_option_string_variant(ty).is_ok();
-    if (descriptor.ownership != MirOwnership::Copy && !linear_record && !move_owned_option_string)
+    let move_owned_tuple = matches!(descriptor.layout, MirLayout::Tuple(_))
+        && catalog.validate_recursive_tuple_abi(ty).is_ok();
+    if (descriptor.ownership != MirOwnership::Copy
+        && !linear_record
+        && !move_owned_option_string
+        && !move_owned_tuple)
         || (!linear_record
             && !move_owned_option_string
+            && !move_owned_tuple
             && (descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
                 || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
                 || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop))
@@ -2726,6 +2732,49 @@ mod tests {
             .type_catalog()
             .iter()
             .any(|(ty, _)| program.type_catalog().validate_owned_string(ty).is_ok()));
+    }
+
+    #[test]
+    fn verifier_and_reference_oracle_preserve_recursive_owned_tuple_glue() {
+        let source = include_str!("../../tests/fixtures/mir_native_recursive_tuple.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("recursive tuple must be in verifier capability");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("consume_nested"))
+            .cloned()
+            .expect("consume_nested MIR function");
+
+        let reference_value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &owner,
+                &[MirRuntimeValue::Tuple(vec![
+                    MirRuntimeValue::Tuple(vec![
+                        MirRuntimeValue::String("input".into()),
+                        MirRuntimeValue::Int(41),
+                    ]),
+                    MirRuntimeValue::Bool(true),
+                ])],
+            )
+            .expect("reference recursive tuple execution");
+        assert_eq!(reference_value, MirRuntimeValue::Int(42));
+
+        let results = verify_program(&program, "recursive-tuple-source-hash".into())
+            .expect("verify recursive tuple MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("recursive tuple contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        assert!(result
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR));
     }
 
     #[test]
