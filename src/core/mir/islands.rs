@@ -11,7 +11,9 @@
 use std::collections::BTreeSet;
 
 use crate::core::ir::{
-    ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedType, ResolvedUnaryOp,
+    ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
+    ResolvedLiteral, ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedType,
+    ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
@@ -27,6 +29,555 @@ use super::{
 
 /// Name of the finite whole-program island closed by this contract.
 pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
+
+/// Checker-owned admission state for the already implemented scalar
+/// collection production island.
+///
+/// The verifier API is program-scoped, so a materialized List/Set operation
+/// cannot by itself prove that the complete checked program belongs to this
+/// island.  Admission is therefore computed from typed resolved bodies before
+/// MIR construction.  `CompleteCoverage` is the only state that may cross
+/// the canonical construction boundary; the other states remain an explicit
+/// compatibility boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarCollectionAdmission {
+    /// No typed List.len or concrete scalar Set-facade call is present.
+    OutsideProfile,
+    /// A collection candidate exists, but the whole checked program contains
+    /// imports, unsupported effects, managed values, or another unresolved
+    /// executable dependency.
+    MixedCoverage,
+    /// Every executable typed body is within the current scalar collection
+    /// envelope.  Any subsequent MIR construction or validation failure is a
+    /// hard error and must never re-enter a legacy consumer.
+    CompleteCoverage,
+}
+
+/// Classify scalar collection admission from checker-owned typed facts.
+///
+/// This is deliberately a pre-materialization predicate.  It does not read
+/// the retained source file, invoke a backend, or infer a candidate from the
+/// presence of a type declaration.  Generic templates are not executable
+/// values on their own; only a checker-resolved concrete call to the narrow
+/// identity/Set facade family can make them part of this island.
+pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
+    let mut scanner = ScalarCollectionAdmissionScanner {
+        program,
+        has_candidate: false,
+        mixed: false,
+        seen_types: BTreeSet::new(),
+    };
+
+    for callable in program.callables().values() {
+        let concrete = callable.signature.generic_parameters.is_empty();
+        if !callable.signature.effects.is_empty()
+            || callable.signature.parameters.iter().any(|parameter| {
+                matches!(
+                    parameter.permission,
+                    Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+                )
+            })
+            || !callable.body.captures.is_empty()
+            || !callable.body.default_values.is_empty()
+        {
+            scanner.mixed = true;
+        }
+        if concrete {
+            for parameter in &callable.signature.parameters {
+                scanner.require_profile_type(&parameter.ty);
+            }
+            scanner.require_profile_type(&callable.signature.result);
+        }
+        scanner.visit_block(&callable.body.root, concrete);
+        if concrete {
+            for value in callable.body.default_values.values() {
+                scanner.visit_expr(value, true);
+            }
+        }
+    }
+
+    // These declarations are checker-owned executable dependencies.  A
+    // scalar collection call must not silently coexist with another consumer
+    // family whose semantics are still supplied by a legacy path.
+    let is_runtime_origin =
+        |origin: &crate::core::Origin| matches!(origin, crate::core::Origin::RuntimeSystem { .. });
+    scanner.mixed |= program.has_imports()
+        || program
+            .flows()
+            .values()
+            .any(|flow| !is_runtime_origin(&flow.origin))
+        || program
+            .transitions()
+            .values()
+            .any(|transition| !is_runtime_origin(&transition.origin))
+        || !program.sessions().is_empty()
+        || !program.actors().is_empty()
+        || !program.capabilities().is_empty()
+        || !program.traits().is_empty()
+        || !program.impls().is_empty()
+        || !program.extern_blocks().is_empty()
+        || !program.backend_requirements().is_empty()
+        || program.functions().values().any(|function| {
+            function.is_async
+                || function.is_comptime
+                || function.extern_abi.is_some()
+                || !function.effects.is_empty()
+        });
+
+    if !scanner.has_candidate {
+        ScalarCollectionAdmission::OutsideProfile
+    } else if scanner.mixed {
+        ScalarCollectionAdmission::MixedCoverage
+    } else {
+        ScalarCollectionAdmission::CompleteCoverage
+    }
+}
+
+struct ScalarCollectionAdmissionScanner<'a> {
+    program: &'a CheckedProgram,
+    has_candidate: bool,
+    mixed: bool,
+    seen_types: BTreeSet<crate::core::ResolvedTypeId>,
+}
+
+impl<'a> ScalarCollectionAdmissionScanner<'a> {
+    fn require_profile_type(&mut self, id: &crate::core::ResolvedTypeId) {
+        if !self.seen_types.insert(id.clone()) {
+            return;
+        }
+        if !is_scalar_collection_type(self.program, id, &mut BTreeSet::new()) {
+            self.mixed = true;
+        }
+    }
+
+    fn visit_pattern(&mut self, pattern: &ResolvedPattern, concrete: bool) {
+        if concrete {
+            self.require_profile_type(&pattern.ty);
+        }
+        match &pattern.kind {
+            ResolvedPatternKind::Constructor { fields, .. } => {
+                for (_, field) in fields {
+                    self.visit_pattern(field, concrete);
+                }
+            }
+            ResolvedPatternKind::Tuple(items) | ResolvedPatternKind::Array(items) => {
+                for item in items {
+                    self.visit_pattern(item, concrete);
+                }
+            }
+            ResolvedPatternKind::Slice { prefix, rest } => {
+                for item in prefix {
+                    self.visit_pattern(item, concrete);
+                }
+                if let Some(rest) = rest {
+                    self.visit_pattern(rest, concrete);
+                }
+            }
+            ResolvedPatternKind::Wildcard
+            | ResolvedPatternKind::Binding { .. }
+            | ResolvedPatternKind::Literal(_) => {}
+        }
+    }
+
+    fn visit_block(&mut self, block: &crate::core::ir::ResolvedBlock, concrete: bool) {
+        if concrete {
+            self.require_profile_type(&block.ty);
+        }
+        for statement in &block.statements {
+            if concrete {
+                self.require_profile_type(&statement.ty);
+            }
+            match &statement.kind {
+                ResolvedStmtKind::Bind {
+                    pattern,
+                    initializer,
+                } => {
+                    self.visit_pattern(pattern, concrete);
+                    if let Some(initializer) = initializer {
+                        self.visit_expr(initializer, concrete);
+                    }
+                }
+                ResolvedStmtKind::Assign { value, .. } => self.visit_expr(value, concrete),
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        self.visit_expr(value, concrete);
+                    }
+                }
+                ResolvedStmtKind::Continue => {}
+                ResolvedStmtKind::Expr(value) => self.visit_expr(value, concrete),
+                ResolvedStmtKind::While { condition, body } => {
+                    self.visit_expr(condition, concrete);
+                    self.visit_block(body, concrete);
+                }
+                ResolvedStmtKind::WhileLet {
+                    pattern,
+                    initializer,
+                    body,
+                } => {
+                    self.visit_pattern(pattern, concrete);
+                    self.visit_expr(initializer, concrete);
+                    self.visit_block(body, concrete);
+                }
+                ResolvedStmtKind::IfLet {
+                    pattern,
+                    initializer,
+                    then_block,
+                    else_block,
+                } => {
+                    self.visit_pattern(pattern, concrete);
+                    self.visit_expr(initializer, concrete);
+                    self.visit_block(then_block, concrete);
+                    if let Some(else_block) = else_block {
+                        self.visit_block(else_block, concrete);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                    self.visit_block(body, concrete)
+                }
+                ResolvedStmtKind::For {
+                    pattern,
+                    iterable,
+                    body,
+                } => {
+                    self.visit_pattern(pattern, concrete);
+                    self.visit_expr(iterable, concrete);
+                    self.visit_block(body, concrete);
+                }
+                ResolvedStmtKind::Drop(_) => {}
+                ResolvedStmtKind::Contract { condition, .. } => {
+                    self.visit_expr(condition, concrete)
+                }
+                ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        self.visit_expr(expression, concrete);
+                    }
+                }
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    self.visit_expr(value, concrete);
+                    self.visit_block(body, concrete);
+                }
+                ResolvedStmtKind::NestedCallable(_) => {}
+            }
+        }
+        if let Some(result) = &block.result {
+            self.visit_expr(result, concrete);
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &ResolvedExpr, concrete: bool) {
+        if concrete {
+            self.require_profile_type(&expression.ty);
+        }
+        match &expression.kind {
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        self.visit_expr(value, concrete);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.visit_expr(value, concrete);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    self.visit_expr(index, concrete);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.visit_expr(left, concrete);
+                self.visit_expr(right, concrete);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.visit_expr(operand, concrete),
+            ResolvedExprKind::Call(call) => {
+                if is_list_len_call(self.program, call) {
+                    self.has_candidate = true;
+                }
+                if is_scalar_set_facade_call(self.program, call) {
+                    self.has_candidate = true;
+                }
+                for argument in &call.arguments {
+                    self.visit_expr(&argument.value, concrete);
+                }
+            }
+            ResolvedExprKind::Tuple(items)
+            | ResolvedExprKind::List(items)
+            | ResolvedExprKind::Set(items) => {
+                for item in items {
+                    self.visit_expr(item, concrete);
+                }
+            }
+            ResolvedExprKind::Map(items) => {
+                for (key, value) in items {
+                    self.visit_expr(key, concrete);
+                    self.visit_expr(value, concrete);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                // The current canonical lowering contract has no
+                // comprehension node.  Keep a collection candidate nested in
+                // one on the explicit compatibility boundary instead of
+                // promoting it to a complete island and discovering the gap
+                // only after MIR materialization.
+                self.mixed = true;
+                self.visit_expr(value, concrete);
+                self.visit_expr(iterable, concrete);
+                if let Some(guard) = guard {
+                    self.visit_expr(guard, concrete);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => self.visit_expr(receiver, concrete),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    self.visit_expr(&field.value, concrete);
+                }
+                if let Some(rest) = rest {
+                    self.visit_expr(rest, concrete);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.visit_block(block, concrete),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.visit_expr(condition, concrete);
+                self.visit_block(then_block, concrete);
+                self.visit_block(else_block, concrete);
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.visit_expr(scrutinee, concrete);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(guard, concrete);
+                    }
+                    self.visit_expr(&arm.body, concrete);
+                }
+            }
+            ResolvedExprKind::Try { value, .. } => self.visit_expr(value, concrete),
+            ResolvedExprKind::Range { start, end } => {
+                self.visit_expr(start, concrete);
+                self.visit_expr(end, concrete);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.visit_expr(target, concrete);
+                if let Some(start) = start {
+                    self.visit_expr(start, concrete);
+                }
+                if let Some(end) = end {
+                    self.visit_expr(end, concrete);
+                }
+            }
+            ResolvedExprKind::Cast { value, .. } => self.visit_expr(value, concrete),
+            ResolvedExprKind::Lambda(lambda) => self.visit_block(&lambda.body, concrete),
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Load(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+        }
+    }
+}
+
+fn is_scalar_collection_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return true;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Primitive(
+            crate::core::PrimitiveType::I32
+            | crate::core::PrimitiveType::I64
+            | crate::core::PrimitiveType::Bool
+            | crate::core::PrimitiveType::Unit,
+        )) => true,
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) if matches!(item.as_str(), "builtin:type:List" | "builtin:type:Set")
+            && arguments.len() == 1 =>
+        {
+            is_scalar_collection_type(program, &arguments[0], seen)
+        }
+        _ => false,
+    }
+}
+
+fn is_list_len_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    matches!(builtin.as_str(), "len" | "builtin.method.list.len")
+        && call.arguments.len() == 1
+        && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_resolved_list_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal { item, .. }) => item.as_str() == "builtin:type:List",
+        Some(ResolvedType::Reference { target, .. })
+        | Some(ResolvedType::Ownership { target, .. })
+        | Some(ResolvedType::Newtype { inner: target, .. }) => {
+            is_resolved_list_type(program, target, seen)
+        }
+        _ => false,
+    }
+}
+
+fn is_scalar_set_facade_call(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Function(template) = &call.callee else {
+        return false;
+    };
+    let Some(callable) = program.callable(template) else {
+        return false;
+    };
+    !call.type_arguments.is_empty()
+        && callable.signature.generic_parameters.len() == 1
+        && mentions_generic_set(
+            program,
+            &callable.signature.parameters,
+            &callable.signature.result,
+            &callable.signature.generic_parameters,
+        )
+}
+
+fn mentions_generic_set(
+    program: &CheckedProgram,
+    parameters: &[crate::core::ir::ResolvedParameter],
+    result: &crate::core::ResolvedTypeId,
+    generic_parameters: &[NodeId],
+) -> bool {
+    parameters.iter().any(|parameter| {
+        mentions_generic_set_type(
+            program,
+            &parameter.ty,
+            generic_parameters,
+            &mut BTreeSet::new(),
+        )
+    }) || mentions_generic_set_type(program, result, generic_parameters, &mut BTreeSet::new())
+}
+
+fn mentions_generic_set_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_parameters: &[NodeId],
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            (item.as_str() == "builtin:type:Set"
+                && arguments.iter().any(|argument| {
+                    contains_generic_parameter(
+                        program,
+                        argument,
+                        generic_parameters,
+                        &mut BTreeSet::new(),
+                    )
+                }))
+                || arguments.iter().any(|argument| {
+                    mentions_generic_set_type(program, argument, generic_parameters, seen)
+                })
+        }
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            mentions_generic_set_type(program, inner, generic_parameters, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            mentions_generic_set_type(program, ok, generic_parameters, seen)
+                || mentions_generic_set_type(program, error, generic_parameters, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| mentions_generic_set_type(program, item, generic_parameters, seen)),
+        Some(ResolvedType::Array { element, .. }) => {
+            mentions_generic_set_type(program, element, generic_parameters, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters.iter().any(|parameter| {
+                mentions_generic_set_type(program, parameter, generic_parameters, seen)
+            }) || mentions_generic_set_type(program, result, generic_parameters, seen)
+        }
+        _ => false,
+    }
+}
+
+fn contains_generic_parameter(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_parameters: &[NodeId],
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::GenericParameter(parameter)) => generic_parameters.contains(parameter),
+        Some(ResolvedType::Nominal { arguments, .. }) => arguments.iter().any(|argument| {
+            contains_generic_parameter(program, argument, generic_parameters, seen)
+        }),
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            contains_generic_parameter(program, inner, generic_parameters, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            contains_generic_parameter(program, ok, generic_parameters, seen)
+                || contains_generic_parameter(program, error, generic_parameters, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| contains_generic_parameter(program, item, generic_parameters, seen)),
+        Some(ResolvedType::Array { element, .. }) => {
+            contains_generic_parameter(program, element, generic_parameters, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters.iter().any(|parameter| {
+                contains_generic_parameter(program, parameter, generic_parameters, seen)
+            }) || contains_generic_parameter(program, result, generic_parameters, seen)
+        }
+        _ => false,
+    }
+}
 
 /// Checker-owned admission state for the flat Copy-record verifier island.
 ///
@@ -1102,7 +1653,10 @@ fn binary_supported(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_scalar_collection_island, SCALAR_COLLECTION_ISLAND};
+    use super::{
+        classify_scalar_collection_admission, validate_scalar_collection_island,
+        ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+    };
     use crate::core::mir::reference::MirProgram;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -1147,5 +1701,62 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("Flow transition contracts")));
+    }
+
+    #[test]
+    fn admits_the_typed_scalar_collection_profile_before_materialization() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_native_list_len.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::CompleteCoverage
+        );
+    }
+
+    #[test]
+    fn keeps_a_program_without_a_collection_operation_outside_the_profile() {
+        let tokens = Lexer::new("func main() -> i32 { 42 }")
+            .tokenize()
+            .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::OutsideProfile
+        );
+    }
+
+    #[test]
+    fn classifies_a_managed_sibling_as_mixed_before_mir_construction() {
+        let tokens = Lexer::new(include_str!(
+            "../../../tests/fixtures/mir_test_scalar_collection_mixed.mimi"
+        ))
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::MixedCoverage
+        );
+    }
+
+    #[test]
+    fn keeps_a_collection_comprehension_on_the_compatibility_boundary() {
+        let tokens =
+            Lexer::new("func main() -> i32 { let xs = [i for i in range(0, 3)]; len(xs) }")
+                .tokenize()
+                .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_scalar_collection_admission(&checked),
+            ScalarCollectionAdmission::MixedCoverage
+        );
     }
 }

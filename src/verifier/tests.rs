@@ -891,6 +891,62 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
 }
 
 #[test]
+fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_list_len.mimi");
+    let file = parse_memory_source(source, "mir-scalar-collection-public-api").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&program),
+        crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    );
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
+    let result = verify_result
+        .iter()
+        .find(|result| result.func_name == "list_len_contract")
+        .expect("scalar collection contract result");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert_eq!(
+        result
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+
+    let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    let dual = dual_result
+        .iter()
+        .find(|result| result.func_name == "list_len_contract")
+        .expect("dual scalar collection contract result");
+    assert_eq!(dual.status, VerifStatus::Proven);
+    assert_eq!(
+        dual.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
+fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_test_scalar_collection_mixed.mimi");
+    let file = parse_memory_source(source, "mir-scalar-collection-mixed").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&program),
+        crate::core::mir::ScalarCollectionAdmission::MixedCoverage
+    );
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    assert!(verify_closed_scalar_collection_mir(&program, source_hash)
+        .expect("mixed collection program remains outside the closed verifier island")
+        .is_none());
+}
+
+#[test]
 fn public_checked_verifier_routes_closed_s8_flow_to_mir() {
     require_z3!();
     let source = r#"

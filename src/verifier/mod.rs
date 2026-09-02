@@ -96,6 +96,9 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    if let Some(results) = verify_closed_scalar_collection_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
         return Ok(results);
     }
@@ -242,6 +245,9 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    if let Some(results) = verify_closed_scalar_collection_mir(program, source_hash.clone())? {
+        return Ok(results);
+    }
     if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
         return Ok(results);
     }
@@ -261,6 +267,61 @@ pub fn verify_checked_dual(
     let flow_results =
         flow::flow_verify_file_with_hashes(program.raw_ast(), source_hash, resolved_ir_hash)?;
     Ok(merge_engine_verdicts(resolved_results, flow_results))
+}
+
+/// Verify the already-closed scalar collection island from canonical MIR.
+///
+/// Admission is checker-owned and runs before construction.  The successful
+/// route is deliberately the same MIR graph consumed by the reference
+/// executor, bytecode/native preflight, and the MIR verifier.  A complete
+/// admission followed by construction, coverage, or capability failure is a
+/// hard error; it is never converted into the legacy AST/Flow verifier.
+fn verify_closed_scalar_collection_mir(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    if !is_z3_available() {
+        // Preserve the existing no-Z3 mock infrastructure boundary.  The
+        // typed admission remains available to callers/tests, but the public
+        // API does not claim a MIR proof when the solver is absent.
+        return Ok(None);
+    }
+    if crate::core::mir::classify_scalar_collection_admission(program)
+        != crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    {
+        return Ok(None);
+    }
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
+        .map_err(|error| {
+            format!(
+                "MIR-MATERIALIZATION-001: scalar collection verifier island construction failed: {error}"
+            )
+        })?;
+    if !crate::core::mir::contains_scalar_collection_candidate(&canonical) {
+        return Err(
+            "MIR-COVERAGE-001: complete scalar collection admission did not materialize a production operation"
+                .into(),
+        );
+    }
+    crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
+        )
+    })?;
+    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier TypeDesc/capability gate rejected the scalar collection island: {errors:?}"
+        )
+    })?;
+    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
+    // Keep the historical public display name while preserving the canonical
+    // `function:<name>` owner in MIR proof artifacts and their hashes.
+    for result in &mut results {
+        if let Some(name) = result.func_name.strip_prefix("function:") {
+            result.func_name = name.to_string();
+        }
+    }
+    Ok(Some(results))
 }
 
 /// Verify the already-closed flat Copy-record island from canonical MIR.
