@@ -277,6 +277,7 @@ fn assert_legacy_return_receipt(
     category: &'static str,
     ownership: &'static str,
     label: &str,
+    expected_route: &str,
     src: &str,
     expected_stdout: &str,
     expected_reason_fragment: Option<&str>,
@@ -332,7 +333,10 @@ fn assert_legacy_return_receipt(
     let text = receipt.canonical_text();
     assert!(text.starts_with("schema=mimi-stop-ship-receipt-v1\n"));
     assert!(text.contains(&format!("case_id={case_id}\n")));
-    assert!(text.contains("route=legacy:outside-migrated-profile"));
+    assert!(
+        text.contains(&format!("route={expected_route}")),
+        "{label} route disposition drifted: expected `{expected_route}` in `{text}`"
+    );
     assert!(text.contains("canonical_mir=not-materialized"));
     assert!(text.contains("ownership=not-closed:"));
     eprintln!("[stop-ship-receipt]\n{text}");
@@ -346,6 +350,7 @@ fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout
         "set-lowering-return-ownership",
         "not-closed: Set function-form builtin ABI/glue contract",
         "Set function-form contains",
+        "legacy:outside-migrated-profile",
         src,
         expected_stdout,
         None,
@@ -1215,6 +1220,7 @@ fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
         "generic-concrete-mir-ownership",
         "not-closed: generic concrete MIR aggregate instance ABI/glue contract",
         "generic identity List tuple return",
+        "legacy:outside-migrated-profile",
         r#"
         func wrap<T>(x: T) -> List<T> { return [x] }
         func main() -> i32 {
@@ -1230,6 +1236,57 @@ fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
         "7\n9\n[[(1, 2), (3, 4)]]",
         Some("generic MIR instance argument is outside scalar contract"),
     );
+}
+
+/// Record the existing F-017 indexed record-element mutation boundary. The
+/// checked VM/native compatibility paths currently agree, while canonical MIR
+/// rejects the structured assignment before any consumer can claim an indexed
+/// aggregate-address/ownership contract.
+#[test]
+fn audit_record_element_field_mutation_stop_ship_receipts() {
+    if !can_link() {
+        return;
+    }
+
+    for (case_id, src, expected_stdout) in [
+        (
+            "dual_f017_record_elem_field_mut",
+            r#"
+            type R { a: i32, b: i32 }
+            func main() -> i32 {
+                let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]
+                rs[1].b = 9
+                println(rs[1].b)
+                0
+            }
+        "#,
+            "9",
+        ),
+        (
+            "dual_f017_record_elem_field_mut_first",
+            r#"
+            type R { a: i32, b: i32 }
+            func main() -> i32 {
+                let rs = [R { a: 1, b: 2 }, R { a: 3, b: 4 }]
+                rs[0].a = 5
+                println(rs[0].a)
+                0
+            }
+        "#,
+            "5",
+        ),
+    ] {
+        assert_legacy_return_receipt(
+            case_id,
+            "record-element-mutation-ownership",
+            "not-closed: indexed record mutation aggregate address/glue contract",
+            "record element field mutation",
+            "legacy:mixed-coverage-without-materialized-candidate",
+            src,
+            expected_stdout,
+            Some("structured control flow is not lowered by MIR Phase 0"),
+        );
+    }
 }
 
 /// Slice axis 1 (error leg): end beyond len must TRAP (VM E0814), not clamp.
