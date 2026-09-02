@@ -3084,6 +3084,38 @@ impl MirTypeCatalog {
         Ok(inner.clone())
     }
 
+    /// Return the canonical active/inactive variant descriptors for the
+    /// materialized non-Copy Option<string> ABI.  The validator above proves
+    /// the complete recursive MoveOut/Clone/Drop contract and exact
+    /// None/Some shape; this method only exposes those stable descriptors to
+    /// glue emitters, so they cannot rediscover branches from payload arity.
+    pub fn validated_option_string_variants(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(&MirVariantDesc, &MirVariantDesc, ResolvedTypeId), String> {
+        let inner = self.validate_option_string_variant(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let variants = match &descriptor.layout {
+            MirLayout::Option { variants, .. } => variants,
+            layout => {
+                return Err(format!(
+                    "layout {layout:?} is outside the canonical non-Copy Option<string> variant contract"
+                ));
+            }
+        };
+        let none = variants
+            .iter()
+            .find(|variant| variant.id.0 == "builtin:variant:Option::None")
+            .ok_or_else(|| "canonical Option<string> None descriptor is absent".to_string())?;
+        let some = variants
+            .iter()
+            .find(|variant| variant.id.0 == "builtin:variant:Option::Some")
+            .ok_or_else(|| "canonical Option<string> Some descriptor is absent".to_string())?;
+        Ok((none, some, inner))
+    }
+
     /// Return the canonical nominal label and discriminant/payload table for
     /// the built-in Option/Result families.  User enum layouts remain
     /// fail-closed until their schema is promoted into this catalog.
@@ -3851,6 +3883,12 @@ mod tests {
         assert_eq!(plans[1].fields[0].glue, MirGlueKind::OwnedString);
         let some_id = crate::core::NodeId("builtin:variant:Option::Some".into());
         let none_id = crate::core::NodeId("builtin:variant:Option::None".into());
+        let (none_variant, some_variant, inner) = catalog
+            .validated_option_string_variants(&option_id)
+            .expect("canonical Option<string> variants");
+        assert_eq!(none_variant.id, none_id);
+        assert_eq!(some_variant.id, some_id);
+        assert_eq!(inner, string_id);
         assert_eq!(
             catalog
                 .validated_variant_drop_plan(&option_id, &some_id)
@@ -3878,6 +3916,9 @@ mod tests {
         ] {
             assert!(catalog.validate_glue(&option_id, operation).is_ok());
         }
+        assert!(catalog
+            .validated_option_string_variants(&string_id)
+            .is_err());
     }
 
     #[test]

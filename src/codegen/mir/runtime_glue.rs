@@ -341,22 +341,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let payload_ty = native_non_copy_variant_payload_type(self.program.type_catalog(), ty)?;
-        let (_, variants) = self
+        let (empty_variant, payload_variant, payload_ty) = self
             .program
             .type_catalog()
-            .variant_layout(ty)
-            .ok_or_else(|| NativeMirError::new(subject, "variant drop has no TypeDesc layout"))?;
-        let payload_variant = variants
-            .iter()
-            .find(|variant| variant.id.0 == "builtin:variant:Option::Some")
-            .ok_or_else(|| {
-                NativeMirError::new(subject, "variant drop has no owned payload variant")
-            })?;
-        let empty_variant = variants
-            .iter()
-            .find(|variant| variant.id.0 == "builtin:variant:Option::None")
-            .ok_or_else(|| NativeMirError::new(subject, "variant drop has no empty variant"))?;
+            .validated_option_string_variants(ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
         let payload_plan = self
             .program
             .type_catalog()
@@ -432,7 +421,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_extract_value(aggregate, 1, "mir_variant_drop_value")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        if payload_ty != payload_variant.fields[0].ty {
+        let payload_field = payload_variant.fields.first().ok_or_else(|| {
+            NativeMirError::new(subject, "canonical Option<string> payload field is absent")
+        })?;
+        if payload_ty != payload_field.ty {
             return Err(NativeMirError::new(
                 subject,
                 "variant drop payload disagrees with the canonical TypeDesc field",

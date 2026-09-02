@@ -189,23 +189,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
-        let payload_ty = native_non_copy_variant_payload_type(self.program.type_catalog(), ty)?;
-        let (_, variants) = self
+        let (empty_variant, payload_variant, payload_ty) = self
             .program
             .type_catalog()
-            .variant_layout(ty)
-            .ok_or_else(|| NativeMirError::new(subject, "variant clone has no TypeDesc layout"))?;
-        let payload_variant = variants
-            .iter()
-            .find(|variant| variant.fields.len() == 1)
-            .ok_or_else(|| {
-                NativeMirError::new(subject, "variant clone has no owned payload variant")
-            })?;
-        let empty_variant = variants
-            .iter()
-            .find(|variant| variant.fields.is_empty())
-            .ok_or_else(|| NativeMirError::new(subject, "variant clone has no empty variant"))?;
-        if payload_ty != payload_variant.fields[0].ty {
+            .validated_option_string_variants(ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let payload_field = payload_variant.fields.first().ok_or_else(|| {
+            NativeMirError::new(subject, "canonical Option<string> payload field is absent")
+        })?;
+        if payload_ty != payload_field.ty {
             return Err(NativeMirError::new(
                 subject,
                 "variant clone payload disagrees with the canonical TypeDesc field",
