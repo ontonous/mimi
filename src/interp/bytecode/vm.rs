@@ -2903,12 +2903,20 @@ impl BytecodeVM {
                     base,
                     arity,
                     variant_tag,
+                    shapes,
                 } => {
-                    let (actual_tag, payload_len) = match self.get_reg(ra) {
-                        Value::Variant(tag, payload) => (tag.as_str(), payload.len()),
-                        Value::CanonicalVariant { tag, payload, .. } => {
-                            (tag.as_str(), payload.len())
-                        }
+                    let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
+                        Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
+                        Value::CanonicalVariant {
+                            nominal,
+                            variant,
+                            tag,
+                            payload,
+                        } => (
+                            tag.clone(),
+                            payload.len(),
+                            Some((nominal.clone(), variant.clone())),
+                        ),
                         value => {
                             return Err(InterpError::new(format!(
                                 "variant destructure: expected Variant value, got {}",
@@ -2917,7 +2925,7 @@ impl BytecodeVM {
                         }
                     };
                     let expected_tag = match proto.constants.get(variant_tag as usize) {
-                        Some(ConstValue::Str(tag)) => tag.as_str(),
+                        Some(ConstValue::Str(tag)) => tag.clone(),
                         Some(_) => {
                             return Err(InterpError::new(format!(
                                 "variant destructure: tag constant {} is not a string",
@@ -2936,6 +2944,43 @@ impl BytecodeVM {
                             "variant destructure: expected tag '{}', got '{}'",
                             expected_tag, actual_tag
                         )));
+                    }
+                    let expected_shape = match proto.constants.get(shapes as usize) {
+                        Some(ConstValue::VariantShapes(shapes)) => {
+                            shapes.iter().find(|shape| shape.tag == actual_tag)
+                        }
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: shapes constant {} is not a VariantShapes table",
+                                shapes
+                            )));
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: shapes constant {} is absent",
+                                shapes
+                            )));
+                        }
+                    };
+                    let Some(expected_shape) = expected_shape else {
+                        return Err(InterpError::new(format!(
+                            "variant destructure: tag '{}' is absent from canonical shape table",
+                            actual_tag
+                        )));
+                    };
+                    if expected_shape.arity != arity {
+                        return Err(InterpError::new(format!(
+                            "variant destructure: tag '{}' shape arity {} disagrees with opcode arity {}",
+                            actual_tag, expected_shape.arity, arity
+                        )));
+                    }
+                    if let Some((nominal, variant)) = identity {
+                        if nominal != expected_shape.nominal || variant != expected_shape.variant {
+                            return Err(InterpError::new(format!(
+                                "variant destructure: canonical identity for tag '{}' disagrees with shape table",
+                                actual_tag
+                            )));
+                        }
                     }
                     if payload_len != arity as usize {
                         return Err(InterpError::new(format!(

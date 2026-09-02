@@ -2471,6 +2471,9 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant payload arity exceeds bytecode field ABI");
             return;
         }
+        let Some(shapes) = self.emit_variant_shape_table(scrutinee_ty) else {
+            return;
+        };
         let payload_base = self.proto.alloc_reg();
         for _ in 1..variant.fields.len() {
             self.proto.alloc_reg();
@@ -2481,6 +2484,7 @@ impl<'a> FunctionEmitter<'a> {
             base: payload_base,
             arity: variant.fields.len() as u16,
             variant_tag,
+            shapes,
         });
         for (index, field) in variant.fields.iter().enumerate().rev() {
             if !bindings.iter().any(|binding| binding.field == field.id) {
@@ -2550,7 +2554,7 @@ impl<'a> FunctionEmitter<'a> {
             Ok(contract) => contract,
             Err(message) => {
                 self.error(format!(
-                    "variant construction type '{}' is unsupported: {message}",
+                    "variant shape table type '{}' is unsupported: {message}",
                     ty.as_str()
                 ));
                 return None;
@@ -4477,10 +4481,33 @@ mod tests {
             .expect("reference execution");
         let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
         let main = &bytecode.functions[bytecode.entry as usize];
-        assert!(main
+        let (shape_index, variant_tag) = main
             .code
             .iter()
-            .any(|op| matches!(op, Op::DestructureVariantMove { .. })));
+            .find_map(|op| match op {
+                Op::DestructureVariantMove {
+                    shapes,
+                    variant_tag,
+                    ..
+                } => Some((*shapes, *variant_tag)),
+                _ => None,
+            })
+            .expect("canonical switch-move destructure");
+        assert!(matches!(
+            main.constants.get(variant_tag as usize),
+            Some(crate::interp::bytecode::ConstValue::Str(tag)) if tag == "Some"
+        ));
+        let shapes = match main.constants.get(shape_index as usize) {
+            Some(crate::interp::bytecode::ConstValue::VariantShapes(shapes)) => shapes,
+            other => panic!("expected canonical switch-move shape table, got {other:?}"),
+        };
+        let some = shapes
+            .iter()
+            .find(|shape| shape.tag == "Some")
+            .expect("Some shape");
+        assert_eq!(some.nominal.as_str(), "builtin:type:Option");
+        assert_eq!(some.variant.0, "builtin:variant:Option::Some");
+        assert_eq!((some.discriminant, some.arity), (1, 1));
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("bytecode execution");
@@ -4532,6 +4559,60 @@ mod tests {
         assert!(matches!(
             vm.get_reg(scrutinee),
             Value::CanonicalVariant { tag, .. } if tag == "Some"
+        ));
+    }
+
+    #[test]
+    fn rejects_variant_destructure_identity_drift_before_moving_payload() {
+        let source =
+            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let forged_shapes =
+            main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
+                crate::interp::bytecode::instr::VariantShape {
+                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                        .expect("Result nominal"),
+                    variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                    tag: "Some".into(),
+                    discriminant: 1,
+                    arity: 1,
+                },
+            ]));
+        let (destructure_shapes, source_reg) = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::DestructureVariantMove { ra, shapes, .. } => Some((shapes, *ra)),
+                _ => None,
+            })
+            .expect("canonical switch-move destructure");
+        *destructure_shapes = forged_shapes;
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("canonical identity drift must fail closed");
+        assert!(error.message().contains(
+            "variant destructure: canonical identity for tag 'Some' disagrees with shape table"
+        ));
+        assert!(matches!(
+            vm.get_reg(source_reg),
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                ..
+            } if nominal.as_str() == "builtin:type:Option"
+                && variant.0 == "builtin:variant:Option::Some"
+                && tag == "Some"
         ));
     }
 

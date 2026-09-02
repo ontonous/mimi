@@ -789,15 +789,16 @@ pub enum Op {
         shapes: Option<ConstIdx>,
     },
     /// Consume the canonical active variant and move all payload fields into
-    /// `base..base+arity`. `variant_tag` is the tag constant selected from
-    /// the MIR TypeDesc; the VM checks it before moving anything. The
-    /// canonical MIR SwitchMove adapter then drops unbound fields and
-    /// transfers bound fields to block parameters.
+    /// `base..base+arity`. `variant_tag` and `shapes` are selected from the
+    /// MIR TypeDesc; the VM checks active identity and physical shape before
+    /// moving anything. The canonical MIR SwitchMove adapter then drops
+    /// unbound fields and transfers bound fields to block parameters.
     DestructureVariantMove {
         ra: Reg,
         base: Reg,
         arity: u16,
         variant_tag: ConstIdx,
+        shapes: ConstIdx,
     },
     /// rd = variant_tag(ra) — extract tag as Int
     VariantTag {

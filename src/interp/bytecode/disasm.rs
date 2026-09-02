@@ -711,6 +711,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             base,
             arity,
             variant_tag,
+            shapes,
         } => {
             let tag = proto
                 .constants
@@ -721,13 +722,14 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 })
                 .unwrap_or("?");
             format!(
-                "{:04}  {:<16} destructure_variant_move<{}> r{} -> r{}..r{}",
+                "{:04}  {:<16} destructure_variant_move<{}> r{} -> r{}..r{} [shapes const {}]",
                 pc,
                 name,
                 tag,
                 ra,
                 base,
-                *base as u16 + arity.saturating_sub(1)
+                *base as u16 + arity.saturating_sub(1),
+                shapes
             )
         }
         Op::VariantTag { rd, ra } => format!("{:04}  {:<16} r{} = tag(r{})", pc, name, rd, ra),
