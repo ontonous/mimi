@@ -92,12 +92,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<(), NativeMirError> {
         let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
         let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
-        let (variant_abi, payload_ty) =
+        let (variant_abi, _) =
             native_variant_abi(self.program.type_catalog(), &scrutinee_ty, true)?;
         let (_, payload_variant, _) = self
             .program
             .type_catalog()
-            .validated_option_string_variants(&scrutinee_ty)
+            .validated_option_string_payload(&scrutinee_ty)
             .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
         let tag = self
             .generator
@@ -123,17 +123,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .validated_option_string_variant(&scrutinee_ty, variant_id)
                 .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             let has_payload = variant.id == payload_variant.id;
-            if has_payload
-                && variant
-                    .fields
-                    .first()
-                    .is_some_and(|field| field.ty != payload_ty)
-            {
-                return Err(NativeMirError::new(
-                    subject.to_string(),
-                    "switch-move payload field disagrees with the native Option<string> TypeDesc contract",
-                ));
-            }
             let condition = self
                 .generator
                 .builder
