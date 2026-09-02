@@ -456,7 +456,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         "variant payload binding target type is absent",
                     )
                 })?;
-            let field_index = if flat_copy {
+            if flat_copy {
                 self.program
                     .type_catalog()
                     .validated_flat_copy_payload_projection(
@@ -465,8 +465,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         &bindings[0].field,
                         &parameter.ty,
                     )
-                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
-                    .1
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             } else {
                 self.program
                     .type_catalog()
@@ -476,11 +475,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         &bindings[0].field,
                         &parameter.ty,
                     )
-                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             };
-            if bindings.len() != 1
-                || (!flat_copy && (field_index != 0 || variant.fields.len() != 1))
-            {
+            // The flat-copy projection helper proves field zero/single-field;
+            // the non-Copy caller has already passed the complete
+            // Option<string> TypeDesc gate.  Keep only the edge's own
+            // binding arity check here.
+            if bindings.len() != 1 {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "variant payload binding is outside the single-payload native contract",
