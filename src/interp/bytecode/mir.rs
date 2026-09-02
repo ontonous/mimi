@@ -2556,6 +2556,16 @@ impl<'a> FunctionEmitter<'a> {
                 return None;
             }
         };
+        let nominal_id = match crate::core::ir::NominalTypeId::new(nominal) {
+            Ok(nominal) => nominal,
+            Err(error) => {
+                self.error(format!(
+                    "variant shape table nominal '{}' is invalid: {error}",
+                    nominal
+                ));
+                return None;
+            }
+        };
         let mut shapes = Vec::with_capacity(variants.len());
         for variant in variants {
             if variant.fields.len() > u16::MAX as usize {
@@ -2566,6 +2576,8 @@ impl<'a> FunctionEmitter<'a> {
                 return None;
             }
             shapes.push(VariantShape {
+                nominal: nominal_id.clone(),
+                variant: variant.id.clone(),
                 tag: variant.name.clone(),
                 discriminant: variant.discriminant,
                 arity: variant.fields.len() as u16,
@@ -3968,8 +3980,16 @@ mod tests {
         ));
         assert!(matches!(
             bytecode,
-            Value::Variant(tag, payload)
-                if tag == "Some" && payload == vec![Value::Int(41)]
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            }
+                if nominal.as_str() == "builtin:type:Option"
+                    && variant.0 == "builtin:variant:Option::Some"
+                    && tag == "Some"
+                    && payload == vec![Value::Int(41)]
         ));
     }
 
@@ -4011,9 +4031,32 @@ mod tests {
         assert_eq!(
             shapes
                 .iter()
-                .map(|shape| (shape.tag.as_str(), shape.discriminant, shape.arity))
+                .map(|shape| {
+                    (
+                        shape.nominal.as_str(),
+                        shape.variant.0.as_str(),
+                        shape.tag.as_str(),
+                        shape.discriminant,
+                        shape.arity,
+                    )
+                })
                 .collect::<Vec<_>>(),
-            vec![("None", 0, 0), ("Some", 1, 1)]
+            vec![
+                (
+                    "builtin:type:Option",
+                    "builtin:variant:Option::None",
+                    "None",
+                    0,
+                    0,
+                ),
+                (
+                    "builtin:type:Option",
+                    "builtin:variant:Option::Some",
+                    "Some",
+                    1,
+                    1,
+                ),
+            ]
         );
         let some = shapes
             .iter()
@@ -4031,8 +4074,16 @@ mod tests {
         ));
         assert!(matches!(
             value,
-            Value::Variant(tag, payload)
-                if tag == "Some" && payload == vec![Value::Int(41)]
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            }
+                if nominal.as_str() == "builtin:type:Option"
+                    && variant.0 == "builtin:variant:Option::Some"
+                    && tag == "Some"
+                    && payload == vec![Value::Int(41)]
         ));
     }
 
@@ -4077,6 +4128,9 @@ mod tests {
         let forged_shapes =
             main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
                 crate::interp::bytecode::instr::VariantShape {
+                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Option")
+                        .expect("Option nominal"),
+                    variant: crate::core::NodeId("builtin:variant:Option::Some".into()),
                     tag: "Some".into(),
                     discriminant: 0,
                     arity: 1,
@@ -4131,8 +4185,16 @@ mod tests {
         );
         assert!(matches!(
             value,
-            Value::Variant(tag, payload)
-                if tag == "Some" && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            }
+                if nominal.as_str() == "builtin:type:Option"
+                    && variant.0 == "builtin:variant:Option::Some"
+                    && tag == "Some"
+                    && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
         ));
     }
 
@@ -4192,8 +4254,16 @@ mod tests {
         );
         assert!(matches!(
             value,
-            Value::Variant(tag, payload)
-                if tag == "Ok" && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            }
+                if nominal.as_str() == "builtin:type:Result"
+                    && variant.0 == "builtin:variant:Result::Ok"
+                    && tag == "Ok"
+                    && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
         ));
     }
 
@@ -4461,7 +4531,7 @@ mod tests {
             .contains("variant destructure: expected tag 'Err', got 'Some'"));
         assert!(matches!(
             vm.get_reg(scrutinee),
-            Value::Variant(tag, _) if tag == "Some"
+            Value::CanonicalVariant { tag, .. } if tag == "Some"
         ));
     }
 
@@ -4486,6 +4556,9 @@ mod tests {
         let forged_shapes =
             main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
                 crate::interp::bytecode::instr::VariantShape {
+                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Option")
+                        .expect("Option nominal"),
+                    variant: crate::core::NodeId("builtin:variant:Option::Err".into()),
                     tag: "Err".into(),
                     discriminant: 0,
                     arity: 1,
@@ -4510,7 +4583,61 @@ mod tests {
             .contains("variant drop: tag 'Some' is absent from canonical drop shapes"));
         assert!(matches!(
             vm.get_reg(source_reg),
-            Value::Variant(tag, _) if tag == "Some"
+            Value::CanonicalVariant { tag, .. } if tag == "Some"
+        ));
+    }
+
+    #[test]
+    fn rejects_variant_drop_identity_drift_before_consuming_source() {
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); drop(value); 42 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let forged_shapes =
+            main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
+                crate::interp::bytecode::instr::VariantShape {
+                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                        .expect("Result nominal"),
+                    variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                    tag: "Some".into(),
+                    discriminant: 1,
+                    arity: 1,
+                },
+            ]));
+        let (drop_shapes, source_reg) = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::DropVariant { ra, shapes } => Some((shapes, *ra)),
+                _ => None,
+            })
+            .expect("canonical variant drop");
+        *drop_shapes = forged_shapes;
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("canonical identity drift must fail closed");
+        assert!(error.message().contains(
+            "variant drop: canonical identity for tag 'Some' disagrees with shape table"
+        ));
+        assert!(matches!(
+            vm.get_reg(source_reg),
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                ..
+            } if nominal.as_str() == "builtin:type:Option"
+                && variant.0 == "builtin:variant:Option::Some"
+                && tag == "Some"
         ));
     }
 

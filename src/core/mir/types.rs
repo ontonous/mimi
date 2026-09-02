@@ -1920,7 +1920,21 @@ impl MirTypeCatalog {
         }
         let mut names = BTreeSet::new();
         let mut discriminants = BTreeSet::new();
+        let mut variant_ids = BTreeSet::new();
         for variant in variants {
+            if variant.id.0.is_empty() {
+                return Err(format!(
+                    "type '{}' has a variant with an empty canonical identity",
+                    ty.as_str()
+                ));
+            }
+            if !variant_ids.insert(&variant.id) {
+                return Err(format!(
+                    "type '{}' has duplicate canonical variant identity '{}'",
+                    ty.as_str(),
+                    variant.id.0
+                ));
+            }
             if !names.insert(&variant.name) {
                 return Err(format!(
                     "type '{}' has duplicate variant tag '{}'",
@@ -4306,6 +4320,20 @@ mod tests {
         assert!(
             discriminant_error.contains("duplicate variant discriminant"),
             "{discriminant_error}"
+        );
+
+        let mut duplicate_identity = catalog.get(&option_id).expect("option descriptor").clone();
+        let MirLayout::Option { variants, .. } = &mut duplicate_identity.layout else {
+            unreachable!("Option layout");
+        };
+        variants[1].id = variants[0].id.clone();
+        catalog.replace_for_test_only(option_id.clone(), duplicate_identity);
+        let identity_error = catalog
+            .validated_variant_shape_table(&option_id)
+            .expect_err("duplicate variant identities must fail closed");
+        assert!(
+            identity_error.contains("duplicate canonical variant identity"),
+            "{identity_error}"
         );
     }
 

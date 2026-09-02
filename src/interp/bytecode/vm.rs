@@ -627,8 +627,18 @@ impl BytecodeVM {
                     // the MIR emitter already proved the TypeDesc schedule.
                 }
                 Op::DropVariant { ra, shapes } => {
-                    let (actual_tag, payload_len) = match self.get_reg(ra) {
-                        Value::Variant(tag, payload) => (tag.as_str(), payload.len()),
+                    let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
+                        Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
+                        Value::CanonicalVariant {
+                            nominal,
+                            variant,
+                            tag,
+                            payload,
+                        } => (
+                            tag.clone(),
+                            payload.len(),
+                            Some((nominal.clone(), variant.clone())),
+                        ),
                         value => {
                             return Err(InterpError::new(format!(
                                 "variant drop: expected Variant, got {}",
@@ -636,11 +646,10 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    let expected_arity = match proto.constants.get(shapes as usize) {
-                        Some(ConstValue::VariantShapes(shapes)) => shapes
-                            .iter()
-                            .find(|shape| shape.tag == actual_tag)
-                            .map(|shape| shape.arity),
+                    let expected_shape = match proto.constants.get(shapes as usize) {
+                        Some(ConstValue::VariantShapes(shapes)) => {
+                            shapes.iter().find(|shape| shape.tag == actual_tag)
+                        }
                         Some(_) => {
                             return Err(InterpError::new(format!(
                                 "variant drop: shapes constant {} is not a VariantShapes table",
@@ -654,27 +663,37 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    let Some(expected_arity) = expected_arity else {
+                    let Some(expected_shape) = expected_shape else {
                         return Err(InterpError::new(format!(
                             "variant drop: tag '{}' is absent from canonical drop shapes",
                             actual_tag
                         )));
                     };
-                    if payload_len != expected_arity as usize {
+                    if let Some((nominal, variant)) = identity {
+                        if nominal != expected_shape.nominal || variant != expected_shape.variant {
+                            return Err(InterpError::new(format!(
+                                "variant drop: canonical identity for tag '{}' disagrees with shape table",
+                                actual_tag
+                            )));
+                        }
+                    }
+                    if payload_len != expected_shape.arity as usize {
                         return Err(InterpError::new(format!(
                             "variant drop: tag '{}' expects {} payload fields, got {}",
-                            actual_tag, expected_arity, payload_len
+                            actual_tag, expected_shape.arity, payload_len
                         )));
                     }
                     let value = {
                         let frame = self.cur_frame_mut();
                         std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
                     };
-                    let Value::Variant(_, _payload) = value else {
+                    let is_variant =
+                        matches!(value, Value::Variant(_, _) | Value::CanonicalVariant { .. });
+                    if !is_variant {
                         return Err(InterpError::new(
                             "variant drop: expected Variant after shape validation",
                         ));
-                    };
+                    }
                     // The MIR adapter proves the recursive child drop plan;
                     // moving the whole value into this op lets Rust recursively
                     // release every owned payload without a second type pass.
@@ -2837,11 +2856,20 @@ impl BytecodeVM {
                     arity,
                     shapes,
                 } => {
-                    let tag =
-                        Self::variant_construction_tag(proto, type_name, variant, arity, shapes)?;
+                    let (tag, shape) =
+                        Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
                     let payload: Vec<Value> =
                         (0..arity).map(|i| self.get_reg(base + i).clone()).collect();
-                    self.set_reg(rd, Value::Variant(tag, payload));
+                    let value = match shape {
+                        Some(shape) => Value::CanonicalVariant {
+                            nominal: shape.nominal,
+                            variant: shape.variant,
+                            tag,
+                            payload,
+                        },
+                        None => Value::Variant(tag, payload),
+                    };
+                    self.set_reg(rd, value);
                 }
                 Op::NewVariantMove {
                     rd,
@@ -2851,15 +2879,24 @@ impl BytecodeVM {
                     arity,
                     shapes,
                 } => {
-                    let tag =
-                        Self::variant_construction_tag(proto, type_name, variant, arity, shapes)?;
+                    let (tag, shape) =
+                        Self::variant_construction_shape(proto, type_name, variant, arity, shapes)?;
                     let payload: Vec<Value> = (0..arity)
                         .map(|i| {
                             let frame = self.cur_frame_mut();
                             std::mem::replace(&mut frame.regs[(base + i) as usize], Value::Unit)
                         })
                         .collect();
-                    self.set_reg(rd, Value::Variant(tag, payload));
+                    let value = match shape {
+                        Some(shape) => Value::CanonicalVariant {
+                            nominal: shape.nominal,
+                            variant: shape.variant,
+                            tag,
+                            payload,
+                        },
+                        None => Value::Variant(tag, payload),
+                    };
+                    self.set_reg(rd, value);
                 }
                 Op::DestructureVariantMove {
                     ra,
@@ -2869,6 +2906,9 @@ impl BytecodeVM {
                 } => {
                     let (actual_tag, payload_len) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.as_str(), payload.len()),
+                        Value::CanonicalVariant { tag, payload, .. } => {
+                            (tag.as_str(), payload.len())
+                        }
                         value => {
                             return Err(InterpError::new(format!(
                                 "variant destructure: expected Variant value, got {}",
@@ -2907,10 +2947,15 @@ impl BytecodeVM {
                         let frame = self.cur_frame_mut();
                         std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
                     };
-                    let Value::Variant(_, payload) = value else {
-                        return Err(InterpError::new(
-                            "variant destructure: expected Variant value",
-                        ));
+                    let payload = match value {
+                        Value::Variant(_, payload) | Value::CanonicalVariant { payload, .. } => {
+                            payload
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "variant destructure: expected Variant value",
+                            ));
+                        }
                     };
                     for (index, value) in payload.into_iter().enumerate() {
                         self.set_reg(base + index as u16, value);
@@ -2924,6 +2969,7 @@ impl BytecodeVM {
                     };
                     let matches = match v {
                         Value::Variant(name, _) => name == &expected_tag,
+                        Value::CanonicalVariant { tag, .. } => tag == &expected_tag,
                         // v0.34.15: flow states are Record(Some(state_name), _)
                         // — multi-target transition results carry the target
                         // state name as the record tag, so match arms on
@@ -2937,7 +2983,10 @@ impl BytecodeVM {
                 Op::VariantGet { rd, ra, idx } => {
                     let v = self.get_reg(ra).clone();
                     match v {
-                        Value::Variant(_, fields) => {
+                        Value::Variant(_, fields)
+                        | Value::CanonicalVariant {
+                            payload: fields, ..
+                        } => {
                             if (idx as usize) >= fields.len() {
                                 // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
                                 return Err(InterpError::index_out_of_bounds(format!(
@@ -2976,7 +3025,7 @@ impl BytecodeVM {
                                 )));
                             }
                         }
-                        Value::Variant(_, vals) => {
+                        Value::Variant(_, vals) | Value::CanonicalVariant { payload: vals, .. } => {
                             let idx = field_name
                                 .strip_prefix('_')
                                 .and_then(|n| n.parse::<usize>().ok())
@@ -3004,6 +3053,11 @@ impl BytecodeVM {
                             // Return tag as a string (for comparison).
                             self.set_reg(rd, Value::String(Arc::new(name.clone())));
                         }
+                        Value::CanonicalVariant { tag, .. } => {
+                            // Canonical identity is preserved in the source;
+                            // this projection exposes only the surface tag.
+                            self.set_reg(rd, Value::String(Arc::new(tag.clone())));
+                        }
                         other => {
                             return Err(InterpError::new(format!(
                                 "variant tag: expected Variant, got {}",
@@ -3015,7 +3069,10 @@ impl BytecodeVM {
                 Op::VariantPayload { rd, ra, idx } => {
                     let v = self.get_reg(ra).clone();
                     match v {
-                        Value::Variant(_, fields) => {
+                        Value::Variant(_, fields)
+                        | Value::CanonicalVariant {
+                            payload: fields, ..
+                        } => {
                             if (idx as usize) >= fields.len() {
                                 // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
                                 return Err(InterpError::index_out_of_bounds(format!(
@@ -3065,8 +3122,11 @@ impl BytecodeVM {
                 }
                 Op::IsSome { rd, ra } => {
                     let v = self.get_reg(ra);
-                    let is_some =
-                        matches!(v, Value::Variant(name, _) if name == "Some" || name == "Ok");
+                    let is_some = match v {
+                        Value::Variant(name, _) => name == "Some" || name == "Ok",
+                        Value::CanonicalVariant { tag, .. } => tag == "Some" || tag == "Ok",
+                        _ => false,
+                    };
                     self.set_reg(rd, Value::Bool(is_some));
                 }
                 Op::Unwrap { rd, ra } => {
@@ -3076,10 +3136,22 @@ impl BytecodeVM {
                             let inner = payload.into_iter().next().unwrap_or(Value::Unit);
                             self.set_reg(rd, inner);
                         }
+                        Value::CanonicalVariant { tag, payload, .. }
+                            if tag == "Some" || tag == "Ok" =>
+                        {
+                            let inner = payload.into_iter().next().unwrap_or(Value::Unit);
+                            self.set_reg(rd, inner);
+                        }
                         Value::Variant(name, _) if name == "None" => {
                             return Err(InterpError::new("unwrap called on None"));
                         }
+                        Value::CanonicalVariant { tag, .. } if tag == "None" => {
+                            return Err(InterpError::new("unwrap called on None"));
+                        }
                         Value::Variant(name, _) if name == "Err" => {
+                            return Err(InterpError::new("unwrap called on Err"));
+                        }
+                        Value::CanonicalVariant { tag, .. } if tag == "Err" => {
                             return Err(InterpError::new("unwrap called on Err"));
                         }
                         _ => {
@@ -4278,19 +4350,19 @@ impl BytecodeVM {
         }
     }
 
-    /// Resolve the runtime tag for a variant construction and, for canonical
-    /// MIR instructions, prove that its tag/discriminant/arity triple is the
-    /// one emitted from the TypeDesc shape table.  Legacy bytecode has no
-    /// shape-table operand, but still must provide a real string tag; the
-    /// old `variant_{n}` fallback would allow malformed bytecode to invent a
-    /// value outside the checked MIR contract.
-    fn variant_construction_tag(
+    /// Resolve the runtime shape for a variant construction and, for
+    /// canonical MIR instructions, prove that its tag/discriminant/arity
+    /// triple is the one emitted from the TypeDesc shape table.  Legacy
+    /// bytecode has no shape-table operand, but still must provide a real
+    /// string tag; the old `variant_{n}` fallback would allow malformed
+    /// bytecode to invent a value outside the checked MIR contract.
+    fn variant_construction_shape(
         proto: &FunctionProto,
         type_name: ConstIdx,
         variant: VariantIdx,
         arity: u16,
         shapes: Option<ConstIdx>,
-    ) -> Result<String, InterpError> {
+    ) -> Result<(String, Option<VariantShape>), InterpError> {
         let tag = match proto.constants.get(type_name as usize) {
             Some(ConstValue::Str(tag)) => tag.clone(),
             Some(_) => {
@@ -4308,10 +4380,12 @@ impl BytecodeVM {
         };
 
         let Some(shapes_idx) = shapes else {
-            return Ok(tag);
+            return Ok((tag, None));
         };
         let shape = match proto.constants.get(shapes_idx as usize) {
-            Some(ConstValue::VariantShapes(shapes)) => shapes.iter().find(|shape| shape.tag == tag),
+            Some(ConstValue::VariantShapes(shapes)) => {
+                shapes.iter().find(|shape| shape.tag == tag).cloned()
+            }
             Some(_) => {
                 return Err(InterpError::new(format!(
                     "variant construction: shapes constant {} is not a VariantShapes table",
@@ -4343,7 +4417,7 @@ impl BytecodeVM {
                 tag, shape.arity, arity
             )));
         }
-        Ok(tag)
+        Ok((tag, Some(shape)))
     }
 
     /// Pop the top of the quote assembly stack.

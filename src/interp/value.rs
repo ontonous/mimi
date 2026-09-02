@@ -248,6 +248,16 @@ pub enum Value {
     Set(Vec<Value>),
     Tuple(Vec<Value>),
     Variant(String, Vec<Value>),
+    /// Variant value produced by the canonical MIR bytecode path.  The
+    /// legacy `Variant(String, Vec<Value>)` remains available to the old
+    /// compiler and builtin surface, but it deliberately carries no
+    /// semantic identity.  Canonical consumers must preserve both IDs.
+    CanonicalVariant {
+        nominal: crate::core::ir::NominalTypeId,
+        variant: crate::core::NodeId,
+        tag: String,
+        payload: Vec<Value>,
+    },
     Record(Option<String>, HashMap<String, Value>),
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
@@ -354,6 +364,17 @@ impl Clone for Value {
             Value::Set(v) => Value::Set(v.clone()),
             Value::Tuple(v) => Value::Tuple(v.clone()),
             Value::Variant(name, v) => Value::Variant(name.clone(), v.clone()),
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            } => Value::CanonicalVariant {
+                nominal: nominal.clone(),
+                variant: variant.clone(),
+                tag: tag.clone(),
+                payload: payload.clone(),
+            },
             Value::Record(name, fields) => Value::Record(name.clone(), fields.clone()),
             Value::Future(v) => Value::Future(Arc::clone(v)),
             Value::Error(v) => Value::Error(v.clone()),
@@ -1669,6 +1690,16 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::CanonicalVariant { tag, payload, .. } => {
+                write!(f, "{}(", tag)?;
+                for (i, v) in payload.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, ")")
+            }
             Value::Record(type_name, fields) => {
                 // Untyped records (JSON/Map) print as JSON objects for dual
                 // with codegen Map handles (mimi_map_to_json_i64).
@@ -1837,6 +1868,7 @@ pub(crate) fn contains_local_shared(v: &Value) -> bool {
         Value::Tuple(elems) => elems.iter().any(contains_local_shared),
         Value::Record(_, fields) => fields.values().any(contains_local_shared),
         Value::Variant(_, args) => args.iter().any(contains_local_shared),
+        Value::CanonicalVariant { payload, .. } => payload.iter().any(contains_local_shared),
         Value::Newtype(_, inner) => contains_local_shared(inner),
         Value::DynTrait { data, .. } => contains_local_shared(data),
         Value::Ref(rc) | Value::RefMut(rc) => {
@@ -1864,6 +1896,9 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
         Value::Tuple(elems) => elems.iter().any(|e| contains_arena_ref(e, arena_id)),
         Value::Record(_, fields) => fields.values().any(|v| contains_arena_ref(v, arena_id)),
         Value::Variant(_, args) => args.iter().any(|v| contains_arena_ref(v, arena_id)),
+        Value::CanonicalVariant { payload, .. } => {
+            payload.iter().any(|v| contains_arena_ref(v, arena_id))
+        }
         Value::Newtype(_, inner) => contains_arena_ref(inner, arena_id),
         Value::DynTrait { data, .. } => contains_arena_ref(data, arena_id),
         Value::Ref(rc) | Value::RefMut(rc) => {
@@ -1914,6 +1949,7 @@ pub(crate) fn is_copy(v: &Value) -> bool {
         Value::Shared(_) | Value::LocalShared(_) => true,
         Value::Record(_, fields) => fields.values().all(is_copy),
         Value::Variant(_, args) => args.iter().all(is_copy),
+        Value::CanonicalVariant { payload, .. } => payload.iter().all(is_copy),
         Value::Array(elems) => elems.iter().all(is_copy),
         Value::Set(elems) => elems.iter().all(is_copy),
         _ => false,
@@ -2005,6 +2041,29 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
         }
         (Value::Variant(an, av), Value::Variant(bn, bv)) => {
             an == bn
+                && av.len() == bv.len()
+                && av
+                    .iter()
+                    .zip(bv.iter())
+                    .all(|(x, y)| values_equal_depth(x, y, depth + 1))
+        }
+        (
+            Value::CanonicalVariant {
+                nominal: an,
+                variant: ai,
+                tag: at,
+                payload: av,
+            },
+            Value::CanonicalVariant {
+                nominal: bn,
+                variant: bi,
+                tag: bt,
+                payload: bv,
+            },
+        ) => {
+            an == bn
+                && ai == bi
+                && at == bt
                 && av.len() == bv.len()
                 && av
                     .iter()
@@ -2135,6 +2194,7 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Tuple(_) => "tuple",
         Value::Variant(_, _) => "variant",
+        Value::CanonicalVariant { .. } => "variant",
         Value::Record(Some(_), _) => "record",
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",

@@ -1449,8 +1449,17 @@ pub enum ConstValue {
 }
 
 /// One canonical variant shape in the bytecode physical contract.
+///
+/// The nominal and variant IDs are carried alongside the physical tag,
+/// discriminant, and arity.  A tag alone is not a semantic identity: the
+/// runtime must retain the checker-owned IDs until a consuming operation has
+/// validated its TypeDesc contract.
 #[derive(Debug, Clone)]
 pub struct VariantShape {
+    /// Canonical nominal identity copied from the MIR TypeDesc family.
+    pub nominal: crate::core::ir::NominalTypeId,
+    /// Canonical variant identity copied from the MIR TypeDesc descriptor.
+    pub variant: crate::core::NodeId,
     pub tag: String,
     pub discriminant: VariantIdx,
     pub arity: u16,
