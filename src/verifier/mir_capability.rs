@@ -222,7 +222,15 @@ impl<'a> CapabilityGate<'a> {
                 Ok(())
             }
             MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => {
-                self.require_copy_aggregate(ty, &descriptor)?;
+                if descriptor.ownership == MirOwnership::Copy {
+                    self.require_copy_aggregate(ty, &descriptor)?;
+                } else {
+                    catalog.validate_option_string_variant(ty).map_err(|message| {
+                        format!(
+                            "non-Copy variant TypeDesc is outside the verifier capability: {message}"
+                        )
+                    })?;
+                }
                 for variant in variants {
                     for field in &variant.fields {
                         self.validate_type(&field.ty, "variant field");
@@ -559,10 +567,43 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} non-Copy variant construction is outside the verifier capability"));
                 }
             }
-            MirInstructionKind::ConstructVariantMove { .. } => {
-                self.error(format!(
-                    "{subject} ConstructVariantMove is outside the verifier capability"
-                ));
+            MirInstructionKind::ConstructVariantMove {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => {
+                let Some(result_ty) = value_type(function, result) else {
+                    self.error(format!("{subject} variant result is absent"));
+                    return;
+                };
+                if let Err(message) = catalog.validate_option_string_variant(&result_ty) {
+                    self.error(format!(
+                        "{subject} ConstructVariantMove rejected: {message}"
+                    ));
+                    return;
+                }
+                let field_ids = fields
+                    .iter()
+                    .map(|(field, _)| field.clone())
+                    .collect::<Vec<_>>();
+                let field_types = fields
+                    .iter()
+                    .filter_map(|(_, value)| value_type(function, value))
+                    .collect::<Vec<_>>();
+                if field_types.len() != fields.len() {
+                    self.error(format!("{subject} variant payload is absent"));
+                } else if let Err(message) = catalog.validate_variant_construct(
+                    &result_ty,
+                    nominal,
+                    variant,
+                    &field_ids,
+                    &field_types,
+                ) {
+                    self.error(format!(
+                        "{subject} ConstructVariantMove rejected: {message}"
+                    ));
+                }
             }
             MirInstructionKind::UpdateRecord {
                 result,
@@ -943,10 +984,138 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} Switch rejected: {message}"));
                 }
             }
-            MirTerminator::SwitchMove { .. } => {
-                self.error(format!(
-                    "{subject} SwitchMove is outside the verifier capability"
-                ));
+            MirTerminator::SwitchMove { scrutinee, arms } => {
+                let Some(scrutinee_ty) = value_type(function, scrutinee) else {
+                    self.error(format!("{subject} SwitchMove scrutinee is absent"));
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_option_string_variant(&scrutinee_ty)
+                {
+                    self.error(format!("{subject} SwitchMove rejected: {message}"));
+                    return;
+                }
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_switch_move(&scrutinee_ty, arms)
+                {
+                    self.error(format!("{subject} SwitchMove rejected: {message}"));
+                    return;
+                }
+                let Some((_, variants)) = self.program.type_catalog().variant_layout(&scrutinee_ty)
+                else {
+                    self.error(format!(
+                        "{subject} SwitchMove has no canonical variant layout"
+                    ));
+                    return;
+                };
+                let required = variants
+                    .iter()
+                    .map(|variant| variant.id.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut seen = BTreeSet::new();
+                if arms.len() != required.len() {
+                    self.error(format!(
+                        "{subject} SwitchMove requires exactly one explicit arm for each TypeDesc variant"
+                    ));
+                }
+                for arm in arms {
+                    let MirSwitchCase::Variant(variant_id) = &arm.case else {
+                        self.error(format!(
+                            "{subject} SwitchMove requires explicit variant arms; default/literal cases are not covered"
+                        ));
+                        continue;
+                    };
+                    let Some(variant) = self
+                        .program
+                        .type_catalog()
+                        .variant(&scrutinee_ty, variant_id)
+                    else {
+                        self.error(format!(
+                            "{subject} SwitchMove variant '{}' is absent from TypeDesc",
+                            variant_id.0
+                        ));
+                        continue;
+                    };
+                    if !seen.insert(variant.id.clone()) {
+                        self.error(format!(
+                            "{subject} SwitchMove variant '{}' is repeated",
+                            variant.name
+                        ));
+                    }
+                    let Some(target) = function.blocks.get(&arm.target) else {
+                        self.error(format!(
+                            "{subject} SwitchMove edge target '{}' is absent",
+                            arm.target
+                        ));
+                        continue;
+                    };
+                    for (index, argument) in arm.arguments.iter().enumerate() {
+                        if !function.values.contains_key(argument) {
+                            self.error(format!(
+                                "{subject} SwitchMove edge argument '{}' is absent",
+                                argument
+                            ));
+                            continue;
+                        }
+                        let Some(parameter) = target
+                            .parameters
+                            .get(index)
+                            .and_then(|parameter| function.values.get(&parameter.value))
+                        else {
+                            continue;
+                        };
+                        if function
+                            .values
+                            .get(argument)
+                            .is_some_and(|value| value.ty != parameter.ty)
+                        {
+                            self.error(format!(
+                                "{subject} SwitchMove edge argument type disagrees with block parameter"
+                            ));
+                        }
+                    }
+                    if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+                        self.error(format!(
+                            "{subject} SwitchMove edge arguments and payload bindings disagree with block parameter arity"
+                        ));
+                    }
+                    let mut binding_fields = BTreeSet::new();
+                    for (index, binding) in arm.bindings.iter().enumerate() {
+                        if !binding_fields.insert(binding.field.clone()) {
+                            self.error(format!(
+                                "{subject} SwitchMove payload field '{}' is bound more than once",
+                                binding.field.0
+                            ));
+                        }
+                        let Some(field) = variant
+                            .fields
+                            .iter()
+                            .find(|field| field.id == binding.field)
+                        else {
+                            self.error(format!(
+                                "{subject} SwitchMove payload field '{}' is absent from TypeDesc variant",
+                                binding.field.0
+                            ));
+                            continue;
+                        };
+                        let Some(parameter) = target
+                            .parameters
+                            .get(arm.arguments.len() + index)
+                            .and_then(|parameter| function.values.get(&parameter.value))
+                        else {
+                            continue;
+                        };
+                        if parameter.ty != field.ty {
+                            self.error(format!(
+                                "{subject} SwitchMove payload binding type disagrees with TypeDesc"
+                            ));
+                        }
+                    }
+                }
             }
             MirTerminator::Return { .. } | MirTerminator::Trap { .. } => {}
             MirTerminator::Fault { .. } => {
@@ -1066,14 +1235,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_copy_variant_before_default_route() {
+    fn accepts_non_copy_option_string_variant_contract() {
         let program = canonical(include_str!(
             "../../tests/fixtures/mir_native_option_string.mimi"
         ));
-        let errors = validate_mir_capabilities(&program).expect_err("Option<string> must be gated");
+        validate_mir_capabilities(&program).expect("Option<string> verifier capability");
+    }
+
+    #[test]
+    fn rejects_non_copy_nested_variant_before_default_route() {
+        let program = canonical(
+            "func main() -> i32 { let value: Option<(string, i32)> = Some((\"owned\", 41)); drop(value); 42 }",
+        );
+        let errors =
+            validate_mir_capabilities(&program).expect_err("nested Option payload must be gated");
         assert!(errors.iter().any(|error| {
-            error.contains("not Copy with canonical no-op glue")
-                || error.contains("ConstructVariantMove")
+            error.contains("non-Copy variant TypeDesc")
+                || error.contains("Option<string> variant contract")
         }));
     }
 

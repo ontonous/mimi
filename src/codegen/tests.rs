@@ -328,7 +328,7 @@ fn direct_native_entry_rejects_a_mixed_flat_copy_record_graph_without_fallback()
     let source = r#"
         type Point { x: i32 }
 
-        func make_some() -> Option<string> { Some("owned") }
+        func make_some() -> Result<string, i32> { Ok("owned") }
 
         func main() -> i32 {
             let point = Point { x: 1 }

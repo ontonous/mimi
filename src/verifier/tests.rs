@@ -1097,6 +1097,99 @@ fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
 }
 
 #[test]
+fn non_copy_option_string_switch_move_closes_all_four_consumers() {
+    require_z3!();
+    let source = r#"
+        func consume(value: Option<string>) -> i32 {
+            ensures: result >= 0
+            match value {
+                Some(_) => 41,
+                None => 0
+            }
+        }
+
+        func discard(value: Option<string>) -> i32 {
+            ensures: result >= 0
+            match value {
+                Some(_) => 7,
+                None => 8
+            }
+        }
+
+        func main() -> i32 {
+            let first: Option<string> = Some("owned")
+            let second: Option<string> = Some("discard")
+            let a = consume(first)
+            let b = discard(second)
+            a + b
+        }
+    "#;
+    let file = parse_memory_source(source, "mir-option-string-switch-move").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("Option<string> SwitchMove verifier capability");
+
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(48)
+    );
+    let bytecode =
+        crate::interp::bytecode::compile_mir_program(&canonical).expect("MIR bytecode compilation");
+    let mut bytecode_vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    assert_eq!(bytecode_vm.run().expect("MIR bytecode execution"), 48);
+
+    crate::codegen::mir::validate_mir_native(&canonical).expect("native MIR validation");
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "mir_option_string_verifier");
+    codegen
+        .compile_mir_native(&canonical)
+        .expect("native MIR compilation");
+    codegen.module.verify().expect("native module verification");
+
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let results = crate::verifier::verify_mir(&canonical, source_hash).expect("MIR verifier");
+    for function in ["function:consume", "function:discard"] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name == function)
+            .expect("contract-bearing Option<string> function");
+        assert_eq!(
+            result.status,
+            VerifStatus::Proven,
+            "{function}: {}",
+            result.message
+        );
+    }
+}
+
+#[test]
+fn non_copy_option_string_switch_move_default_is_rejected_before_consumers() {
+    let source = r#"
+        func main() -> i32 {
+            let value: Option<string> = Some("owned")
+            match value {
+                Some(_) => 41,
+                _ => 0
+            }
+        }
+    "#;
+    let file = parse_memory_source(source, "mir-option-string-switch-default").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let errors = crate::verifier::validate_mir_capabilities(&canonical)
+        .expect_err("consuming default must remain outside the verifier island");
+    assert!(errors
+        .iter()
+        .any(|error| { error.contains("explicit variant arms") || error.contains("SwitchMove") }));
+}
+
+#[test]
 fn malformed_s8_mir_missing_transition_contract_is_rejected_before_consumers() {
     let source = include_str!("../../tests/fixtures/mir_native_flow_transition.mimi");
     let file = parse_memory_source(source, "mir-s8-invalid-transition").expect("parse");
@@ -1264,7 +1357,7 @@ fn public_checked_verifier_rejects_mixed_record_graph_without_ast_fallback() {
     let source = r#"
         type Point { x: i32 }
 
-        func make_some() -> Option<string> { Some("owned") }
+        func make_some() -> Result<string, i32> { Ok("owned") }
 
         func main() -> i32 {
             let point = Point { x: 1 }

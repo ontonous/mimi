@@ -474,94 +474,14 @@ pub(super) fn native_non_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
-    let desc = catalog
-        .get(ty)
-        .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
-    let (inner, variants) = match &desc.layout {
-        MirLayout::Option { inner, variants } => (inner, variants),
-        layout => {
-            return Err(NativeMirError::new(
-                ty.as_str(),
-                format!(
-                "layout {layout:?} is outside the native non-Copy Option<string> variant contract"
-            ),
-            ))
-        }
-    };
-    if !matches!(&desc.kind, MirTypeKind::Option)
-        || desc.abi != MirAbiClass::Aggregate
-        || desc.ownership != MirOwnership::Move
-    {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            format!(
-                "variant TypeDesc kind/ABI/ownership ({:?}/{:?}/{:?}) is outside the native non-Copy Option<string> variant contract",
-                desc.kind, desc.abi, desc.ownership
-            ),
-        ));
-    }
-    let expected = MirGlueContract {
-        move_out: MirGlueKind::Aggregate,
-        clone: MirGlueKind::Aggregate,
-        drop: MirGlueKind::Aggregate,
-    };
-    if desc.glue != expected
-        || !desc.needs_drop_glue
-        || !desc.needs_clone_glue
-        || desc.variant_drop_plan.is_none()
-    {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            "variant TypeDesc aggregate glue/drop plan is incomplete for the native non-Copy Option<string> variant contract",
-        ));
-    }
-    for operation in [
-        crate::core::mir::types::MirGlueOperation::MoveOut,
-        crate::core::mir::types::MirGlueOperation::Clone,
-        crate::core::mir::types::MirGlueOperation::Drop,
-    ] {
-        catalog
-            .validate_glue(ty, operation)
-            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
-    }
-    if variants.len() != 2 {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            format!(
-                "Option TypeDesc has {} variants; the native non-Copy Option<string> contract requires None and Some",
-                variants.len()
-            ),
-        ));
-    }
-    let none = variants.iter().find(|variant| {
-        variant.id.0 == "builtin:variant:Option::None"
-            && variant.name == "None"
-            && variant.discriminant == 0
-            && variant.fields.is_empty()
-    });
-    let some = variants.iter().find(|variant| {
-        variant.id.0 == "builtin:variant:Option::Some"
-            && variant.name == "Some"
-            && variant.discriminant == 1
-            && variant.fields.len() == 1
-    });
-    if none.is_none() || some.is_none() {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            "Option TypeDesc variants do not match the canonical None/Some native non-Copy contract",
-        ));
-    }
-    let field = &some.expect("checked above").fields[0];
-    if field.id.0 != "builtin:variant:Option::Some/payload:0" || field.ty != *inner {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            "Option Some payload identity/type disagrees with the canonical native non-Copy contract",
-        ));
-    }
     catalog
-        .validate_owned_string(inner)
-        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
-    Ok(inner.clone())
+        .validate_option_string_variant(ty)
+        .map_err(|message| {
+            NativeMirError::new(
+                ty.as_str(),
+                format!("native non-Copy Option<string> variant contract: {message}"),
+            )
+        })
 }
 
 pub(super) fn native_basic_type<'ctx>(

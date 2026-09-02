@@ -390,8 +390,10 @@ fn symbolic_value_for_type(
         && descriptor.glue.clone == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.glue.drop == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.drop_plan.is_some();
-    if (descriptor.ownership != MirOwnership::Copy && !linear_record)
+    let move_owned_option_string = catalog.validate_option_string_variant(ty).is_ok();
+    if (descriptor.ownership != MirOwnership::Copy && !linear_record && !move_owned_option_string)
         || (!linear_record
+            && !move_owned_option_string
             && (descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
                 || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
                 || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop))
@@ -856,116 +858,18 @@ fn explore_block(
                 traps,
             )?;
         }
-        MirTerminator::Switch { scrutinee, arms } => {
-            let value = state
-                .values
-                .get(scrutinee)
-                .cloned()
-                .ok_or_else(|| format!("switch scrutinee '{}' is not defined", scrutinee))?;
-            let SymbolicValue::Variant {
-                nominal,
-                tag,
-                payload,
-            } = value
-            else {
-                return Err(
-                    "canonical MIR verifier variant switch requires a symbolic Option/Result value"
-                        .into(),
-                );
-            };
-            let scrutinee_ty = function
-                .values
-                .get(scrutinee)
-                .map(|value| value.ty.clone())
-                .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
-            let Some((expected_nominal, variants)) = catalog.variant_layout(&scrutinee_ty) else {
-                return Err(
-                    "canonical MIR verifier variant switch has no canonical TypeDesc layout".into(),
-                );
-            };
-            if nominal.as_str() != expected_nominal {
-                return Err(
-                    "canonical MIR verifier variant switch nominal disagrees with TypeDesc".into(),
-                );
-            }
-            let mut previous_cases = Vec::new();
-            for arm in arms {
-                let (guard, bindings) = match &arm.case {
-                    MirSwitchCase::Variant(variant_id) => {
-                        let variant = variants
-                            .iter()
-                            .find(|variant| variant.id == *variant_id)
-                            .ok_or_else(|| {
-                                format!(
-                                    "canonical MIR verifier switch variant '{}' is absent from TypeDesc",
-                                    variant_id.0
-                                )
-                            })?;
-                        let guard = tag.eq(Int::from_i64(variant.discriminant as i64));
-                        previous_cases.push(guard.clone());
-                        let mut bindings = Vec::new();
-                        for binding in &arm.bindings {
-                            let field = variant
-                                .fields
-                                .iter()
-                                .find(|field| field.id == binding.field)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "canonical MIR verifier switch binding field '{}' is absent from TypeDesc",
-                                        binding.field.0
-                                    )
-                                })?;
-                            let value = payload.get(&field.id).cloned().ok_or_else(|| {
-                                format!(
-                                    "canonical MIR verifier switch payload field '{}' is absent",
-                                    field.id.0
-                                )
-                            })?;
-                            let parameter = function
-                                .values
-                                .get(&binding.parameter)
-                                .ok_or_else(|| {
-                                    format!(
-                                        "canonical MIR verifier switch binding parameter '{}' is absent",
-                                        binding.parameter
-                                    )
-                                })?;
-                            if !symbolic_matches_type(catalog, &parameter.ty, &value) {
-                                return Err(format!(
-                                    "canonical MIR verifier switch binding '{}' disagrees with payload TypeDesc",
-                                    binding.parameter
-                                ));
-                            }
-                            bindings.push((binding.parameter.clone(), value));
-                        }
-                        (guard, bindings)
-                    }
-                    MirSwitchCase::Default => {
-                        (symbolic_default_guard(&previous_cases), Vec::new())
-                    }
-                    MirSwitchCase::Literal(_) => {
-                        return Err(
-                            "canonical MIR verifier variant switch cannot use a literal case".into(),
-                        )
-                    }
-                };
-                let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
-                next.constraints.push(guard);
-                for (parameter, value) in bindings {
-                    next.values.insert(parameter, value);
-                }
-                explore_block(
-                    function,
-                    program,
-                    catalog,
-                    &mut next,
-                    &arm.target,
-                    &mut active.clone(),
-                    returns,
-                    traps,
-                )?;
-            }
-        }
+        MirTerminator::Switch { scrutinee, arms } => explore_variant_switch(
+            function,
+            program,
+            catalog,
+            state,
+            scrutinee,
+            arms,
+            false,
+            active,
+            returns,
+            traps,
+        )?,
         MirTerminator::Return { value } => {
             let value = value
                 .as_ref()
@@ -985,14 +889,198 @@ fn explore_block(
             });
         }
         MirTerminator::Unreachable => {}
-        MirTerminator::SwitchMove { .. }
-        | MirTerminator::Fault { .. } => {
+        MirTerminator::SwitchMove { scrutinee, arms } => explore_variant_switch(
+            function,
+            program,
+            catalog,
+            state,
+            scrutinee,
+            arms,
+            true,
+            active,
+            returns,
+            traps,
+        )?,
+        MirTerminator::Fault { .. } => {
             return Err(
-                "canonical MIR verifier currently supports scalar Goto/Branch and Copy variant Switch CFG".into(),
+                "canonical MIR verifier currently supports scalar Goto/Branch and canonical variant Switch CFG".into(),
             )
         }
     }
     active.remove(block_id);
+    Ok(())
+}
+
+fn explore_variant_switch(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    scrutinee: &MirValueId,
+    arms: &[crate::core::mir::MirSwitchArm],
+    consume_scrutinee: bool,
+    active: &mut BTreeSet<crate::core::mir::MirBlockId>,
+    returns: &mut Vec<ReturnPath>,
+    traps: &mut Vec<SymbolicTrap>,
+) -> Result<(), String> {
+    let scrutinee_ty = function
+        .values
+        .get(scrutinee)
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
+    if consume_scrutinee {
+        catalog.validate_option_string_variant(&scrutinee_ty)?;
+        catalog.validate_switch_move(&scrutinee_ty, arms)?;
+        validate_explicit_variant_switch_move(catalog, &scrutinee_ty, arms)?;
+    } else {
+        catalog.validate_switch(&scrutinee_ty, arms)?;
+    }
+    let value = if consume_scrutinee {
+        state
+            .values
+            .remove(scrutinee)
+            .ok_or_else(|| format!("switch-move scrutinee '{}' is not defined", scrutinee))?
+    } else {
+        state
+            .values
+            .get(scrutinee)
+            .cloned()
+            .ok_or_else(|| format!("switch scrutinee '{}' is not defined", scrutinee))?
+    };
+    let SymbolicValue::Variant {
+        nominal,
+        tag,
+        payload,
+    } = value
+    else {
+        return Err(
+            "canonical MIR verifier variant switch requires a symbolic Option/Result value".into(),
+        );
+    };
+    let Some((expected_nominal, variants)) = catalog.variant_layout(&scrutinee_ty) else {
+        return Err(
+            "canonical MIR verifier variant switch has no canonical TypeDesc layout".into(),
+        );
+    };
+    if nominal.as_str() != expected_nominal {
+        return Err("canonical MIR verifier variant switch nominal disagrees with TypeDesc".into());
+    }
+    let mut previous_cases = Vec::new();
+    for arm in arms {
+        let (guard, bindings) = match &arm.case {
+            MirSwitchCase::Variant(variant_id) => {
+                let variant = variants
+                    .iter()
+                    .find(|variant| variant.id == *variant_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "canonical MIR verifier switch variant '{}' is absent from TypeDesc",
+                            variant_id.0
+                        )
+                    })?;
+                let guard = tag.eq(Int::from_i64(variant.discriminant as i64));
+                previous_cases.push(guard.clone());
+                let mut bindings = Vec::new();
+                for binding in &arm.bindings {
+                    let field = variant
+                        .fields
+                        .iter()
+                        .find(|field| field.id == binding.field)
+                        .ok_or_else(|| {
+                            format!(
+                                "canonical MIR verifier switch binding field '{}' is absent from TypeDesc",
+                                binding.field.0
+                            )
+                        })?;
+                    let value = payload.get(&field.id).cloned().ok_or_else(|| {
+                        format!(
+                            "canonical MIR verifier switch payload field '{}' is absent",
+                            field.id.0
+                        )
+                    })?;
+                    let parameter = function.values.get(&binding.parameter).ok_or_else(|| {
+                        format!(
+                            "canonical MIR verifier switch binding parameter '{}' is absent",
+                            binding.parameter
+                        )
+                    })?;
+                    if !symbolic_matches_type(catalog, &parameter.ty, &value) {
+                        return Err(format!(
+                            "canonical MIR verifier switch binding '{}' disagrees with payload TypeDesc",
+                            binding.parameter
+                        ));
+                    }
+                    bindings.push((binding.parameter.clone(), value));
+                }
+                (guard, bindings)
+            }
+            MirSwitchCase::Default => (symbolic_default_guard(&previous_cases), Vec::new()),
+            MirSwitchCase::Literal(_) => {
+                return Err(
+                    "canonical MIR verifier variant switch cannot use a literal case".into(),
+                )
+            }
+        };
+        let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
+        next.constraints.push(guard);
+        for (parameter, value) in bindings {
+            next.values.insert(parameter, value);
+        }
+        explore_block(
+            function,
+            program,
+            catalog,
+            &mut next,
+            &arm.target,
+            &mut active.clone(),
+            returns,
+            traps,
+        )?;
+    }
+    Ok(())
+}
+
+/// The verifier's admitted move-variant island has no symbolic encoding for a
+/// default arm: every canonical TypeDesc variant must be explored explicitly
+/// so the active payload/drop proof is visible in the MIR CFG.  Keep this
+/// defense at the symbolic consumer boundary as well as in the capability
+/// gate; callers that invoke the MIR engine directly must remain fail-closed.
+fn validate_explicit_variant_switch_move(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    scrutinee_ty: &crate::core::ResolvedTypeId,
+    arms: &[crate::core::mir::MirSwitchArm],
+) -> Result<(), String> {
+    let Some((_, variants)) = catalog.variant_layout(scrutinee_ty) else {
+        return Err("canonical MIR verifier SwitchMove has no variant layout".into());
+    };
+    if arms.len() != variants.len() {
+        return Err(
+            "canonical MIR verifier SwitchMove requires exactly one explicit arm for each TypeDesc variant".into(),
+        );
+    }
+    let required = variants
+        .iter()
+        .map(|variant| variant.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for arm in arms {
+        let MirSwitchCase::Variant(variant_id) = &arm.case else {
+            return Err(
+                "canonical MIR verifier SwitchMove requires explicit variant arms; default/literal cases are not covered".into(),
+            );
+        };
+        if !seen.insert(variant_id.clone()) {
+            return Err(format!(
+                "canonical MIR verifier SwitchMove variant '{}' is repeated",
+                variant_id.0
+            ));
+        }
+    }
+    if seen != required {
+        return Err(
+            "canonical MIR verifier SwitchMove does not cover exactly the TypeDesc variants".into(),
+        );
+    }
     Ok(())
 }
 
@@ -1501,9 +1589,51 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
-        MirInstructionKind::MoveProject { .. }
-        | MirInstructionKind::ConstructVariantMove { .. } => {
+        MirInstructionKind::MoveProject { .. } => {
             return Err("MIR instruction is outside scalar verifier contract".into())
+        }
+        MirInstructionKind::ConstructVariantMove {
+            result,
+            nominal,
+            variant,
+            fields,
+        } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR variant result '{}' is absent", result))?
+                .ty
+                .clone();
+            catalog.validate_option_string_variant(&result_ty)?;
+            let mut values = Vec::with_capacity(fields.len());
+            let mut field_types = Vec::with_capacity(fields.len());
+            for (field, value) in fields {
+                let value_ty = function
+                    .values
+                    .get(value)
+                    .ok_or_else(|| format!("MIR variant payload value '{}' is absent", value))?
+                    .ty
+                    .clone();
+                field_types.push(value_ty);
+                let symbolic = state.values.remove(value).ok_or_else(|| {
+                    format!("MIR variant payload value '{}' is not defined", value)
+                })?;
+                values.push((field.clone(), symbolic));
+            }
+            let field_ids = fields
+                .iter()
+                .map(|(field, _)| field.clone())
+                .collect::<Vec<_>>();
+            catalog.validate_variant_construct(
+                &result_ty,
+                nominal,
+                variant,
+                &field_ids,
+                &field_types,
+            )?;
+            let value = symbolic_variant_construct(catalog, &result_ty, nominal, variant, &values)?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Call {
             result,
@@ -3105,12 +3235,12 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_non_copy_variant_switch_without_fallback() {
+    fn verifier_proves_non_copy_option_string_switch_move() {
         let source = r#"
             func consume(value: Option<string>) -> i32 {
                 ensures: result >= 0
                 match value {
-                    Some(_) => 1,
+                    Some(_) => 41,
                     None => 0
                 }
             }
@@ -3122,6 +3252,65 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR gate");
         let results = verify_program(&program, "non-copy-variant-source-hash".into())
+            .expect("verifier should prove the admitted variant island");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("consume"))
+            .expect("consume verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_rejects_non_copy_option_string_switch_move_default_directly() {
+        let source = r#"
+            func consume(value: Option<string>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Some(_) => 41,
+                    _ => 0
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR gate");
+        let results = verify_program(
+            &program,
+            "non-copy-option-string-default-source-hash".into(),
+        )
+        .expect("verifier should return a classified result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("consume"))
+            .expect("consume verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result.message.contains("explicit variant arms"));
+    }
+
+    #[test]
+    fn verifier_rejects_non_copy_nested_variant_switch_move() {
+        let source = r#"
+            func consume(value: Option<(string, i32)>) -> i32 {
+                ensures: result >= 0
+                match value {
+                    Some(_) => 41,
+                    None => 0
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR gate");
+        let results = verify_program(&program, "nested-non-copy-variant-source-hash".into())
             .expect("verifier should return a classified result");
         let result = results
             .iter()
@@ -3131,9 +3320,7 @@ mod tests {
             result.status,
             crate::verifier::VerifStatus::NotInTrustedSubset
         );
-        assert!(result
-            .message
-            .contains("outside the Copy/no-op aggregate contract"));
+        assert!(result.message.contains("Copy/no-op aggregate contract"));
     }
 
     #[test]

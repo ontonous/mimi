@@ -2598,6 +2598,93 @@ impl MirTypeCatalog {
         validate_variant_fields(expected, field_ids, field_types)
     }
 
+    /// Validate the first backend-independent non-Copy variant contract.
+    ///
+    /// `Option<string>` is the initial move-owned variant island.  Its
+    /// discriminants, stable payload identity, aggregate ABI, and complete
+    /// Move/Clone/Drop proof are TypeDesc facts shared by every consumer.
+    /// Result, nested payloads, and user-defined variants deliberately remain
+    /// outside this narrow contract until their own consumer matrix is closed.
+    pub fn validate_option_string_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let (inner, variants) = match &descriptor.layout {
+            MirLayout::Option { inner, variants } => (inner, variants),
+            layout => {
+                return Err(format!(
+                    "layout {layout:?} is outside the canonical non-Copy Option<string> variant contract"
+                ));
+            }
+        };
+        if descriptor.kind != MirTypeKind::Option
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Move
+        {
+            return Err(format!(
+                "variant TypeDesc kind/ABI/ownership ({:?}/{:?}/{:?}) is outside the canonical non-Copy Option<string> variant contract",
+                descriptor.kind, descriptor.abi, descriptor.ownership
+            ));
+        }
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::Aggregate,
+            clone: MirGlueKind::Aggregate,
+            drop: MirGlueKind::Aggregate,
+        };
+        if descriptor.glue != expected
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.variant_drop_plan.is_none()
+        {
+            return Err(
+                "variant TypeDesc aggregate glue/drop plan is incomplete for the canonical non-Copy Option<string> variant contract".into(),
+            );
+        }
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_glue(ty, operation)?;
+        }
+        if variants.len() != 2 {
+            return Err(format!(
+                "Option TypeDesc has {} variants; the canonical non-Copy Option<string> contract requires None and Some",
+                variants.len()
+            ));
+        }
+        let none = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Option::None"
+                && variant.name == "None"
+                && variant.discriminant == 0
+                && variant.fields.is_empty()
+        });
+        let some = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Option::Some"
+                && variant.name == "Some"
+                && variant.discriminant == 1
+                && variant.fields.len() == 1
+        });
+        if none.is_none() || some.is_none() {
+            return Err(
+                "Option TypeDesc variants do not match the canonical None/Some non-Copy contract"
+                    .into(),
+            );
+        }
+        let field = &some.expect("checked above").fields[0];
+        if field.id.0 != "builtin:variant:Option::Some/payload:0" || field.ty != *inner {
+            return Err(
+                "Option Some payload identity/type disagrees with the canonical non-Copy contract"
+                    .into(),
+            );
+        }
+        self.validate_owned_string(inner)?;
+        Ok(inner.clone())
+    }
+
     /// Return the canonical nominal label and discriminant/payload table for
     /// the built-in Option/Result families.  User enum layouts remain
     /// fail-closed until their schema is promoted into this catalog.
