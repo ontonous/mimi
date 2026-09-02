@@ -1088,6 +1088,141 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the backend-independent flat Copy Option/Result layout.
+    ///
+    /// Every variant uses the same one-slot scalar payload ABI; a zero-field
+    /// variant is allowed as the tag-only case.  The discriminant, variant
+    /// identity, payload field identity and no-op ownership glue are all
+    /// TypeDesc facts.  Native code may choose the physical `{i8, payload}`
+    /// struct only after this contract succeeds; reference, bytecode and
+    /// verifier consumers use the same semantic table.
+    pub fn validate_flat_copy_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let variants = match &descriptor.layout {
+            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            layout => {
+                return Err(format!(
+                    "type '{}' layout {layout:?} is outside the flat Copy variant contract",
+                    ty.as_str()
+                ));
+            }
+        };
+        if descriptor.kind != MirTypeKind::Option && descriptor.kind != MirTypeKind::Result {
+            return Err(format!(
+                "variant TypeDesc '{}' kind {:?} is outside the flat Copy variant contract",
+                ty.as_str(),
+                descriptor.kind
+            ));
+        }
+        if descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(format!(
+                "variant TypeDesc '{}' is not Aggregate/Copy with canonical no-op glue",
+                ty.as_str()
+            ));
+        }
+        if variants.is_empty() {
+            return Err(format!(
+                "variant TypeDesc '{}' has no variants in the flat Copy variant contract",
+                ty.as_str()
+            ));
+        }
+
+        let expected_nominal = match descriptor.kind {
+            MirTypeKind::Option => "builtin:type:Option",
+            MirTypeKind::Result => "builtin:type:Result",
+            _ => unreachable!("variant kind checked above"),
+        };
+        let (actual_nominal, _) = self
+            .variant_layout(ty)
+            .expect("Option/Result layout checked above");
+        if actual_nominal != expected_nominal {
+            return Err(format!(
+                "variant TypeDesc '{}' nominal '{}' disagrees with '{}'",
+                ty.as_str(),
+                actual_nominal,
+                expected_nominal
+            ));
+        }
+
+        let mut discriminants = BTreeSet::new();
+        let mut variant_ids = BTreeSet::new();
+        let mut field_ids = BTreeSet::new();
+        let mut payload_type: Option<ResolvedTypeId> = None;
+        for variant in variants {
+            if !discriminants.insert(variant.discriminant) {
+                return Err(format!(
+                    "variant discriminant {} is duplicated in the flat Copy variant contract",
+                    variant.discriminant
+                ));
+            }
+            if variant.discriminant > u8::MAX as u16 {
+                return Err(format!(
+                    "variant discriminant {} does not fit the flat Copy variant ABI",
+                    variant.discriminant
+                ));
+            }
+            if !variant_ids.insert(variant.id.clone()) {
+                return Err(format!(
+                    "variant identity '{}' is duplicated in the flat Copy variant contract",
+                    variant.id.0
+                ));
+            }
+            if variant.fields.len() > 1 {
+                return Err(format!(
+                    "variant '{}' has {} payload fields; the flat Copy variant contract allows at most one",
+                    variant.name,
+                    variant.fields.len()
+                ));
+            }
+            let Some(field) = variant.fields.first() else {
+                continue;
+            };
+            if !field_ids.insert(field.id.clone()) {
+                return Err(format!(
+                    "variant payload field identity '{}' is duplicated in the flat Copy variant contract",
+                    field.id.0
+                ));
+            }
+            self.validate_copy_scalar(&field.ty).map_err(|message| {
+                format!(
+                    "variant '{}' payload is outside the flat Copy variant contract: {message}",
+                    variant.name
+                )
+            })?;
+            if let Some(expected) = &payload_type {
+                if expected != &field.ty {
+                    return Err(format!(
+                        "variant payload type '{}' disagrees with '{}'; mixed payload ABI is outside the flat Copy variant contract",
+                        field.ty.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            } else {
+                payload_type = Some(field.ty.clone());
+            }
+        }
+        payload_type.ok_or_else(|| {
+            "variant has no scalar payload; unit/zero-payload variants are outside the flat Copy variant contract".into()
+        })
+    }
+
     /// Validate the argument side of the first concrete generic MIR
     /// instance contract.  This is deliberately narrower than the complete
     /// scalar universe: native and MIR verifier must agree on signed i32/i64
@@ -3841,6 +3976,33 @@ mod tests {
                 &[bool_id, i32_id]
             )
             .is_err());
+    }
+
+    #[test]
+    fn flat_copy_variant_layout_contract_is_shared_and_rejects_mixed_payloads() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(i32_id.clone()))
+            .expect("option");
+        let result_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: i32_id.clone(),
+                error: bool_id,
+            })
+            .expect("mixed result");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        assert_eq!(catalog.validate_flat_copy_variant(&option_id), Ok(i32_id));
+        let error = catalog
+            .validate_flat_copy_variant(&result_id)
+            .expect_err("mixed Result payload ABI must fail closed");
+        assert!(error.contains("mixed payload ABI"), "{error}");
     }
 
     #[test]

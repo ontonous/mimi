@@ -772,6 +772,63 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_shared_flat_copy_variant_contract() {
+        for (source, expected, module_name) in [
+            (
+                include_str!("../../../tests/fixtures/mir_native_option_copy.mimi"),
+                42,
+                "mir_native_flat_copy_option_test",
+            ),
+            (
+                include_str!("../../../tests/fixtures/mir_native_result_copy.mimi"),
+                8,
+                "mir_native_flat_copy_result_test",
+            ),
+        ] {
+            let program = canonical_program(source);
+            for ty in program
+                .type_catalog()
+                .iter()
+                .filter_map(|(ty, descriptor)| {
+                    matches!(
+                        descriptor.layout,
+                        crate::core::mir::types::MirLayout::Option { .. }
+                            | crate::core::mir::types::MirLayout::Result { .. }
+                    )
+                    .then_some(ty.clone())
+                })
+            {
+                program
+                    .type_catalog()
+                    .validate_flat_copy_variant(&ty)
+                    .expect("shared flat Copy variant TypeDesc contract");
+            }
+            let owner = crate::core::NodeId("function:main".into());
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("reference flat Copy variant execution");
+            assert_eq!(reference, MirRuntimeValue::Int(expected));
+            let bytecode = BytecodeVM::new(
+                compile_mir_program(&program).expect("flat Copy variant MIR bytecode"),
+            )
+            .run_value()
+            .expect("bytecode flat Copy variant execution");
+            assert!(matches!(bytecode, Value::Int(value) if value == expected));
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native(&program)
+                .expect("native flat Copy variant lowering");
+            generator
+                .module
+                .verify()
+                .expect("native flat Copy variant module verifies");
+            assert!(generator.module.get_function("main").is_some());
+        }
+    }
+
+    #[test]
     fn native_emitter_materializes_option_string_switch_move_and_matches_oracles() {
         let program = canonical_program(
             "func consume_text(text: string) -> i32 { drop(text); 41 }\nfunc consume(value: Option<string>) -> i32 { match value { Some(text) => consume_text(text), None => 0 } }\nfunc discard(value: Option<string>) -> i32 { match value { Some(_) => 7, None => 8 } }\nfunc main() -> i32 { let first: Option<string> = Some(\"owned\"); let second: Option<string> = Some(\"discard\"); let a = consume(first); let b = discard(second); a + b }",
