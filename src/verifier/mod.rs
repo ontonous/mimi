@@ -276,25 +276,99 @@ pub fn verify_checked_dual(
 /// executor, bytecode/native preflight, and the MIR verifier.  A complete
 /// admission followed by construction, coverage, or capability failure is a
 /// hard error; it is never converted into the legacy AST/Flow verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosedMirIsland {
+    ScalarCollection,
+    FlatCopyRecord,
+    S8FlowTransition,
+}
+
+impl ClosedMirIsland {
+    fn profile(self) -> crate::core::mir::CanonicalMirRouteProfile {
+        match self {
+            Self::ScalarCollection => crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
+            Self::FlatCopyRecord => crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
+            Self::S8FlowTransition => crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+        }
+    }
+
+    fn admitted(self, admission: crate::core::mir::CanonicalMirRouteAdmission) -> bool {
+        match self {
+            Self::ScalarCollection => admission.collection_complete(),
+            Self::FlatCopyRecord => admission.record_complete(),
+            Self::S8FlowTransition => admission.flow_complete(),
+        }
+    }
+
+    fn materialized(self, route: &crate::core::mir::CanonicalMirRouteMaterialization) -> bool {
+        match self {
+            Self::ScalarCollection => route.materialized_collection_candidate,
+            Self::FlatCopyRecord => route.materialized_record_candidate,
+            Self::S8FlowTransition => route.materialized_flow_candidate,
+        }
+    }
+}
+
+/// Materialize one of the already-closed verifier islands through the shared
+/// route envelope.  This is deliberately profile-driven: a verifier helper
+/// must not grow a private `is_exact -> construct -> contains_*` policy when a
+/// new consumer route is added.  Checker admission is read before construction
+/// so non-target profiles do not pay for or accidentally trigger materialization.
+fn materialize_closed_mir_island(
+    program: &crate::core::CheckedProgram,
+    island: ClosedMirIsland,
+) -> Result<Option<crate::core::mir::reference::MirProgram>, String> {
+    if !is_z3_available() {
+        // Preserve the existing CheckedProgram mock infrastructure boundary;
+        // without Z3 the public API does not claim a MIR proof.
+        return Ok(None);
+    }
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if !island.admitted(admission) {
+        return Ok(None);
+    }
+    let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
+        Ok(route) => route,
+        Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
+            return Ok(None)
+        }
+        Err(error) => {
+            let code = match error {
+                crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
+                    stage, ..
+                } => match stage {
+                    crate::core::mir::CanonicalMirRouteFailureStage::Construction => {
+                        "MIR-MATERIALIZATION-001"
+                    }
+                    crate::core::mir::CanonicalMirRouteFailureStage::Coverage => "MIR-COVERAGE-001",
+                },
+                crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+                    ..
+                } => {
+                    unreachable!("compatibility errors are returned above")
+                }
+            };
+            return Err(format!("{code}: {error}"));
+        }
+    };
+    if !island.materialized(&route) {
+        return Err(format!(
+            "MIR-COVERAGE-001: {} admission did not materialize its canonical operation",
+            island.profile().as_str()
+        ));
+    }
+    Ok(Some(route.program))
+}
+
 fn verify_closed_scalar_collection_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    if !is_z3_available() {
-        // Preserve the existing no-Z3 mock infrastructure boundary.  The
-        // typed admission remains available to callers/tests, but the public
-        // API does not claim a MIR proof when the solver is absent.
+    let Some(canonical) =
+        materialize_closed_mir_island(program, ClosedMirIsland::ScalarCollection)?
+    else {
         return Ok(None);
-    }
-    if crate::core::mir::classify_scalar_collection_admission(program)
-        != crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
-    {
-        return Ok(None);
-    }
-    let route = crate::core::mir::materialize_canonical_mir_route(program, None)
-        .map_err(|error| format!("MIR-MATERIALIZATION-001: {error}"))?;
-    let canonical = &route.program;
-    debug_assert!(route.materialized_collection_candidate);
+    };
     crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
         format!(
             "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
@@ -329,21 +403,10 @@ fn verify_closed_flat_copy_record_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    if !is_z3_available() {
-        // The existing public API uses the CheckedProgram mock when Z3 is
-        // unavailable.  Do not change that infrastructure behavior merely by
-        // probing the canonical verifier.
+    let Some(canonical) = materialize_closed_mir_island(program, ClosedMirIsland::FlatCopyRecord)?
+    else {
         return Ok(None);
-    }
-    match crate::core::mir::classify_flat_copy_record_admission(program) {
-        crate::core::mir::FlatCopyRecordAdmission::OutsideProfile
-        | crate::core::mir::FlatCopyRecordAdmission::MixedCoverage => return Ok(None),
-        crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage => {}
-    }
-    let route = crate::core::mir::materialize_canonical_mir_route(program, None)
-        .map_err(|error| format!("MIR-MATERIALIZATION-001: {error}"))?;
-    let canonical = &route.program;
-    debug_assert!(route.materialized_record_candidate);
+    };
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(
             "MIR-CAPABILITY-001: canonical verifier rejected the flat Copy-record island: {errors:?}"
@@ -375,30 +438,13 @@ fn verify_closed_s8_flow_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    if !is_z3_available() {
+    // S26/S27: verifier admission, construction, and the FlowTransition
+    // receipt all come from the shared profile-driven route envelope.
+    let Some(canonical) =
+        materialize_closed_mir_island(program, ClosedMirIsland::S8FlowTransition)?
+    else {
         return Ok(None);
-    }
-    // S26: verifier admission, construction, and the FlowTransition receipt
-    // must come from the same backend-free route envelope as the selector and
-    // direct native entry.  In particular, do not reconstruct the old
-    // `is_exact -> from_checked_program -> contains_*` policy here: that was a
-    // second production route and could drift from the other consumers.
-    let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
-        Ok(route) => route,
-        Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
-            return Ok(None)
-        }
-        Err(error) => {
-            return Err(format!(
-                "MIR-MATERIALIZATION-001: S8 Flow verifier island route failed: {error}"
-            ))
-        }
     };
-    if !route.admission.flow_complete() {
-        return Ok(None);
-    }
-    debug_assert!(route.materialized_flow_candidate);
-    let canonical = &route.program;
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!("MIR-CAPABILITY-001: canonical verifier rejected the S8 Flow island: {errors:?}")
     })?;
