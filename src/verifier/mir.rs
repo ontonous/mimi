@@ -154,29 +154,7 @@ pub(crate) fn verify_program(
 }
 
 fn canonical_mir_hash(program: &MirProgram) -> String {
-    let mut text = String::new();
-    text.push_str("mimi-canonical-mir-verifier-v1\n");
-    text.push_str(&program.type_catalog().canonical_text());
-    for instance in program.instances().values() {
-        text.push_str("mir.instance ");
-        text.push_str(instance.id.as_str());
-        text.push(' ');
-        text.push_str(instance.template.0.as_str());
-        text.push_str(" -> ");
-        text.push_str(instance.function.0.as_str());
-        text.push('<');
-        for (index, argument) in instance.arguments.iter().enumerate() {
-            if index != 0 {
-                text.push(',');
-            }
-            text.push_str(argument.as_str());
-        }
-        text.push_str(">\n");
-    }
-    for function in program.functions().values() {
-        text.push_str(&function.canonical_text());
-    }
-    blake3::hash(text.as_bytes()).to_hex().to_string()
+    program.canonical_digest()
 }
 
 fn verify_function(

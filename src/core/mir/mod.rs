@@ -20,6 +20,7 @@ mod contracts;
 mod eligibility;
 mod islands;
 pub mod lower;
+mod receipt;
 pub mod reference;
 pub mod types;
 
@@ -33,6 +34,7 @@ pub use islands::{
     contains_scalar_collection_candidate, validate_scalar_collection_island,
     FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
+pub use receipt::{CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA};
 
 /// Stable owner identity shared by resolved transition bodies, transition
 /// contracts, and all backend adapters.

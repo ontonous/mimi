@@ -947,6 +947,64 @@ fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
 }
 
 #[test]
+fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_list_len.mimi");
+    let file = parse_memory_source(source, "mir-scalar-collection-receipt").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&checked),
+        crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    );
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    crate::core::mir::validate_scalar_collection_island(&canonical)
+        .expect("scalar collection island");
+    crate::verifier::validate_mir_capabilities(&canonical).expect("verifier capability");
+
+    let receipt = canonical.route_receipt(crate::core::mir::SCALAR_COLLECTION_ISLAND);
+    assert_eq!(receipt.schema, crate::core::mir::MIR_ROUTE_RECEIPT_SCHEMA);
+    assert_eq!(receipt.profile, crate::core::mir::SCALAR_COLLECTION_ISLAND);
+    assert_eq!(receipt.mir_digest.len(), 64);
+    assert_eq!(receipt.type_desc_digest.len(), 64);
+    assert_eq!(receipt.ownership_digest.len(), 64);
+    assert!(receipt
+        .root_owners
+        .iter()
+        .any(|owner| owner.0 == "function:main"));
+
+    // Every consumer below receives the same immutable MIR graph.  The
+    // receipt is recomputed only for comparison; it is never a backend input
+    // from which a consumer could reconstruct frontend semantics.
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(42)
+    );
+    let bytecode = crate::interp::bytecode::compile_mir_program(&canonical).expect("MIR bytecode");
+    let mut bytecode_vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    assert_eq!(bytecode_vm.run().expect("MIR bytecode execution"), 42);
+    crate::codegen::mir::validate_mir_native(&canonical).expect("native MIR capability");
+    let verifier_results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let artifact = verifier_results
+        .iter()
+        .find(|result| result.func_name == "function:list_len_contract")
+        .and_then(|result| result.artifact.as_ref())
+        .expect("MIR proof artifact");
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+
+    let after_consumers = canonical.route_receipt(crate::core::mir::SCALAR_COLLECTION_ISLAND);
+    assert_eq!(receipt, after_consumers);
+}
+
+#[test]
 fn public_checked_verifier_routes_closed_s8_flow_to_mir() {
     require_z3!();
     let source = r#"
