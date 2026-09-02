@@ -1223,6 +1223,33 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Validate the flat Copy variant contract and return one stable variant
+    /// descriptor for a native switch arm.  The caller receives a TypeDesc
+    /// fact rather than re-deriving the arm from a backend representation.
+    pub fn validated_flat_copy_variant(
+        &self,
+        ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+    ) -> Result<&MirVariantDesc, String> {
+        self.validate_flat_copy_variant(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let variants = match &descriptor.layout {
+            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            layout => {
+                return Err(format!(
+                    "type '{}' layout {layout:?} is outside the flat Copy variant contract",
+                    ty.as_str()
+                ));
+            }
+        };
+        variants
+            .iter()
+            .find(|variant| variant.id == *variant_id)
+            .ok_or_else(|| format!("variant '{}' is absent from TypeDesc", variant_id.0))
+    }
+
     /// Validate the argument side of the first concrete generic MIR
     /// instance contract.  This is deliberately narrower than the complete
     /// scalar universe: native and MIR verifier must agree on signed i32/i64
@@ -4438,6 +4465,20 @@ mod tests {
             .expect("valid construction returns canonical descriptor");
         assert_eq!(some_desc.name, "Some");
         assert_eq!(some_desc.discriminant, 1);
+        let flat_some = catalog
+            .validated_flat_copy_variant(&option_id, &some)
+            .expect("flat Copy Some descriptor");
+        assert_eq!(flat_some.id, some);
+        let flat_missing = catalog
+            .validated_flat_copy_variant(
+                &option_id,
+                &crate::core::NodeId("builtin:variant:Option::Missing".into()),
+            )
+            .expect_err("unknown flat Copy variant must fail closed");
+        assert!(
+            flat_missing.contains("absent from TypeDesc"),
+            "{flat_missing}"
+        );
         assert!(catalog
             .validate_variant_construct(
                 &option_id,

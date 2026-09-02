@@ -317,13 +317,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let variant = self
                 .program
                 .type_catalog()
-                .variant(&scrutinee_ty, variant_id)
-                .ok_or_else(|| {
-                    NativeMirError::new(
-                        subject.to_string(),
-                        format!("variant '{}' is absent from TypeDesc", variant_id.0),
-                    )
-                })?
+                .validated_flat_copy_variant(&scrutinee_ty, variant_id)
+                .map_err(|message| NativeMirError::new(subject.to_string(), message))?
                 .clone();
             let condition = self
                 .generator
