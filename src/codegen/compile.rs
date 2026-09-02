@@ -566,16 +566,36 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<Option<crate::core::mir::reference::MirProgram>, Vec<crate::diagnostic::Diagnostic>>
     {
+        // Admission is checker-owned and must happen before materialization.
+        // In particular, a complete scalar-collection program must not turn a
+        // MIR construction error into the old E0723/legacy path.  Mixed
+        // coverage remains an explicit compatibility boundary until the
+        // whole-program profile is closed; it is not the same state as a
+        // complete profile whose canonical producer failed.
+        let collection_admission = crate::core::mir::classify_scalar_collection_admission(program);
+        let record_admission = crate::core::mir::classify_flat_copy_record_admission(program);
+        let complete_collection_admission = matches!(
+            collection_admission,
+            crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let complete_record_admission = matches!(
+            record_admission,
+            crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
         let canonical = match crate::core::mir::reference::MirProgram::from_checked_program(program)
         {
             Ok(canonical) => canonical,
             Err(error) => {
-                if program.type_defs().values().any(|definition| {
-                    definition.kind == crate::core::ResolvedTypeKind::Record
-                        && matches!(definition.origin, crate::core::Origin::User(_))
-                }) && crate::core::mir::classify_flat_copy_record_admission(program)
-                    == crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
-                {
+                if complete_collection_admission {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete scalar collection MIR island construction failed: {error}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if complete_record_admission {
                     return Err(vec![crate::diagnostic::Diagnostic::error_code(
                         "MIR-LOWERING-001",
                         format!(
@@ -592,12 +612,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         let flat_copy_record_candidate =
             crate::core::mir::contains_flat_copy_record_candidate(&canonical);
         if !scalar_collection_candidate && !flat_copy_record_candidate {
-            if program.type_defs().values().any(|definition| {
-                definition.kind == crate::core::ResolvedTypeKind::Record
-                    && matches!(definition.origin, crate::core::Origin::User(_))
-            }) && crate::core::mir::classify_flat_copy_record_admission(program)
-                == crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
-            {
+            if complete_collection_admission {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    "MIR-COVERAGE-001",
+                    "complete scalar collection admission did not materialize a native collection boundary",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            if complete_record_admission {
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     "MIR-COVERAGE-001",
                     "complete flat Copy-record admission did not materialize a native record boundary",

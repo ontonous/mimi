@@ -236,6 +236,10 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&program),
+        crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    );
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("canonical MIR");
     assert!(crate::core::mir::contains_scalar_collection_candidate(
@@ -254,6 +258,42 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
         .get_function("main")
         .is_some_and(|function| function.count_basic_blocks() > 0));
     assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
+fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
+    let source = r#"
+        func main() -> i32 {
+            let values = [1, 2, 3]
+            let count = len(values)
+            drop(values)
+            for i in range(0, 3) {
+                let copy = i
+                drop(copy)
+            }
+            count
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_scalar_collection_admission(&program),
+        crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s23_scalar_collection_materialization_error");
+    let errors = codegen.compile_checked(&program).expect_err(
+        "complete collection admission must not fall back after MIR construction failure",
+    );
+    assert!(errors.iter().any(|error| {
+        error.code.as_deref() == Some("MIR-LOWERING-001")
+            && error.message.contains("scalar collection")
+    }));
+    assert!(codegen.module.get_function("main").is_none());
 }
 
 #[test]
