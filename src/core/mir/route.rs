@@ -60,6 +60,31 @@ impl CanonicalMirRouteProfile {
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
         }
     }
+
+    /// Return whether checker-owned admission has completed this profile.
+    ///
+    /// This is deliberately kept next to the profile names and materialized
+    /// receipts so verifier and backend route owners cannot grow independent
+    /// `is_exact -> construct -> contains_*` tables.
+    pub const fn is_admitted(self, admission: CanonicalMirRouteAdmission) -> bool {
+        match self {
+            Self::ScalarCollection => admission.collection_complete(),
+            Self::FlatCopyRecord => admission.record_complete(),
+            Self::S8FlowTransition => admission.flow_complete(),
+            Self::NonCopyOptionStringVariant => admission.option_string_complete(),
+        }
+    }
+
+    /// Return whether the canonical route contains this profile's operation
+    /// materialization receipt.
+    pub const fn is_materialized(self, route: &CanonicalMirRouteMaterialization) -> bool {
+        match self {
+            Self::ScalarCollection => route.materialized_collection_candidate,
+            Self::FlatCopyRecord => route.materialized_record_candidate,
+            Self::S8FlowTransition => route.materialized_flow_candidate,
+            Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
+        }
+    }
 }
 
 /// Checker-owned admission state for the already implemented S8 silent-local
@@ -416,5 +441,35 @@ mod tests {
             .expect("complete Option<string> route must materialize");
         assert!(route.materialized_option_string_candidate);
         assert!(crate::core::mir::validate_option_string_variant_island(&route.program).is_ok());
+    }
+
+    #[test]
+    fn profile_matrix_owns_admission_and_materialization_mapping() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_list_len.mimi"
+        ));
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("scalar collection route must materialize");
+        let admission = route.admission;
+        let profiles = [
+            CanonicalMirRouteProfile::ScalarCollection,
+            CanonicalMirRouteProfile::FlatCopyRecord,
+            CanonicalMirRouteProfile::S8FlowTransition,
+            CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+        ];
+        for profile in profiles {
+            assert_eq!(
+                profile.is_admitted(admission),
+                matches!(profile, CanonicalMirRouteProfile::ScalarCollection),
+                "profile admission mapping drifted for {}",
+                profile.as_str()
+            );
+            assert_eq!(
+                profile.is_materialized(&route),
+                matches!(profile, CanonicalMirRouteProfile::ScalarCollection),
+                "profile materialization mapping drifted for {}",
+                profile.as_str()
+            );
+        }
     }
 }

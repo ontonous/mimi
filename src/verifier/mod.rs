@@ -97,16 +97,7 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    if let Some(results) = verify_closed_scalar_collection_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_option_string_variant_mir(program, source_hash.clone())? {
+    if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
     }
     // P1-24: compute Resolved IR hash from CheckedProgram signatures.
@@ -259,16 +250,7 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    if let Some(results) = verify_closed_scalar_collection_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_flat_copy_record_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_s8_flow_mir(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    if let Some(results) = verify_closed_option_string_variant_mir(program, source_hash.clone())? {
+    if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
     }
     let resolved_ir_hash = ctx::compute_resolved_ir_hash(program);
@@ -289,50 +271,84 @@ pub fn verify_checked_dual(
     Ok(merge_engine_verdicts(resolved_results, flow_results))
 }
 
-/// Verify the already-closed scalar collection island from canonical MIR.
+/// Try the already-closed verifier profile matrix from canonical MIR.
 ///
-/// Admission is checker-owned and runs before construction.  The successful
-/// route is deliberately the same MIR graph consumed by the reference
-/// executor, bytecode/native preflight, and the MIR verifier.  A complete
-/// admission followed by construction, coverage, or capability failure is a
-/// hard error; it is never converted into the legacy AST/Flow verifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClosedMirIsland {
-    ScalarCollection,
-    FlatCopyRecord,
-    S8FlowTransition,
-    NonCopyOptionStringVariant,
+/// The public checked verifier is a program-level API. Once checker-owned
+/// eligibility has established one of the exact closed profiles, its old
+/// AST/Flow engine is no longer a valid consumer for this request. The profile
+/// matrix below is owned by the shared MIR route module; construction,
+/// materialized operation coverage, MIR capability, and the MIR verifier are
+/// one hard-fail-closed chain. Programs outside every exact profile return
+/// `None` so the existing compatibility verifier remains an explicit boundary
+/// for unmigrated features.
+fn verify_closed_mir_program(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 4] = [
+        crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
+        crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
+        crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+    ];
+    for profile in PROFILES {
+        if let Some(results) = verify_closed_mir_profile(program, profile, source_hash.clone())? {
+            return Ok(Some(results));
+        }
+    }
+    Ok(None)
 }
 
-impl ClosedMirIsland {
-    fn profile(self) -> crate::core::mir::CanonicalMirRouteProfile {
-        match self {
-            Self::ScalarCollection => crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
-            Self::FlatCopyRecord => crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
-            Self::S8FlowTransition => crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
-            Self::NonCopyOptionStringVariant => {
-                crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant
-            }
+/// Verify one already-closed profile from the shared canonical route.
+///
+/// This function is the verifier-side consumer adapter only. Admission and
+/// materialization are checker-owned by `core::mir::route`; profile-specific
+/// TypeDesc/island validators remain explicit here because they are the
+/// verifier's final consumer gate.
+fn verify_closed_mir_profile(
+    program: &crate::core::CheckedProgram,
+    profile: crate::core::mir::CanonicalMirRouteProfile,
+    source_hash: String,
+) -> Result<Option<Vec<VerificationResult>>, String> {
+    let Some(canonical) = materialize_closed_mir_island(program, profile)? else {
+        return Ok(None);
+    };
+    match profile {
+        crate::core::mir::CanonicalMirRouteProfile::ScalarCollection => {
+            crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
+                )
+            })?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord
+        | crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition => {}
+        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant => {
+            crate::core::mir::validate_option_string_variant_island(&canonical).map_err(
+                |errors| {
+                    format!(
+                        "MIR-CAPABILITY-001: canonical verifier rejected the Option<string> variant island: {errors:?}"
+                    )
+                },
+            )?;
         }
     }
-
-    fn admitted(self, admission: crate::core::mir::CanonicalMirRouteAdmission) -> bool {
-        match self {
-            Self::ScalarCollection => admission.collection_complete(),
-            Self::FlatCopyRecord => admission.record_complete(),
-            Self::S8FlowTransition => admission.flow_complete(),
-            Self::NonCopyOptionStringVariant => admission.option_string_complete(),
+    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: canonical verifier TypeDesc/capability gate rejected the {}: {errors:?}",
+            profile.as_str()
+        )
+    })?;
+    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
+    // Public checked-verifier APIs historically expose source-level callable
+    // names. Keep that display contract at the adapter boundary while proof
+    // artifacts retain the canonical `function:` owner and MIR hash.
+    for result in &mut results {
+        if let Some(name) = result.func_name.strip_prefix("function:") {
+            result.func_name = name.to_string();
         }
     }
-
-    fn materialized(self, route: &crate::core::mir::CanonicalMirRouteMaterialization) -> bool {
-        match self {
-            Self::ScalarCollection => route.materialized_collection_candidate,
-            Self::FlatCopyRecord => route.materialized_record_candidate,
-            Self::S8FlowTransition => route.materialized_flow_candidate,
-            Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
-        }
-    }
+    Ok(Some(results))
 }
 
 /// Materialize one of the already-closed verifier islands through the shared
@@ -342,7 +358,7 @@ impl ClosedMirIsland {
 /// so non-target profiles do not pay for or accidentally trigger materialization.
 fn materialize_closed_mir_island(
     program: &crate::core::CheckedProgram,
-    island: ClosedMirIsland,
+    island: crate::core::mir::CanonicalMirRouteProfile,
 ) -> Result<Option<crate::core::mir::reference::MirProgram>, String> {
     if !is_z3_available() {
         // Preserve the existing CheckedProgram mock infrastructure boundary;
@@ -350,7 +366,7 @@ fn materialize_closed_mir_island(
         return Ok(None);
     }
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-    if !island.admitted(admission) {
+    if !island.is_admitted(admission) {
         return Ok(None);
     }
     let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
@@ -377,144 +393,39 @@ fn materialize_closed_mir_island(
             return Err(format!("{code}: {error}"));
         }
     };
-    if !island.materialized(&route) {
+    if !island.is_materialized(&route) {
         return Err(format!(
             "MIR-COVERAGE-001: {} admission did not materialize its canonical operation",
-            island.profile().as_str()
+            island.as_str()
         ));
     }
     Ok(Some(route.program))
 }
 
+/// Verify the already-closed scalar collection island from canonical MIR.
+#[cfg(test)]
 fn verify_closed_scalar_collection_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    let Some(canonical) =
-        materialize_closed_mir_island(program, ClosedMirIsland::ScalarCollection)?
-    else {
-        return Ok(None);
-    };
-    crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
-        format!(
-            "MIR-CAPABILITY-001: canonical verifier rejected the scalar collection island: {errors:?}"
-        )
-    })?;
-    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-        format!(
-            "MIR-CAPABILITY-001: canonical verifier TypeDesc/capability gate rejected the scalar collection island: {errors:?}"
-        )
-    })?;
-    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
-    // Keep the historical public display name while preserving the canonical
-    // `function:<name>` owner in MIR proof artifacts and their hashes.
-    for result in &mut results {
-        if let Some(name) = result.func_name.strip_prefix("function:") {
-            result.func_name = name.to_string();
-        }
-    }
-    Ok(Some(results))
-}
-
-/// Verify the already-closed flat Copy-record island from canonical MIR.
-///
-/// Admission is decided from checker-owned Resolved IR before materialization.
-/// Only `CompleteCoverage` crosses the MIR boundary: a construction failure is
-/// a hard materialization error, and a successful graph without the admitted
-/// record is a coverage error.  `OutsideProfile` and `MixedCoverage` are the
-/// explicit compatibility boundary for programs that do not belong to this
-/// whole-program island; they are never confused with a MIR construction
-/// failure.
-fn verify_closed_flat_copy_record_mir(
-    program: &crate::core::CheckedProgram,
-    source_hash: String,
-) -> Result<Option<Vec<VerificationResult>>, String> {
-    let Some(canonical) = materialize_closed_mir_island(program, ClosedMirIsland::FlatCopyRecord)?
-    else {
-        return Ok(None);
-    };
-    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-        format!(
-            "MIR-CAPABILITY-001: canonical verifier rejected the flat Copy-record island: {errors:?}"
-        )
-    })?;
-    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
-    // `verify_checked*` historically exposed source-level callable names,
-    // while canonical MIR owners carry the stable `function:` NodeId prefix.
-    // Keep that public API identity stable at the adapter boundary; the
-    // proof artifact still records the canonical MIR engine and hash.
-    for result in &mut results {
-        if let Some(name) = result.func_name.strip_prefix("function:") {
-            result.func_name = name.to_string();
-        }
-    }
-    Ok(Some(results))
+    verify_closed_mir_profile(
+        program,
+        crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
+        source_hash,
+    )
 }
 
 /// Verify the already-closed S8 silent-local Flow island from canonical MIR.
-///
-/// The public checked verifier is a program-level API.  Once checker-owned
-/// eligibility has established the exact S8 profile, its old AST/Flow engine
-/// is no longer a valid consumer for this request.  Construction, materialized
-/// operation coverage, MIR capability, and the MIR verifier are therefore one
-/// hard-fail-closed chain.  Programs outside the exact profile return `None` so
-/// the existing compatibility verifier remains an explicit boundary for
-/// unmigrated Flow features.
+#[cfg(test)]
 fn verify_closed_s8_flow_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    // S26/S27: verifier admission, construction, and the FlowTransition
-    // receipt all come from the shared profile-driven route envelope.
-    let Some(canonical) =
-        materialize_closed_mir_island(program, ClosedMirIsland::S8FlowTransition)?
-    else {
-        return Ok(None);
-    };
-    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-        format!("MIR-CAPABILITY-001: canonical verifier rejected the S8 Flow island: {errors:?}")
-    })?;
-    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
-    // Keep the public checked-verifier display contract stable while retaining
-    // the canonical `function:<name>` owner in the MIR proof artifact/hash.
-    for result in &mut results {
-        if let Some(name) = result.func_name.strip_prefix("function:") {
-            result.func_name = name.to_string();
-        }
-    }
-    Ok(Some(results))
-}
-
-/// Verify the already-closed non-Copy `Option<string>` variant island from
-/// canonical MIR.  The variant validator owns the exact TypeDesc/layout,
-/// Move/Clone/Drop glue, and explicit SwitchMove contract; this function only
-/// composes that contract with the verifier's structural and symbolic passes.
-fn verify_closed_option_string_variant_mir(
-    program: &crate::core::CheckedProgram,
-    source_hash: String,
-) -> Result<Option<Vec<VerificationResult>>, String> {
-    let Some(canonical) =
-        materialize_closed_mir_island(program, ClosedMirIsland::NonCopyOptionStringVariant)?
-    else {
-        return Ok(None);
-    };
-    crate::core::mir::validate_option_string_variant_island(&canonical).map_err(|errors| {
-        format!(
-            "MIR-CAPABILITY-001: canonical verifier rejected the Option<string> variant island: {errors:?}"
-        )
-    })?;
-    crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-        format!(
-            "MIR-CAPABILITY-001: canonical verifier TypeDesc/capability gate rejected the Option<string> variant island: {errors:?}"
-        )
-    })?;
-    let mut results = crate::verifier::verify_mir(&canonical, source_hash)?;
-    for result in &mut results {
-        if let Some(name) = result.func_name.strip_prefix("function:") {
-            result.func_name = name.to_string();
-        }
-    }
-    Ok(Some(results))
+    verify_closed_mir_profile(
+        program,
+        crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+        source_hash,
+    )
 }
 
 /// Coarse verdict classes for divergence detection.
