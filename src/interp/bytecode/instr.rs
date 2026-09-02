@@ -817,11 +817,16 @@ pub enum Op {
         ra: Reg,
         tag: ConstIdx,
     },
-    /// rd = variant_get(ra, idx) — extract payload field (alias for VariantPayload)
+    /// rd = variant_get(ra, idx) — extract a canonical payload field without
+    /// consuming the source. `variant_tag` and `shapes` are selected from
+    /// the MIR TypeDesc; the VM checks the active identity and physical
+    /// payload shape before reading the field.
     VariantGet {
         rd: Reg,
         ra: Reg,
         idx: u16,
+        variant_tag: ConstIdx,
+        shapes: ConstIdx,
     },
     /// v0.34.15: extract a pattern field by NAME. Flow states are
     /// Record(Some(name), HashMap) — multi-target match arms name fields

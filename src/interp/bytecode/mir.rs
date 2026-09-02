@@ -2675,6 +2675,10 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("edge to '{}' has wrong argument arity", target));
             return;
         }
+        let Some(shapes) = self.emit_variant_shape_table(scrutinee_ty) else {
+            return;
+        };
+        let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
         let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
         for argument in arguments {
             let Some(source) = self.reg(argument) else {
@@ -2727,6 +2731,8 @@ impl<'a> FunctionEmitter<'a> {
                 rd: scratch,
                 ra: scrutinee,
                 idx: index as u16,
+                variant_tag,
+                shapes,
             });
             sources.push(scratch);
         }
@@ -4465,6 +4471,111 @@ mod tests {
             .expect("bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(42));
         assert!(matches!(bytecode, Value::Int(42)));
+    }
+
+    #[test]
+    fn variant_get_carries_type_desc_identity_shape_contract() {
+        let source =
+            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let main = &bytecode.functions[bytecode.entry as usize];
+        let (tag_idx, shape_idx, field_idx) = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::VariantGet {
+                    variant_tag,
+                    shapes,
+                    idx,
+                    ..
+                } => Some((*variant_tag, *shapes, *idx)),
+                _ => None,
+            })
+            .expect("canonical variant projection");
+        assert_eq!(field_idx, 0);
+        assert!(matches!(
+            main.constants.get(tag_idx as usize),
+            Some(crate::interp::bytecode::ConstValue::Str(tag)) if tag == "Some"
+        ));
+        let shapes = match main.constants.get(shape_idx as usize) {
+            Some(crate::interp::bytecode::ConstValue::VariantShapes(shapes)) => shapes,
+            other => panic!("expected canonical projection shape table, got {other:?}"),
+        };
+        let some = shapes
+            .iter()
+            .find(|shape| shape.tag == "Some")
+            .expect("Some shape");
+        assert_eq!(some.nominal.as_str(), "builtin:type:Option");
+        assert_eq!(some.variant.0, "builtin:variant:Option::Some");
+        assert_eq!((some.discriminant, some.arity), (1, 1));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn rejects_variant_get_identity_drift_before_reading_payload() {
+        let source =
+            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+
+        let mut bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        let program = std::sync::Arc::make_mut(&mut bytecode);
+        let entry = program.entry as usize;
+        let main = &mut program.functions[entry];
+        let forged_shapes =
+            main.add_const(crate::interp::bytecode::ConstValue::VariantShapes(vec![
+                crate::interp::bytecode::instr::VariantShape {
+                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                        .expect("Result nominal"),
+                    variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                    tag: "Some".into(),
+                    discriminant: 1,
+                    arity: 1,
+                },
+            ]));
+        let (projection_shapes, source_reg) = main
+            .code
+            .iter_mut()
+            .find_map(|op| match op {
+                Op::VariantGet { ra, shapes, .. } => Some((shapes, *ra)),
+                _ => None,
+            })
+            .expect("canonical variant projection");
+        *projection_shapes = forged_shapes;
+
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .run_value()
+            .expect_err("canonical identity drift must fail closed");
+        assert!(error
+            .message()
+            .contains("variant get: canonical identity for tag 'Some' disagrees with shape table"));
+        assert!(matches!(
+            vm.get_reg(source_reg),
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            } if nominal.as_str() == "builtin:type:Option"
+                && variant.0 == "builtin:variant:Option::Some"
+                && tag == "Some"
+                && *payload == vec![Value::Int(41)]
+        ));
     }
 
     #[test]

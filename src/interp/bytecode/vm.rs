@@ -3025,31 +3025,107 @@ impl BytecodeVM {
                     };
                     self.set_reg(rd, Value::Bool(matches));
                 }
-                Op::VariantGet { rd, ra, idx } => {
-                    let v = self.get_reg(ra).clone();
-                    match v {
+                Op::VariantGet {
+                    rd,
+                    ra,
+                    idx,
+                    variant_tag,
+                    shapes,
+                } => {
+                    let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
+                        Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
+                        Value::CanonicalVariant {
+                            nominal,
+                            variant,
+                            tag,
+                            payload,
+                        } => (
+                            tag.clone(),
+                            payload.len(),
+                            Some((nominal.clone(), variant.clone())),
+                        ),
+                        value => {
+                            return Err(InterpError::new(format!(
+                                "variant get: expected Variant, got {}",
+                                value
+                            )))
+                        }
+                    };
+                    let expected_tag = match proto.constants.get(variant_tag as usize) {
+                        Some(ConstValue::Str(tag)) => tag.clone(),
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "variant get: tag constant {} is not a string",
+                                variant_tag
+                            )));
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "variant get: tag constant {} is absent",
+                                variant_tag
+                            )));
+                        }
+                    };
+                    if actual_tag != expected_tag {
+                        return Err(InterpError::new(format!(
+                            "variant get: expected tag '{}', got '{}'",
+                            expected_tag, actual_tag
+                        )));
+                    }
+                    let (expected_nominal, expected_variant, expected_arity) =
+                        match proto.constants.get(shapes as usize) {
+                            Some(ConstValue::VariantShapes(shapes)) => {
+                                let Some(shape) =
+                                    shapes.iter().find(|shape| shape.tag == actual_tag)
+                                else {
+                                    return Err(InterpError::new(format!(
+                                    "variant get: tag '{}' is absent from canonical shape table",
+                                    actual_tag
+                                )));
+                                };
+                                (shape.nominal.clone(), shape.variant.clone(), shape.arity)
+                            }
+                            Some(_) => {
+                                return Err(InterpError::new(format!(
+                                    "variant get: shapes constant {} is not a VariantShapes table",
+                                    shapes
+                                )));
+                            }
+                            None => {
+                                return Err(InterpError::new(format!(
+                                    "variant get: shapes constant {} is absent",
+                                    shapes
+                                )));
+                            }
+                        };
+                    if let Some((nominal, variant)) = identity {
+                        if nominal != expected_nominal || variant != expected_variant {
+                            return Err(InterpError::new(format!(
+                                "variant get: canonical identity for tag '{}' disagrees with shape table",
+                                actual_tag
+                            )));
+                        }
+                    }
+                    if payload_len != expected_arity as usize {
+                        return Err(InterpError::new(format!(
+                            "variant get: payload arity {} disagrees with canonical arity {}",
+                            payload_len, expected_arity
+                        )));
+                    }
+                    if (idx as usize) >= expected_arity as usize {
+                        return Err(InterpError::index_out_of_bounds(format!(
+                            "variant field index {} out of bounds (canonical arity {})",
+                            idx, expected_arity
+                        )));
+                    }
+                    let elem = match self.get_reg(ra) {
                         Value::Variant(_, fields)
                         | Value::CanonicalVariant {
                             payload: fields, ..
-                        } => {
-                            if (idx as usize) >= fields.len() {
-                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
-                                return Err(InterpError::index_out_of_bounds(format!(
-                                    "variant field index {} out of bounds (arity {})",
-                                    idx,
-                                    fields.len()
-                                )));
-                            }
-                            let elem = fields[idx as usize].clone();
-                            self.set_reg(rd, elem);
-                        }
-                        other => {
-                            return Err(InterpError::new(format!(
-                                "variant get: expected Variant, got {}",
-                                other
-                            )))
-                        }
-                    }
+                        } => fields[idx as usize].clone(),
+                        _ => unreachable!("variant get source changed during validation"),
+                    };
+                    self.set_reg(rd, elem);
                 }
                 Op::PatternField { rd, ra, field } => {
                     // v0.34.15: field extraction for match arms. Flow states

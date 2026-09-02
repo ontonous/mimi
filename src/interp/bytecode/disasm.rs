@@ -748,8 +748,17 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .unwrap_or("?");
             format!("{:04}  {:<16} r{} = is(r{}, {})", pc, name, rd, ra, tname)
         }
-        Op::VariantGet { rd, ra, idx } => {
-            format!("{:04}  {:<16} r{} = r{}[{}]", pc, name, rd, ra, idx)
+        Op::VariantGet {
+            rd,
+            ra,
+            idx,
+            variant_tag,
+            shapes,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = r{}[{}] [tag const {}, shapes const {}]",
+                pc, name, rd, ra, idx, variant_tag, shapes
+            )
         }
         Op::PatternField { rd, ra, field } => {
             format!("{:04}  {:<16} r{} = r{}.field[{}]", pc, name, rd, ra, field)
