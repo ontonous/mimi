@@ -18,8 +18,9 @@ use crate::core::CheckedProgram;
 
 use super::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
-    contains_flat_copy_record_candidate, contains_scalar_collection_candidate,
-    FlatCopyRecordAdmission, ScalarCollectionAdmission,
+    contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
+    contains_scalar_collection_candidate, is_exact_s8_flow_transition,
+    is_s8_flow_transition_candidate, FlatCopyRecordAdmission, ScalarCollectionAdmission,
 };
 
 /// The already-admitted production island whose materialization failed or
@@ -28,6 +29,7 @@ use super::{
 pub enum CanonicalMirRouteProfile {
     ScalarCollection,
     FlatCopyRecord,
+    S8FlowTransition,
 }
 
 impl CanonicalMirRouteProfile {
@@ -35,8 +37,19 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
+            Self::S8FlowTransition => "s8-silent-local-flow-v1",
         }
     }
+}
+
+/// Checker-owned admission state for the already implemented S8 silent-local
+/// Flow island.  A candidate is still an explicit fail-closed signal for the
+/// default/direct route; only the exact body is a complete production island.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum S8FlowAdmission {
+    OutsideProfile,
+    MixedCoverage,
+    CompleteCoverage,
 }
 
 /// Stage at which an already complete admission failed.
@@ -50,10 +63,14 @@ pub enum CanonicalMirRouteFailureStage {
 /// admitted production island and an unrelated legacy compatibility graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalMirRouteMaterializationError {
-    /// The checked program is outside the complete production envelope. The
-    /// caller may keep its explicit compatibility route, but must not claim a
-    /// canonical route from this error.
-    Compatibility { message: String },
+    /// The checked program is not in a complete production envelope.  The
+    /// attached admission lets the caller distinguish an explicit
+    /// compatibility input from a recognized candidate that must be rejected;
+    /// neither case may claim a canonical route from this error.
+    Compatibility {
+        admission: CanonicalMirRouteAdmission,
+        message: String,
+    },
     /// A checker admission crossed the canonical boundary. This is hard and
     /// must never be converted into a legacy compile or execution.
     Complete {
@@ -66,7 +83,7 @@ pub enum CanonicalMirRouteMaterializationError {
 impl std::fmt::Display for CanonicalMirRouteMaterializationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Compatibility { message } => {
+            Self::Compatibility { message, .. } => {
                 write!(
                     formatter,
                     "canonical MIR compatibility materialization failed: {message}"
@@ -91,12 +108,14 @@ impl std::fmt::Display for CanonicalMirRouteMaterializationError {
 pub struct CanonicalMirRouteAdmission {
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
+    pub flow: S8FlowAdmission,
 }
 
 impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
         !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
+            || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
     }
 
     pub const fn collection_complete(self) -> bool {
@@ -105,6 +124,10 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn record_complete(self) -> bool {
         matches!(self.record, FlatCopyRecordAdmission::CompleteCoverage)
+    }
+
+    pub const fn flow_complete(self) -> bool {
+        matches!(self.flow, S8FlowAdmission::CompleteCoverage)
     }
 }
 
@@ -118,6 +141,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_collection_candidate: bool,
     pub materialized_record_candidate: bool,
+    pub materialized_flow_candidate: bool,
 }
 
 /// Classify route eligibility once from checker-owned typed facts.
@@ -127,6 +151,17 @@ pub fn classify_canonical_mir_route_admission(
     CanonicalMirRouteAdmission {
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
+        flow: classify_s8_flow_admission(program),
+    }
+}
+
+fn classify_s8_flow_admission(program: &CheckedProgram) -> S8FlowAdmission {
+    if is_exact_s8_flow_transition(program) {
+        S8FlowAdmission::CompleteCoverage
+    } else if is_s8_flow_transition_candidate(program) {
+        S8FlowAdmission::MixedCoverage
+    } else {
+        S8FlowAdmission::OutsideProfile
     }
 }
 
@@ -156,6 +191,7 @@ pub fn materialize_canonical_mir_route(
 
     let materialized_collection_candidate = contains_scalar_collection_candidate(&canonical);
     let materialized_record_candidate = contains_flat_copy_record_candidate(&canonical);
+    let materialized_flow_candidate = contains_s8_flow_transition_candidate(&canonical);
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -173,12 +209,21 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.flow_complete() && !materialized_flow_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::S8FlowTransition,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete S8 Flow admission did not materialize a FlowTransition boundary"
+                .into(),
+        });
+    }
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
         admission,
         materialized_collection_candidate,
         materialized_record_candidate,
+        materialized_flow_candidate,
     })
 }
 
@@ -199,8 +244,14 @@ fn match_complete_or_compatibility(
             stage,
             message,
         }
+    } else if admission.flow_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::S8FlowTransition,
+            stage,
+            message,
+        }
     } else {
-        CanonicalMirRouteMaterializationError::Compatibility { message }
+        CanonicalMirRouteMaterializationError::Compatibility { admission, message }
     }
 }
 
@@ -229,6 +280,7 @@ mod tests {
         );
         assert!(route.materialized_collection_candidate);
         assert!(!route.materialized_record_candidate);
+        assert!(!route.materialized_flow_candidate);
     }
 
     #[test]
@@ -257,5 +309,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn complete_s8_flow_materialization_carries_one_receipt() {
+        let program = checked(
+            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete S8 Flow route must materialize");
+        assert_eq!(route.admission.flow, S8FlowAdmission::CompleteCoverage);
+        assert!(route.materialized_flow_candidate);
+        assert!(!route.materialized_collection_candidate);
+        assert!(!route.materialized_record_candidate);
+    }
+
+    #[test]
+    fn compatibility_materialization_error_preserves_candidate_admission() {
+        let admission = CanonicalMirRouteAdmission {
+            collection: ScalarCollectionAdmission::MixedCoverage,
+            record: FlatCopyRecordAdmission::OutsideProfile,
+            flow: S8FlowAdmission::OutsideProfile,
+        };
+        let error = match_complete_or_compatibility(
+            admission,
+            CanonicalMirRouteFailureStage::Construction,
+            "unsupported mixed graph".into(),
+        );
+        let CanonicalMirRouteMaterializationError::Compatibility {
+            admission: preserved,
+            ..
+        } = error
+        else {
+            panic!("mixed admission must remain an explicit compatibility error");
+        };
+        assert_eq!(preserved, admission);
+        assert!(preserved.has_candidate());
     }
 }

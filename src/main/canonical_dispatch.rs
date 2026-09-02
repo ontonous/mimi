@@ -158,13 +158,18 @@ pub(crate) fn select_default_route(
                 reason,
             );
         }
-        Err(mimi::core::mir::CanonicalMirRouteMaterializationError::Compatibility { message }) => {
+        Err(mimi::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
+            // Mixed/Outside collection and record programs retain the
+            // explicit compatibility route when no canonical operation was
+            // materialized.  S8 keeps its existing candidate hard boundary:
+            // the front-end candidate predicate is intentionally stricter
+            // than collection/record compatibility and must not fall back.
             if flow_candidate {
                 return reject_migrated_candidates(
                     true,
                     false,
                     false,
-                    format!("canonical MIR compatibility materialization failed: {message}"),
+                    "canonical MIR candidate materialization failed",
                 );
             }
             return DefaultMirRoute::Legacy;
@@ -173,6 +178,8 @@ pub(crate) fn select_default_route(
     let canonical = &route.program;
     let copy_record = route.materialized_record_candidate;
     let materialized_collection_candidate = route.materialized_collection_candidate;
+    let materialized_flow_candidate = route.materialized_flow_candidate;
+    let flow_route_candidate = flow_candidate || materialized_flow_candidate;
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
     // Mixed coverage remains a compatibility boundary only when construction
@@ -181,9 +188,9 @@ pub(crate) fn select_default_route(
     let collection_route_candidate =
         complete_collection_candidate || (collection_hint && materialized_collection_candidate);
     let record_route_candidate = complete_record_candidate || (record_hint && copy_record);
-    if flow_candidate && !flow_transition_operation {
+    if flow_route_candidate && !flow_transition_operation {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate || (record_route_candidate && copy_record),
             record_route_candidate,
             "canonical graph did not materialize the selected production operation",
@@ -196,13 +203,13 @@ pub(crate) fn select_default_route(
     // it remains an explicit compatibility input and may use Legacy.
     if record_route_candidate && !complete_record_candidate {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate,
             true,
             "flat Copy record materialized inside mixed coverage",
         );
     }
-    if !collection_route_candidate && !record_route_candidate && !flow_candidate {
+    if !collection_route_candidate && !record_route_candidate && !flow_route_candidate {
         return DefaultMirRoute::Legacy;
     }
 
@@ -215,7 +222,7 @@ pub(crate) fn select_default_route(
     if materialized_collection_candidate {
         if let Err(errors) = mimi::core::mir::validate_scalar_collection_island(&canonical) {
             return reject_migrated_candidates(
-                flow_candidate,
+                flow_route_candidate,
                 true,
                 record_route_candidate,
                 format!(
@@ -233,7 +240,7 @@ pub(crate) fn select_default_route(
     // capability, including no-obligation functions.
     if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             format!("verifier capability gate failed: {error:?}"),
@@ -245,7 +252,7 @@ pub(crate) fn select_default_route(
     // before use.
     if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&canonical) {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             format!("MIR-bytecode preflight failed: {errors:?}"),
@@ -253,7 +260,7 @@ pub(crate) fn select_default_route(
     }
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&canonical) {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             format!("native MIR preflight failed: {errors:?}"),
@@ -273,7 +280,7 @@ pub(crate) fn select_default_route(
         }),
         Err(error) => {
             return reject_migrated_candidates(
-                flow_candidate,
+                flow_route_candidate,
                 collection_route_candidate,
                 record_route_candidate,
                 format!("verifier contract pass failed: {error}"),
@@ -282,7 +289,7 @@ pub(crate) fn select_default_route(
     };
     if !verifier_ready {
         return reject_migrated_candidates(
-            flow_candidate,
+            flow_route_candidate,
             collection_route_candidate,
             record_route_candidate,
             "verifier returned an unsupported or inconclusive result",

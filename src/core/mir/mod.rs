@@ -39,7 +39,7 @@ pub use receipt::{CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEI
 pub use route::{
     classify_canonical_mir_route_admission, materialize_canonical_mir_route,
     CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
-    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile,
+    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, S8FlowAdmission,
 };
 
 /// Stable owner identity shared by resolved transition bodies, transition

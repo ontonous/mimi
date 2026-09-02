@@ -28,23 +28,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        // S10: the exact S8 Flow island has already switched to the canonical
-        // MIR native consumer. This compatibility entry point delegates that
-        // island to the same validated MIR program as the CLI; it never
-        // reaches the legacy AST body compiler for an admitted shape.
-        if crate::core::mir::is_exact_s8_flow_transition(program) {
-            let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
-                .map_err(|error| {
-                    vec![crate::diagnostic::Diagnostic::error_code(
-                        "MIR-LOWERING-001",
-                        format!("canonical MIR build failed for the S8 Flow island: {error}"),
-                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
-                    )]
-                })?;
-            return self.compile_mir_native(&canonical);
-        }
-        // S12/S15: the scalar collection and flat Copy-record production
-        // islands have crossed the default route boundary.  This direct
+        // S12/S15/S25: the S8 Flow, scalar collection, and flat Copy-record
+        // production islands have crossed the default route boundary.  This direct
         // native API is also an old production entry point, so an admitted
         // graph must not continue into the old AST body compiler merely
         // because a caller bypassed the CLI selector.  The helper performs
@@ -569,7 +554,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // The shared core-MIR envelope performs checker-owned admission,
         // canonical construction, and operation materialization before this
         // direct native entry can approach LLVM.  Complete failures are hard;
-        // Mixed/Outside remains an explicit compatibility boundary.
+        // Mixed/Outside remains an explicit compatibility boundary only when
+        // no typed candidate was recognized; a recognized candidate that fails
+        // before materialization is still fail-closed.
         let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
             Ok(route) => route,
             Err(crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
@@ -614,6 +601,22 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete flat Copy-record MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("complete S8 Flow MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete S8 Flow MIR island materialization failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,
@@ -623,12 +626,22 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
                 ..
-            }) => return Ok(None),
+            }) => {
+                // Mixed/Outside construction is the explicit compatibility
+                // boundary.  A complete admission can never arrive here:
+                // `materialize_canonical_mir_route` classifies that failure as
+                // `Complete` above.  A mixed candidate that did not
+                // materialize therefore remains on the old API, while any
+                // materialized candidate is rejected by the gates below.
+                return Ok(None);
+            }
         };
         let canonical = &route.program;
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
-        if !scalar_collection_candidate && !flat_copy_record_candidate {
+        let flow_transition_candidate = route.materialized_flow_candidate;
+        if !scalar_collection_candidate && !flat_copy_record_candidate && !flow_transition_candidate
+        {
             return Ok(None);
         }
 
@@ -639,8 +652,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // a flat record from accidentally widening the collection envelope.
         let island = if scalar_collection_candidate {
             "scalar collection island"
-        } else {
+        } else if flat_copy_record_candidate {
             "flat Copy record island"
+        } else {
+            "S8 Flow transition island"
         };
         if scalar_collection_candidate {
             if let Err(errors) = crate::core::mir::validate_scalar_collection_island(&canonical) {
