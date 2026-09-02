@@ -1320,7 +1320,11 @@ impl<'a> NativeMirValidator<'a> {
                     "switch-move edge arguments and payload bindings disagree with block parameter arity",
                 ));
             }
-            if variant.fields.len() > 1 || arm.bindings.len() > 1 {
+            // `native_non_copy_variant_payload_type` above has already
+            // proved the complete Option<string> shape, including the
+            // canonical zero/one payload field.  Only the MIR edge's own
+            // target-binding arity remains to be checked here.
+            if arm.bindings.len() > 1 {
                 self.errors.push(NativeMirError::new(
                     subject,
                     "native Option<string> SwitchMove supports at most one payload field and one binding",
