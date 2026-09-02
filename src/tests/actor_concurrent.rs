@@ -26,10 +26,16 @@ unsafe extern "C" fn actor_dispatch(
     }
 }
 
+struct ActorPauseGuard(*mut c_void);
+
+impl Drop for ActorPauseGuard {
+    fn drop(&mut self) {
+        actor_test_pause_after_pin(self.0, false);
+    }
+}
+
 #[test]
 fn actor_call_pins_lifetime_while_drop_detaches_handle() {
-    actor_test_pause_after_pin(true);
-
     let fields = 0u8;
     let handle = unsafe {
         mimi_actor_spawn(
@@ -39,6 +45,8 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
         )
     };
     assert!(!handle.is_null());
+    actor_test_pause_after_pin(handle, true);
+    let _pause_guard = ActorPauseGuard(handle);
 
     let call_handle = handle as usize;
     let call = std::thread::spawn(move || {
@@ -100,7 +108,7 @@ fn actor_call_pins_lifetime_while_drop_detaches_handle() {
     // drop completed instead of racing the scheduler.
     dropper.join().unwrap();
     assert!(drop_finished.load(Ordering::Acquire));
-    actor_test_pause_after_pin(false);
+    actor_test_pause_after_pin(handle, false);
     assert_eq!(call.join().unwrap(), (8, 42));
     assert!(drop_finished.load(Ordering::Acquire));
 }

@@ -374,13 +374,25 @@ fn actor_pin_handle(handle: *mut std::ffi::c_void) -> Option<std::sync::Arc<Mimi
 static ACTOR_CALL_PAUSE_AFTER_PIN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
+static ACTOR_CALL_PAUSE_HANDLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
 static ACTOR_CALL_PIN_REACHED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
-pub(crate) fn actor_test_pause_after_pin(pause: bool) {
+pub(crate) fn actor_test_pause_after_pin(handle: *mut std::ffi::c_void, pause: bool) {
     ACTOR_CALL_PIN_REACHED.store(false, std::sync::atomic::Ordering::Release);
-    ACTOR_CALL_PAUSE_AFTER_PIN.store(pause, std::sync::atomic::Ordering::Release);
+    if pause {
+        ACTOR_CALL_PAUSE_HANDLE.store(handle as usize, std::sync::atomic::Ordering::Release);
+        ACTOR_CALL_PAUSE_AFTER_PIN.store(true, std::sync::atomic::Ordering::Release);
+    } else {
+        // Release a paused call before clearing its target. This ordering
+        // keeps the test hook from leaving a caller spinning if its guard
+        // runs during panic unwinding.
+        ACTOR_CALL_PAUSE_AFTER_PIN.store(false, std::sync::atomic::Ordering::Release);
+        ACTOR_CALL_PAUSE_HANDLE.store(0, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -442,7 +454,9 @@ pub unsafe extern "C" fn mimi_actor_call(
     };
 
     #[cfg(test)]
-    if ACTOR_CALL_PAUSE_AFTER_PIN.load(std::sync::atomic::Ordering::Acquire) {
+    if ACTOR_CALL_PAUSE_AFTER_PIN.load(std::sync::atomic::Ordering::Acquire)
+        && ACTOR_CALL_PAUSE_HANDLE.load(std::sync::atomic::Ordering::Acquire) == handle as usize
+    {
         ACTOR_CALL_PIN_REACHED.store(true, std::sync::atomic::Ordering::Release);
         while ACTOR_CALL_PAUSE_AFTER_PIN.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::yield_now();

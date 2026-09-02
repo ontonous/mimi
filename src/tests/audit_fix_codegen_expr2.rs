@@ -131,9 +131,42 @@ fn canonical_route_boundary(src: &str, label: &str) -> (String, StopShipObservat
     (
         route.to_owned(),
         StopShipObservation::NotMaterialized {
-            reason: format!("canonical MIR construction rejected: {canonical}"),
+            reason: format!(
+                "canonical MIR construction rejected: {}",
+                summarize_canonical_build_error(&canonical)
+            ),
         },
     )
+}
+
+fn summarize_canonical_build_error(
+    error: &crate::core::mir::reference::MirProgramBuildError,
+) -> String {
+    match error {
+        crate::core::mir::reference::MirProgramBuildError::Lowering(errors) => format!(
+            "MIR lowering failed ({} errors): {}",
+            errors.len(),
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        crate::core::mir::reference::MirProgramBuildError::Types(errors) => format!(
+            "MIR type catalog failed ({} errors): {}",
+            errors.len(),
+            errors.join("; ")
+        ),
+        crate::core::mir::reference::MirProgramBuildError::Validation(errors) => format!(
+            "MIR validation failed ({} errors): {}",
+            errors.len(),
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    }
 }
 
 fn string_slice_route_boundary(src: &str) -> (String, StopShipObservation) {
@@ -236,13 +269,28 @@ fn assert_string_slice_receipt(
     eprintln!("[stop-ship-receipt]\n{text}");
 }
 
-/// Record the existing Set function-form `contains(set, value)` boundary.
-/// The checked VM and production native compatibility path currently agree,
-/// but canonical MIR rejects the builtin call before any consumer can claim a
-/// Set ownership contract.  This is a disposition receipt, not an admission
-/// expansion.
-fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
-    let (route, reference) = canonical_route_boundary(src, "Set function-form contains");
+/// Record an existing compatibility boundary whose canonical MIR is not yet
+/// materialized. The checked VM and production native path are useful
+/// observations, but they do not grant a shape admission or ownership proof.
+fn assert_legacy_return_receipt(
+    case_id: &'static str,
+    category: &'static str,
+    ownership: &'static str,
+    label: &str,
+    src: &str,
+    expected_stdout: &str,
+    expected_reason_fragment: Option<&str>,
+) {
+    let (route, reference) = canonical_route_boundary(src, label);
+    if let Some(fragment) = expected_reason_fragment {
+        let StopShipObservation::NotMaterialized { reason } = &reference else {
+            panic!("{label} must produce a non-materialized canonical observation");
+        };
+        assert!(
+            reason.contains(fragment),
+            "{label} root-cause receipt drifted; expected `{fragment}` in `{reason}`"
+        );
+    }
     let (value, stdout) = checked_run_source_with_stdout(src);
     let value = format!("{value:?}");
     assert_eq!(value, "Int(0)", "checked VM return value drifted");
@@ -263,7 +311,7 @@ fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout
     assert_eq!(
         native.stdout.trim(),
         stdout.trim(),
-        "Set VM/native output diverged"
+        "VM/native output diverged"
     );
     let native = StopShipObservation::Return {
         value: format!("Int(0);process_exit_code={:?}", native.exit_code),
@@ -272,11 +320,11 @@ fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout
 
     let receipt = StopShipReceipt {
         case_id,
-        category: "set-lowering-return-ownership",
+        category,
         disposition: "reproduced-green",
         route,
         canonical_mir: "not-materialized",
-        ownership: "not-closed: Set function-form builtin ABI/glue contract",
+        ownership,
         reference,
         vm,
         native,
@@ -288,6 +336,20 @@ fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout
     assert!(text.contains("canonical_mir=not-materialized"));
     assert!(text.contains("ownership=not-closed:"));
     eprintln!("[stop-ship-receipt]\n{text}");
+}
+
+/// Record the existing Set function-form `contains(set, value)` boundary.
+/// This is a disposition receipt, not an admission expansion.
+fn assert_set_contains_receipt(case_id: &'static str, src: &str, expected_stdout: &str) {
+    assert_legacy_return_receipt(
+        case_id,
+        "set-lowering-return-ownership",
+        "not-closed: Set function-form builtin ABI/glue contract",
+        "Set function-form contains",
+        src,
+        expected_stdout,
+        None,
+    );
 }
 
 /// Run BOTH backends and assert the trimmed outputs equal `expected` and
@@ -1136,6 +1198,37 @@ fn audit1j_set_function_form_receipt() {
         }
     "#,
         "true\nfalse\ntrue",
+    );
+}
+
+/// Generic identity stop-ship receipt. The old checked VM/native paths agree,
+/// while canonical MIR keeps the concrete tuple/list instance outside the
+/// current scalar generic contract until unified monomorphization and aggregate
+/// ABI/glue are explicit.
+#[test]
+fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
+    if !can_link() {
+        return;
+    }
+    assert_legacy_return_receipt(
+        "dual_generic_identity_list_tuple_return_cross_emitter",
+        "generic-concrete-mir-ownership",
+        "not-closed: generic concrete MIR aggregate instance ABI/glue contract",
+        "generic identity List tuple return",
+        r#"
+        func wrap<T>(x: T) -> List<T> { return [x] }
+        func main() -> i32 {
+            let xs = wrap((7, 9))
+            let first = xs[0]
+            println(first.0)
+            println(first.1)
+            let ys = wrap([(1, 2), (3, 4)])
+            println(ys)
+            0
+        }
+    "#,
+        "7\n9\n[[(1, 2), (3, 4)]]",
+        Some("generic MIR instance argument is outside scalar contract"),
     );
 }
 
