@@ -75,11 +75,17 @@ pub(crate) fn select_default_route(
     // Keep the dispatcher from growing a second Set/record type walk: the
     // same admission result is also used by the public verifier boundary.
     let collection_admission = mimi::core::mir::classify_scalar_collection_admission(checked);
-    let collection_hint = merged_file.imports.is_empty()
-        && !matches!(
-            collection_admission,
-            mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
-        );
+    // Imported stdlib facades are part of the production island once their
+    // concrete operations materialize in MIR.  Do not use the retained File
+    // import list as a second route policy: checker admission records the
+    // mixed provenance, while the canonical MIR island validator decides
+    // whether the complete imported executable graph is covered.  This is
+    // what lets `std::set` enter the same default Set island without opening
+    // an implicit legacy fallback for an unsupported imported graph.
+    let collection_hint = !matches!(
+        collection_admission,
+        mimi::core::mir::ScalarCollectionAdmission::OutsideProfile
+    );
     let complete_collection_candidate = matches!(
         collection_admission,
         mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
