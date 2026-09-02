@@ -375,19 +375,30 @@ fn verify_closed_s8_flow_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    if !is_z3_available() || !crate::core::mir::is_exact_s8_flow_transition(program) {
+    if !is_z3_available() {
         return Ok(None);
     }
-    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
-        .map_err(|error| {
-            format!("MIR-MATERIALIZATION-001: S8 Flow verifier island construction failed: {error}")
-        })?;
-    if !crate::core::mir::contains_s8_flow_transition_candidate(&canonical) {
-        return Err(
-            "MIR-COVERAGE-001: exact S8 Flow admission did not materialize a FlowTransition boundary"
-                .into(),
-        );
+    // S26: verifier admission, construction, and the FlowTransition receipt
+    // must come from the same backend-free route envelope as the selector and
+    // direct native entry.  In particular, do not reconstruct the old
+    // `is_exact -> from_checked_program -> contains_*` policy here: that was a
+    // second production route and could drift from the other consumers.
+    let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
+        Ok(route) => route,
+        Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
+            return Ok(None)
+        }
+        Err(error) => {
+            return Err(format!(
+                "MIR-MATERIALIZATION-001: S8 Flow verifier island route failed: {error}"
+            ))
+        }
+    };
+    if !route.admission.flow_complete() {
+        return Ok(None);
     }
+    debug_assert!(route.materialized_flow_candidate);
+    let canonical = &route.program;
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!("MIR-CAPABILITY-001: canonical verifier rejected the S8 Flow island: {errors:?}")
     })?;
