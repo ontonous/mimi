@@ -3310,6 +3310,36 @@ impl MirTypeCatalog {
             .find(|candidate| candidate.id == *variant)
     }
 
+    /// Resolve one checked variant-switch case from the canonical family.
+    ///
+    /// Switch validation owns exhaustiveness and duplicate-case policy; this
+    /// companion returns the stable nominal label and descriptor that a
+    /// backend needs to encode the already-validated case.  Keeping the
+    /// lookup here prevents a consumer from rebuilding variant identity from
+    /// its own tag table or runtime representation.
+    pub fn validated_variant_switch_case(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+    ) -> Result<(&str, &MirVariantDesc), String> {
+        let (nominal, variants) = self.variant_layout(scrutinee_ty).ok_or_else(|| {
+            format!(
+                "switch scrutinee type '{}' has no canonical variant layout",
+                scrutinee_ty.as_str()
+            )
+        })?;
+        let variant = variants
+            .iter()
+            .find(|candidate| candidate.id == *variant_id)
+            .ok_or_else(|| {
+                format!(
+                    "variant switch case '{}' is absent from TypeDesc",
+                    variant_id.0
+                )
+            })?;
+        Ok((nominal, variant))
+    }
+
     /// Validate the payload projection made by one variant-switch binding.
     ///
     /// A `MirSwitchBinding` carries stable variant-field identity, while the
@@ -3389,12 +3419,8 @@ impl MirTypeCatalog {
                     if has_default {
                         return Err("variant switch has an arm after its default".into());
                     }
-                    if !variants.iter().any(|candidate| candidate.id == *variant) {
-                        return Err(format!(
-                            "variant switch case '{}' is absent from TypeDesc",
-                            variant.0
-                        ));
-                    }
+                    self.validated_variant_switch_case(scrutinee_ty, variant)
+                        .map(|_| ())?;
                     if !seen.insert(variant) {
                         return Err(format!("variant switch case '{}' is repeated", variant.0));
                     }
@@ -3467,12 +3493,7 @@ impl MirTypeCatalog {
             let crate::core::mir::MirSwitchCase::Variant(variant_id) = &arm.case else {
                 continue;
             };
-            let variant = self.variant(scrutinee_ty, variant_id).ok_or_else(|| {
-                format!(
-                    "switch-move case '{}' is absent from TypeDesc",
-                    variant_id.0
-                )
-            })?;
+            let (_, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
             let mut bound_fields = BTreeSet::new();
             for binding in &arm.bindings {
                 if !bound_fields.insert(&binding.field) {
@@ -4054,6 +4075,18 @@ mod tests {
         assert_eq!(plans[1].fields[0].glue, MirGlueKind::OwnedString);
         let some_id = crate::core::NodeId("builtin:variant:Option::Some".into());
         let none_id = crate::core::NodeId("builtin:variant:Option::None".into());
+        let (switch_nominal, switch_some) = catalog
+            .validated_variant_switch_case(&option_id, &some_id)
+            .expect("canonical Some switch case");
+        assert_eq!(switch_nominal, "builtin:type:Option");
+        assert_eq!(switch_some.discriminant, 1);
+        let switch_error = catalog
+            .validated_variant_switch_case(
+                &string_id,
+                &crate::core::NodeId("builtin:variant:Option::Some".into()),
+            )
+            .expect_err("bare string has no variant switch case");
+        assert!(switch_error.contains("variant layout"));
         let (none_variant, some_variant, inner) = catalog
             .validated_option_string_variants(&option_id)
             .expect("canonical Option<string> variants");

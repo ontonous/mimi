@@ -2324,7 +2324,7 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        let Some((nominal, variants)) = self
+        let Some((nominal, _)) = self
             .program
             .type_catalog()
             .variant_layout(&scrutinee_info.ty)
@@ -2353,14 +2353,16 @@ impl<'a> FunctionEmitter<'a> {
         for arm in arms {
             match &arm.case {
                 crate::core::mir::MirSwitchCase::Variant(variant) => {
-                    let Some(variant_desc) =
-                        variants.iter().find(|candidate| candidate.id == *variant)
-                    else {
-                        self.error(format!(
-                            "switch variant '{}' is absent from TypeDesc",
-                            variant.0
-                        ));
-                        return;
+                    let variant_desc = match self
+                        .program
+                        .type_catalog()
+                        .validated_variant_switch_case(&scrutinee_info.ty, variant)
+                    {
+                        Ok((_, variant_desc)) => variant_desc,
+                        Err(message) => {
+                            self.error(message);
+                            return;
+                        }
                     };
                     let condition = self.proto.alloc_reg();
                     let tag = self
