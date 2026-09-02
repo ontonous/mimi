@@ -1093,28 +1093,30 @@ impl<'a> CapabilityGate<'a> {
                                 binding.field.0
                             ));
                         }
-                        let Some(field) = variant
-                            .fields
-                            .iter()
-                            .find(|field| field.id == binding.field)
-                        else {
-                            self.error(format!(
-                                "{subject} SwitchMove payload field '{}' is absent from TypeDesc variant",
-                                binding.field.0
-                            ));
-                            continue;
-                        };
-                        let Some(parameter) = target
-                            .parameters
-                            .get(arm.arguments.len() + index)
-                            .and_then(|parameter| function.values.get(&parameter.value))
+                        let Some(target_parameter) =
+                            target.parameters.get(arm.arguments.len() + index)
                         else {
                             continue;
                         };
-                        if parameter.ty != field.ty {
+                        let Some(parameter) = function.values.get(&target_parameter.value) else {
+                            continue;
+                        };
+                        if binding.parameter != target_parameter.value {
                             self.error(format!(
-                                "{subject} SwitchMove payload binding type disagrees with TypeDesc"
+                                "{subject} SwitchMove binding parameter disagrees with target block parameter"
                             ));
+                        }
+                        if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_variant_payload_projection(
+                                &scrutinee_ty,
+                                variant_id,
+                                &binding.field,
+                                &parameter.ty,
+                            )
+                        {
+                            self.error(format!("{subject} SwitchMove rejected: {message}"));
                         }
                     }
                 }

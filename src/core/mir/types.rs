@@ -3064,6 +3064,54 @@ impl MirTypeCatalog {
             .find(|candidate| candidate.id == *variant)
     }
 
+    /// Validate the payload projection made by one variant-switch binding.
+    ///
+    /// A `MirSwitchBinding` carries stable variant-field identity, while the
+    /// physical payload index and its type are layout facts.  Keeping this
+    /// lookup here prevents reference, bytecode, native, and verifier
+    /// consumers from independently re-deriving the active-variant ABI.
+    /// The returned index is declaration order in the canonical TypeDesc.
+    pub fn validate_variant_payload_projection(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<usize, String> {
+        self.get(result_ty).ok_or_else(|| {
+            format!(
+                "variant payload projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let variant = self.variant(scrutinee_ty, variant_id).ok_or_else(|| {
+            format!(
+                "variant payload projection variant '{}' is absent from TypeDesc",
+                variant_id.0
+            )
+        })?;
+        let (index, field) = variant
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.id == *field_id)
+            .ok_or_else(|| {
+                format!(
+                    "variant payload projection field '{}' is absent from variant '{}'",
+                    field_id.0, variant.name
+                )
+            })?;
+        if field.ty != *result_ty {
+            return Err(format!(
+                "variant payload projection field '{}' type '{}' disagrees with result type '{}'",
+                field_id.0,
+                field.ty.as_str(),
+                result_ty.as_str()
+            ));
+        }
+        Ok(index)
+    }
+
     /// Validate a switch over a canonical variant family.  Exhaustiveness is
     /// part of the MIR contract: either every discriminant is listed exactly
     /// once or the final arm is an explicit default.
@@ -4217,6 +4265,31 @@ mod tests {
             crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
         let some = crate::core::NodeId("builtin:variant:Option::Some".into());
         let some_field = crate::core::NodeId("builtin:variant:Option::Some/payload:0".into());
+        assert_eq!(
+            catalog
+                .validate_variant_payload_projection(&option_id, &some, &some_field, &i32_id,)
+                .expect("Some payload projection"),
+            0
+        );
+        let projection_error = catalog
+            .validate_variant_payload_projection(&option_id, &some, &some_field, &bool_id)
+            .expect_err("payload result type must match TypeDesc");
+        assert!(
+            projection_error.contains("disagrees with result type"),
+            "{projection_error}"
+        );
+        let missing_field = catalog
+            .validate_variant_payload_projection(
+                &option_id,
+                &some,
+                &crate::core::NodeId("builtin:variant:Option::Some/payload:missing".into()),
+                &i32_id,
+            )
+            .expect_err("unknown payload identity must fail closed");
+        assert!(
+            missing_field.contains("absent from variant"),
+            "{missing_field}"
+        );
         assert!(catalog
             .validate_variant_construct(
                 &option_id,

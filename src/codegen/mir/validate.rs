@@ -1166,11 +1166,8 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
             let mut binding_fields = BTreeSet::new();
-            let variant = match &arm.case {
-                MirSwitchCase::Variant(variant) => self
-                    .program
-                    .type_catalog()
-                    .variant(&scrutinee_value.ty, variant),
+            let variant_id = match &arm.case {
+                MirSwitchCase::Variant(variant) => Some(variant),
                 MirSwitchCase::Default | MirSwitchCase::Literal(_) => None,
             };
             for (index, binding) in arm.bindings.iter().enumerate() {
@@ -1190,28 +1187,26 @@ impl<'a> NativeMirValidator<'a> {
                 else {
                     continue;
                 };
-                let Some(variant) = variant else {
+                let Some(variant_id) = variant_id else {
                     continue;
                 };
-                let Some(field) = variant
-                    .fields
-                    .iter()
-                    .find(|field| field.id == binding.field)
-                else {
+                if binding.parameter != target.parameters[arm.arguments.len() + index].value {
                     self.errors.push(NativeMirError::new(
                         subject,
-                        format!(
-                            "switch payload field '{}' is absent from TypeDesc variant",
-                            binding.field.0
-                        ),
+                        "switch binding parameter disagrees with target block parameter",
                     ));
-                    continue;
-                };
-                if parameter.ty != field.ty {
-                    self.errors.push(NativeMirError::new(
-                        subject,
-                        "switch payload binding type disagrees with TypeDesc",
-                    ));
+                }
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_variant_payload_projection(
+                        &scrutinee_value.ty,
+                        variant_id,
+                        &binding.field,
+                        &parameter.ty,
+                    )
+                {
+                    self.errors.push(NativeMirError::new(subject, message));
                 }
             }
         }
@@ -1346,20 +1341,6 @@ impl<'a> NativeMirValidator<'a> {
                         ),
                     ));
                 }
-                let Some(field) = variant
-                    .fields
-                    .iter()
-                    .find(|field| field.id == binding.field)
-                else {
-                    self.errors.push(NativeMirError::new(
-                        subject,
-                        format!(
-                            "switch-move payload field '{}' is absent from TypeDesc",
-                            binding.field.0
-                        ),
-                    ));
-                    continue;
-                };
                 let Some(parameter) = target
                     .parameters
                     .get(arm.arguments.len() + index)
@@ -1373,11 +1354,17 @@ impl<'a> NativeMirValidator<'a> {
                         "switch-move binding parameter disagrees with target block parameter",
                     ));
                 }
-                if parameter.ty != field.ty {
-                    self.errors.push(NativeMirError::new(
-                        subject,
-                        "switch-move payload binding type disagrees with TypeDesc",
-                    ));
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_variant_payload_projection(
+                        &scrutinee_value.ty,
+                        variant_id,
+                        &binding.field,
+                        &parameter.ty,
+                    )
+                {
+                    self.errors.push(NativeMirError::new(subject, message));
                 }
             }
         }

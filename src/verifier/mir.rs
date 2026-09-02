@@ -992,26 +992,28 @@ fn explore_variant_switch(
                 previous_cases.push(guard.clone());
                 let mut bindings = Vec::new();
                 for binding in &arm.bindings {
-                    let field = variant
-                        .fields
-                        .iter()
-                        .find(|field| field.id == binding.field)
-                        .ok_or_else(|| {
-                            format!(
-                                "canonical MIR verifier switch binding field '{}' is absent from TypeDesc",
-                                binding.field.0
-                            )
-                        })?;
-                    let value = payload.get(&field.id).cloned().ok_or_else(|| {
-                        format!(
-                            "canonical MIR verifier switch payload field '{}' is absent",
-                            field.id.0
-                        )
-                    })?;
                     let parameter = function.values.get(&binding.parameter).ok_or_else(|| {
                         format!(
                             "canonical MIR verifier switch binding parameter '{}' is absent",
                             binding.parameter
+                        )
+                    })?;
+                    let field_index = catalog.validate_variant_payload_projection(
+                        &scrutinee_ty,
+                        variant_id,
+                        &binding.field,
+                        &parameter.ty,
+                    )?;
+                    let field = variant.fields.get(field_index).ok_or_else(|| {
+                        format!(
+                            "canonical MIR verifier switch payload field '{}' is absent",
+                            binding.field.0
+                        )
+                    })?;
+                    let value = payload.get(&field.id).cloned().ok_or_else(|| {
+                        format!(
+                            "canonical MIR verifier switch payload field '{}' is absent",
+                            field.id.0
                         )
                     })?;
                     if !symbolic_matches_type(catalog, &parameter.ty, &value) {

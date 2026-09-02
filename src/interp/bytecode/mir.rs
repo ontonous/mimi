@@ -2422,6 +2422,7 @@ impl<'a> FunctionEmitter<'a> {
                             arm.target.clone(),
                             &arm.arguments,
                             &arm.bindings,
+                            &scrutinee_info.ty,
                             scrutinee_reg,
                             variant_desc,
                         );
@@ -2430,6 +2431,7 @@ impl<'a> FunctionEmitter<'a> {
                             arm.target.clone(),
                             &arm.arguments,
                             &arm.bindings,
+                            &scrutinee_info.ty,
                             scrutinee_reg,
                             variant_desc,
                         );
@@ -2466,6 +2468,7 @@ impl<'a> FunctionEmitter<'a> {
         target: crate::core::mir::MirBlockId,
         arguments: &[MirValueId],
         bindings: &[crate::core::mir::MirSwitchBinding],
+        scrutinee_ty: &crate::core::ResolvedTypeId,
         scrutinee: Reg,
         variant: &crate::core::mir::types::MirVariantDesc,
     ) {
@@ -2515,18 +2518,34 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_drop_register(payload_base + index as u16, &field.ty);
             }
         }
-        for binding in bindings {
-            let Some(index) = variant
-                .fields
-                .iter()
-                .position(|field| field.id == binding.field)
+        for (binding_index, binding) in bindings.iter().enumerate() {
+            let Some(parameter) = block
+                .parameters
+                .get(arguments.len() + binding_index)
+                .and_then(|parameter| self.function.values.get(&parameter.value))
             else {
-                self.error(format!(
-                    "switch-move binding field '{}' is absent",
-                    binding.field.0
-                ));
+                self.error("switch-move binding target type is absent");
                 return;
             };
+            let index = match self
+                .program
+                .type_catalog()
+                .validate_variant_payload_projection(
+                    scrutinee_ty,
+                    &variant.id,
+                    &binding.field,
+                    &parameter.ty,
+                ) {
+                Ok(index) => index,
+                Err(message) => {
+                    self.error(message);
+                    return;
+                }
+            };
+            if binding.parameter != block.parameters[arguments.len() + binding_index].value {
+                self.error("switch-move binding parameter disagrees with target block parameter");
+                return;
+            }
             sources.push(payload_base + index as u16);
         }
         for (source, parameter) in sources.into_iter().zip(&block.parameters) {
@@ -2598,6 +2617,7 @@ impl<'a> FunctionEmitter<'a> {
         target: crate::core::mir::MirBlockId,
         arguments: &[MirValueId],
         bindings: &[crate::core::mir::MirSwitchBinding],
+        scrutinee_ty: &crate::core::ResolvedTypeId,
         scrutinee: Reg,
         variant: &crate::core::mir::types::MirVariantDesc,
     ) {
@@ -2624,18 +2644,34 @@ impl<'a> FunctionEmitter<'a> {
             }
             sources.push(scratch);
         }
-        for binding in bindings {
-            let Some(index) = variant
-                .fields
-                .iter()
-                .position(|field| field.id == binding.field)
+        for (binding_index, binding) in bindings.iter().enumerate() {
+            let Some(parameter) = block
+                .parameters
+                .get(arguments.len() + binding_index)
+                .and_then(|parameter| self.function.values.get(&parameter.value))
             else {
-                self.error(format!(
-                    "switch binding field '{}' is absent",
-                    binding.field.0
-                ));
+                self.error("switch binding target type is absent");
                 return;
             };
+            let index = match self
+                .program
+                .type_catalog()
+                .validate_variant_payload_projection(
+                    scrutinee_ty,
+                    &variant.id,
+                    &binding.field,
+                    &parameter.ty,
+                ) {
+                Ok(index) => index,
+                Err(message) => {
+                    self.error(message);
+                    return;
+                }
+            };
+            if binding.parameter != block.parameters[arguments.len() + binding_index].value {
+                self.error("switch binding parameter disagrees with target block parameter");
+                return;
+            }
             if index > u16::MAX as usize {
                 self.error("variant payload index exceeds bytecode field ABI");
                 return;

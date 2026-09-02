@@ -826,13 +826,17 @@ impl MirProgram {
                         let Some(target) = function.blocks.get(&arm.target) else {
                             continue;
                         };
-                        let variant = match &arm.case {
-                            super::MirSwitchCase::Variant(variant) => {
-                                type_catalog.variant(&scrutinee_value.ty, variant)
-                            }
+                        if target.parameters.len() != arm.arguments.len() + arm.bindings.len() {
+                            errors.push(super::MirValidationError {
+                                subject: arm.edge.to_string(),
+                                message: "switch edge arguments and payload bindings disagree with block parameter arity".into(),
+                            });
+                        }
+                        let variant_id = match &arm.case {
+                            super::MirSwitchCase::Variant(variant) => Some(variant),
                             _ => None,
                         };
-                        if variant.is_none() && !arm.bindings.is_empty() {
+                        if variant_id.is_none() && !arm.bindings.is_empty() {
                             errors.push(super::MirValidationError {
                                 subject: arm.edge.to_string(),
                                 message: "switch payload bindings require a canonical variant case"
@@ -840,38 +844,34 @@ impl MirProgram {
                             });
                             continue;
                         }
-                        if let Some(variant) = variant {
+                        if let Some(variant_id) = variant_id {
                             for (index, binding) in arm.bindings.iter().enumerate() {
-                                let Some(parameter) = target
-                                    .parameters
-                                    .get(arm.arguments.len() + index)
-                                    .and_then(|parameter| function.values.get(&parameter.value))
+                                let Some(target_parameter) =
+                                    target.parameters.get(arm.arguments.len() + index)
                                 else {
                                     continue;
                                 };
-                                let Some(field) = variant
-                                    .fields
-                                    .iter()
-                                    .find(|field| field.id == binding.field)
+                                let Some(parameter) = function.values.get(&target_parameter.value)
                                 else {
+                                    continue;
+                                };
+                                if binding.parameter != target_parameter.value {
                                     errors.push(super::MirValidationError {
                                         subject: arm.edge.to_string(),
-                                        message: format!(
-                                            "switch binding field '{}' is absent from variant TypeDesc",
-                                            binding.field.0
-                                        ),
+                                        message: "switch binding parameter disagrees with target block parameter".into(),
                                     });
-                                    continue;
-                                };
-                                if parameter.ty != field.ty {
+                                }
+                                if let Err(message) = type_catalog
+                                    .validate_variant_payload_projection(
+                                        &scrutinee_value.ty,
+                                        variant_id,
+                                        &binding.field,
+                                        &parameter.ty,
+                                    )
+                                {
                                     errors.push(super::MirValidationError {
                                         subject: arm.edge.to_string(),
-                                        message: format!(
-                                            "switch binding '{}' type '{}' disagrees with payload type '{}'",
-                                            binding.parameter,
-                                            parameter.ty.as_str(),
-                                            field.ty.as_str()
-                                        ),
+                                        message,
                                     });
                                 }
                             }
@@ -3624,19 +3624,34 @@ impl<'a> MirReferenceInterpreter<'a> {
         if arm.bindings.is_empty() {
             return Ok(incoming);
         }
-        let variant = self
-            .program
-            .type_catalog()
-            .variant(scrutinee_ty, actual_variant)
-            .ok_or_else(|| {
-                self.error(&function.owner, "runtime variant is absent from TypeDesc")
-            })?;
-        for binding in &arm.bindings {
-            let field_index = variant
-                .fields
-                .iter()
-                .position(|field| field.id == binding.field)
-                .ok_or_else(|| self.error(&function.owner, "switch binding field is absent"))?;
+        for (index, binding) in arm.bindings.iter().enumerate() {
+            let target_parameter = function
+                .blocks
+                .get(&arm.target)
+                .and_then(|block| block.parameters.get(arm.arguments.len() + index))
+                .ok_or_else(|| self.error(&function.owner, "switch binding target is absent"))?;
+            let parameter = function
+                .values
+                .get(&target_parameter.value)
+                .ok_or_else(|| {
+                    self.error(&function.owner, "switch binding target type is absent")
+                })?;
+            if binding.parameter != target_parameter.value {
+                return Err(self.error(
+                    &function.owner,
+                    "switch binding parameter disagrees with target block parameter",
+                ));
+            }
+            let field_index = self
+                .program
+                .type_catalog()
+                .validate_variant_payload_projection(
+                    scrutinee_ty,
+                    actual_variant,
+                    &binding.field,
+                    &parameter.ty,
+                )
+                .map_err(|message| self.error(&function.owner, message))?;
             let field = payload.get(field_index).cloned().ok_or_else(|| {
                 self.error(
                     &function.owner,
@@ -3737,17 +3752,36 @@ impl<'a> MirReferenceInterpreter<'a> {
             .cloned()
             .ok_or_else(|| self.error(&function.owner, "switch-move variant has no drop plan"))?;
         let mut bound_indices = BTreeMap::new();
-        for binding in &arm.bindings {
-            let index = variant
-                .fields
-                .iter()
-                .position(|field| field.id == binding.field)
+        for (binding_index, binding) in arm.bindings.iter().enumerate() {
+            let target_parameter = function
+                .blocks
+                .get(&arm.target)
+                .and_then(|block| block.parameters.get(arm.arguments.len() + binding_index))
                 .ok_or_else(|| {
-                    self.error(
-                        &function.owner,
-                        "switch-move binding field is absent from TypeDesc",
-                    )
+                    self.error(&function.owner, "switch-move binding target is absent")
                 })?;
+            let parameter = function
+                .values
+                .get(&target_parameter.value)
+                .ok_or_else(|| {
+                    self.error(&function.owner, "switch-move binding target type is absent")
+                })?;
+            if binding.parameter != target_parameter.value {
+                return Err(self.error(
+                    &function.owner,
+                    "switch-move binding parameter disagrees with target block parameter",
+                ));
+            }
+            let index = self
+                .program
+                .type_catalog()
+                .validate_variant_payload_projection(
+                    &scrutinee_ty,
+                    &actual_variant,
+                    &binding.field,
+                    &parameter.ty,
+                )
+                .map_err(|message| self.error(&function.owner, message))?;
             if bound_indices.insert(binding.field.clone(), index).is_some() {
                 return Err(self.error(&function.owner, "switch-move binding field is repeated"));
             }

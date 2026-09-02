@@ -202,6 +202,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.target,
                     &arm.arguments,
                     &arm.bindings,
+                    &scrutinee_ty,
                     variant,
                     scrutinee_value,
                     drop_predecessor,
@@ -225,6 +226,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.target,
                     &arm.arguments,
                     &arm.bindings,
+                    &scrutinee_ty,
                     variant,
                     scrutinee_value,
                     current,
@@ -341,6 +343,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &arm.target,
                 &arm.arguments,
                 &arm.bindings,
+                &scrutinee_ty,
                 &variant,
                 scrutinee_value,
                 current,
@@ -424,6 +427,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         target: &MirBlockId,
         arguments: &[MirValueId],
         bindings: &[crate::core::mir::MirSwitchBinding],
+        scrutinee_ty: &crate::core::ResolvedTypeId,
         variant: &crate::core::mir::types::MirVariantDesc,
         scrutinee: BasicValueEnum<'ctx>,
         predecessor: BasicBlock<'ctx>,
@@ -450,17 +454,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let payload = if bindings.is_empty() {
             None
         } else {
-            let field = variant
-                .fields
-                .iter()
-                .find(|field| field.id == bindings[0].field)
+            let parameter = block
+                .parameters
+                .get(arguments.len())
+                .and_then(|parameter| self.function.values.get(&parameter.value))
                 .ok_or_else(|| {
                     NativeMirError::new(
                         subject.to_string(),
-                        "variant payload binding field is absent from TypeDesc",
+                        "variant payload binding target type is absent",
                     )
                 })?;
-            if field.id != bindings[0].field || variant.fields.len() != 1 {
+            let field_index = self
+                .program
+                .type_catalog()
+                .validate_variant_payload_projection(
+                    scrutinee_ty,
+                    &variant.id,
+                    &bindings[0].field,
+                    &parameter.ty,
+                )
+                .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
+            if bindings.len() != 1 || field_index != 0 || variant.fields.len() != 1 {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "variant payload binding is outside the single-payload native contract",
@@ -479,13 +493,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         };
         if let Some(payload) = payload {
             for (index, binding) in bindings.iter().enumerate() {
-                if index != 0 || binding.field != variant.fields[0].id {
+                let parameter = &block.parameters[arguments.len() + index];
+                if index != 0 || binding.parameter != parameter.value {
                     return Err(NativeMirError::new(
                         subject.to_string(),
-                        "variant payload binding is outside the single-payload native contract",
+                        "variant payload binding parameter disagrees with target block parameter",
                     ));
                 }
-                let parameter = &block.parameters[arguments.len() + index];
                 self.pending_incoming.push((
                     parameter.value.clone(),
                     NativePhiSource::Value(payload),
