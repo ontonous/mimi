@@ -747,43 +747,30 @@ fn symbolic_variant_construct(
     nominal: &crate::core::ir::NominalTypeId,
     variant: &crate::core::NodeId,
     fields: &[(crate::core::NodeId, SymbolicValue)],
+    field_types: &[crate::core::ir::ResolvedTypeId],
 ) -> Result<SymbolicValue, String> {
-    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
-        return Err("MIR verifier variant construction has no canonical layout".into());
-    };
-    if nominal.as_str() != expected_nominal {
-        return Err("MIR verifier variant construction nominal disagrees with TypeDesc".into());
-    }
-    let Some(expected_variant) = variants.iter().find(|candidate| candidate.id == *variant) else {
-        return Err("MIR verifier variant construction case is absent from TypeDesc".into());
-    };
-    if expected_variant.fields.len() != fields.len() {
-        return Err(
-            "MIR verifier variant construction payload arity disagrees with TypeDesc".into(),
-        );
-    }
+    let field_ids = fields
+        .iter()
+        .map(|(field_id, _)| field_id.clone())
+        .collect::<Vec<_>>();
+    let expected_variant = catalog.validated_variant_construct(
+        result_ty,
+        nominal,
+        variant,
+        &field_ids,
+        field_types,
+    )?;
     let mut payload = BTreeMap::new();
-    for (field_id, value) in fields {
-        let Some(expected_field) = expected_variant
-            .fields
-            .iter()
-            .find(|field| field.id == *field_id)
-        else {
-            return Err("MIR verifier variant construction field is absent from TypeDesc".into());
-        };
-        if !symbolic_matches_type(catalog, &expected_field.ty, value) {
+    for ((field_id, value), field_ty) in fields.iter().zip(field_types) {
+        if !symbolic_matches_type(catalog, field_ty, value) {
             return Err("MIR verifier variant payload disagrees with TypeDesc".into());
         }
         if payload.insert(field_id.clone(), value.clone()).is_some() {
             return Err("MIR verifier variant construction repeats a field".into());
         }
     }
-    if payload.len() != expected_variant.fields.len() {
-        return Err("MIR verifier variant construction is missing a payload field".into());
-    }
     Ok(SymbolicValue::Variant {
-        nominal: crate::core::ir::NominalTypeId::new(expected_nominal)
-            .map_err(|error| error.to_string())?,
+        nominal: nominal.clone(),
         tag: Int::from_i64(expected_variant.discriminant as i64),
         payload,
     })
@@ -1433,6 +1420,16 @@ fn eval_instruction(
             variant,
             fields,
         } => {
+            let field_types = fields
+                .iter()
+                .map(|(_, value)| {
+                    function
+                        .values
+                        .get(value)
+                        .map(|info| info.ty.clone())
+                        .ok_or_else(|| format!("MIR variant payload value '{}' is absent", value))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let values = fields
                 .iter()
                 .map(|(field, value)| {
@@ -1456,6 +1453,7 @@ fn eval_instruction(
                 nominal,
                 variant,
                 &values,
+                &field_types,
             )?;
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
@@ -1634,18 +1632,14 @@ fn eval_instruction(
                 })?;
                 values.push((field.clone(), symbolic));
             }
-            let field_ids = fields
-                .iter()
-                .map(|(field, _)| field.clone())
-                .collect::<Vec<_>>();
-            catalog.validate_variant_construct(
+            let value = symbolic_variant_construct(
+                catalog,
                 &result_ty,
                 nominal,
                 variant,
-                &field_ids,
+                &values,
                 &field_types,
             )?;
-            let value = symbolic_variant_construct(catalog, &result_ty, nominal, variant, &values)?;
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
