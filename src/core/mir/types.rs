@@ -3170,6 +3170,22 @@ impl MirTypeCatalog {
         Ok((none, some, inner))
     }
 
+    /// Return the canonical None/Some descriptors and the already-validated
+    /// Some payload field for Option<string> glue consumers.  Clone/drop
+    /// emitters must consume this field fact instead of rechecking payload
+    /// arity or type against a target representation.
+    pub fn validated_option_string_payload(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(&MirVariantDesc, &MirVariantDesc, &MirFieldDesc), String> {
+        let (none, some, _) = self.validated_option_string_variants(ty)?;
+        let payload = some
+            .fields
+            .first()
+            .ok_or_else(|| "canonical Option<string> Some payload field is absent".to_string())?;
+        Ok((none, some, payload))
+    }
+
     /// Resolve one active variant from the already-validated narrow
     /// Option<string> contract.  Consumers must select by stable identity;
     /// payload arity and physical representation are not variant semantics.
@@ -3965,6 +3981,20 @@ mod tests {
         assert_eq!(none_variant.id, none_id);
         assert_eq!(some_variant.id, some_id);
         assert_eq!(inner, string_id);
+        let (payload_none, payload_some, payload_field) = catalog
+            .validated_option_string_payload(&option_id)
+            .expect("canonical Option<string> payload field");
+        assert_eq!(payload_none.id, none_id);
+        assert_eq!(payload_some.id, some_id);
+        assert_eq!(
+            payload_field.id,
+            crate::core::NodeId("builtin:variant:Option::Some/payload:0".into())
+        );
+        assert_eq!(payload_field.ty, string_id);
+        let payload_error = catalog
+            .validated_option_string_payload(&string_id)
+            .expect_err("bare string has no Option<string> payload contract");
+        assert!(payload_error.contains("Option<string>"), "{payload_error}");
         assert_eq!(
             catalog
                 .validated_variant_drop_plan(&option_id, &some_id)

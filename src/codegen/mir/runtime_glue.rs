@@ -341,11 +341,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let (variant_abi, payload_ty) = native_variant_abi(self.program.type_catalog(), ty, true)?;
-        let (empty_variant, payload_variant, _) = self
+        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), ty, true)?;
+        let (empty_variant, payload_variant, _payload_field) = self
             .program
             .type_catalog()
-            .validated_option_string_variants(ty)
+            .validated_option_string_payload(ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let payload_plan = self
             .program
@@ -426,15 +426,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "mir_variant_drop_value",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let payload_field = payload_variant.fields.first().ok_or_else(|| {
-            NativeMirError::new(subject, "canonical Option<string> payload field is absent")
-        })?;
-        if payload_ty != payload_field.ty {
-            return Err(NativeMirError::new(
-                subject,
-                "variant drop payload disagrees with the canonical TypeDesc field",
-            ));
-        }
         self.emit_owned_string_drop_value(payload, subject)?;
         self.generator
             .builder
