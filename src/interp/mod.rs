@@ -105,8 +105,11 @@ impl<'a> Interpreter<'a> {
     pub fn from_checked(program: &'a crate::core::CheckedProgram) -> Self {
         // C2 (permanent): the surface-AST interpreter is the reference execution
         // semantics for Flow, Actor, Session, and FFI programs. ResolvedInterpreter
-        // covers pure value programs; raw_ast() provides the permanent remainder.
-        let mut interp = Self::new(program.raw_ast());
+        // covers pure value programs; the explicitly named surface-AST
+        // compatibility owner provides the permanent remainder.
+        let mut interp = Self::new(
+            program.legacy_body_file(crate::core::LegacyBodyConsumer::SurfaceAstInterpreter),
+        );
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
         let tables = std::sync::Arc::new(program.build_transition_tables());
         interp.resolved_transitions = Some(tables.resolved.clone());

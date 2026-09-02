@@ -891,6 +891,37 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
 }
 
 #[test]
+fn compatibility_verifier_access_is_explicitly_tagged() {
+    require_z3!();
+    let source = r#"
+        func positive(value: i32) -> i32 {
+            requires: value > 0
+            ensures: result > 0
+            value
+        }
+
+        func main() -> i32 { positive(1) }
+    "#;
+    let file = parse_memory_source(source, "legacy-body-owner-audit").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    verify_checked(&program, source_hash.clone()).expect("compatibility verifier");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::FlowVerifierCompatibility]
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    verify_checked_dual(&program, source_hash).expect("dual compatibility verifier");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
+    );
+}
+
+#[test]
 fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_list_len.mimi");
@@ -1063,7 +1094,7 @@ fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
     // The thread-local tripwires isolate this proof from unrelated parallel
     // tests: verify_checked and verify_checked_dual must each materialize once
     // and must not touch the compatibility raw-AST accessor.
-    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::reset_test_route_materialization_count();
     assert!(
         crate::verifier::verify_checked(&checked, source_hash.clone())
@@ -1071,15 +1102,15 @@ fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
             .is_empty()
     );
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
-    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::reset_test_route_materialization_count();
     assert!(crate::verifier::verify_checked_dual(&checked, source_hash)
         .expect("dual public verifier")
         .is_empty());
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
-    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     // Recomputing the audit witness after all consumers proves that no
     // backend mutated the canonical graph or its side tables.
@@ -1171,7 +1202,7 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
     // before their historical AST/Flow compatibility engine.  The counters
     // make an accidental raw-AST fallback observable even though the verdicts
     // would otherwise look identical.
-    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::reset_test_route_materialization_count();
     let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
         .expect("public checked verifier must use the Option<string> MIR island");
@@ -1182,9 +1213,9 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
         .iter()
         .any(|result| result.func_name == "discard"));
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
-    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-    crate::core::CheckedProgram::reset_test_raw_ast_call_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::reset_test_route_materialization_count();
     let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
         .expect("dual public checked verifier must use the Option<string> MIR island");
@@ -1195,7 +1226,7 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
         .iter()
         .any(|result| result.func_name == "discard"));
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
-    assert_eq!(crate::core::CheckedProgram::test_raw_ast_call_count(), 0);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]

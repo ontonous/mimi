@@ -829,8 +829,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// vtables) but before the legacy body compilation pass. This ensures all
     /// symbols are declared before the resolved emitter compiles eligible bodies.
     ///
-    /// 0.32.27+: `file` extracted from `program.raw_ast()` internally,
-    /// eliminating the raw AST parameter at the caller site (C1 migration).
+    /// 0.32.27+: `file` is obtained from the explicitly tagged
+    /// `CodegenLegacyRemainder` compatibility owner, eliminating the surface
+    /// body parameter at the caller site (C1 migration).
     pub(crate) fn compile_file_with_resolved(
         &mut self,
         program: &crate::core::CheckedProgram,
@@ -839,8 +840,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         // C1 (permanent): the fifth pass compiles ineligible body classes
         // (capturing lambdas, generics, async, extern ABI wrappers) from the
         // surface AST. The resolved native emitter handles the eligible subset;
-        // raw_ast() provides the permanent remainder to the legacy emitter.
-        self.compile_file_inner(program.raw_ast(), Some((program, eligible)))
+        // The tagged compatibility owner provides the permanent remainder to
+        // the legacy emitter.
+        self.compile_file_inner(
+            program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder),
+            Some((program, eligible)),
+        )
     }
 
     fn compile_file_inner(

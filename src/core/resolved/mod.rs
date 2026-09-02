@@ -8,10 +8,45 @@ use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// The only callers that may still access the retained surface body file.
+///
+/// This is deliberately a closed, typed boundary rather than a boolean
+/// "legacy fallback" flag.  Each variant names the compatibility consumer
+/// that still owns the access, so migration tests can prove that a closed MIR
+/// island did not accidentally reopen a different AST consumer.  Removing a
+/// variant is the deletion gate for that consumer; adding one requires a new
+/// architecture decision and receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum LegacyBodyConsumer {
+    /// The legacy LLVM fifth pass for body classes not yet lowered to MIR.
+    CodegenLegacyRemainder,
+    /// The surface interpreter compatibility path for Flow/actor/session/FFI.
+    SurfaceAstInterpreter,
+    /// The legacy Z3 Flow/body compatibility encoder.
+    FlowVerifierCompatibility,
+    /// The legacy Z3 extern-call-site/body compatibility encoder.
+    FfiVerifierCompatibility,
+    /// The secondary Flow/VIR engine used by dual verification compatibility.
+    DualVerifierCompatibility,
+}
+
+impl LegacyBodyConsumer {
+    #[cfg(test)]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CodegenLegacyRemainder => "codegen-legacy-remainder",
+            Self::SurfaceAstInterpreter => "surface-ast-interpreter",
+            Self::FlowVerifierCompatibility => "flow-verifier-compatibility",
+            Self::FfiVerifierCompatibility => "ffi-verifier-compatibility",
+            Self::DualVerifierCompatibility => "dual-verifier-compatibility",
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
-    static TEST_RAW_AST_CALL_COUNT: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
+    static TEST_LEGACY_BODY_ACCESS: std::cell::RefCell<Vec<LegacyBodyConsumer>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
@@ -1252,7 +1287,7 @@ impl CheckedProgram {
         })
     }
 
-    /// Raw surface AST retained for backends that permanently require it.
+    /// Retained surface body file for an explicitly named compatibility owner.
     ///
     /// # Architecture (0.32.29, irreversible)
     ///
@@ -1278,23 +1313,26 @@ impl CheckedProgram {
     ///
     /// # Prohibition
     ///
-    /// New code MUST NOT call this method. Declaration-level data (signatures,
-    /// Flow transitions, Actor/Session/Protocol catalogs, ownership, CFG) is
-    /// available through the typed accessor methods on `CheckedProgram`.
-    /// If you need body-level data, use `resolved_body()` / `callables()`.
+    /// New semantic consumers MUST NOT use this method. Declaration-level
+    /// data (signatures, Flow transitions, Actor/Session/Protocol catalogs,
+    /// ownership, CFG) is available through typed accessors on
+    /// `CheckedProgram`; body-level canonical data is available through
+    /// `resolved_body()` / `callables()`.  A caller here is an explicit
+    /// compatibility boundary and must carry one of the five owner tags
+    /// above.
     #[cfg(test)]
-    pub(crate) fn reset_test_raw_ast_call_count() {
-        TEST_RAW_AST_CALL_COUNT.with(|count| count.set(0));
+    pub(crate) fn reset_test_legacy_body_access() {
+        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().clear());
     }
 
     #[cfg(test)]
-    pub(crate) fn test_raw_ast_call_count() -> usize {
-        TEST_RAW_AST_CALL_COUNT.with(std::cell::Cell::get)
+    pub(crate) fn test_legacy_body_access() -> Vec<LegacyBodyConsumer> {
+        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow().clone())
     }
 
-    pub(crate) fn raw_ast(&self) -> &File {
+    pub(crate) fn legacy_body_file(&self, consumer: LegacyBodyConsumer) -> &File {
         #[cfg(test)]
-        TEST_RAW_AST_CALL_COUNT.with(|count| count.set(count.get() + 1));
+        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(consumer));
         &self.legacy_file
     }
 

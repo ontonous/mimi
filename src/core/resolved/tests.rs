@@ -94,8 +94,8 @@ fn checked_program_owns_its_migration_body_input() {
     );
     // The checked program owns the canonical frontend-to-MIR boundary.  This
     // test used to exercise the compatibility bytecode compiler through
-    // `raw_ast()`, which made an ownership test depend on the very legacy
-    // source consumer that the migration is removing.  Compile the same
+    // retained surface body accessor, which made an ownership test depend on
+    // the very legacy source consumer that the migration is removing. Compile the same
     // checked program through the AST-free MIR backend instead.
     let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("canonical MIR from owned checked program");
@@ -109,12 +109,46 @@ fn checked_program_owns_its_migration_body_input() {
 }
 
 #[test]
+fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
+    let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
+
+    let consumers = [
+        LegacyBodyConsumer::CodegenLegacyRemainder,
+        LegacyBodyConsumer::SurfaceAstInterpreter,
+        LegacyBodyConsumer::FlowVerifierCompatibility,
+        LegacyBodyConsumer::FfiVerifierCompatibility,
+        LegacyBodyConsumer::DualVerifierCompatibility,
+    ];
+    let names = consumers
+        .iter()
+        .map(|consumer| consumer.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "codegen-legacy-remainder",
+            "surface-ast-interpreter",
+            "flow-verifier-compatibility",
+            "ffi-verifier-compatibility",
+            "dual-verifier-compatibility",
+        ]
+    );
+
+    CheckedProgram::reset_test_legacy_body_access();
+    for consumer in consumers {
+        assert!(!program.legacy_body_file(consumer).items.is_empty());
+    }
+    assert_eq!(CheckedProgram::test_legacy_body_access(), consumers);
+}
+
+#[test]
 fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
     let file = parse("func main() -> i32 { 42 }");
     let mut program = crate::core::check_program(&file).expect("check");
     program.legacy_file.items.clear();
     assert!(program.legacy_file.items.is_empty());
 
+    CheckedProgram::reset_test_legacy_body_access();
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "resolved_poison");
     codegen
@@ -123,6 +157,21 @@ fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
     let ir = codegen.module.print_to_string().to_string();
     assert!(ir.contains("define i32 @main(i32"), "{ir}");
     assert!(ir.contains("ret i32 42"), "{ir}");
+    // A fully admitted scalar MIR island must not touch the retained legacy
+    // body at all.  The compatibility boundary is exercised by separate
+    // legacy-path tests below, so this tripwire is intentionally empty.
+    assert!(CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn surface_interpreter_access_is_explicitly_tagged() {
+    let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
+    CheckedProgram::reset_test_legacy_body_access();
+    let _interpreter = crate::interp::Interpreter::from_checked(&program);
+    assert_eq!(
+        CheckedProgram::test_legacy_body_access(),
+        vec![LegacyBodyConsumer::SurfaceAstInterpreter]
+    );
 }
 
 #[test]

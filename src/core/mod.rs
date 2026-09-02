@@ -42,6 +42,7 @@ pub use ownership::{
     IndexProjection, Loan, LoanId, LoanKind, LocalId, Place, PlaceProjection, ResourceAnalysis,
     ResourceFact, ResourceId,
 };
+pub(crate) use resolved::LegacyBodyConsumer;
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,
     ResolvedActorMethod, ResolvedCallKind, ResolvedCallSite, ResolvedCapability,
