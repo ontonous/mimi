@@ -257,14 +257,13 @@ pub fn verify_checked_dual(
 
 /// Verify the already-closed flat Copy-record island from canonical MIR.
 ///
-/// The public CheckedProgram APIs predate the canonical verifier and normally
-/// retain the Flow/AST verifier for shapes that have not crossed the default
-/// production boundary.  A materialized flat Copy record is different: its
-/// TypeDesc/layout, reference, bytecode, native and MIR-verifier contracts are
-/// already closed.  Once this MIR-side predicate recognizes it, the old AST
-/// verifier is no longer an allowed consumer or fallback.  Construction
-/// failure or absence of a materialized record is deliberately `None`, so
-/// unrelated compatibility programs keep their existing boundary.
+/// Admission is decided from checker-owned Resolved IR before materialization.
+/// Only `CompleteCoverage` crosses the MIR boundary: a construction failure is
+/// a hard materialization error, and a successful graph without the admitted
+/// record is a coverage error.  `OutsideProfile` and `MixedCoverage` are the
+/// explicit compatibility boundary for programs that do not belong to this
+/// whole-program island; they are never confused with a MIR construction
+/// failure.
 fn verify_closed_flat_copy_record_mir(
     program: &crate::core::CheckedProgram,
     source_hash: String,
@@ -275,12 +274,22 @@ fn verify_closed_flat_copy_record_mir(
         // probing the canonical verifier.
         return Ok(None);
     }
-    let Ok(canonical) = crate::core::mir::reference::MirProgram::from_checked_program(program)
-    else {
-        return Ok(None);
-    };
+    match crate::core::mir::classify_flat_copy_record_admission(program) {
+        crate::core::mir::FlatCopyRecordAdmission::OutsideProfile
+        | crate::core::mir::FlatCopyRecordAdmission::MixedCoverage => return Ok(None),
+        crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage => {}
+    }
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
+        .map_err(|error| {
+            format!(
+                "MIR-MATERIALIZATION-001: flat Copy-record verifier island construction failed: {error}"
+            )
+        })?;
     if !crate::core::mir::contains_flat_copy_record_candidate(&canonical) {
-        return Ok(None);
+        return Err(
+            "MIR-COVERAGE-001: complete flat Copy-record admission did not materialize a record boundary"
+                .into(),
+        );
     }
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(

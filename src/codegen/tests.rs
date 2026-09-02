@@ -317,6 +317,34 @@ fn direct_native_entry_rejects_a_mixed_flat_copy_record_graph_without_fallback()
 }
 
 #[test]
+fn direct_native_entry_rejects_complete_record_materialization_failure() {
+    let source = r#"
+        type Point { x: i32 }
+
+        func make_fn(p: Point) -> func(i32) -> i32 {
+            fn(value: i32) -> i32 { value + 1 }
+        }
+
+        func main() -> i32 { 0 }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "s17_flat_copy_record_materialization_error");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("complete record admission must not fall back after MIR construction failure");
+    assert!(errors
+        .iter()
+        .any(|error| error.code.as_deref() == Some("MIR-LOWERING-001")));
+    assert!(codegen.module.get_function("main").is_none());
+}
+
+#[test]
 fn direct_native_entry_rejects_a_mixed_scalar_collection_candidate() {
     let source = "func main() -> i32 { let values = [1, 2, 3] let count = len(values) drop(values) let text = \"outside\" drop(text) count }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

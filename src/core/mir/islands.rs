@@ -10,13 +10,15 @@
 
 use std::collections::BTreeSet;
 
-use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
+use crate::core::ir::{
+    ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedType, ResolvedUnaryOp,
+};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
     MirTypeKind,
 };
-use crate::core::{NodeId, PrimitiveType};
+use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedTypeId};
 
 use super::{
     MirFunction, MirGenericInstanceContract, MirInstructionKind, MirListOperation, MirTerminator,
@@ -25,6 +27,197 @@ use super::{
 
 /// Name of the finite whole-program island closed by this contract.
 pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
+
+/// Checker-owned admission state for the flat Copy-record verifier island.
+///
+/// This is intentionally computed before MIR materialization.  A materialized
+/// candidate is not enough for a public verifier API: the API verifies a
+/// whole checked program, so a generic, imported, effectful, or otherwise
+/// mixed sibling must not be silently omitted from the MIR graph and thereby
+/// receive a partial green result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatCopyRecordAdmission {
+    /// No executable typed body or signature uses a user record.
+    OutsideProfile,
+    /// A record is used, but the complete program is outside the currently
+    /// closed verifier island.  This is an explicit compatibility boundary;
+    /// it is not a MIR construction failure.
+    MixedCoverage,
+    /// The checker-owned typed program is closed enough that construction
+    /// failure is a hard MIR materialization error rather than a fallback.
+    CompleteCoverage,
+}
+
+/// Classify flat Copy-record verifier admission from checker-owned artifacts.
+///
+/// The predicate deliberately does not build MIR and never consults the
+/// retained surface AST.  Its conservative mixed-coverage checks protect the
+/// public whole-program verifier from returning a partial MIR subgraph for a
+/// program containing generic templates, imports, effects, or other semantic
+/// consumers not yet covered by this island.
+pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopyRecordAdmission {
+    let record_ids = program
+        .type_defs()
+        .values()
+        .filter(|definition| definition.kind == crate::core::ResolvedTypeKind::Record)
+        .map(|definition| definition.node_id.0.clone())
+        .collect::<BTreeSet<_>>();
+    if record_ids.is_empty() {
+        return FlatCopyRecordAdmission::OutsideProfile;
+    }
+
+    let uses_record = program_uses_record(program, &record_ids);
+    if !uses_record {
+        return FlatCopyRecordAdmission::OutsideProfile;
+    }
+
+    if has_mixed_coverage(program) {
+        FlatCopyRecordAdmission::MixedCoverage
+    } else {
+        FlatCopyRecordAdmission::CompleteCoverage
+    }
+}
+
+fn has_mixed_coverage(program: &CheckedProgram) -> bool {
+    fn is_runtime_origin(origin: &crate::core::Origin) -> bool {
+        matches!(origin, crate::core::Origin::RuntimeSystem { .. })
+    }
+
+    let mixed = program.has_imports()
+        || program
+            .flows()
+            .values()
+            .any(|flow| !is_runtime_origin(&flow.origin))
+        || !program.sessions().is_empty()
+        || !program.actors().is_empty()
+        || !program.capabilities().is_empty()
+        || !program.traits().is_empty()
+        || !program.impls().is_empty()
+        || !program.extern_blocks().is_empty()
+        || program
+            .transitions()
+            .values()
+            .any(|transition| !is_runtime_origin(&transition.origin))
+        || !program.backend_requirements().is_empty()
+        || program.type_defs().values().any(|definition| {
+            matches!(definition.origin, crate::core::Origin::User(_))
+                && (!definition.generic_parameters.is_empty()
+                    || definition.kind != crate::core::ResolvedTypeKind::Record
+                        && definition.kind != crate::core::ResolvedTypeKind::Alias
+                        && definition.kind != crate::core::ResolvedTypeKind::Newtype)
+        })
+        || program.functions().values().any(|function| {
+            !function.generics.is_empty()
+                || !function.generic_binders.is_empty()
+                || !function.effects.is_empty()
+                || function.is_async
+                || function.is_comptime
+                || function.extern_abi.is_some()
+        })
+        || program.callables().values().any(|callable| {
+            !callable.signature.generic_parameters.is_empty()
+                || !callable.signature.effects.is_empty()
+                || !callable.body.captures.is_empty()
+                || !callable.body.default_values.is_empty()
+        })
+        // The closed record verifier island proves value semantics for Copy
+        // records. A view/mutate parameter is a borrow/effect contract with a
+        // separate ownership proof and must remain on the compatibility
+        // verifier until that contract has its own MIR consumer island.
+        || program.resolved_signatures().values().any(|signature| {
+            signature.parameters.iter().any(|parameter| {
+                matches!(
+                    parameter.permission,
+                    Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+                )
+            })
+        });
+    mixed
+}
+
+/// Scan the checker-owned type references that make up a whole program.
+/// `resolved_node_types` is populated for every typed body node; the other
+/// maps cover declaration and generated type edges that do not have an
+/// expression node.  This keeps admission independent of both source AST and
+/// MIR materialization.
+fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) -> bool {
+    fn contains(
+        program: &CheckedProgram,
+        ty: &ResolvedTypeId,
+        record_ids: &BTreeSet<String>,
+        visited: &mut BTreeSet<ResolvedTypeId>,
+    ) -> bool {
+        if !visited.insert(ty.clone()) {
+            return false;
+        }
+        let Some(resolved) = program.resolved_types().get(ty) else {
+            return false;
+        };
+        match resolved {
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } => {
+                record_ids.contains(item.as_str())
+                    || arguments
+                        .iter()
+                        .any(|argument| contains(program, argument, record_ids, visited))
+            }
+            ResolvedType::Reference { target, .. }
+            | ResolvedType::CBuffer(target)
+            | ResolvedType::Ownership { target, .. }
+            | ResolvedType::Newtype { inner: target, .. }
+            | ResolvedType::Slice(target)
+            | ResolvedType::RawPointer { target, .. }
+            | ResolvedType::Option(target) => contains(program, target, record_ids, visited),
+            ResolvedType::Result { ok, error } => {
+                contains(program, ok, record_ids, visited)
+                    || contains(program, error, record_ids, visited)
+            }
+            ResolvedType::Tuple(elements) => elements
+                .iter()
+                .any(|element| contains(program, element, record_ids, visited)),
+            ResolvedType::Function {
+                parameters, result, ..
+            } => {
+                parameters
+                    .iter()
+                    .any(|parameter| contains(program, parameter, record_ids, visited))
+                    || contains(program, result, record_ids, visited)
+            }
+            ResolvedType::Array { element, .. } => contains(program, element, record_ids, visited),
+            ResolvedType::FlowStateSet { .. }
+            | ResolvedType::Primitive(_)
+            | ResolvedType::GenericParameter(_)
+            | ResolvedType::Capability(_)
+            | ResolvedType::Trait { .. }
+            | ResolvedType::DynamicAny { .. } => false,
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut check = |ty: &ResolvedTypeId| contains(program, ty, record_ids, &mut visited);
+
+    program.resolved_node_types().values().any(&mut check)
+        || program.resolved_field_types().values().any(&mut check)
+        || program.resolved_type_operands().values().any(&mut check)
+        || program
+            .resolved_type_arguments()
+            .values()
+            .flatten()
+            .any(&mut check)
+        || program.resolved_type_targets().values().any(&mut check)
+        || program.resolved_signatures().values().any(|signature| {
+            signature
+                .parameters
+                .iter()
+                .any(|parameter| check(&parameter.ty))
+                || check(&signature.result)
+        })
+        || program
+            .resolved_bodies()
+            .values()
+            .any(|body| body.locals.values().any(|local| check(&local.ty)) || check(&body.root.ty))
+}
 
 /// Return whether the canonical graph contains an operation that the default
 /// scalar collection selector recognizes as a migrated production candidate.

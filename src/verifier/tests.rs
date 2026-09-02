@@ -891,6 +891,84 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
 }
 
 #[test]
+fn flat_copy_record_admission_is_checker_owned_before_materialization() {
+    let source = include_str!("../../tests/fixtures/mir_verifier_record_contract.mimi");
+    let file = parse_memory_source(source, "mir-record-admission").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_flat_copy_record_admission(&program),
+        crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+    );
+
+    let mixed_source = r#"
+        type Point { x: i32 }
+        func identity<T>(value: T) -> T { value }
+        func main() -> i32 {
+            let point = Point { x: 1 }
+            point.x
+        }
+    "#;
+    let mixed_file = parse_memory_source(mixed_source, "mir-record-mixed-admission")
+        .expect("parse mixed source");
+    let mixed_program = crate::core::check_program(&mixed_file).expect("typecheck mixed source");
+    assert_eq!(
+        crate::core::mir::classify_flat_copy_record_admission(&mixed_program),
+        crate::core::mir::FlatCopyRecordAdmission::MixedCoverage
+    );
+
+    let borrow_source = r#"
+        type Rec { a: i32, b: i32 }
+        func swap(mutated: mutate Rec) -> Rec {
+            mutated = Rec { a: mutated.b, b: mutated.a }
+            mutated
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let borrow_file = parse_memory_source(borrow_source, "mir-record-borrow-admission")
+        .expect("parse borrow source");
+    let borrow_program = crate::core::check_program(&borrow_file).expect("typecheck borrow source");
+    assert_eq!(
+        crate::core::mir::classify_flat_copy_record_admission(&borrow_program),
+        crate::core::mir::FlatCopyRecordAdmission::MixedCoverage
+    );
+
+    let scalar_source = "func main() -> i32 { 0 }";
+    let scalar_file = parse_memory_source(scalar_source, "mir-record-outside-admission")
+        .expect("parse scalar source");
+    let scalar_program = crate::core::check_program(&scalar_file).expect("typecheck scalar source");
+    assert_eq!(
+        crate::core::mir::classify_flat_copy_record_admission(&scalar_program),
+        crate::core::mir::FlatCopyRecordAdmission::OutsideProfile
+    );
+}
+
+#[test]
+fn complete_flat_copy_record_materialization_failure_is_not_a_verifier_fallback() {
+    require_z3!();
+    let source = r#"
+        type Point { x: i32 }
+
+        func make_fn(p: Point) -> func(i32) -> i32 {
+            fn(value: i32) -> i32 { value + 1 }
+        }
+
+        func main() -> i32 { 0 }
+    "#;
+    let file = parse_memory_source(source, "mir-record-materialization-error").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_flat_copy_record_admission(&program),
+        crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+    );
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let error = verify_checked(&program, source_hash).expect_err("MIR construction must be hard");
+    assert!(
+        error.contains("MIR-MATERIALIZATION-001"),
+        "complete admission must not fall back after construction failure: {error}"
+    );
+}
+
+#[test]
 fn public_checked_verifier_rejects_mixed_record_graph_without_ast_fallback() {
     require_z3!();
     let source = r#"

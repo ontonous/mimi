@@ -556,25 +556,54 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     /// Probe the direct native boundary for already closed MIR islands.
     ///
-    /// The probe is deliberately MIR-first: a failed canonical construction
-    /// means this old API has not recognized a migrated candidate and may
-    /// keep serving an unrelated compatibility program.  Once a candidate is
-    /// materialized, however, an island or consumer failure is a hard error;
-    /// it is never converted into a legacy compile.
+    /// The probe is deliberately checker-admission-first: an unrelated or
+    /// mixed compatibility program may remain on the old API, but complete
+    /// flat Copy-record admission crosses a hard MIR materialization boundary.
+    /// Once a candidate is materialized, an island or consumer failure is also
+    /// a hard error; it is never converted into a legacy compile.
     fn try_compile_exact_migrated_mir_island(
         &self,
         program: &crate::core::CheckedProgram,
     ) -> Result<Option<crate::core::mir::reference::MirProgram>, Vec<crate::diagnostic::Diagnostic>>
     {
-        let Ok(canonical) = crate::core::mir::reference::MirProgram::from_checked_program(program)
-        else {
-            return Ok(None);
+        let canonical = match crate::core::mir::reference::MirProgram::from_checked_program(program)
+        {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                if program.type_defs().values().any(|definition| {
+                    definition.kind == crate::core::ResolvedTypeKind::Record
+                        && matches!(definition.origin, crate::core::Origin::User(_))
+                }) && crate::core::mir::classify_flat_copy_record_admission(program)
+                    == crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+                {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete flat Copy-record MIR island construction failed: {error}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                return Ok(None);
+            }
         };
         let scalar_collection_candidate =
             crate::core::mir::contains_scalar_collection_candidate(&canonical);
         let flat_copy_record_candidate =
             crate::core::mir::contains_flat_copy_record_candidate(&canonical);
         if !scalar_collection_candidate && !flat_copy_record_candidate {
+            if program.type_defs().values().any(|definition| {
+                definition.kind == crate::core::ResolvedTypeKind::Record
+                    && matches!(definition.origin, crate::core::Origin::User(_))
+            }) && crate::core::mir::classify_flat_copy_record_admission(program)
+                == crate::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    "MIR-COVERAGE-001",
+                    "complete flat Copy-record admission did not materialize a native record boundary",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
             return Ok(None);
         }
 
