@@ -7,7 +7,8 @@ use crate::core::mir::types::{
 };
 use crate::core::mir::{
     MirBlock, MirBlockId, MirFunction, MirInstruction, MirInstructionId, MirInstructionKind,
-    MirOwnershipSummary, MirTerminator, MirValue, MirValueId,
+    MirOwnershipSummary, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue,
+    MirValueId,
 };
 use crate::core::NodeId;
 use crate::lexer::Lexer;
@@ -396,5 +397,186 @@ pub(crate) fn direct_record_move_drop_fixture() -> DirectRecordMoveDropFixture {
         result_ty,
         selected_field,
         receipt,
+    }
+}
+
+/// Canonical fixture for an aggregate user-enum `SwitchMove`.  The source
+/// only asks the checker to materialize the enum schema; the switch itself is
+/// assembled directly as canonical MIR so this slice cannot accidentally
+/// widen surface constructor lowering or the default native route.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectEnumSwitchMoveFixture {
+    pub(crate) program: MirProgram,
+    pub(crate) function: NodeId,
+    pub(crate) source_ty: ResolvedTypeId,
+    pub(crate) nominal: crate::core::ir::NominalTypeId,
+    pub(crate) keep: NodeId,
+}
+
+pub(crate) fn direct_enum_switch_move_fixture() -> DirectEnumSwitchMoveFixture {
+    let source = include_str!("../../../tests/fixtures/mir_custom_enum_residual_drop.mimi");
+    let tokens = Lexer::new(source).tokenize().expect("enum switch-move lex");
+    let file = Parser::new(tokens)
+        .parse_file()
+        .expect("enum switch-move parse");
+    let checked = crate::core::check_program(&file).expect("enum switch-move check");
+    let canonical = MirProgram::from_checked_program(&checked).expect("enum switch-move MIR");
+    let catalog = canonical.type_catalog().clone();
+    let result_ty = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::Primitive(PrimitiveType::String)).then(|| id.clone())
+        })
+        .expect("String TypeDesc");
+    let (source_ty, nominal, variants) = catalog
+        .iter()
+        .find_map(|(id, descriptor)| match &descriptor.layout {
+            MirLayout::Enum { nominal, variants } if nominal.as_str().ends_with("Choice") => {
+                Some((id.clone(), nominal.clone(), variants.clone()))
+            }
+            _ => None,
+        })
+        .expect("Choice enum TypeDesc");
+    let keep_desc = variants
+        .iter()
+        .find(|variant| variant.name == "Keep")
+        .expect("Keep variant TypeDesc");
+    let empty_desc = variants
+        .iter()
+        .find(|variant| variant.name == "Empty")
+        .expect("Empty variant TypeDesc");
+    let selected = keep_desc
+        .fields
+        .first()
+        .expect("Keep first payload TypeDesc")
+        .id
+        .clone();
+    let projection = catalog
+        .validated_variant_payload_projection_contract(
+            &source_ty,
+            &keep_desc.id,
+            &selected,
+            &result_ty,
+        )
+        .expect("enum payload projection receipt");
+    let contracts = canonical
+        .functions()
+        .get(&NodeId("function:take".into()))
+        .expect("take source function")
+        .contracts
+        .clone();
+
+    let input = MirValueId::new("v.input").expect("enum input value id");
+    let kept = MirValueId::new("v.kept").expect("enum kept value id");
+    let empty_result = MirValueId::new("v.empty").expect("enum empty result value id");
+    let entry = MirBlockId::new("bb.entry").expect("enum entry block id");
+    let keep_block = MirBlockId::new("bb.keep").expect("enum keep block id");
+    let empty_block = MirBlockId::new("bb.empty").expect("enum empty block id");
+    let keep_edge = crate::core::mir::MirEdgeId::new("e.keep").expect("enum keep edge id");
+    let empty_edge = crate::core::mir::MirEdgeId::new("e.empty").expect("enum empty edge id");
+    let mut functions = canonical.functions().clone();
+    functions.insert(
+        NodeId("function:take".into()),
+        MirFunction {
+            owner: NodeId("function:take".into()),
+            parameters: vec![input.clone()],
+            result: result_ty.clone(),
+            entry: entry.clone(),
+            values: BTreeMap::from([
+                (
+                    input.clone(),
+                    MirValue {
+                        id: input.clone(),
+                        ty: source_ty.clone(),
+                    },
+                ),
+                (
+                    kept.clone(),
+                    MirValue {
+                        id: kept.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+                (
+                    empty_result.clone(),
+                    MirValue {
+                        id: empty_result.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+            ]),
+            blocks: BTreeMap::from([
+                (
+                    entry.clone(),
+                    MirBlock {
+                        id: entry,
+                        parameters: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: MirTerminator::SwitchMove {
+                            scrutinee: input,
+                            arms: vec![
+                                MirSwitchArm {
+                                    edge: keep_edge,
+                                    target: keep_block.clone(),
+                                    arguments: Vec::new(),
+                                    bindings: vec![MirSwitchBinding {
+                                        parameter: kept.clone(),
+                                        projection: projection.clone(),
+                                    }],
+                                    case: MirSwitchCase::Variant(keep_desc.id.clone()),
+                                },
+                                MirSwitchArm {
+                                    edge: empty_edge,
+                                    target: empty_block.clone(),
+                                    arguments: Vec::new(),
+                                    bindings: Vec::new(),
+                                    case: MirSwitchCase::Variant(empty_desc.id.clone()),
+                                },
+                            ],
+                        },
+                    },
+                ),
+                (
+                    keep_block.clone(),
+                    MirBlock {
+                        id: keep_block,
+                        parameters: vec![crate::core::mir::MirBlockParameter {
+                            value: kept.clone(),
+                        }],
+                        instructions: Vec::new(),
+                        terminator: MirTerminator::Return { value: Some(kept) },
+                    },
+                ),
+                (
+                    empty_block.clone(),
+                    MirBlock {
+                        id: empty_block,
+                        parameters: Vec::new(),
+                        instructions: vec![MirInstruction {
+                            id: MirInstructionId::new("i.empty-string")
+                                .expect("enum empty-string instruction id"),
+                            kind: MirInstructionKind::Const {
+                                result: empty_result.clone(),
+                                literal: crate::core::ir::ResolvedLiteral::String("empty".into()),
+                            },
+                        }],
+                        terminator: MirTerminator::Return {
+                            value: Some(empty_result),
+                        },
+                    },
+                ),
+            ]),
+            contracts,
+            ownership: MirOwnershipSummary::default(),
+        },
+    );
+    let program = MirProgram::with_type_catalog(functions, catalog)
+        .expect("enum switch-move program validation");
+    DirectEnumSwitchMoveFixture {
+        program,
+        function: NodeId("function:take".into()),
+        source_ty,
+        nominal,
+        keep: keep_desc.id.clone(),
     }
 }

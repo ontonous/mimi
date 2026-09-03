@@ -4083,7 +4083,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 &function.owner,
                 "non-Copy opaque value has no canonical drop implementation",
             )),
-            MirLayout::Option { .. } | MirLayout::Result { .. } => {
+            MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. } => {
                 let MirRuntimeValue::Variant {
                     nominal,
                     variant,

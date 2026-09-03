@@ -310,7 +310,22 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_blocks(&mut self) {
-        let blocks: Vec<_> = self.function.blocks.values().cloned().collect();
+        // The VM starts execution at bytecode pc 0.  MIR block storage is a
+        // BTreeMap for stable IDs, so lexical order is not the CFG entry
+        // order (for example, `bb.empty` sorts before `bb.entry`).  Lay out
+        // the declared entry first, then retain deterministic order for the
+        // remaining blocks; all branch targets are still patched by block ID.
+        let mut blocks = Vec::with_capacity(self.function.blocks.len());
+        if let Some(entry) = self.function.blocks.get(&self.function.entry) {
+            blocks.push(entry.clone());
+        }
+        blocks.extend(
+            self.function
+                .blocks
+                .values()
+                .filter(|block| block.id != self.function.entry)
+                .cloned(),
+        );
         for block in &blocks {
             self.block_starts
                 .insert(block.id.clone(), self.proto.code.len());
@@ -456,7 +471,9 @@ impl<'a> FunctionEmitter<'a> {
                     let arity = match &desc.layout {
                         MirLayout::Tuple(elements) => elements.len(),
                         MirLayout::Record { fields, .. } => fields.len(),
-                        MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                        MirLayout::Option { .. }
+                        | MirLayout::Result { .. }
+                        | MirLayout::Enum { .. } => {
                             let Some(ra) = self.reg(value) else { return };
                             self.emit_drop_variant(ra, &desc.id);
                             return;
@@ -2749,7 +2766,9 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     Ok(())
                 }
-                MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => {
+                MirLayout::Option { variants, .. }
+                | MirLayout::Result { variants, .. }
+                | MirLayout::Enum { variants, .. } => {
                     if desc.ownership != MirOwnership::Copy {
                         for operation in [
                             crate::core::mir::types::MirGlueOperation::MoveOut,
@@ -3822,6 +3841,129 @@ mod tests {
             value,
             Value::String(value) if value.as_str() == "left"
         ));
+    }
+
+    #[test]
+    fn canonical_mir_custom_enum_switch_move_transfers_and_drops_residual() {
+        let fixture = crate::core::mir::test_support::direct_enum_switch_move_fixture();
+        let mir = &fixture.program;
+        let choice_ty = fixture.source_ty.clone();
+        let choice_desc = mir
+            .type_catalog()
+            .get(&choice_ty)
+            .expect("Choice descriptor");
+        assert_eq!(
+            choice_desc.ownership,
+            crate::core::mir::types::MirOwnership::Move
+        );
+        assert_eq!(
+            choice_desc.abi,
+            crate::core::mir::types::MirAbiClass::Aggregate
+        );
+        assert_eq!(
+            choice_desc.glue,
+            crate::core::mir::types::MirGlueContract {
+                move_out: crate::core::mir::types::MirGlueKind::Aggregate,
+                clone: crate::core::mir::types::MirGlueKind::Aggregate,
+                drop: crate::core::mir::types::MirGlueKind::Aggregate,
+            }
+        );
+        let crate::core::mir::types::MirLayout::Enum { nominal, variants } = &choice_desc.layout
+        else {
+            panic!("Choice must have a checker-materialized enum layout");
+        };
+        assert_eq!(nominal, &fixture.nominal);
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Keep", "Empty"]
+        );
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.discriminant)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(variants[0].fields.len(), 2);
+        let plan = mir
+            .type_catalog()
+            .validated_variant_drop_plan(&choice_ty, &fixture.keep)
+            .expect("Keep variant drop plan");
+        assert_eq!(
+            plan.fields
+                .iter()
+                .map(|field| field.index)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            plan.fields[0].glue,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
+
+        let bytecode = compile_mir_program(&mir).expect("custom enum MIR bytecode");
+        let take_proto = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name == fixture.function.0.as_str())
+            .expect("take bytecode function");
+        assert!(take_proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::DestructureVariantMove { arity: 2, .. })));
+        assert!(take_proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::Drop { .. })));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(
+                &crate::core::NodeId("function:take".into()),
+                &[MirRuntimeValue::Variant {
+                    nominal: fixture.nominal.clone(),
+                    variant: fixture.keep.clone(),
+                    payload: vec![
+                        MirRuntimeValue::String("keep".into()),
+                        MirRuntimeValue::String("residual".into()),
+                    ],
+                }],
+            )
+            .expect("reference custom enum SwitchMove");
+        let bytecode_value = BytecodeVM::new(bytecode)
+            .call_named(
+                fixture.function.0.as_str(),
+                vec![Value::CanonicalVariant {
+                    nominal: fixture.nominal.clone(),
+                    variant: fixture.keep.clone(),
+                    tag: "Keep".into(),
+                    payload: vec![
+                        Value::String(std::sync::Arc::new("keep".into())),
+                        Value::String(std::sync::Arc::new("residual".into())),
+                    ],
+                }],
+            )
+            .expect("bytecode custom enum SwitchMove");
+        assert_eq!(reference, MirRuntimeValue::String("keep".into()));
+        assert!(
+            matches!(&bytecode_value, Value::String(value) if value.as_str() == "keep"),
+            "unexpected bytecode value: {bytecode_value:?}"
+        );
+
+        let error = BytecodeVM::new(compile_mir_program(&mir).expect("recompile custom enum MIR"))
+            .call_named(
+                fixture.function.0.as_str(),
+                vec![Value::CanonicalVariant {
+                    nominal: fixture.nominal,
+                    variant: fixture.keep,
+                    tag: "Keep".into(),
+                    payload: vec![Value::String(std::sync::Arc::new("truncated".into()))],
+                }],
+            )
+            .expect_err("variant payload arity drift must trap");
+        assert_eq!(error.code(), "E0800");
     }
 
     #[test]

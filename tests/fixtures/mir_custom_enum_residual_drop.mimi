@@ -1,0 +1,12 @@
+// Canonical MIR S97 checker seed: a non-Copy user enum variant has two owned
+// payloads.  The SwitchMove body is assembled directly in test_support after
+// the checker materializes this declaration into the canonical TypeDesc.
+
+type Choice { Keep(string, string) | Empty }
+
+func take(choice: Choice) -> string {
+    ensures: true
+    "seed"
+}
+
+func main() -> i32 { 0 }

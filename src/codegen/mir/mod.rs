@@ -2069,6 +2069,23 @@ mod tests {
     }
 
     #[test]
+    fn native_validator_rejects_checker_materialized_enum_before_llvm() {
+        let fixture = crate::core::mir::test_support::direct_enum_switch_move_fixture();
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_user_enum_validator_test");
+        let diagnostics = generator
+            .compile_mir_native(&fixture.program)
+            .expect_err("user enum must remain outside the native union ABI slice");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("checker-materialized user enum has no native tagged-union ABI contract")));
+        assert!(
+            generator.module.get_function("take").is_none(),
+            "L2 requires an unsupported user enum to be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
     fn native_validator_rejects_tuple_with_unsupported_child_before_llvm_declarations() {
         let program =
             canonical_program("func main() -> i32 { let value = (\"x\", [1]); drop(value); 0 }");

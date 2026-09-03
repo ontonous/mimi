@@ -2078,6 +2078,35 @@ fn result_switch_move_projection_receipt_drift_is_rejected_before_consumers() {
 }
 
 #[test]
+fn custom_enum_switch_move_receipt_drift_is_rejected_before_consumers() {
+    let fixture = crate::core::mir::test_support::direct_enum_switch_move_fixture();
+    let owner = crate::core::NodeId("function:take".into());
+    let mut forged = fixture.program.functions().clone();
+    let forged_fn = forged.get_mut(&owner).expect("enum take MIR");
+    let binding = forged_fn
+        .blocks
+        .values_mut()
+        .flat_map(|block| match &mut block.terminator {
+            crate::core::mir::MirTerminator::SwitchMove { arms, .. } => arms
+                .iter_mut()
+                .flat_map(|arm| arm.bindings.iter_mut())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .next()
+        .expect("Keep projection binding");
+    binding.projection.move_out_glue = crate::core::mir::types::MirGlueKind::Noop;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("forged enum projection glue must fail before consumers");
+    assert!(errors
+        .iter()
+        .any(|error| { error.message.contains("variant payload projection receipt") }));
+}
+
+#[test]
 fn result_read_only_switch_rejects_move_owned_payload_projection() {
     let source =
         include_str!("../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi");

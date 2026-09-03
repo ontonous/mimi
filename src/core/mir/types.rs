@@ -431,7 +431,7 @@ pub struct MirDropGlueField {
     pub glue: MirGlueKind,
 }
 
-/// Canonical drop schedule for one Option/Result variant payload.  Unlike a
+/// Canonical drop schedule for one tagged-variant payload.  Unlike a
 /// product drop plan, a variant has a runtime-selected payload shape, so the
 /// active variant identity is part of the schedule key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,6 +552,15 @@ pub enum MirLayout {
     Result {
         ok: ResolvedTypeId,
         error: ResolvedTypeId,
+        variants: Vec<MirVariantDesc>,
+    },
+    /// Checker-materialized user enum storage.  Unlike Option/Result, an
+    /// enum carries its declared nominal identity and may have heterogeneous
+    /// or multi-field variants.  The semantic variant table is canonical;
+    /// target-specific tagged-union layout remains outside this first
+    /// production ABI slice.
+    Enum {
+        nominal: crate::core::NominalTypeId,
         variants: Vec<MirVariantDesc>,
     },
     Array {
@@ -1041,8 +1050,8 @@ impl MirTypeCatalog {
         Ok(catalog)
     }
 
-    /// Build the catalog from the checker-owned program and attach record
-    /// field contracts while the resolved declaration snapshot is still
+    /// Build the catalog from the checker-owned program and attach record and
+    /// enum layout contracts while the resolved declaration snapshot is still
     /// available.  A backend never needs to reopen `CheckedProgram` after
     /// this point.
     pub fn from_checked_program(program: &CheckedProgram) -> Result<Self, Vec<String>> {
@@ -1059,6 +1068,77 @@ impl MirTypeCatalog {
             }) else {
                 continue;
             };
+            if matches!(type_def.kind, ResolvedTypeKind::Enum) {
+                if !catalog.entries.contains_key(id) {
+                    errors.push(format!(
+                        "enum '{}' has no MIR TypeDesc entry",
+                        type_def.qualified_name
+                    ));
+                    continue;
+                }
+                let nominal = item.clone();
+                let mut variants = Vec::with_capacity(type_def.variants.len());
+                let mut ownership = MirOwnership::Copy;
+                for (discriminant, (name, _)) in type_def.variants.iter().enumerate() {
+                    let Some(discriminant) = u16::try_from(discriminant).ok() else {
+                        errors.push(format!(
+                            "enum '{}' has more than {} variants",
+                            type_def.qualified_name,
+                            u16::MAX
+                        ));
+                        continue;
+                    };
+                    let Some(variant_id) = type_def.variant_ids.get(name) else {
+                        errors.push(format!(
+                            "enum '{}' variant '{}' has no stable declaration identity",
+                            type_def.qualified_name, name
+                        ));
+                        continue;
+                    };
+                    let Some(schema) = program.resolved_variant(variant_id) else {
+                        errors.push(format!(
+                            "enum '{}' variant '{}' has no canonical resolved schema",
+                            type_def.qualified_name, name
+                        ));
+                        continue;
+                    };
+                    let mut fields = Vec::with_capacity(schema.members.len());
+                    for member in &schema.members {
+                        if catalog.get(&member.ty).is_none() {
+                            errors.push(format!(
+                                "enum '{}' variant '{}' member '{}' references a type absent from MIR catalog",
+                                type_def.qualified_name, name, member.name
+                            ));
+                        }
+                        let field_ownership = catalog
+                            .get(&member.ty)
+                            .map(|field| field.ownership)
+                            .unwrap_or(MirOwnership::Move);
+                        ownership = combine_ownership(ownership, field_ownership);
+                        fields.push(MirFieldDesc {
+                            id: member.node_id.clone(),
+                            name: member.name.clone(),
+                            ty: member.ty.clone(),
+                        });
+                    }
+                    variants.push(MirVariantDesc {
+                        id: schema.node_id.clone(),
+                        name: schema.name.clone(),
+                        discriminant,
+                        fields,
+                    });
+                }
+                let Some(descriptor) = catalog.entries.get_mut(id) else {
+                    unreachable!("enum TypeDesc entry checked above")
+                };
+                descriptor.abi = MirAbiClass::Aggregate;
+                descriptor.ownership = ownership;
+                descriptor.needs_drop_glue = ownership.needs_drop();
+                descriptor.needs_clone_glue = ownership.needs_clone();
+                descriptor.glue = MirGlueContract::for_type(&descriptor.kind, ownership);
+                descriptor.layout = MirLayout::Enum { nominal, variants };
+                continue;
+            }
             if !matches!(type_def.kind, ResolvedTypeKind::Record) {
                 continue;
             }
@@ -1720,7 +1800,7 @@ impl MirTypeCatalog {
         };
         if operation_glue == MirGlueKind::Aggregate {
             match &descriptor.layout {
-                MirLayout::Option { .. } | MirLayout::Result { .. } => {
+                MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. } => {
                     self.validate_variant_glue(ty, operation)?;
                 }
                 _ => self.validate_aggregate_glue(ty, operation)?,
@@ -2239,8 +2319,8 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate the recursive glue graph for an Option/Result payload.  The
-    /// plan must cover every canonical variant, including zero-field `None`,
+    /// Validate the recursive glue graph for a tagged variant payload.  The
+    /// plan must cover every canonical variant, including zero-field cases,
     /// and every payload child must be validated through its own TypeDesc.
     pub fn validate_variant_glue(
         &self,
@@ -2251,10 +2331,12 @@ impl MirTypeCatalog {
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
         let variants = match &descriptor.layout {
-            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            MirLayout::Option { variants, .. }
+            | MirLayout::Result { variants, .. }
+            | MirLayout::Enum { variants, .. } => variants,
             _ => {
                 return Err(format!(
-                    "variant glue type '{}' has no canonical Option/Result layout",
+                    "variant glue type '{}' has no canonical tagged-variant layout",
                     ty.as_str()
                 ))
             }
@@ -2387,7 +2469,7 @@ impl MirTypeCatalog {
             .map(|(nominal, _)| nominal)
             .ok_or_else(|| {
                 format!(
-                    "type '{}' has no canonical Option/Result variant layout",
+                    "type '{}' has no canonical tagged-variant layout",
                     ty.as_str()
                 )
             })?;
@@ -2419,7 +2501,7 @@ impl MirTypeCatalog {
     ) -> Result<(&str, &[MirVariantDesc]), String> {
         let (expected_nominal, variants) = self.variant_layout(ty).ok_or_else(|| {
             format!(
-                "type '{}' has no canonical Option/Result variant layout",
+                "type '{}' has no canonical tagged-variant layout",
                 ty.as_str()
             )
         })?;
@@ -2735,6 +2817,7 @@ impl MirTypeCatalog {
                         | MirLayout::Record { .. }
                         | MirLayout::Option { .. }
                         | MirLayout::Result { .. }
+                        | MirLayout::Enum { .. }
                 )
             });
             let child_is_copy = self
@@ -2796,7 +2879,9 @@ impl MirTypeCatalog {
                             .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy)
             }
             Some(MirLayout::Record { .. }) => self.materialize_product_glue_for(id, visiting),
-            Some(MirLayout::Option { variants, .. }) | Some(MirLayout::Result { variants, .. }) => {
+            Some(MirLayout::Option { variants, .. })
+            | Some(MirLayout::Result { variants, .. })
+            | Some(MirLayout::Enum { variants, .. }) => {
                 self.materialize_variant_glue_for(id, variants, visiting)
             }
             _ => self
@@ -2825,6 +2910,7 @@ impl MirTypeCatalog {
                             | MirLayout::Record { .. }
                             | MirLayout::Option { .. }
                             | MirLayout::Result { .. }
+                            | MirLayout::Enum { .. }
                     )
                 });
                 let child_is_copy = self
@@ -4505,8 +4591,7 @@ impl MirTypeCatalog {
     }
 
     /// Return the canonical nominal label and discriminant/payload table for
-    /// the built-in Option/Result families.  User enum layouts remain
-    /// fail-closed until their schema is promoted into this catalog.
+    /// built-in and checker-materialized user variant families.
     pub fn variant_layout(&self, ty: &ResolvedTypeId) -> Option<(&str, &[MirVariantDesc])> {
         let descriptor = self.get(ty)?;
         match &descriptor.layout {
@@ -4516,6 +4601,7 @@ impl MirTypeCatalog {
             MirLayout::Result { variants, .. } => {
                 Some(("builtin:type:Result", variants.as_slice()))
             }
+            MirLayout::Enum { nominal, variants } => Some((nominal.as_str(), variants.as_slice())),
             _ => None,
         }
     }
@@ -4762,7 +4848,7 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate a consuming switch over a non-Copy built-in variant.  Every
+    /// Validate a consuming switch over a non-Copy tagged variant.  Every
     /// active payload field is either moved into an arm binding or released
     /// by the variant drop plan; a backend must not treat this as a read-only
     /// tag dispatch.
@@ -4785,10 +4871,10 @@ impl MirTypeCatalog {
         }
         if !matches!(
             descriptor.layout,
-            MirLayout::Option { .. } | MirLayout::Result { .. }
+            MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. }
         ) {
             return Err(format!(
-                "switch-move scrutinee type '{}' has no canonical Option/Result layout",
+                "switch-move scrutinee type '{}' has no canonical tagged-variant layout",
                 scrutinee_ty.as_str()
             ));
         }
@@ -4825,7 +4911,7 @@ impl MirTypeCatalog {
 
     /// Validate the complete TypeDesc-side contract for a consuming variant
     /// switch.  `validate_switch_move` proves that the scrutinee is a
-    /// non-Copy built-in variant and that its CFG is exhaustive; this
+    /// non-Copy tagged variant and that its CFG is exhaustive; this
     /// companion additionally proves every materialized payload binding
     /// receipt and the child MoveOut glue for fields transferred into an arm.
     /// Fields without a binding are released by the already-validated active

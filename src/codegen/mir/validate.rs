@@ -162,8 +162,9 @@ impl<'a> NativeMirValidator<'a> {
         let is_record = matches!(desc.layout, MirLayout::Record { .. });
         let is_variant = matches!(
             desc.layout,
-            MirLayout::Option { .. } | MirLayout::Result { .. }
+            MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. }
         );
+        let is_user_enum = matches!(desc.layout, MirLayout::Enum { .. });
         let is_unit = desc.abi == MirAbiClass::Unit
             && desc.layout == MirLayout::Unit
             && desc.ownership == MirOwnership::Copy
@@ -234,7 +235,13 @@ impl<'a> NativeMirValidator<'a> {
                 }
             }
         } else if is_variant {
-            if desc.ownership == MirOwnership::Copy {
+            if is_user_enum {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "checker-materialized user enum has no native tagged-union ABI contract",
+                ));
+                false
+            } else if desc.ownership == MirOwnership::Copy {
                 self.validate_flat_copy_variant(ty, subject, desc)
             } else {
                 match native_non_copy_variant_payload_type(self.program.type_catalog(), ty) {
@@ -270,7 +277,9 @@ impl<'a> NativeMirValidator<'a> {
             } else if is_record {
                 "native canonical non-Copy record contract"
             } else if is_variant {
-                if desc.ownership == MirOwnership::Copy {
+                if is_user_enum {
+                    "checker-materialized user-enum native tagged-union contract"
+                } else if desc.ownership == MirOwnership::Copy {
                     "flat Copy variant contract"
                 } else if matches!(desc.layout, MirLayout::Result { .. }) {
                     "native non-Copy Result<string, i32> variant contract"
