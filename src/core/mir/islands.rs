@@ -1210,9 +1210,9 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 
 /// Return whether a checker-resolved generic record projection looks like the
 /// S108 candidate but its declaration/body shape is outside the admitted
-/// one-field Copy contract.  Default dispatch uses this only on the mixed
-/// compatibility path to reject instead of silently handing the candidate to
-/// legacy code.
+/// one- or two-field Copy contract.  Default dispatch uses this only on the
+/// mixed compatibility path to reject instead of silently handing the
+/// candidate to legacy code.
 pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
     program.callables().values().any(|callable| {
         if callable.signature.generic_parameters.len() != 1
@@ -1288,30 +1288,32 @@ fn is_flat_copy_record_definition(
     })
 }
 
-/// The first generic record island is deliberately one shape only: a single
-/// `Record<T>` field whose declaration type is exactly its sole generic
-/// binder.  Concrete `T` is supplied by the nominal use and materialized into
-/// TypeDesc before any backend consumes the layout.
+/// The generic record island admits one or two fields, each declared as the
+/// same sole generic binder.  Concrete `T` is supplied by the nominal use and
+/// materialized into TypeDesc before any backend consumes the layout.  The
+/// two-field form is intentionally the smallest aggregate-layout extension;
+/// mixed-field and larger records remain outside this island.
 fn is_scalar_generic_record_definition(
     program: &CheckedProgram,
     definition: &crate::core::ResolvedTypeDef,
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || definition.fields.len() != 1
+        || !matches!(definition.fields.len(), 1 | 2)
     {
         return false;
     }
     let binder = &definition.generic_parameters[0].1;
-    let (name, _) = &definition.fields[0];
-    definition
-        .field_ids
-        .get(name)
-        .and_then(|field_id| program.resolved_field_type(field_id))
-        .and_then(|field_ty| program.resolved_types().get(field_ty))
-        .is_some_and(|field_ty| {
-            matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
-        })
+    definition.fields.iter().all(|(name, _)| {
+        definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_ty| program.resolved_types().get(field_ty))
+            .is_some_and(|field_ty| {
+                matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
+            })
+    })
 }
 
 /// Recognize the only generic callable admitted with the generic record

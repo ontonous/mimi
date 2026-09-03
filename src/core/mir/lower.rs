@@ -776,7 +776,7 @@ pub(crate) fn validate_owned_record_call_argument(
 /// call ABI still needs an explicit producer proof: either a direct local
 /// `Clone` or a fresh `Record Construct` immediately precedes the call, and
 /// both producer/result TypeDesc identities agree with the specialized
-/// one-field record parameter.  Conditional and indirect producers therefore
+/// one- or two-field record parameter.  Conditional and indirect producers therefore
 /// remain fail-closed before every backend.
 pub(crate) fn validate_scalar_record_call_argument(
     caller: &MirFunction,
@@ -1911,9 +1911,22 @@ fn detect_scalar_record_projection_contract(
         })
         .collect::<Vec<_>>();
     let [(_, _, _)] = projection.as_slice() else {
+        let unsupported_arity = function
+            .values
+            .get(parameter)
+            .and_then(|value| type_catalog.get(&value.ty))
+            .and_then(|descriptor| match &descriptor.layout {
+                super::types::MirLayout::Record { fields, .. } => Some(fields.len()),
+                _ => None,
+            })
+            .is_some_and(|arity| !matches!(arity, 1 | 2));
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic record projection must contain exactly one field Project".into(),
+            message: if unsupported_arity {
+                "generic record projection requires a one- or two-field Copy record contract".into()
+            } else {
+                "generic record projection must contain exactly one field Project".into()
+            },
         }]);
     };
     if block.instructions.len() != 1 {
@@ -1973,11 +1986,12 @@ fn detect_scalar_record_projection_contract(
                 ),
             }]
         })?;
-    if receipt.arity != 1 || function.result != result_ty {
+    if !matches!(receipt.arity, 1 | 2) || function.result != result_ty {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic record projection requires one field and a direct result identity"
-                .into(),
+            message:
+                "generic record projection requires one or two fields and a direct result identity"
+                    .into(),
         }]);
     }
     let MirTerminator::Return {
@@ -2165,9 +2179,10 @@ pub(crate) fn validate_scalar_record_projection_mir(
     if &expected != contract {
         return Err("generic record projection receipt disagrees with TypeDesc".into());
     }
-    if contract.arity != 1 || function.result != result_ty {
+    if !matches!(contract.arity, 1 | 2) || function.result != result_ty {
         return Err(
-            "generic record projection requires one field and a direct result identity".into(),
+            "generic record projection requires one or two fields and a direct result identity"
+                .into(),
         );
     }
     let MirTerminator::Return {

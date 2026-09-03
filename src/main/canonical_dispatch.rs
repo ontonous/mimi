@@ -632,11 +632,26 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_generic_record_projection_is_rejected_before_legacy_route() {
-        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
+    fn two_field_generic_record_projection_enters_canonical_default_route() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_record_projection_pair.mimi");
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("two-field generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection { ref contract }
+                if contract.arity == 2 && contract.name == "left"
+        )));
+    }
+
+    #[test]
+    fn three_field_generic_record_projection_is_rejected_before_legacy_route() {
+        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: 41, second: 7, third: 9 }; get(triple) }";
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("unsupported generic record projection must fail closed");
+            panic!("three-field generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
     }

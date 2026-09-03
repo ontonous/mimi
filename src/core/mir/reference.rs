@@ -6018,13 +6018,57 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_generic_record_projection_shape_fails_closed() {
-        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
+    fn concrete_two_field_generic_record_projection_executes_with_copy_residual() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection_pair.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("two-field generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("two-field generic record projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("two-field generic record projection must carry a record receipt");
+        };
+        assert_eq!(contract.arity, 2);
+        assert_eq!(contract.name, "left");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("two-field generic record projection target");
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("two-field record projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("two-field record projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 2 && fields.iter().all(|field| field.ty == contract.field_ty)
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference two-field generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn three_field_generic_record_projection_fails_closed() {
+        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: 41, second: 7, third: 9 }; get(triple) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("multi-field generic record projection must remain fail-closed");
+            .expect_err("three-field generic record projection must remain fail-closed");
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(
                 errors

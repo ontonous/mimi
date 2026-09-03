@@ -315,9 +315,10 @@ pub enum MirGenericInstanceContract {
         contract: types::MirListIndexProjectionContract,
         index_value: i64,
     },
-    /// A generic one-field record projection specialized to a concrete
-    /// Copy-scalar field. The instance receipt fixes the nominal/field
-    /// identity so consumers cannot infer a generic record ABI from names.
+    /// A generic one- or two-field record projection specialized to a
+    /// concrete Copy-scalar field. Every field shares the same concrete
+    /// scalar TypeDesc; the instance receipt fixes the nominal/field identity
+    /// so consumers cannot infer a generic record ABI from names.
     ScalarRecordProjection {
         contract: types::MirRecordProjectionContract,
     },

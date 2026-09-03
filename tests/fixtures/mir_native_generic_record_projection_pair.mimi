@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// two-field Record<T>; the sibling remains Copy and is retained by the caller.
+type Pair<T> { left: T, right: T }
+
+func get_left<T>(pair: Pair<T>) -> T {
+    pair.left
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let pair = Pair { left: 41, right: 7 }
+    let picked = get_left(pair)
+    picked
+}
