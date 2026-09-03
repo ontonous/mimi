@@ -1,0 +1,16 @@
+type Named {
+    name: string,
+    count: i32
+}
+
+func pick() -> string {
+    ensures: true
+    let value = Named { count: 41, name: "owned" }
+    value.name
+}
+
+func main() -> i32 {
+    let result = pick()
+    drop(result)
+    42
+}

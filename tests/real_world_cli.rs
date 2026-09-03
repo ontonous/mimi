@@ -747,6 +747,37 @@ fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
 }
 
 #[test]
+fn canonical_mir_verifier_proves_non_copy_record_move_projection_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_record_move_projection.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn record MoveProject verifier");
+    assert!(
+        output.status.success(),
+        "record MoveProject must be proven by canonical MIR verifier:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
 fn canonical_mir_native_recursive_tuple_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

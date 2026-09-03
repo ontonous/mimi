@@ -1722,8 +1722,29 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
-        MirInstructionKind::MoveProject { .. } => {
-            return Err("MIR instruction is outside scalar verifier contract".into())
+        MirInstructionKind::MoveProject {
+            result,
+            base,
+            projection,
+        } => {
+            let base_ty = instruction_value_type(function, base, "move projection base")?;
+            let result_ty = instruction_value_type(function, result, "move projection result")?;
+            catalog.validate_move_projection(&base_ty, &result_ty, projection)?;
+            let MirProjection::Field(field) = projection else {
+                return Err("MIR move projection requires a direct record field".into());
+            };
+            let receipt =
+                catalog.validated_record_field_projection_contract(&base_ty, field, &result_ty)?;
+            let base_value = state
+                .values
+                .remove(base)
+                .ok_or_else(|| format!("MIR move projection base '{}' is not defined", base))?;
+            if !symbolic_matches_type(catalog, &base_ty, &base_value) {
+                return Err("MIR move projection base disagrees with TypeDesc".into());
+            }
+            let projected = symbolic_project(base_value, &MirProjection::Field(receipt.field))?;
+            ensure_result_shape(function, catalog, result, &projected)?;
+            state.values.insert(result.clone(), projected);
         }
         MirInstructionKind::ConstructVariantMove {
             result,
@@ -3616,6 +3637,49 @@ mod tests {
             )
             .expect("reference copy argument preservation");
         assert_eq!(value, MirRuntimeValue::String("done".into()));
+    }
+
+    #[test]
+    fn verifier_proves_non_copy_record_move_projection_from_canonical_mir() {
+        let source = include_str!("../../tests/fixtures/mir_verifier_record_move_projection.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("record MoveProject must be canonical MIR");
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:pick".into()))
+            .expect("pick MIR function");
+        assert!(function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::MoveProject { .. })));
+        let results = verify_program(&program, "record-move-projection-source-hash".into())
+            .expect("record MoveProject verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:pick")
+            .expect("pick verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:pick".into()), &[])
+            .expect("reference record MoveProject");
+        assert_eq!(value, MirRuntimeValue::String("owned".into()));
+    }
+
+    #[test]
+    fn verifier_rejects_non_copy_record_move_projection_with_non_copy_sibling() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_record_move_project_rejected.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-Copy sibling must fail before verifier exploration");
+        let text = format!("{error:?}");
+        assert!(text.contains("explicit move projection contract"), "{text}");
     }
 
     #[test]
