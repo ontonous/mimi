@@ -786,6 +786,16 @@ pub enum Op {
         /// Canonical MIR always supplies a ListOperationShape here.
         contract: Option<ConstIdx>,
     },
+    /// rd = a fresh scalar List formed by consuming and appending ra, rb.
+    /// The canonical receipt proves both inputs share one List element ABI;
+    /// this opcode is not the legacy generic ListExt dispatcher.
+    MirListConcat {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+        /// Canonical MIR always supplies a ListOperationShape here.
+        contract: Option<ConstIdx>,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1106,6 +1116,7 @@ impl Op {
             | MirSetToList { rd, .. }
             | MirListLen { rd, .. }
             | MirListReverse { rd, .. }
+            | MirListConcat { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1316,6 +1327,7 @@ impl Op {
             | SetContains { ra, rb, .. }
             | MirSetInsert { ra, rb, .. }
             | MirSetRemove { ra, rb, .. }
+            | MirListConcat { ra, rb, .. }
             | RecordSet { ra, rb, .. }
             | TupleSet { ra, rb, .. }
             | SharedSet { ra, rb, .. } => *ra == reg || *rb == reg,
@@ -1552,6 +1564,7 @@ pub struct ListOperationShape {
     pub list_ty: crate::core::ResolvedTypeId,
     pub element_ty: crate::core::ResolvedTypeId,
     pub result_ty: crate::core::ResolvedTypeId,
+    pub argument_ty: Option<crate::core::ResolvedTypeId>,
     pub operation: crate::core::mir::MirListOperation,
 }
 

@@ -610,10 +610,14 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 self.validate_value(function, result, "List operation result");
                 self.validate_value(function, list, "List operation receiver");
+                if let Some(argument) = argument {
+                    self.validate_value(function, argument, "List operation argument");
+                }
                 let (Some(result_value), Some(list_value)) =
                     (function.values.get(result), function.values.get(list))
                 else {
@@ -626,12 +630,21 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                     return;
                 };
-                if let Err(message) = self.program.type_catalog().validate_list_operation_receipt(
-                    &result_value.ty,
-                    &list_value.ty,
-                    *operation,
-                    receipt,
-                ) {
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| value.ty.clone());
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_list_operation_receipt_with_argument(
+                        &result_value.ty,
+                        &list_value.ty,
+                        argument_ty.as_ref(),
+                        *operation,
+                        receipt,
+                    )
+                {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }

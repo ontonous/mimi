@@ -105,6 +105,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirSetToList { .. } => "MIR_SET_TO_LIST",
         Op::MirListLen { .. } => "MIR_LIST_LEN",
         Op::MirListReverse { .. } => "MIR_LIST_REVERSE",
+        Op::MirListConcat { .. } => "MIR_LIST_CONCAT",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
@@ -733,6 +734,24 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 name,
                 rd,
                 ra,
+                contract
+                    .map(|contract| format!(" contract={contract}"))
+                    .unwrap_or_default()
+            )
+        }
+        Op::MirListConcat {
+            rd,
+            ra,
+            rb,
+            contract,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = mir_list_concat(r{}, r{}){}",
+                pc,
+                name,
+                rd,
+                ra,
+                rb,
                 contract
                     .map(|contract| format!(" contract={contract}"))
                     .unwrap_or_default()

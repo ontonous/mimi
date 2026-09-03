@@ -663,6 +663,8 @@ pub struct MirListOperationContract {
     pub list_ty: ResolvedTypeId,
     pub element_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
+    /// The second List identity for `Concat`; absent for `Len`/`Reverse`.
+    pub argument_ty: Option<ResolvedTypeId>,
     pub operation: crate::core::mir::MirListOperation,
 }
 
@@ -1564,12 +1566,23 @@ impl MirTypeCatalog {
     /// Validate an operation over the canonical scalar List island.
     /// `Len` borrows the List handle and returns a Copy i32. `Reverse` borrows
     /// the source and returns a fresh move-owned List produced through Clone
-    /// glue. In both cases the source obligation remains with the source
-    /// value; a backend must not infer in-place mutation from its storage ABI.
+    /// glue. `Concat` consumes both List handles and returns a fresh List with
+    /// the union of both input obligations. The argument slot is explicit so
+    /// a backend cannot infer arity or ownership from its storage ABI.
     pub fn validate_list_operation(
         &self,
         result_ty: &ResolvedTypeId,
         list_ty: &ResolvedTypeId,
+        operation: crate::core::mir::MirListOperation,
+    ) -> Result<(), String> {
+        self.validate_list_operation_with_argument(result_ty, list_ty, None, operation)
+    }
+
+    pub fn validate_list_operation_with_argument(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        argument_ty: Option<&ResolvedTypeId>,
         operation: crate::core::mir::MirListOperation,
     ) -> Result<(), String> {
         self.validate_list_glue(list_ty, MirGlueOperation::MoveOut)?;
@@ -1581,6 +1594,9 @@ impl MirTypeCatalog {
         })?;
         match operation {
             crate::core::mir::MirListOperation::Len => {
+                if argument_ty.is_some() {
+                    return Err("List.len does not accept a second List argument".into());
+                }
                 if result.kind != MirTypeKind::Primitive(PrimitiveType::I32)
                     || result.abi
                         != (MirAbiClass::Integer {
@@ -1594,6 +1610,9 @@ impl MirTypeCatalog {
                 }
             }
             crate::core::mir::MirListOperation::Reverse => {
+                if argument_ty.is_some() {
+                    return Err("List.reverse does not accept a second List argument".into());
+                }
                 if result_ty != list_ty {
                     return Err(format!(
                         "List.reverse result type '{}' disagrees with receiver type '{}'",
@@ -1608,6 +1627,19 @@ impl MirTypeCatalog {
                 self.validate_list_glue(list_ty, MirGlueOperation::Clone)?;
                 self.validate_list_glue(result_ty, MirGlueOperation::MoveOut)?;
             }
+            crate::core::mir::MirListOperation::Concat => {
+                let argument_ty = argument_ty
+                    .ok_or_else(|| "List.concat requires a second List argument".to_string())?;
+                self.validate_list_glue(argument_ty, MirGlueOperation::MoveOut)?;
+                if result_ty != list_ty || result_ty != argument_ty {
+                    return Err(format!(
+                        "List.concat result '{}' and inputs '{}'/'{}' must have one canonical List type",
+                        result_ty.as_str(),
+                        list_ty.as_str(),
+                        argument_ty.as_str()
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1621,7 +1653,17 @@ impl MirTypeCatalog {
         list_ty: &ResolvedTypeId,
         operation: crate::core::mir::MirListOperation,
     ) -> Result<MirListOperationContract, String> {
-        self.validate_list_operation(result_ty, list_ty, operation)?;
+        self.validated_list_operation_contract_with_argument(result_ty, list_ty, None, operation)
+    }
+
+    pub fn validated_list_operation_contract_with_argument(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        argument_ty: Option<&ResolvedTypeId>,
+        operation: crate::core::mir::MirListOperation,
+    ) -> Result<MirListOperationContract, String> {
+        self.validate_list_operation_with_argument(result_ty, list_ty, argument_ty, operation)?;
         let descriptor = self.get(list_ty).ok_or_else(|| {
             format!(
                 "List operation receiver type '{}' is absent",
@@ -1638,6 +1680,7 @@ impl MirTypeCatalog {
             list_ty: list_ty.clone(),
             element_ty: element.clone(),
             result_ty: result_ty.clone(),
+            argument_ty: argument_ty.cloned(),
             operation,
         })
     }
@@ -1652,7 +1695,25 @@ impl MirTypeCatalog {
         operation: crate::core::mir::MirListOperation,
         receipt: &MirListOperationContract,
     ) -> Result<(), String> {
-        let expected = self.validated_list_operation_contract(result_ty, list_ty, operation)?;
+        self.validate_list_operation_receipt_with_argument(
+            result_ty, list_ty, None, operation, receipt,
+        )
+    }
+
+    pub fn validate_list_operation_receipt_with_argument(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        argument_ty: Option<&ResolvedTypeId>,
+        operation: crate::core::mir::MirListOperation,
+        receipt: &MirListOperationContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_list_operation_contract_with_argument(
+            result_ty,
+            list_ty,
+            argument_ty,
+            operation,
+        )?;
         if receipt != &expected {
             return Err("List operation receipt disagrees with TypeDesc".into());
         }
@@ -4404,6 +4465,30 @@ mod tests {
             .validate_list_operation(&i32_id, &list_id, MirListOperation::Reverse)
             .expect_err("List.reverse must return the same owned List type");
         assert!(wrong_reverse_result.contains("result type"));
+
+        let concat = catalog
+            .validated_list_operation_contract_with_argument(
+                &list_id,
+                &list_id,
+                Some(&list_id),
+                MirListOperation::Concat,
+            )
+            .expect("List.concat contract");
+        assert_eq!(concat.argument_ty, Some(list_id.clone()));
+        assert_eq!(concat.result_ty, list_id);
+        assert!(catalog
+            .validate_list_operation_receipt_with_argument(
+                &concat.result_ty,
+                &concat.list_ty,
+                concat.argument_ty.as_ref(),
+                concat.operation,
+                &concat,
+            )
+            .is_ok());
+        let missing_argument = catalog
+            .validate_list_operation(&concat.result_ty, &concat.list_ty, MirListOperation::Concat)
+            .expect_err("List.concat must carry its second input");
+        assert!(missing_argument.contains("second List argument"));
     }
 
     #[test]

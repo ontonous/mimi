@@ -1574,6 +1574,71 @@ pub unsafe extern "C" fn mimi_mir_list_reverse_scalar(
     clone
 }
 
+/// Consume two scalar Lists and concatenate them for canonical native MIR.
+/// Both input handles are freed after their scalar payloads have been copied
+/// into a fresh result. This is the runtime half of the TypeDesc contract:
+/// `List.concat` is a two-input MoveOut operation, not a borrowed clone and
+/// not an in-place append that could leave either source obligation alive.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_concat_scalar(
+    left: *mut MimiList,
+    right: *mut MimiList,
+    kind: i8,
+) -> *mut MimiList {
+    let Some(expected) = mir_list_kind(kind) else {
+        mir_list_abort(b"[E0800] canonical MIR List kind is invalid\0");
+    };
+    if left.is_null() || right.is_null() || left == right {
+        mir_list_abort(b"[E0800] canonical MIR List concat handle is invalid\0");
+    }
+    // SAFETY: the canonical emitter passes two distinct live MimiList
+    // pointers; null and aliasing were checked above.
+    let (left_source, right_source) = unsafe { (&*left, &*right) };
+    if left_source.element_kind != expected
+        || right_source.element_kind != expected
+        || left_source.len < 0
+        || right_source.len < 0
+    {
+        mir_list_abort(b"[E0800] canonical MIR List concat kind disagrees\0");
+    }
+    if (left_source.len > 0 && left_source.data.is_null())
+        || (right_source.len > 0 && right_source.data.is_null())
+    {
+        mir_list_abort(b"[E0800] canonical MIR List concat data is null\0");
+    }
+    let total_len = left_source
+        .len
+        .checked_add(right_source.len)
+        .unwrap_or_else(|| mir_list_abort(b"[E0800] canonical MIR List concat length overflow\0"));
+    let result = unsafe { mimi_mir_list_new_scalar(kind) };
+    if result.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List concat allocation failed\0");
+    }
+    for source in [left_source, right_source] {
+        for index in 0..source.len as usize {
+            // SAFETY: each source was validated to have a non-null data
+            // pointer for non-empty lists and the index is length-bounded.
+            let value = unsafe { *(source.data as *const i64).add(index) };
+            if unsafe { mimi_mir_list_push_scalar(result, kind, value) } == 0 {
+                mir_list_abort(b"[E0800] canonical MIR List concat append failed\0");
+            }
+        }
+    }
+    // SAFETY: total_len was checked before copying; the append loop must have
+    // produced exactly that many elements under the shared scalar ABI.
+    if unsafe { (*result).len } != total_len {
+        mir_list_abort(b"[E0800] canonical MIR List concat result length disagrees\0");
+    }
+    // SAFETY: both input lists are consumed by this operation and contain no
+    // individually-owned pointer elements in the scalar-only contract.
+    unsafe {
+        mimi_list_free(left, false);
+        mimi_list_free(right, false);
+        (*result).element_kind = expected;
+    }
+    result
+}
+
 /// Drop a scalar list allocated by canonical native MIR.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
@@ -1652,6 +1717,45 @@ mod canonical_mir_list_tests {
             );
             mimi_mir_list_drop_scalar(reversed, ListElementKind::I64 as i8);
             mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_scalar_list_concat_consumes_both_inputs_into_fresh_storage() {
+        let left = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let right = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!left.is_null());
+        assert!(!right.is_null());
+        for value in [1, 2] {
+            assert_eq!(
+                unsafe { mimi_mir_list_push_scalar(left, ListElementKind::I64 as i8, value) },
+                1
+            );
+        }
+        for value in [3, 4] {
+            assert_eq!(
+                unsafe { mimi_mir_list_push_scalar(right, ListElementKind::I64 as i8, value) },
+                1
+            );
+        }
+
+        let joined =
+            unsafe { mimi_mir_list_concat_scalar(left, right, ListElementKind::I64 as i8) };
+        assert!(!joined.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_len_scalar(joined, ListElementKind::I64 as i8),
+                4
+            );
+            for (index, value) in [1, 2, 3, 4].into_iter().enumerate() {
+                assert_eq!(
+                    mimi_mir_list_get_scalar(joined, ListElementKind::I64 as i8, index as i64),
+                    value
+                );
+            }
+            // `concat` frees both inputs as part of its MoveOut ABI. Only the
+            // fresh result remains valid and needs an explicit drop.
+            mimi_mir_list_drop_scalar(joined, ListElementKind::I64 as i8);
         }
     }
 

@@ -1525,6 +1525,7 @@ fn eval_instruction(
             result,
             operation,
             list,
+            argument,
             list_operation_contract,
         } => {
             let result_ty = function
@@ -1539,25 +1540,73 @@ fn eval_instruction(
                 .ok_or_else(|| format!("MIR List operation receiver '{}' is absent", list))?
                 .ty
                 .clone();
+            let argument_ty = argument
+                .as_ref()
+                .map(|value| {
+                    function
+                        .values
+                        .get(value)
+                        .map(|info| info.ty.clone())
+                        .ok_or_else(|| format!("MIR List operation argument '{}' is absent", value))
+                })
+                .transpose()?;
             let receipt = list_operation_contract
                 .as_ref()
                 .ok_or_else(|| "MIR List operation has no canonical receipt".to_string())?;
-            catalog.validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)?;
-            let SymbolicValue::List { length } = state
-                .values
-                .get(list)
-                .cloned()
-                .ok_or_else(|| format!("MIR List receiver '{}' is not defined", list))?
-            else {
-                return Err("MIR List operation receiver is not a symbolic List".into());
-            };
-            let fits_i32 = length.le(Int::from_i64(i32::MAX as i64));
-            add_definedness(state, fits_i32, "E0802")?;
+            catalog.validate_list_operation_receipt_with_argument(
+                &result_ty,
+                &list_ty,
+                argument_ty.as_ref(),
+                *operation,
+                receipt,
+            )?;
             let value = match operation {
-                MirListOperation::Len => SymbolicValue::Int(length),
+                MirListOperation::Len => {
+                    let SymbolicValue::List { length } =
+                        state.values.get(list).cloned().ok_or_else(|| {
+                            format!("MIR List receiver '{}' is not defined", list)
+                        })?
+                    else {
+                        return Err("MIR List operation receiver is not a symbolic List".into());
+                    };
+                    let fits_i32 = length.le(Int::from_i64(i32::MAX as i64));
+                    add_definedness(state, fits_i32, "E0802")?;
+                    SymbolicValue::Int(length)
+                }
                 // Reverse clones the scalar List and therefore preserves its
                 // symbolic cardinality while leaving the source value live.
-                MirListOperation::Reverse => SymbolicValue::List { length },
+                MirListOperation::Reverse => {
+                    let SymbolicValue::List { length } =
+                        state.values.get(list).cloned().ok_or_else(|| {
+                            format!("MIR List receiver '{}' is not defined", list)
+                        })?
+                    else {
+                        return Err("MIR List operation receiver is not a symbolic List".into());
+                    };
+                    SymbolicValue::List { length }
+                }
+                MirListOperation::Concat => {
+                    let Some(argument) = argument else {
+                        return Err("MIR List.concat operation has no second input".into());
+                    };
+                    let SymbolicValue::List { length: left } = state
+                        .values
+                        .remove(list)
+                        .ok_or_else(|| format!("MIR List receiver '{}' is not defined", list))?
+                    else {
+                        return Err("MIR List.concat receiver is not a symbolic List".into());
+                    };
+                    let SymbolicValue::List { length: right } =
+                        state.values.remove(argument).ok_or_else(|| {
+                            format!("MIR List argument '{}' is not defined", argument)
+                        })?
+                    else {
+                        return Err("MIR List.concat argument is not a symbolic List".into());
+                    };
+                    let length = Int::add(&[&left, &right]);
+                    add_definedness(state, length.le(Int::from_i64(i64::MAX)), "E0800")?;
+                    SymbolicValue::List { length }
+                }
             };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);

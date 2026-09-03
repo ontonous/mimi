@@ -538,6 +538,7 @@ fn list_len_operation_materializes_type_desc_receipt() {
                 list,
                 operation: MirListOperation::Len,
                 list_operation_contract: Some(receipt),
+                ..
             } => Some((
                 function.values.get(list).expect("List value").ty.clone(),
                 function.values.get(result).expect("count value").ty.clone(),
@@ -577,6 +578,7 @@ fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
                 list,
                 operation: MirListOperation::Reverse,
                 list_operation_contract: Some(receipt),
+                ..
             } => Some((
                 function.values.get(list).expect("List value").ty.clone(),
                 function
@@ -646,6 +648,134 @@ fn list_reverse_method_materializes_the_same_canonical_operation_receipt() {
             crate::core::mir::reference::MirRuntimeValue::Int(2),
             crate::core::mir::reference::MirRuntimeValue::Int(1),
         ])
+    );
+}
+
+#[test]
+fn list_concat_method_materializes_two_input_move_receipt_and_consumes_both_sources() {
+    let source = "func main() -> List<i32> { let left = [1, 2]; let right = [3, 4]; let joined = left.concat(right); joined }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    let (left, right, receipt) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                list,
+                argument: Some(argument),
+                operation: MirListOperation::Concat,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some((list.clone(), argument.clone(), receipt.clone())),
+            _ => None,
+        })
+        .expect("canonical List.concat receipt");
+    assert_eq!(receipt.operation, MirListOperation::Concat);
+    assert_eq!(receipt.list_ty, receipt.result_ty);
+    assert_eq!(receipt.argument_ty, Some(receipt.list_ty.clone()));
+    // Scalar List containers are not checker-linear merely because their
+    // element is Copy, so the resource ledger has no linear events to attach
+    // here.  The operation's two explicit MoveOut inputs are the ownership
+    // proof for this canonical heap-handle transform.
+    assert!(function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. } if result == &left
+            )
+        })
+    }));
+    assert!(function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. } if result == &right
+            )
+        })
+    }));
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference List.concat method execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::List(vec![
+            crate::core::mir::reference::MirRuntimeValue::Int(1),
+            crate::core::mir::reference::MirRuntimeValue::Int(2),
+            crate::core::mir::reference::MirRuntimeValue::Int(3),
+            crate::core::mir::reference::MirRuntimeValue::Int(4),
+        ])
+    );
+}
+
+#[test]
+fn canonical_list_concat_receipt_rejects_missing_second_input_type() {
+    let source = "func main() -> List<i32> { let left = [1]; let right = [2]; let joined = left.concat(right); joined }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = forged
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::ListOp {
+                    operation: MirListOperation::Concat,
+                    ..
+                }
+            )
+        })
+        .expect("List.concat operation");
+    let MirInstructionKind::ListOp {
+        list_operation_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    receipt.argument_ty = None;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, forged)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("missing List.concat argument TypeDesc must fail before consumers");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("List operation receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn canonical_list_concat_rejects_aliasing_move_inputs_before_consumers() {
+    let source =
+        "func main() -> List<i32> { let values = [1, 2]; let joined = values.concat(values); joined }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("List.concat must not consume one List value twice");
+    let debug = format!("{error:?}");
+    assert!(
+        debug.contains("use after consuming non-Copy value"),
+        "unexpected aliasing diagnostic: {debug}"
     );
 }
 

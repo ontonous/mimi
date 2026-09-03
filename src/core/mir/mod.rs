@@ -34,8 +34,9 @@ pub use islands::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
-    FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+    has_unsupported_list_concat_candidate, has_unsupported_list_reverse_candidate,
+    validate_scalar_collection_island, FlatCopyRecordAdmission, ScalarCollectionAdmission,
+    SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
@@ -198,13 +199,16 @@ pub enum MirSetOperation {
 
 /// Closed operations over the canonical scalar List production island.
 /// `Len` borrows the source and returns a Copy scalar; `Reverse` borrows the
-/// source while materializing a fresh List through the List Clone glue.  The
+/// source while materializing a fresh List through the List Clone glue;
+/// `Concat` consumes both List inputs and materializes a fresh result. The
 /// operation identity is part of the MIR contract so a consumer cannot
-/// silently turn a cloning transform into an in-place move.
+/// silently change a borrow into a move or drop one side of a double-input
+/// ownership transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirListOperation {
     Len,
     Reverse,
+    Concat,
 }
 
 /// Effect boundary carried by a materialized Flow transition contract.  The
@@ -339,13 +343,17 @@ pub enum MirInstructionKind {
     },
     /// Execute a canonical operation over a Copy-scalar List. `Len` returns a
     /// Copy i32 without transferring the source; `Reverse` returns a fresh
-    /// move-owned List and leaves the source available for its own Drop.
-    /// TypeDesc fixes both List ABI/glue and result ABI before any consumer is
-    /// invoked.
+    /// move-owned List and leaves the source available for its own Drop;
+    /// `Concat` consumes `list` and `argument` and transfers both obligations
+    /// into a fresh move-owned result. TypeDesc fixes both List ABI/glue and
+    /// result ABI before any consumer is invoked.
     ListOp {
         result: MirValueId,
         operation: MirListOperation,
         list: MirValueId,
+        /// The second List input for `Concat`; absent for borrow-only `Len`
+        /// and `Reverse`. The receipt repeats its TypeDesc identity.
+        argument: Option<MirValueId>,
         /// TypeDesc receipt required for canonical List operations.
         /// Legacy/non-canonical constructors must not be presented as MIR.
         list_operation_contract: Option<types::MirListOperationContract>,
@@ -778,9 +786,14 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             result,
             operation,
             list,
+            argument,
             list_operation_contract,
         } => format!(
-            "list_op {result} = {operation:?} {list}{}",
+            "list_op {result} = {operation:?} {list}{}{}",
+            argument
+                .as_ref()
+                .map(|value| format!(", {value}"))
+                .unwrap_or_default(),
             list_operation_contract
                 .as_ref()
                 .map(|contract| format!(" [list_contract={contract:?}]"))
@@ -1248,9 +1261,13 @@ impl<'a> MirValidator<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 self.use_value(list);
+                if let Some(argument) = argument {
+                    self.use_value(argument);
+                }
                 if list_operation_contract.is_none() {
                     self.error(
                         result.to_string(),
@@ -1706,7 +1723,12 @@ impl<'a> MirValidator<'a> {
             MirInstructionKind::ConstructList { elements, .. } => {
                 uses.extend(elements.iter().cloned());
             }
-            MirInstructionKind::ListOp { list, .. } => uses.push(list.clone()),
+            MirInstructionKind::ListOp { list, argument, .. } => {
+                uses.push(list.clone());
+                if let Some(argument) = argument {
+                    uses.push(argument.clone());
+                }
+            }
             MirInstructionKind::ConstructSet { elements, .. } => {
                 uses.extend(elements.iter().cloned());
             }

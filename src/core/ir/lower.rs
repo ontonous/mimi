@@ -8842,6 +8842,7 @@ func double(value: i32) -> i32 { value * 2 }
 func option_status(value: Option<i32>) -> bool { value.is_some() }
 func result_map(value: Result<i32, string>) -> Result<i32, string> { value.map(double) }
 func list_reverse(value: List<i32>) -> List<i32> { value.reverse() }
+func list_concat(value: List<i32>, other: List<i32>) -> List<i32> { value.concat(other) }
 func shared_value() -> i32 {
     shared value = 1
     let copied = value.clone()
@@ -8886,6 +8887,14 @@ func main() -> i32 { 0 }
         ));
         assert_eq!(list.arguments.len(), 1);
         assert_eq!(list.permission, Some(crate::core::Permission::View));
+
+        let concat = tail_call("function:list_concat");
+        assert!(matches!(
+            &concat.callee,
+            ResolvedCallee::Builtin(id) if id.as_str() == "builtin.method.list.concat"
+        ));
+        assert_eq!(concat.arguments.len(), 2);
+        assert_eq!(concat.permission, Some(crate::core::Permission::Mutate));
 
         let shared = tail_call("function:shared_value");
         assert!(matches!(

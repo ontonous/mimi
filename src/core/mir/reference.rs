@@ -475,6 +475,7 @@ impl MirProgram {
                             result,
                             operation,
                             list,
+                            argument,
                             list_operation_contract,
                         } => {
                             let Some(result_value) = function.values.get(result) else {
@@ -496,12 +497,19 @@ impl MirProgram {
                                 });
                                 continue;
                             };
-                            if let Err(message) = type_catalog.validate_list_operation_receipt(
-                                &result_value.ty,
-                                &list_value.ty,
-                                *operation,
-                                receipt,
-                            ) {
+                            let argument_ty = argument
+                                .as_ref()
+                                .and_then(|value| function.values.get(value))
+                                .map(|value| value.ty.clone());
+                            if let Err(message) = type_catalog
+                                .validate_list_operation_receipt_with_argument(
+                                    &result_value.ty,
+                                    &list_value.ty,
+                                    argument_ty.as_ref(),
+                                    *operation,
+                                    receipt,
+                                )
+                            {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -1966,6 +1974,12 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
             fields: arguments, ..
         } => arguments.clone(),
         super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
+        super::MirInstructionKind::ListOp {
+            operation: super::MirListOperation::Concat,
+            list,
+            argument: Some(argument),
+            ..
+        } => vec![list.clone(), argument.clone()],
         super::MirInstructionKind::ListOp { .. } => Vec::new(),
         super::MirInstructionKind::ConstructSet { elements, .. } => elements.clone(),
         super::MirInstructionKind::SetOp {
@@ -2118,7 +2132,9 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
-        super::MirInstructionKind::ListOp { list, .. } => list == needle,
+        super::MirInstructionKind::ListOp { list, argument, .. } => {
+            list == needle || argument.as_ref() == Some(needle)
+        }
         super::MirInstructionKind::ConstructSet { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
@@ -2668,6 +2684,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 let result_ty = function
@@ -2687,19 +2704,30 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let receipt = list_operation_contract.as_ref().ok_or_else(|| {
                     self.error(&function.owner, "List operation has no canonical receipt")
                 })?;
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| value.ty.clone());
                 self.program
                     .type_catalog()
-                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
+                    .validate_list_operation_receipt_with_argument(
+                        &result_ty,
+                        &list_ty,
+                        argument_ty.as_ref(),
+                        *operation,
+                        receipt,
+                    )
                     .map_err(|message| self.error(&function.owner, message))?;
-                let MirRuntimeValue::List(elements) = self.read_value(function, values, list)?
-                else {
-                    return Err(self.error(
-                        &function.owner,
-                        "List operation receiver is not a canonical List",
-                    ));
-                };
                 let output = match operation {
                     super::MirListOperation::Len => {
+                        let MirRuntimeValue::List(elements) =
+                            self.read_value(function, values, list)?
+                        else {
+                            return Err(self.error(
+                                &function.owner,
+                                "List operation receiver is not a canonical List",
+                            ));
+                        };
                         if elements.len() > i32::MAX as usize {
                             return Err(self.error(
                                 &function.owner,
@@ -2709,10 +2737,41 @@ impl<'a> MirReferenceInterpreter<'a> {
                         MirRuntimeValue::Int(elements.len() as i64)
                     }
                     super::MirListOperation::Reverse => {
+                        let MirRuntimeValue::List(elements) =
+                            self.read_value(function, values, list)?
+                        else {
+                            return Err(self.error(
+                                &function.owner,
+                                "List operation receiver is not a canonical List",
+                            ));
+                        };
                         // Reverse is a cloning transform: the source List
                         // remains available for its own Drop and the result
                         // owns an independent element vector.
                         MirRuntimeValue::List(elements.into_iter().rev().collect())
+                    }
+                    super::MirListOperation::Concat => {
+                        let Some(argument) = argument else {
+                            return Err(self.error(
+                                &function.owner,
+                                "List.concat operation has no second input",
+                            ));
+                        };
+                        let left = self.take_transfer_value(function, values, list)?;
+                        let right = self.take_transfer_value(function, values, argument)?;
+                        let MirRuntimeValue::List(left) = left else {
+                            return Err(self.error(
+                                &function.owner,
+                                "List.concat receiver is not a canonical List",
+                            ));
+                        };
+                        let MirRuntimeValue::List(right) = right else {
+                            return Err(self.error(
+                                &function.owner,
+                                "List.concat argument is not a canonical List",
+                            ));
+                        };
+                        MirRuntimeValue::List(left.into_iter().chain(right).collect())
                     }
                 };
                 values.insert(result.clone(), output);

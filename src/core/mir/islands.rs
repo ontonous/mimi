@@ -83,6 +83,10 @@ pub fn has_unsupported_list_reverse_candidate(program: &CheckedProgram) -> bool 
     scan_scalar_collection_admission(program).has_unsupported_list_reverse_candidate
 }
 
+pub fn has_unsupported_list_concat_candidate(program: &CheckedProgram) -> bool {
+    scan_scalar_collection_admission(program).has_unsupported_list_concat_candidate
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -90,6 +94,7 @@ fn scan_scalar_collection_admission(
         program,
         has_candidate: false,
         has_unsupported_list_reverse_candidate: false,
+        has_unsupported_list_concat_candidate: false,
         mixed: false,
         seen_types: BTreeSet::new(),
     };
@@ -157,6 +162,7 @@ struct ScalarCollectionAdmissionScanner<'a> {
     program: &'a CheckedProgram,
     has_candidate: bool,
     has_unsupported_list_reverse_candidate: bool,
+    has_unsupported_list_concat_candidate: bool,
     mixed: bool,
     seen_types: BTreeSet<crate::core::ResolvedTypeId>,
 }
@@ -315,7 +321,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             ResolvedExprKind::Call(call) => {
                 if concrete
                     && (is_list_len_call(self.program, call)
-                        || is_list_reverse_call(self.program, call))
+                        || is_list_reverse_call(self.program, call)
+                        || is_list_concat_call(self.program, call))
                 {
                     self.has_candidate = true;
                 }
@@ -330,6 +337,18 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     })
                 {
                     self.has_unsupported_list_reverse_candidate = true;
+                }
+                if concrete
+                    && is_list_concat_call(self.program, call)
+                    && call.arguments.iter().any(|argument| {
+                        !is_scalar_collection_type(
+                            self.program,
+                            &argument.value.ty,
+                            &mut BTreeSet::new(),
+                        )
+                    })
+                {
+                    self.has_unsupported_list_concat_candidate = true;
                 }
                 if is_scalar_set_facade_call(self.program, call) {
                     self.has_candidate = true;
@@ -485,6 +504,17 @@ fn is_list_reverse_call(program: &CheckedProgram, call: &crate::core::ir::Resolv
     matches!(builtin.as_str(), "reverse" | "builtin.method.list.reverse")
         && call.arguments.len() == 1
         && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_list_concat_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    builtin.as_str() == "builtin.method.list.concat"
+        && call.arguments.len() == 2
+        && call.arguments.iter().all(|argument| {
+            is_resolved_list_type(program, &argument.value.ty, &mut BTreeSet::new())
+        })
 }
 
 fn is_scalar_set_contains_call(
@@ -1070,7 +1100,7 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len`/`Reverse`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
+/// `ListOp::Len`/`Reverse`/`Concat`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
 /// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
 /// S11 production boundary.
 /// Keeping this fact next to the island contract prevents the CLI and direct
@@ -1105,7 +1135,9 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
                 matches!(
                     instruction.kind,
                     MirInstructionKind::ListOp {
-                        operation: MirListOperation::Len | MirListOperation::Reverse,
+                        operation: MirListOperation::Len
+                            | MirListOperation::Reverse
+                            | MirListOperation::Concat,
                         ..
                     }
                 )
@@ -1500,6 +1532,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 let (Some(result_ty), Some(list_ty)) = (
@@ -1508,7 +1541,10 @@ impl<'a> ScalarCollectionValidator<'a> {
                 ) else {
                     return;
                 };
-                if !matches!(operation, MirListOperation::Len | MirListOperation::Reverse) {
+                if !matches!(
+                    operation,
+                    MirListOperation::Len | MirListOperation::Reverse | MirListOperation::Concat
+                ) {
                     self.error(format!(
                         "{subject} List operation {operation:?} is outside {SCALAR_COLLECTION_ISLAND}"
                     ));
@@ -1517,10 +1553,20 @@ impl<'a> ScalarCollectionValidator<'a> {
                     self.error(format!("{subject} List operation has no canonical receipt"));
                     return;
                 };
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| value.ty.clone());
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
+                    .validate_list_operation_receipt_with_argument(
+                        &result_ty,
+                        &list_ty,
+                        argument_ty.as_ref(),
+                        *operation,
+                        receipt,
+                    )
                 {
                     self.error(format!("{subject} List operation rejected: {message}"));
                 }

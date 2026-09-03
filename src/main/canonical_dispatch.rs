@@ -222,6 +222,15 @@ pub(crate) fn select_default_route(
                     "canonical List.reverse candidate did not materialize a supported MIR shape",
                 );
             }
+            if collection_hint && mimi::core::mir::has_unsupported_list_concat_candidate(checked) {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    true,
+                    false,
+                    false,
+                    "canonical List.concat candidate did not materialize a supported MIR shape",
+                );
+            }
             // S8 keeps its existing candidate hard boundary: the front-end
             // candidate predicate is intentionally stricter than
             // collection/record compatibility and must not fall back.
@@ -668,6 +677,31 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_concat_method_enters_canonical_default_route() {
+        let (checked, file) = checked(
+            "func main() -> i32 { let left = [1, 2]; let right = [3, 4]; let joined = left.concat(right); let n = len(joined); drop(joined); n }",
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("List.concat method must select the canonical default route");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::ListOp {
+                            operation: mimi::core::mir::MirListOperation::Concat,
+                            argument: Some(_),
+                            list_operation_contract: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
     fn unsupported_scalar_list_reverse_cannot_reenter_legacy_with_auto_prelude() {
         let source = include_str!("../../tests/fixtures/mir_native_list_reverse_rejected.mimi");
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -687,6 +721,29 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("did not materialize"), "{reason}");
+    }
+
+    #[test]
+    fn unsupported_scalar_list_concat_cannot_reenter_legacy_with_auto_prelude() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_list_concat_method_rejected.mimi");
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        mimi::loader::merge_prelude_into(&mut file);
+        let checked = mimi::core::check_program(&file).expect("check");
+        assert!(mimi::core::mir::has_unsupported_list_concat_candidate(
+            &checked
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("unsupported List.concat must fail closed instead of using legacy");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("List.concat"), "{reason}");
     }
 
     #[test]

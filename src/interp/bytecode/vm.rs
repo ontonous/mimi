@@ -2738,6 +2738,48 @@ impl BytecodeVM {
                     let reversed = std::sync::Arc::new(values.iter().rev().cloned().collect());
                     self.set_reg(rd, Value::List(reversed));
                 }
+                Op::MirListConcat {
+                    rd,
+                    ra,
+                    rb,
+                    contract,
+                } => {
+                    let shape = self.list_operation_contract(contract)?.ok_or_else(|| {
+                        InterpError::new("List.concat: canonical operation has no receipt")
+                    })?;
+                    if shape.operation != crate::core::mir::MirListOperation::Concat {
+                        return Err(InterpError::new(
+                            "List.concat: receipt operation disagrees with opcode",
+                        ));
+                    }
+                    Self::validate_canonical_list_operation(
+                        self.get_reg(ra),
+                        &shape,
+                        "List.concat",
+                    )?;
+                    Self::validate_canonical_list_operation(
+                        self.get_reg(rb),
+                        &shape,
+                        "List.concat",
+                    )?;
+                    let left = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let right = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[rb as usize], Value::Unit)
+                    };
+                    let (Value::List(left), Value::List(right)) = (left, right) else {
+                        return Err(InterpError::new(
+                            "canonical List.concat: expected List inputs",
+                        ));
+                    };
+                    let mut combined = Vec::with_capacity(left.len() + right.len());
+                    combined.extend(left.iter().cloned());
+                    combined.extend(right.iter().cloned());
+                    self.set_reg(rd, Value::List(std::sync::Arc::new(combined)));
+                }
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {
@@ -4688,7 +4730,9 @@ impl BytecodeVM {
         }
         if !matches!(
             shape.operation,
-            crate::core::mir::MirListOperation::Len | crate::core::mir::MirListOperation::Reverse
+            crate::core::mir::MirListOperation::Len
+                | crate::core::mir::MirListOperation::Reverse
+                | crate::core::mir::MirListOperation::Concat
         ) {
             return Err(InterpError::new(
                 "canonical List operation: receipt operation is outside the canonical List contract",
@@ -4699,6 +4743,13 @@ impl BytecodeVM {
         {
             return Err(InterpError::new(
                 "List.reverse: receipt result and source types disagree",
+            ));
+        }
+        if shape.operation == crate::core::mir::MirListOperation::Concat
+            && shape.argument_ty.is_none()
+        {
+            return Err(InterpError::new(
+                "List.concat: receipt has no second input type",
             ));
         }
         Ok(())

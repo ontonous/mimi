@@ -8,17 +8,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         operation: MirListOperation,
         list: &MirValueId,
+        argument: Option<&MirValueId>,
         list_operation_contract: Option<&crate::core::mir::types::MirListOperationContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let result_ty = self.value_type(result, subject)?;
         let list_ty = self.value_type(list, subject)?;
+        let argument_ty = argument
+            .map(|value| self.value_type(value, subject))
+            .transpose()?;
         let receipt = list_operation_contract.ok_or_else(|| {
             NativeMirError::new(subject, "List operation has no canonical receipt")
         })?;
         self.program
             .type_catalog()
-            .validate_list_operation_receipt(&result_ty, &list_ty, operation, receipt)
+            .validate_list_operation_receipt_with_argument(
+                &result_ty,
+                &list_ty,
+                argument_ty.as_ref(),
+                operation,
+                receipt,
+            )
             .map_err(|message| NativeMirError::new(subject, message))?;
         let list_desc = self
             .program
@@ -32,6 +42,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ));
         };
         let list_handle = self.value(list, subject)?.into_pointer_value();
+        let argument_handle = argument
+            .map(|value| {
+                self.value(value, subject)
+                    .map(|value| value.into_pointer_value())
+            })
+            .transpose()?;
         let kind = native_list_kind(self.program.type_catalog(), &receipt.list_ty)?;
         let kind_value = self
             .generator
@@ -41,24 +57,34 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let runtime_name = match operation {
             MirListOperation::Len => "mimi_mir_list_len_scalar",
             MirListOperation::Reverse => "mimi_mir_list_reverse_scalar",
+            MirListOperation::Concat => "mimi_mir_list_concat_scalar",
         };
+        if operation == MirListOperation::Concat {
+            crate::codegen::builtins::register_mir_list_concat_runtime(
+                &self.generator.module,
+                self.generator.context,
+            );
+        }
         let function = self
             .generator
             .get_runtime_fn(runtime_name)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let mut call_arguments = vec![BasicMetadataValueEnum::from(list_handle)];
+        if let Some(argument_handle) = argument_handle {
+            call_arguments.push(BasicMetadataValueEnum::from(argument_handle));
+        }
+        call_arguments.push(BasicMetadataValueEnum::from(kind_value));
         let value = call_try_basic_value(
             &self
                 .generator
                 .builder
                 .build_call(
                     function,
-                    &[
-                        BasicMetadataValueEnum::from(list_handle),
-                        BasicMetadataValueEnum::from(kind_value),
-                    ],
+                    &call_arguments,
                     match operation {
                         MirListOperation::Len => "mir_list_len",
                         MirListOperation::Reverse => "mir_list_reverse",
+                        MirListOperation::Concat => "mir_list_concat",
                     },
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,

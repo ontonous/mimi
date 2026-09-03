@@ -495,12 +495,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 let value = self.emit_list_op(
                     result,
                     *operation,
                     list,
+                    argument.as_ref(),
                     list_operation_contract.as_ref(),
                     subject,
                 )?;
@@ -1230,6 +1232,45 @@ mod tests {
             .module
             .verify()
             .expect("native List.reverse method module verifies");
+    }
+
+    #[test]
+    fn native_emitter_materializes_scalar_list_concat_method_with_two_input_move_abi() {
+        let program = canonical_program(
+            "func main() -> i32 { let left = [1, 2]; let right = [3, 4]; let joined = left.concat(right); let count = len(joined); drop(joined); count }",
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("List.concat method main MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Concat,
+                        argument: Some(_),
+                        list_operation_contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_scalar_list_concat_method_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar List.concat method should use the canonical two-input ABI adapter");
+        generator
+            .module
+            .verify()
+            .expect("native List.concat method module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_concat_scalar")
+            .is_some());
     }
 
     #[test]

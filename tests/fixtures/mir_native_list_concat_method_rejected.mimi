@@ -1,0 +1,8 @@
+// Canonical MIR S78 negative shape: concat is not open for owned elements.
+func main() -> i32 {
+    let left = ["a"]
+    let right = ["b"]
+    let joined = left.concat(right)
+    drop(joined)
+    0
+}

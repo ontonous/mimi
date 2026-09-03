@@ -542,17 +542,49 @@ impl<'a> Checker<'a> {
         method: &str,
         inner: &Type,
         args: &[Expr],
-        _scopes: &mut Vec<HashMap<String, Type>>,
+        scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
-        if !args.is_empty() {
-            self.emit_code(
-                crate::diagnostic::codes::E0242,
-                format!("List.{method} expects no arguments"),
-            );
-        }
         match method {
-            "len" => Type::Name("i32".into(), vec![]),
-            "reverse" => Type::Name("List".into(), vec![inner.clone()]),
+            "len" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "List.len expects no arguments",
+                    );
+                }
+                Type::Name("i32".into(), vec![])
+            }
+            "reverse" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "List.reverse expects no arguments",
+                    );
+                }
+                Type::Name("List".into(), vec![inner.clone()])
+            }
+            "concat" => {
+                if args.len() != 1 {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "List.concat expects one List argument",
+                    );
+                } else {
+                    let argument = self.infer_expr(&args[0], scopes);
+                    let expected = Type::Name("List".into(), vec![inner.clone()]);
+                    if self.unification.unify(&argument, &expected).is_err() {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0211,
+                            format!(
+                                "List.concat expects a List with element type {}, found {}",
+                                fmt_type(inner),
+                                fmt_type(&argument)
+                            ),
+                        );
+                    }
+                }
+                Type::Name("List".into(), vec![inner.clone()])
+            }
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,

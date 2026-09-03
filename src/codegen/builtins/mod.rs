@@ -133,6 +133,31 @@ fn register_mir_list_runtime<'ctx>(
     );
 }
 
+/// Register the two-input native MIR List.concat helper on demand.
+///
+/// Keeping this declaration lazy is intentional: the ordinary legacy LLVM
+/// module must not change merely because the canonical MIR runtime supports a
+/// new operation.  The declaration is installed immediately before a native
+/// MIR concat call is emitted.
+pub(crate) fn register_mir_list_concat_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
+    if module.get_function("mimi_mir_list_concat_scalar").is_some() {
+        return;
+    }
+    let ptr = ctx.ptr_type(AddressSpace::default());
+    module.add_function(
+        "mimi_mir_list_concat_scalar",
+        ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(ctx.i8_type()),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+}
+
 fn register_libc<'ctx>(
     module: &Module<'ctx>,
     _ctx: &'ctx Context,

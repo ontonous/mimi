@@ -975,7 +975,7 @@ impl<'a> Checker<'a> {
                 return self.check_string_method(method_name, args, scopes);
             }
             // Check list methods
-            if type_name == "List" && matches!(method_name, "len" | "reverse") {
+            if type_name == "List" && matches!(method_name, "len" | "reverse" | "concat") {
                 return self.check_list_method(method_name, &type_args[0], args, scopes);
             }
             let mut method_candidates: Vec<String> = self

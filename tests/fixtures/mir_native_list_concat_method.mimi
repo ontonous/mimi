@@ -1,0 +1,9 @@
+// Canonical MIR S78: List.concat consumes both scalar List inputs.
+func main() -> i32 {
+    let left = [1, 2]
+    let right = [3, 4]
+    let joined = left.concat(right)
+    let joined_len = len(joined)
+    drop(joined)
+    joined_len
+}

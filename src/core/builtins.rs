@@ -645,8 +645,12 @@ pub fn resolve_builtin_method(
         ),
         ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:List" => (
             "list",
-            matches!(method, "len" | "reverse"),
-            Permission::View,
+            matches!(method, "len" | "reverse" | "concat"),
+            if method == "concat" {
+                Permission::Mutate
+            } else {
+                Permission::View
+            },
         ),
         ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:Set" => (
             "set",

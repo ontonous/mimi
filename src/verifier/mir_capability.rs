@@ -498,6 +498,7 @@ impl<'a> CapabilityGate<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
             } => {
                 let (Some(result_ty), Some(list_ty)) =
@@ -509,9 +510,17 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} List operation has no canonical receipt"));
                     return;
                 };
-                if let Err(message) = catalog
-                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
-                {
+                let argument_ty = argument
+                    .as_ref()
+                    .and_then(|value| function.values.get(value))
+                    .map(|value| value.ty.clone());
+                if let Err(message) = catalog.validate_list_operation_receipt_with_argument(
+                    &result_ty,
+                    &list_ty,
+                    argument_ty.as_ref(),
+                    *operation,
+                    receipt,
+                ) {
                     self.error(format!("{subject} List operation rejected: {message}"));
                 }
             }

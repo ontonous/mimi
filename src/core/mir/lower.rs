@@ -1418,10 +1418,24 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Call(call) => {
+                // `concat` is a destructive two-input transform.  Direct
+                // local arguments therefore enter the canonical operation via
+                // explicit Move values; using the ordinary Load lowering here
+                // would Clone both handles and leave the source allocations
+                // outside the operation's MoveOut proof.  Rvalues still use
+                // their normal lowering because their fresh result is already
+                // the owned operation input.
+                let consuming_list_concat = is_list_concat_builtin(call, self.type_catalog);
                 let arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
-                    .map(|argument| self.lower_expr(&argument.value))
+                    .map(|argument| {
+                        if consuming_list_concat {
+                            self.lower_consuming_expr(&argument.value)
+                        } else {
+                            self.lower_expr(&argument.value)
+                        }
+                    })
                     .collect();
                 if let ResolvedCallee::Transition(transition) = &call.callee {
                     self.emit(
@@ -1491,6 +1505,7 @@ impl<'a> Lowerer<'a> {
                             &expression.node_id,
                             &result,
                             list,
+                            None,
                             super::MirListOperation::Len,
                         );
                         self.emit(
@@ -1500,6 +1515,7 @@ impl<'a> Lowerer<'a> {
                                 result: result.clone(),
                                 operation: super::MirListOperation::Len,
                                 list: list.clone(),
+                                argument: None,
                                 list_operation_contract,
                             },
                         );
@@ -1515,6 +1531,7 @@ impl<'a> Lowerer<'a> {
                             &expression.node_id,
                             &result,
                             list,
+                            None,
                             super::MirListOperation::Reverse,
                         );
                         self.emit(
@@ -1524,6 +1541,7 @@ impl<'a> Lowerer<'a> {
                                 result: result.clone(),
                                 operation: super::MirListOperation::Reverse,
                                 list: list.clone(),
+                                argument: None,
                                 list_operation_contract,
                             },
                         );
@@ -1531,6 +1549,32 @@ impl<'a> Lowerer<'a> {
                         self.error(
                             &expression.node_id,
                             "List.reverse canonical MIR operation requires one receiver",
+                        );
+                    }
+                } else if is_list_concat_builtin(call, self.type_catalog) {
+                    if let (Some(list), Some(argument)) = (arguments.first(), arguments.get(1)) {
+                        let list_operation_contract = self.list_operation_contract(
+                            &expression.node_id,
+                            &result,
+                            list,
+                            Some(argument),
+                            super::MirListOperation::Concat,
+                        );
+                        self.emit(
+                            &expression.node_id,
+                            "list_op",
+                            MirInstructionKind::ListOp {
+                                result: result.clone(),
+                                operation: super::MirListOperation::Concat,
+                                list: list.clone(),
+                                argument: Some(argument.clone()),
+                                list_operation_contract,
+                            },
+                        );
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "List.concat canonical MIR operation requires receiver and argument",
                         );
                     }
                 } else if let Some(contract) = call_builtin_contract(call, self.type_catalog) {
@@ -2280,6 +2324,7 @@ impl<'a> Lowerer<'a> {
         node_id: &NodeId,
         result: &MirValueId,
         list: &MirValueId,
+        argument: Option<&MirValueId>,
         operation: super::MirListOperation,
     ) -> Option<super::types::MirListOperationContract> {
         let Some(type_catalog) = self.type_catalog else {
@@ -2297,7 +2342,14 @@ impl<'a> Lowerer<'a> {
             self.error(node_id, "List operation receiver has no MIR type");
             return None;
         };
-        match type_catalog.validated_list_operation_contract(&result_ty, &list_ty, operation) {
+        let argument_ty =
+            argument.and_then(|value| self.values.get(value).map(|value| value.ty.clone()));
+        match type_catalog.validated_list_operation_contract_with_argument(
+            &result_ty,
+            &list_ty,
+            argument_ty.as_ref(),
+            operation,
+        ) {
             Ok(contract) => Some(contract),
             Err(message) => {
                 self.error(node_id, message);
@@ -2453,6 +2505,22 @@ fn is_list_reverse_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCat
             .is_some_and(|descriptor| {
                 matches!(descriptor.layout, super::types::MirLayout::List { .. })
             })
+    })
+}
+
+fn is_list_concat_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    if builtin.as_str() != "builtin.method.list.concat" || call.arguments.len() != 2 {
+        return false;
+    }
+    type_catalog.is_some_and(|catalog| {
+        call.arguments.iter().all(|argument| {
+            catalog.get(&argument.value.ty).is_some_and(|descriptor| {
+                matches!(descriptor.layout, super::types::MirLayout::List { .. })
+            })
+        })
     })
 }
 

@@ -515,8 +515,15 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 operation,
                 list,
+                argument,
                 list_operation_contract,
-            } => self.emit_list_op(result, *operation, list, list_operation_contract.as_ref()),
+            } => self.emit_list_op(
+                result,
+                *operation,
+                list,
+                argument.as_ref(),
+                list_operation_contract.as_ref(),
+            ),
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.emit_set_construct(result, elements)
             }
@@ -1757,10 +1764,12 @@ impl<'a> FunctionEmitter<'a> {
         result: &MirValueId,
         operation: MirListOperation,
         list: &MirValueId,
+        argument: Option<&MirValueId>,
         list_operation_contract: Option<&MirListOperationContract>,
     ) {
         let Some(rd) = self.reg(result) else { return };
         let Some(ra) = self.reg(list) else { return };
+        let rb = argument.and_then(|value| self.reg(value));
         let Some(result_info) = self.function.values.get(result) else {
             self.error(format!("List operation result '{}' is absent", result));
             return;
@@ -1773,12 +1782,20 @@ impl<'a> FunctionEmitter<'a> {
             self.error("List operation has no canonical receipt");
             return;
         };
-        if let Err(message) = self.program.type_catalog().validate_list_operation_receipt(
-            &result_info.ty,
-            &list_info.ty,
-            operation,
-            receipt,
-        ) {
+        let argument_ty = argument
+            .and_then(|value| self.function.values.get(value))
+            .map(|value| value.ty.clone());
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_list_operation_receipt_with_argument(
+                &result_info.ty,
+                &list_info.ty,
+                argument_ty.as_ref(),
+                operation,
+                receipt,
+            )
+        {
             self.error(format!("List operation is unsupported: {message}"));
             return;
         }
@@ -1799,6 +1816,19 @@ impl<'a> FunctionEmitter<'a> {
                     contract: Some(contract),
                 });
             }
+            MirListOperation::Concat => {
+                let Some(rb) = rb else {
+                    self.error("List.concat operation has no second input");
+                    return;
+                };
+                let contract = self.add_list_operation_contract(receipt);
+                self.proto.emit(Op::MirListConcat {
+                    rd,
+                    ra,
+                    rb,
+                    contract: Some(contract),
+                });
+            }
         }
     }
 
@@ -1808,6 +1838,7 @@ impl<'a> FunctionEmitter<'a> {
                 list_ty: receipt.list_ty.clone(),
                 element_ty: receipt.element_ty.clone(),
                 result_ty: receipt.result_ty.clone(),
+                argument_ty: receipt.argument_ty.clone(),
                 operation: receipt.operation,
             }))
     }
@@ -3153,6 +3184,13 @@ mod tests {
     fn run_canonical_differential(
         source: &str,
     ) -> Result<DifferentialReport, DifferentialHarnessError> {
+        run_canonical_differential_with_legacy(source, true)
+    }
+
+    fn run_canonical_differential_with_legacy(
+        source: &str,
+        require_legacy_equivalence: bool,
+    ) -> Result<DifferentialReport, DifferentialHarnessError> {
         let (file, checked) = parse_and_check(source)?;
 
         // This is the only frontend-to-MIR boundary in the harness.  A
@@ -3197,16 +3235,10 @@ mod tests {
             mir_bytecode,
             legacy_bytecode,
         };
-        let semantic_observations = [
-            &report.reference,
-            &report.mir_bytecode,
-            &report.legacy_bytecode,
-        ];
-        let first = &semantic_observations[0];
-        if semantic_observations
-            .iter()
-            .any(|observation| !observations_match(observation, first))
-        {
+        let canonical_match = observations_match(&report.mir_bytecode, &report.reference);
+        let legacy_match = !require_legacy_equivalence
+            || observations_match(&report.legacy_bytecode, &report.reference);
+        if !canonical_match || !legacy_match {
             return Err(DifferentialHarnessError::Mismatch(Box::new(report)));
         }
         Ok(report)
@@ -3417,6 +3449,28 @@ mod tests {
         );
         assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
         assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
+    }
+
+    #[test]
+    fn canonical_mir_list_concat_method_consumes_both_inputs_and_matches_reference() {
+        let source = "func main() -> List<i32> { let left = [1, 2]; let right = [3, 4]; let joined = left.concat(right); joined }";
+        let report = run_canonical_differential_with_legacy(source, false)
+            .expect("canonical List.concat method differential");
+        assert!(report.mir_text.contains("Concat"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::List(vec![
+                MirRuntimeValue::Int(1),
+                MirRuntimeValue::Int(2),
+                MirRuntimeValue::Int(3),
+                MirRuntimeValue::Int(4),
+            ]))
+        );
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert!(matches!(
+            report.legacy_bytecode.outcome,
+            DifferentialOutcome::Error { ref class, .. } if class == "runtime:E0800"
+        ));
     }
 
     #[test]
