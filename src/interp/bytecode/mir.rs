@@ -4946,6 +4946,28 @@ mod tests {
     }
 
     #[test]
+    fn executes_scalar_generic_record_projection_rvalue_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic record Copy rvalue MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic record Copy rvalue execution");
+        let bytecode = compile_mir_program(&mir).expect("generic record Copy rvalue bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic record Copy rvalue bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_scalar_generic_record_projection_i64_and_bool_without_ast() {
         for (source, expected) in [
             (

@@ -2189,6 +2189,27 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_scalar_generic_record_projection_rvalue() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic record Copy rvalue execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_projection_rvalue");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic record Copy rvalue must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic record Copy rvalue module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_scalar_generic_record_projection_i64_and_bool() {
         for (module_name, source, expected) in [
             (

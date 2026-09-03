@@ -1,0 +1,13 @@
+// Canonical generic MIR candidate: a fresh Copy-scalar record rvalue
+// is borrowed directly by the generic projection call.
+type Box<T> { value: T }
+
+func get<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let picked = get(Box { value: 41 })
+    picked
+}

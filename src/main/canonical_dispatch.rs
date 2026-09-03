@@ -578,6 +578,24 @@ mod tests {
     }
 
     #[test]
+    fn scalar_generic_record_projection_rvalue_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Copy-record rvalue projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+        )));
+    }
+
+    #[test]
     fn owned_generic_record_projection_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"

@@ -1063,6 +1063,35 @@ fn generic_record_projection_is_consumed_by_mir_verifier_without_ast_fallback() 
 }
 
 #[test]
+fn generic_record_projection_rvalue_call_is_verified_from_consuming_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-projection-rvalue").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic record Copy rvalue MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic record Copy rvalue verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn scalar_generic_record_projection_i64_and_bool_keep_mir_proof_artifacts() {
     require_z3!();
     for (label, source) in [

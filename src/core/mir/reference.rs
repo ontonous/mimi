@@ -1748,6 +1748,42 @@ fn validate_call_graph(
                                 ),
                             });
                         }
+                    } else if let MirGenericInstanceContract::ScalarRecordProjection { .. } =
+                        &instance.contract
+                    {
+                        let Some(target_parameter) = target.parameters.first() else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "generic scalar record projection target has no parameter"
+                                    .into(),
+                            });
+                            continue;
+                        };
+                        let Some(target_parameter_ty) = target
+                            .values
+                            .get(target_parameter)
+                            .map(|value| value.ty.clone())
+                        else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "generic scalar record projection target parameter TypeDesc is absent".into(),
+                            });
+                            continue;
+                        };
+                        if let Err(message) = super::lower::validate_scalar_record_call_argument(
+                            function,
+                            block,
+                            instruction_index,
+                            &target_parameter_ty,
+                            type_catalog,
+                        ) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "generic scalar record projection call transfer is invalid: {message}"
+                                ),
+                            });
+                        }
                     }
                 }
 
@@ -5651,6 +5687,135 @@ mod tests {
                 .expect("reference scalar generic record projection execution");
             assert_eq!(value, expected);
         }
+    }
+
+    #[test]
+    fn concrete_scalar_generic_record_projection_rvalue_call_keeps_construct_proof() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic record Copy rvalue call must materialize");
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("generic record Copy rvalue caller");
+        let (call_index, call_argument) = main
+            .blocks
+            .values()
+            .find_map(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, instruction)| match &instruction.kind {
+                        MirInstructionKind::Call { arguments, .. } => {
+                            arguments.first().cloned().map(|argument| (index, argument))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("generic record Copy rvalue call");
+        assert!(matches!(
+            main.blocks
+                .values()
+                .find_map(|block| block.instructions.get(call_index.saturating_sub(1))),
+            Some(MirInstruction {
+                kind: MirInstructionKind::Construct {
+                    result,
+                    kind: MirAggregateKind::Record { .. },
+                    ..
+                },
+                ..
+            }) if result == &call_argument
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic record Copy rvalue execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn scalar_generic_record_projection_indirect_argument_fails_closed() {
+        let source = "type Box<T> { value: T }\nfunc get<T>(boxed: Box<T>) -> T { boxed.value }\nfunc main() -> i32 { let picked = get(if true { Box { value: 41 } } else { Box { value: 42 } }); picked }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("generic record Copy indirect call must fail closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
+                error.message.contains(
+                    "generic scalar record projection call requires a direct local Clone or fresh Record Construct producer",
+                )
+            }), "{errors:?}"),
+            other => panic!("generic record Copy indirect call crossed MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scalar_generic_record_projection_call_producer_cannot_cross_mir_gate() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic record Copy rvalue call must materialize");
+        let owner = NodeId("function:main".into());
+        let mut main = program
+            .functions()
+            .get(&owner)
+            .cloned()
+            .expect("generic record Copy rvalue caller");
+        let block =
+            main.blocks
+                .values_mut()
+                .find(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(instruction.kind, MirInstructionKind::Call { .. })
+                    })
+                })
+                .expect("generic record Copy rvalue call block");
+        let call_index = block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+            .expect("generic record Copy rvalue call");
+        let replacement = block
+            .instructions
+            .iter()
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Const { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .expect("generic record Copy rvalue scalar producer");
+        let MirInstructionKind::Call { arguments, .. } = &mut block.instructions[call_index].kind
+        else {
+            unreachable!("call index points to a non-call instruction")
+        };
+        arguments[0] = replacement;
+        let mut functions = program.functions().clone();
+        functions.insert(owner, main);
+        let errors = MirProgram::with_type_catalog_and_instances(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+        )
+        .expect_err("generic record Copy call without a producer must fail closed");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("generic scalar record projection call transfer is invalid")
+                    && error.message.contains("direct Record Construct result")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]

@@ -371,6 +371,18 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                 .map(|value| value.ty.clone())
         })
         .flatten();
+        let scalar_record_target_parameter = matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarRecordProjection { .. }
+        )
+        .then(|| {
+            function
+                .parameters
+                .first()
+                .and_then(|parameter| function.values.get(parameter))
+                .map(|value| value.ty.clone())
+        })
+        .flatten();
         if matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
@@ -412,6 +424,27 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                     target_parameter_ty,
                     type_catalog,
                 )?;
+            } else if let Some(target_parameter_ty) = scalar_record_target_parameter.as_ref() {
+                validate_scalar_record_call_argument(
+                    function,
+                    function.blocks.get(&block_id).ok_or_else(|| {
+                        vec![MirLoweringError {
+                            node_id: NodeId(instruction_id.as_str().to_owned()),
+                            message: "generic scalar record call block is absent".into(),
+                        }]
+                    })?,
+                    index,
+                    target_parameter_ty,
+                    type_catalog,
+                )
+                .map_err(|message| {
+                    vec![MirLoweringError {
+                        node_id: NodeId(instruction_id.as_str().to_owned()),
+                        message: format!(
+                            "generic scalar record projection call transfer is invalid: {message}"
+                        ),
+                    }]
+                })?;
             }
             let Some(instruction) = function
                 .blocks
@@ -736,6 +769,102 @@ pub(crate) fn validate_owned_record_call_argument(
         return Err("owned generic record projection call source is not Move-owned".into());
     }
     type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
+}
+
+/// Validate the caller-side producer for a Copy-scalar generic record
+/// projection.  Copy ownership does not require a rewrite, but the canonical
+/// call ABI still needs an explicit producer proof: either a direct local
+/// `Clone` or a fresh `Record Construct` immediately precedes the call, and
+/// both producer/result TypeDesc identities agree with the specialized
+/// one-field record parameter.  Conditional and indirect producers therefore
+/// remain fail-closed before every backend.
+pub(crate) fn validate_scalar_record_call_argument(
+    caller: &MirFunction,
+    block: &MirBlock,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), String> {
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err("generic scalar record projection call instruction is absent".into());
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err("generic scalar record projection call requires one argument".into());
+    };
+    let producer_index = call_index.checked_sub(1).ok_or_else(|| {
+        "generic scalar record projection call requires a direct local Clone or fresh Record Construct producer".to_string()
+    })?;
+    if let Some(MirInstruction {
+        kind:
+            MirInstructionKind::Construct {
+                result,
+                kind: MirAggregateKind::Record { .. },
+                ..
+            },
+        ..
+    }) = block.instructions.get(producer_index)
+    {
+        if result != argument {
+            return Err(
+                "generic scalar record projection call argument is not the direct Record Construct result".into(),
+            );
+        }
+        let result_ty = caller
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                "generic scalar record projection call Construct result TypeDesc is absent"
+                    .to_string()
+            })?;
+        if result_ty != *target_parameter_ty {
+            return Err(
+                "generic scalar record projection call Construct type disagrees with target parameter".into(),
+            );
+        }
+        type_catalog.validate_flat_copy_record(&result_ty)?;
+        return type_catalog.validate_glue(&result_ty, super::types::MirGlueOperation::MoveOut);
+    }
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Clone { result, source },
+        ..
+    }) = block.instructions.get(producer_index)
+    else {
+        return Err(
+            "generic scalar record projection call requires a direct local Clone or fresh Record Construct producer".into(),
+        );
+    };
+    if result != argument {
+        return Err(
+            "generic scalar record projection call argument is not the direct Clone result".into(),
+        );
+    }
+    if !source.as_str().starts_with("local:") {
+        return Err("generic scalar record projection call Clone source is not a local".into());
+    }
+    let source_ty = caller
+        .values
+        .get(source)
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| {
+            "generic scalar record projection call Clone source TypeDesc is absent".to_string()
+        })?;
+    if source_ty != *target_parameter_ty {
+        return Err(
+            "generic scalar record projection call source type disagrees with target parameter"
+                .into(),
+        );
+    }
+    type_catalog.validate_flat_copy_record(&source_ty)?;
+    type_catalog.validate_value_operation(
+        target_parameter_ty,
+        &source_ty,
+        super::types::MirGlueOperation::Clone,
+    )
 }
 
 fn materialize_generic_instance(
