@@ -829,6 +829,21 @@ impl<'a> NativeMirValidator<'a> {
             return;
         };
         match projection {
+            MirProjection::Tuple(index) => {
+                if let Err(message) = self.program.type_catalog().validate_projection(
+                    &base_value.ty,
+                    &result_value.ty,
+                    projection,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+                if *index > u32::MAX as usize {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "tuple projection index exceeds native aggregate ABI",
+                    ));
+                }
+            }
             MirProjection::Index(index) => {
                 let Some(index_value) = function.values.get(index) else {
                     self.errors.push(NativeMirError::new(
@@ -881,10 +896,6 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
-            _ => self.errors.push(NativeMirError::new(
-                subject,
-                "projection shape is outside the native MIR contract",
-            )),
         }
     }
 

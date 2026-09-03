@@ -1327,6 +1327,20 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_tuple_projection_receipt() {
+        let program = canonical_program("func main() -> i32 { let pair = (40, 2); pair.0 }");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_tuple_projection_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native tuple projection should use the canonical receipt");
+        generator
+            .module
+            .verify()
+            .expect("native tuple projection module verifies");
+    }
+
+    #[test]
     fn native_validator_rejects_tuple_with_unsupported_child_before_llvm_declarations() {
         let program =
             canonical_program("func main() -> i32 { let value = (\"x\", [1]); drop(value); 0 }");

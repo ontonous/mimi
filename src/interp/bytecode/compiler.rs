@@ -1922,6 +1922,7 @@ impl BytecodeCompiler {
                     rd,
                     ra: r_obj,
                     idx: *idx as u16,
+                    contract: None,
                 });
                 Ok(rd)
             }
@@ -4416,6 +4417,7 @@ impl BytecodeCompiler {
                         rd: r_elem,
                         ra: r_subject,
                         idx: i as u16,
+                        contract: None,
                     });
                     let (sub_test, sub_bindings) =
                         self.compile_pattern_test(fc, sub_pat, r_elem)?;
@@ -5439,6 +5441,7 @@ impl BytecodeCompiler {
                     rd: r_next,
                     ra: r_cur,
                     idx: f.parse::<u16>().unwrap_or(0),
+                    contract: None,
                 });
             } else {
                 fc.emit(Op::RecordGet {
@@ -5908,6 +5911,7 @@ impl BytecodeCompiler {
                         rd: r,
                         ra: reg,
                         idx: i as u16,
+                        contract: None,
                     });
                     self.bind_pattern(fc, p, r);
                 }
@@ -5932,6 +5936,7 @@ impl BytecodeCompiler {
                         rd: r,
                         ra: reg,
                         idx: 0,
+                        contract: None,
                     });
                     self.bind_pattern(fc, &pats[0].1, r);
                 }

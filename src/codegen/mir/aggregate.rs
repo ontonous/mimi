@@ -426,6 +426,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )),
             };
         }
+        if let MirProjection::Tuple(field_index) = projection {
+            let base_ty = self.value_type(base, subject)?;
+            let result_ty = self.value_type(result, subject)?;
+            let receipt = self
+                .program
+                .type_catalog()
+                .validated_tuple_field_projection_contract(&base_ty, *field_index, &result_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let aggregate = self.value(base, subject)?.into_struct_value();
+            return self
+                .generator
+                .builder
+                .build_extract_value(aggregate, receipt.field_index as u32, "mir_tuple_project")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()));
+        }
         let MirProjection::Field(field_id) = projection else {
             return Err(NativeMirError::new(
                 subject,

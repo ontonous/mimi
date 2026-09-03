@@ -629,6 +629,20 @@ pub struct MirRecordProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for one canonical tuple field projection.
+///
+/// Tuples have structural identity rather than a nominal field ID. The
+/// source TypeDesc, declaration-order index, arity, and selected element type
+/// therefore travel together so a consumer cannot infer tuple shape from a
+/// physical vector or LLVM struct alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirTupleProjectionContract {
+    pub tuple_ty: ResolvedTypeId,
+    pub field_index: usize,
+    pub arity: usize,
+    pub field_ty: ResolvedTypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -2836,6 +2850,52 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Resolve the complete TypeDesc receipt for one canonical tuple field
+    /// projection. The result type is part of the contract so a consumer
+    /// cannot select a physically valid slot with a semantically unrelated
+    /// destination type.
+    pub fn validated_tuple_field_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        field_index: usize,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirTupleProjectionContract, String> {
+        let descriptor = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "tuple projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        self.get(result_ty).ok_or_else(|| {
+            format!(
+                "tuple projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::Tuple(elements) = &descriptor.layout else {
+            return Err(format!(
+                "tuple projection base type '{}' has no canonical tuple layout",
+                base_ty.as_str()
+            ));
+        };
+        let field_ty = elements
+            .get(field_index)
+            .ok_or_else(|| format!("tuple projection index {} is out of bounds", field_index))?;
+        if field_ty != result_ty {
+            return Err(format!(
+                "tuple projection result type '{}' disagrees with layout type '{}'",
+                result_ty.as_str(),
+                field_ty.as_str()
+            ));
+        }
+        Ok(MirTupleProjectionContract {
+            tuple_ty: base_ty.clone(),
+            field_index,
+            arity: elements.len(),
+            field_ty: field_ty.clone(),
+        })
+    }
+
     pub fn projection_result_type(
         &self,
         base_ty: &ResolvedTypeId,
@@ -2885,17 +2945,9 @@ impl MirTypeCatalog {
             .get(result_ty)
             .ok_or_else(|| format!("projection result type '{}' is absent", result_ty.as_str()))?;
         match (&base.layout, projection) {
-            (MirLayout::Tuple(elements), crate::core::mir::MirProjection::Tuple(index)) => {
-                let expected = elements
-                    .get(*index)
-                    .ok_or_else(|| format!("tuple projection index {} is out of bounds", index))?;
-                if expected != result_ty {
-                    return Err(format!(
-                        "tuple projection result type '{}' disagrees with layout type '{}'",
-                        result_ty.as_str(),
-                        expected.as_str()
-                    ));
-                }
+            (MirLayout::Tuple(_), crate::core::mir::MirProjection::Tuple(index)) => {
+                let _ =
+                    self.validated_tuple_field_projection_contract(base_ty, *index, result_ty)?;
                 if result.ownership != MirOwnership::Copy {
                     return Err(format!(
                         "tuple projection result type '{}' is non-Copy and has no explicit move projection contract",
@@ -4451,6 +4503,17 @@ mod tests {
         assert_eq!(pair.glue.move_out, MirGlueKind::Aggregate);
         assert_eq!(pair.glue.clone, MirGlueKind::Aggregate);
         assert_eq!(pair.glue.drop, MirGlueKind::Aggregate);
+        let tuple_receipt = catalog
+            .validated_tuple_field_projection_contract(&pair_id, 1, &i32_id)
+            .expect("tuple projection receipt");
+        assert_eq!(tuple_receipt.tuple_ty, pair_id);
+        assert_eq!(tuple_receipt.field_index, 1);
+        assert_eq!(tuple_receipt.arity, 2);
+        assert_eq!(tuple_receipt.field_ty, i32_id);
+        let tuple_type_error = catalog
+            .validated_tuple_field_projection_contract(&pair_id, 0, &i32_id)
+            .expect_err("tuple projection must reject a forged result type");
+        assert!(tuple_type_error.contains("disagrees with layout type"));
         let plan = pair.drop_plan.as_ref().expect("pair drop plan");
         assert_eq!(
             plan.fields

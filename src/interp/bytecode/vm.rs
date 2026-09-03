@@ -1673,6 +1673,7 @@ impl BytecodeVM {
                         | Some(ConstValue::StrVec(_))
                         | Some(ConstValue::VariantShapes(_))
                         | Some(ConstValue::RecordProjection(_))
+                        | Some(ConstValue::TupleProjection(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2190,47 +2191,60 @@ impl BytecodeVM {
                         .collect();
                     frame.regs[rd as usize] = Value::Tuple(elems);
                 }
-                Op::TupleGet { rd, ra, idx } => {
+                Op::TupleGet {
+                    rd,
+                    ra,
+                    idx,
+                    contract,
+                } => {
+                    let shape = Self::tuple_projection_contract(proto, idx, contract)?;
                     let v = self.get_reg(ra).clone();
-                    match v {
-                        Value::Tuple(t) => {
-                            if (idx as usize) >= t.len() {
-                                // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
-                                return Err(InterpError::index_out_of_bounds(format!(
-                                    "tuple index {} out of bounds (arity {})",
-                                    idx,
-                                    t.len()
-                                )));
+                    let elem = if let Some(shape) = shape.as_ref() {
+                        let tuple =
+                            Self::validate_canonical_tuple_projection(&v, shape, "tuple get")?;
+                        tuple
+                            .get(shape.index as usize)
+                            .cloned()
+                            .ok_or_else(|| InterpError::new("tuple field is out of bounds"))?
+                    } else {
+                        match v {
+                            Value::Tuple(t) => {
+                                if (idx as usize) >= t.len() {
+                                    // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                    return Err(InterpError::index_out_of_bounds(format!(
+                                        "tuple index {} out of bounds (arity {})",
+                                        idx,
+                                        t.len()
+                                    )));
+                                }
+                                t[idx as usize].clone()
                             }
-                            let elem = t[idx as usize].clone();
-                            self.set_reg(rd, elem);
+                            // Newtype .0 accessor: unwrap the inner value.
+                            // Newtypes are represented as Variant(name, [inner]) in bytecode.
+                            Value::Newtype(_, inner) if idx == 0 => *inner,
+                            Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
+                                payload[0].clone()
+                            }
+                            // 0.39.135 (L1 parity): with transparent newtype ctor
+                            // compilation the scrutinee IS the inner scalar, and
+                            // `.0` is identity (codegen expr/access.rs D4). The
+                            // checker only admits `.0` on tuple/newtype receivers,
+                            // so an Int/Float/Bool/String reaching here under
+                            // idx 0 is exactly a transparent-newtype projection.
+                            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_)
+                                if idx == 0 =>
+                            {
+                                v
+                            }
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "tuple get: expected Tuple, got {}",
+                                    other
+                                )))
+                            }
                         }
-                        // Newtype .0 accessor: unwrap the inner value.
-                        // Newtypes are represented as Variant(name, [inner]) in bytecode.
-                        Value::Newtype(_, inner) if idx == 0 => {
-                            self.set_reg(rd, *inner);
-                        }
-                        Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
-                            self.set_reg(rd, payload[0].clone());
-                        }
-                        // 0.39.135 (L1 parity): with transparent newtype ctor
-                        // compilation the scrutinee IS the inner scalar, and
-                        // `.0` is identity (codegen expr/access.rs D4). The
-                        // checker only admits `.0` on tuple/newtype receivers,
-                        // so an Int/Float/Bool/String reaching here under
-                        // idx 0 is exactly a transparent-newtype projection.
-                        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_)
-                            if idx == 0 =>
-                        {
-                            self.set_reg(rd, v);
-                        }
-                        other => {
-                            return Err(InterpError::new(format!(
-                                "tuple get: expected Tuple, got {}",
-                                other
-                            )))
-                        }
-                    }
+                    };
+                    self.set_reg(rd, elem);
                 }
 
                 // ── Record ─────────────────────────────────────
@@ -4493,6 +4507,71 @@ impl BytecodeVM {
         }
     }
 
+    /// Decode the optional canonical tuple projection receipt and prove that
+    /// its physical index agrees with the opcode operand. Legacy bytecode
+    /// intentionally returns `None`; canonical MIR always supplies the
+    /// receipt before this VM dispatch path is reached.
+    fn tuple_projection_contract(
+        proto: &FunctionProto,
+        index: FieldIdx,
+        contract: Option<ConstIdx>,
+    ) -> Result<Option<TupleProjectionShape>, InterpError> {
+        let Some(contract_idx) = contract else {
+            return Ok(None);
+        };
+        let shape = match proto.constants.get(contract_idx as usize) {
+            Some(ConstValue::TupleProjection(shape)) => shape.clone(),
+            Some(_) => {
+                return Err(InterpError::new(format!(
+                    "tuple projection: contract constant {} is not a TupleProjection",
+                    contract_idx
+                )))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "tuple projection: contract constant {} is absent",
+                    contract_idx
+                )))
+            }
+        };
+        if shape.index != index {
+            return Err(InterpError::new(format!(
+                "tuple projection: opcode index {} disagrees with canonical receipt index {}",
+                index, shape.index
+            )));
+        }
+        Ok(Some(shape))
+    }
+
+    /// Validate a canonical tuple source before the VM reads it. The runtime
+    /// tuple remains a physical vector, but its arity and selected slot come
+    /// from the MIR receipt rather than from inferred vector shape.
+    fn validate_canonical_tuple_projection<'a>(
+        value: &'a Value,
+        shape: &TupleProjectionShape,
+        operation: &str,
+    ) -> Result<&'a [Value], InterpError> {
+        let Value::Tuple(items) = value else {
+            return Err(InterpError::new(format!(
+                "{operation}: canonical projection requires a Tuple source"
+            )));
+        };
+        if items.len() != shape.arity as usize {
+            return Err(InterpError::new(format!(
+                "{operation}: tuple arity {} disagrees with projection contract arity {}",
+                items.len(),
+                shape.arity
+            )));
+        }
+        if shape.index >= shape.arity {
+            return Err(InterpError::new(format!(
+                "{operation}: projection index {} is outside canonical arity {}",
+                shape.index, shape.arity
+            )));
+        }
+        Ok(items)
+    }
+
     /// Decode the optional canonical record projection receipt and prove that
     /// its physical field name agrees with the opcode operand. Legacy
     /// bytecode intentionally returns `None`; canonical MIR always supplies
@@ -4757,6 +4836,7 @@ impl BytecodeVM {
             ConstValue::StrVec(_) => Value::Unit,
             ConstValue::VariantShapes(_) => Value::Unit,
             ConstValue::RecordProjection(_) => Value::Unit,
+            ConstValue::TupleProjection(_) => Value::Unit,
         }
     }
 

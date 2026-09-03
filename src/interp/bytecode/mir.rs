@@ -25,7 +25,7 @@ use crate::core::NodeId;
 
 use super::instr::{
     BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, Op, RecordProjectionShape, Reg,
-    VariantShape,
+    TupleProjectionShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -832,10 +832,16 @@ impl<'a> FunctionEmitter<'a> {
                         self.error("tuple projected load index exceeds bytecode field ABI");
                         return;
                     }
+                    let Some(contract) =
+                        self.add_tuple_projection_contract(&current_ty, *tuple_index, projected_ty)
+                    else {
+                        return;
+                    };
                     self.proto.emit(Op::TupleGet {
                         rd: destination,
                         ra: current_reg,
                         idx: *tuple_index as u16,
+                        contract: Some(contract),
                     });
                     current_ty = projected_ty.clone();
                 }
@@ -1303,28 +1309,17 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         match (&base_desc.layout, projection) {
-            (MirLayout::Tuple(elements), MirProjection::Tuple(index)) => {
-                let Some(element_ty) = elements.get(*index) else {
-                    self.error(format!("tuple projection index {} is out of bounds", index));
+            (MirLayout::Tuple(_), MirProjection::Tuple(index)) => {
+                let Some(contract) =
+                    self.add_tuple_projection_contract(&base_desc.id, *index, &result_desc.id)
+                else {
                     return;
                 };
-                if element_ty != &result_desc.id {
-                    self.error(format!(
-                        "tuple projection result '{}' has type '{}' but layout selects '{}'",
-                        result,
-                        result_desc.id.as_str(),
-                        element_ty.as_str()
-                    ));
-                    return;
-                }
-                if *index > u16::MAX as usize {
-                    self.error("tuple projection index exceeds bytecode field ABI");
-                    return;
-                }
                 self.proto.emit(Op::TupleGet {
                     rd,
                     ra,
                     idx: *index as u16,
+                    contract: Some(contract),
                 });
             }
             (MirLayout::Record { .. }, MirProjection::Field(field)) => {
@@ -1489,6 +1484,43 @@ impl<'a> FunctionEmitter<'a> {
                     nominal: receipt.nominal.clone(),
                     field: receipt.field.clone(),
                     name: receipt.name.clone(),
+                    index,
+                    arity,
+                })),
+        )
+    }
+
+    fn add_tuple_projection_contract(
+        &mut self,
+        base_ty: &crate::core::ResolvedTypeId,
+        field_index: usize,
+        result_ty: &crate::core::ResolvedTypeId,
+    ) -> Option<ConstIdx> {
+        let receipt = match self
+            .program
+            .type_catalog()
+            .validated_tuple_field_projection_contract(base_ty, field_index, result_ty)
+        {
+            Ok(receipt) => receipt,
+            Err(message) => {
+                self.error(format!(
+                    "tuple projection has no canonical contract: {message}"
+                ));
+                return None;
+            }
+        };
+        let Ok(index) = u16::try_from(receipt.field_index) else {
+            self.error("tuple projection field index exceeds bytecode ABI");
+            return None;
+        };
+        let Ok(arity) = u16::try_from(receipt.arity) else {
+            self.error("tuple projection arity exceeds bytecode ABI");
+            return None;
+        };
+        Some(
+            self.proto
+                .add_const(ConstValue::TupleProjection(TupleProjectionShape {
+                    tuple_ty: receipt.tuple_ty,
                     index,
                     arity,
                 })),
@@ -3775,8 +3807,55 @@ mod tests {
     #[test]
     fn executes_tuple_construction_and_projection_through_canonical_mir() {
         let program = compile("func main() -> i32 { let pair = (40, 2); pair.0 + pair.1 }");
+        let main = &program.functions[program.entry as usize];
+        let projection_contracts = main
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                Op::TupleGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(projection_contracts.len(), 2);
+        for (contract, index) in projection_contracts.into_iter().zip([0, 1]) {
+            let ConstValue::TupleProjection(shape) = &main.constants[contract as usize] else {
+                panic!("canonical tuple projection must carry a shape constant");
+            };
+            assert_eq!(shape.index, index);
+            assert_eq!(shape.arity, 2);
+        }
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn canonical_tuple_projection_rejects_forged_arity_before_read() {
+        let mut program = (*compile("func main() -> i32 { let pair = (40, 2); pair.0 }")).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::TupleGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical tuple projection contract");
+        let ConstValue::TupleProjection(shape) = &mut main.constants[contract as usize] else {
+            panic!("tuple projection must carry a canonical shape constant");
+        };
+        shape.arity = 3;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("forged canonical tuple arity must trap");
+        assert!(error
+            .message()
+            .contains("tuple arity 2 disagrees with projection contract arity 3"));
     }
 
     #[test]

@@ -3805,10 +3805,33 @@ fn project_value(
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     match (value, projection) {
-        (MirRuntimeValue::Tuple(values), MirProjection::Tuple(index)) => values
-            .get(*index)
-            .cloned()
-            .ok_or_else(|| execution_error(function, "tuple projection is out of bounds")),
+        (MirRuntimeValue::Tuple(values), MirProjection::Tuple(index)) => {
+            let Some(base_ty) = base_ty else {
+                return Err(execution_error(
+                    function,
+                    "tuple projection has no base type",
+                ));
+            };
+            let Some(result_ty) = result_ty else {
+                return Err(execution_error(
+                    function,
+                    "tuple projection has no result type",
+                ));
+            };
+            let contract = type_catalog
+                .validated_tuple_field_projection_contract(base_ty, *index, result_ty)
+                .map_err(|message| execution_error(function, message))?;
+            if values.len() != contract.arity {
+                return Err(execution_error(
+                    function,
+                    "tuple runtime arity disagrees with projection contract",
+                ));
+            }
+            values
+                .get(contract.field_index)
+                .cloned()
+                .ok_or_else(|| execution_error(function, "tuple field is out of bounds"))
+        }
         (MirRuntimeValue::Record { nominal, fields }, MirProjection::Field(field)) => {
             let Some(base_ty) = base_ty else {
                 return Err(execution_error(
@@ -4276,6 +4299,16 @@ mod tests {
             value,
             MirRuntimeValue::Tuple(vec![MirRuntimeValue::Int(1), MirRuntimeValue::Int(2)])
         );
+    }
+
+    #[test]
+    fn executes_tuple_projection_through_the_type_desc_receipt() {
+        let (owner, program) =
+            canonical_program_with_main("func main() -> i32 { let pair = (40, 2); pair.0 }");
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference tuple projection");
+        assert_eq!(value, MirRuntimeValue::Int(40));
     }
 
     #[test]

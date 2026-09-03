@@ -192,6 +192,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+                ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -377,6 +378,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+                ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -492,8 +494,19 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} drop_variant r{} [shapes const {}]",
             pc, name, ra, shapes
         ),
-        Op::TupleGet { rd, ra, idx } => {
-            format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, idx)
+        Op::TupleGet {
+            rd,
+            ra,
+            idx,
+            contract,
+        } => {
+            let receipt = contract
+                .map(|contract| format!(" [contract {}]", contract))
+                .unwrap_or_default();
+            format!(
+                "{:04}  {:<16} r{} = r{}.{}{}",
+                pc, name, rd, ra, idx, receipt
+            )
         }
         Op::NewRecord {
             rd,
@@ -962,6 +975,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::StrVec(v) => format!("strvec {:?}", v),
             ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
             ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+            ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

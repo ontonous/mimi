@@ -627,6 +627,9 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
         idx: FieldIdx,
+        /// Optional canonical MIR tuple projection receipt. `None` is kept
+        /// for legacy bytecode only; canonical MIR emission must populate it.
+        contract: Option<ConstIdx>,
     },
 
     /// rd = new Record of type `type_name_idx` with fields from [base..base+count)
@@ -1461,6 +1464,9 @@ pub enum ConstValue {
     /// Canonical record projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     RecordProjection(RecordProjectionShape),
+    /// Canonical tuple projection receipts encoded for the bytecode physical
+    /// ABI. The MIR adapter copies this only from a validated TypeDesc.
+    TupleProjection(TupleProjectionShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1489,6 +1495,17 @@ pub struct RecordProjectionShape {
     pub nominal: crate::core::ir::NominalTypeId,
     pub field: crate::core::NodeId,
     pub name: String,
+    pub index: FieldIdx,
+    pub arity: u16,
+}
+
+/// One canonical tuple field projection in the bytecode physical contract.
+/// The structural source type remains in the core MIR receipt; the physical
+/// shape carries that identity while the VM validates Tuple, index, and arity
+/// before reading the untyped runtime vector.
+#[derive(Debug, Clone)]
+pub struct TupleProjectionShape {
+    pub tuple_ty: crate::core::ResolvedTypeId,
     pub index: FieldIdx,
     pub arity: u16,
 }
