@@ -1,0 +1,11 @@
+func has_value<T>(value: Option<T>) -> bool {
+    value.is_some()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Option<string> = Some("owned")
+    let flag = has_value(value)
+    drop(value)
+    if flag { 1 } else { 0 }
+}

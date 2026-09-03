@@ -2472,7 +2472,92 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { contract } => {
+            eval_materialized_variant_predicate_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                contract,
+            )
+        }
     }
+}
+
+fn eval_materialized_variant_predicate_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirVariantPredicateContract,
+) -> Result<(), String> {
+    if type_arguments.len() != 1 || arguments.len() != 1 {
+        return Err(
+            "MIR verifier generic Option predicate calls require one type and value argument"
+                .into(),
+        );
+    }
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier generic Option predicate target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_variant_predicate_mir(target, catalog, contract)?;
+    let target_parameter = target.parameters.first().ok_or_else(|| {
+        "MIR verifier generic Option predicate target has no parameter".to_string()
+    })?;
+    let target_parameter_ty = target
+        .values
+        .get(target_parameter)
+        .ok_or_else(|| {
+            "MIR verifier generic Option predicate target parameter TypeDesc is absent".to_string()
+        })?
+        .ty
+        .clone();
+    let argument_ty = function
+        .values
+        .get(&arguments[0])
+        .ok_or_else(|| {
+            "MIR verifier generic Option predicate argument TypeDesc is absent".to_string()
+        })?
+        .ty
+        .clone();
+    if argument_ty != target_parameter_ty {
+        return Err(
+            "MIR verifier generic Option predicate argument type disagrees with target parameter"
+                .into(),
+        );
+    }
+    let Some(argument_value) = state.values.get(&arguments[0]).cloned() else {
+        return Err(format!(
+            "MIR verifier generic Option predicate argument '{}' is not defined",
+            arguments[0]
+        ));
+    };
+    let SymbolicValue::Variant { nominal, tag, .. } = argument_value else {
+        return Err(
+            "MIR verifier generic Option predicate argument is not a symbolic Option".into(),
+        );
+    };
+    if nominal != contract.nominal {
+        return Err("MIR verifier generic Option predicate nominal disagrees with TypeDesc".into());
+    }
+    let output = SymbolicValue::Bool(tag.eq(&Int::from_i64(contract.discriminant as i64)));
+    if let Some(result) = result {
+        ensure_result_shape(function, catalog, result, &output)?;
+        state.values.insert(result.clone(), output);
+    }
+    Ok(())
 }
 
 /// Symbolically execute a concrete call whose callee returns the canonical

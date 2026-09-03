@@ -1063,6 +1063,43 @@ fn generic_record_projection_is_consumed_by_mir_verifier_without_ast_fallback() 
 }
 
 #[test]
+fn generic_option_predicate_is_verified_from_canonical_mir_without_ast_fallback() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_option_predicate.mimi");
+    let file = parse_memory_source(source, "mir-generic-option-predicate").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Option predicate MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+            )
+        })
+        .expect("generic Option predicate instance");
+    assert!(matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+    ));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Option predicate verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn two_field_generic_record_projection_is_consumed_by_mir_verifier() {
     require_z3!();
     let source =

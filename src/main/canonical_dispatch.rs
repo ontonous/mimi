@@ -118,9 +118,10 @@ pub(crate) fn build_canonical_program_for_sources(
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
 /// record value, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
-/// transition, or the concrete non-Copy `Option<string>` variant island. The
-/// candidate then has to pass every consumer preflight before any caller
-/// starts execution or LLVM emission. A `Legacy(reason)` result is an explicit
+/// transition, the concrete non-Copy `Option<string>` variant island, or the
+/// generic `Option<T>.is_some`/`is_none` predicate island. The candidate then
+/// has to pass every consumer preflight before any caller starts execution or
+/// LLVM emission. A `Legacy(reason)` result is an explicit
 /// compatibility disposition for a program that has not entered a migrated
 /// island. `Rejected` means an island was recognized but canonical preflight
 /// failed; callers must report the error and must not invoke legacy.
@@ -134,6 +135,7 @@ pub(crate) fn select_default_route(
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
     let collection_admission = admission.collection;
     let option_string_admission = admission.option_string;
+    let generic_variant_admission = admission.generic_variant;
     // Imported stdlib facades are part of the production island once their
     // concrete operations materialize in MIR.  Do not use the retained File
     // import list as a second route policy: checker admission records the
@@ -166,13 +168,35 @@ pub(crate) fn select_default_route(
         option_string_admission,
         mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
     );
+    let generic_variant_hint = !matches!(
+        generic_variant_admission,
+        mimi::core::mir::GenericVariantPredicateAdmission::OutsideProfile
+    );
+    let complete_generic_variant_candidate = matches!(
+        generic_variant_admission,
+        mimi::core::mir::GenericVariantPredicateAdmission::CompleteCoverage
+    );
     let flow_candidate = may_contain_single_silent_local_transition(checked, merged_file);
     let complete_flow_candidate = matches!(
         admission.flow,
         mimi::core::mir::S8FlowAdmission::CompleteCoverage
     );
-    if !collection_hint && !record_hint && !flow_candidate && !option_string_hint {
+    if !collection_hint
+        && !record_hint
+        && !flow_candidate
+        && !option_string_hint
+        && !generic_variant_hint
+    {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
+    }
+    if generic_variant_hint && !complete_generic_variant_candidate {
+        return reject_migrated_candidates(
+            flow_candidate,
+            false,
+            true,
+            option_string_hint,
+            "generic Option predicate candidate is outside complete coverage",
+        );
     }
 
     let route = match materialize_canonical_route(checked, merged_file) {
@@ -184,10 +208,26 @@ pub(crate) fn select_default_route(
         }) => {
             let reason = match stage {
                 mimi::core::mir::CanonicalMirRouteFailureStage::Construction => {
-                    format!("canonical MIR construction failed: {message}")
+                    if matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
+                    ) {
+                        format!(
+                            "generic Option predicate canonical MIR construction failed: {message}"
+                        )
+                    } else {
+                        format!("canonical MIR construction failed: {message}")
+                    }
                 }
                 mimi::core::mir::CanonicalMirRouteFailureStage::Coverage => {
-                    format!("canonical graph did not materialize the selected production operation: {message}")
+                    if matches!(
+                        profile,
+                        mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
+                    ) {
+                        format!("generic Option predicate canonical graph did not materialize the selected production operation: {message}")
+                    } else {
+                        format!("canonical graph did not materialize the selected production operation: {message}")
+                    }
                 }
             };
             return reject_migrated_candidates(
@@ -199,6 +239,9 @@ pub(crate) fn select_default_route(
                 matches!(
                     profile,
                     mimi::core::mir::CanonicalMirRouteProfile::FlatCopyRecord
+                ) || matches!(
+                    profile,
+                    mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                 ),
                 matches!(
                     profile,
@@ -253,6 +296,17 @@ pub(crate) fn select_default_route(
                     "canonical generic record projection candidate did not materialize a supported scalar MIR shape",
                 );
             }
+            if generic_variant_hint
+                && mimi::core::mir::has_unsupported_generic_variant_predicate_candidate(checked)
+            {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    false,
+                    true,
+                    false,
+                    "canonical generic Option predicate candidate did not materialize a supported MIR shape",
+                );
+            }
             // S8 keeps its existing candidate hard boundary: the front-end
             // candidate predicate is intentionally stricter than
             // collection/record compatibility and must not fall back.
@@ -284,6 +338,7 @@ pub(crate) fn select_default_route(
     let materialized_collection_candidate = route.materialized_collection_candidate;
     let materialized_flow_candidate = route.materialized_flow_candidate;
     let materialized_option_string_candidate = route.materialized_option_string_candidate;
+    let materialized_generic_variant_candidate = route.materialized_generic_variant_candidate;
     let flow_route_candidate = flow_candidate || materialized_flow_candidate;
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
@@ -292,7 +347,10 @@ pub(crate) fn select_default_route(
     // admission missing its receipt, however, is a hard route failure.
     let collection_route_candidate =
         complete_collection_candidate || (collection_hint && materialized_collection_candidate);
-    let record_route_candidate = complete_record_candidate || (record_hint && copy_record);
+    let generic_route_candidate =
+        complete_generic_variant_candidate && materialized_generic_variant_candidate;
+    let record_route_candidate =
+        complete_record_candidate || (record_hint && copy_record) || generic_route_candidate;
     let option_string_route_candidate = complete_option_string_candidate
         || (option_string_hint && materialized_option_string_candidate);
     if flow_route_candidate && !flow_transition_operation {
@@ -318,7 +376,7 @@ pub(crate) fn select_default_route(
     // contain a migrated boundary, keep the old path deleted for that
     // boundary and reject the whole route.  If it contains no such operation,
     // it remains an explicit compatibility input and may use Legacy.
-    if record_route_candidate && !complete_record_candidate {
+    if record_route_candidate && !complete_record_candidate && !generic_route_candidate {
         return reject_migrated_candidates(
             flow_route_candidate,
             collection_route_candidate,
@@ -460,25 +518,31 @@ fn reject_migrated_candidates(
     option_string_candidate: bool,
     reason: impl Into<String>,
 ) -> DefaultMirRoute {
+    let reason = reason.into();
     if flow_candidate {
         DefaultMirRoute::Rejected(format!(
             "S8 Flow transition candidate is not eligible for the default route: {}",
-            reason.into()
+            reason
         ))
     } else if collection_candidate {
         DefaultMirRoute::Rejected(format!(
             "S11 scalar collection candidate is not eligible for the default route: {}",
-            reason.into()
+            reason
+        ))
+    } else if reason.contains("generic Option predicate") {
+        DefaultMirRoute::Rejected(format!(
+            "generic Option predicate candidate is not eligible for the default route: {}",
+            reason
         ))
     } else if record_candidate {
         DefaultMirRoute::Rejected(format!(
             "S0 flat Copy record candidate is not eligible for the default route: {}",
-            reason.into()
+            reason
         ))
     } else if option_string_candidate {
         DefaultMirRoute::Rejected(format!(
             "S30 non-Copy Option<string> variant candidate is not eligible for the default route: {}",
-            reason.into()
+            reason
         ))
     } else {
         DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
@@ -554,6 +618,37 @@ mod tests {
             instance.contract,
             mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
         )));
+    }
+
+    #[test]
+    fn generic_option_predicate_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_option_predicate.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_variant_predicate_admission(&checked),
+            mimi::core::mir::GenericVariantPredicateAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Option predicate must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+        )));
+    }
+
+    #[test]
+    fn unsupported_generic_option_predicate_cannot_reenter_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_option_predicate_rejected.mimi"
+        ));
+        assert!(mimi::core::mir::has_unsupported_generic_variant_predicate_candidate(&checked));
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Rejected(reason) = route else {
+            panic!("non-Copy generic Option predicate must fail closed before legacy");
+        };
+        assert!(reason.contains("generic Option predicate"), "{reason}");
     }
 
     #[test]

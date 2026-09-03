@@ -723,7 +723,7 @@ pub struct MirListConstructContract {
 /// Backend-independent receipt for a read-only Option/Result predicate.
 /// `variant` and `discriminant` are redundant by design: the checker-owned
 /// identity and the physical tag must agree at every consumer boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirVariantPredicateContract {
     pub variant_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
@@ -4544,6 +4544,104 @@ impl MirTypeCatalog {
             variant_ty: variant_ty.clone(),
             result_ty: result_ty.clone(),
             nominal: NominalTypeId::new(expected_nominal)
+                .expect("static canonical variant nominal"),
+            variant: variant.id.clone(),
+            variant_name: variant.name.clone(),
+            alternate_variant: alternate.id.clone(),
+            alternate_variant_name: alternate.name.clone(),
+            predicate,
+            discriminant: variant.discriminant,
+        })
+    }
+
+    /// Materialize the placeholder receipt used while lowering a generic
+    /// `Option<T>` predicate.  The generic payload is intentionally opaque at
+    /// this stage, so the concrete flat-Copy payload check is deferred until
+    /// instance specialization.  The variant family, identities, arity and
+    /// predicate are still fixed here; an arbitrary generic enum cannot use
+    /// this escape hatch.
+    pub(crate) fn validated_generic_option_predicate_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        variant_ty: &ResolvedTypeId,
+        predicate: crate::core::mir::MirVariantPredicate,
+    ) -> Result<MirVariantPredicateContract, String> {
+        self.validate_copy_scalar(result_ty)?;
+        let descriptor = self.get(variant_ty).ok_or_else(|| {
+            format!(
+                "generic variant predicate source type '{}' is absent from MIR TypeDesc catalog",
+                variant_ty.as_str()
+            )
+        })?;
+        let MirLayout::Option { variants, .. } = &descriptor.layout else {
+            return Err(format!(
+                "generic variant predicate source '{}' is not canonical Option<T>",
+                variant_ty.as_str()
+            ));
+        };
+        if variants.len() != 2 {
+            return Err(format!(
+                "generic Option predicate source '{}' has {} variants; exactly None and Some are required",
+                variant_ty.as_str(),
+                variants.len()
+            ));
+        }
+        let (expected_variant, expected_name) = match predicate {
+            crate::core::mir::MirVariantPredicate::IsSome => {
+                ("builtin:variant:Option::Some", "Some")
+            }
+            crate::core::mir::MirVariantPredicate::IsNone => {
+                ("builtin:variant:Option::None", "None")
+            }
+            other => {
+                return Err(format!(
+                "generic Option predicate does not admit {:?}; only IsSome/IsNone are canonical",
+                other
+            ))
+            }
+        };
+        let variant = variants
+            .iter()
+            .find(|candidate| candidate.id.0 == expected_variant && candidate.name == expected_name)
+            .ok_or_else(|| {
+                format!(
+                    "generic Option predicate target '{}' is absent from TypeDesc",
+                    expected_variant
+                )
+            })?;
+        let alternate = variants
+            .iter()
+            .find(|candidate| candidate.id != variant.id)
+            .ok_or_else(|| {
+                "generic Option predicate alternate variant is absent from TypeDesc".to_string()
+            })?;
+        if (variant.name == "Some" && variant.fields.len() != 1)
+            || (variant.name == "None" && variant.fields.is_empty() == false)
+            || (alternate.name == "Some" && alternate.fields.len() != 1)
+            || (alternate.name == "None" && !alternate.fields.is_empty())
+        {
+            return Err(
+                "generic Option predicate variants do not match the canonical None/Some shape"
+                    .into(),
+            );
+        }
+        if !variant.fields.is_empty()
+            && self
+                .get(&variant.fields[0].ty)
+                .is_none_or(|payload| payload.kind != MirTypeKind::GenericParameter)
+            && !alternate.fields.iter().any(|field| {
+                self.get(&field.ty)
+                    .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter)
+            })
+        {
+            return Err(
+                "generic Option predicate payload must be the canonical GenericParameter".into(),
+            );
+        }
+        Ok(MirVariantPredicateContract {
+            variant_ty: variant_ty.clone(),
+            result_ty: result_ty.clone(),
+            nominal: NominalTypeId::new("builtin:type:Option")
                 .expect("static canonical variant nominal"),
             variant: variant.id.clone(),
             variant_name: variant.name.clone(),

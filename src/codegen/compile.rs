@@ -636,6 +636,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete Option<string> variant MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete generic Option predicate MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete generic Option predicate MIR island materialization failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,

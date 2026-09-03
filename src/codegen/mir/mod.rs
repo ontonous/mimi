@@ -1964,6 +1964,50 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_option_predicate() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_predicate.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+                )
+            })
+            .expect("generic Option predicate instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Option predicate execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let bytecode_program =
+            compile_mir_program(&program).expect("generic Option predicate MIR bytecode");
+        assert!(bytecode_program.ast.is_none());
+        let bytecode = BytecodeVM::new(bytecode_program)
+            .run_value()
+            .expect("bytecode generic Option predicate execution");
+        assert!(matches!(bytecode, Value::Int(41)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_option_predicate");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option predicate must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option predicate module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_scalar_generic_list_reverse() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_list_reverse.mimi"

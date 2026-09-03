@@ -31,13 +31,16 @@ pub use contracts::{
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{
-    classify_flat_copy_record_admission, classify_scalar_collection_admission,
-    contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
+    classify_flat_copy_record_admission, classify_generic_variant_predicate_admission,
+    classify_scalar_collection_admission, contains_flat_copy_record_candidate,
+    contains_generic_variant_predicate_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
     has_unsupported_generic_list_facade_candidate,
-    has_unsupported_generic_record_projection_candidate, has_unsupported_list_concat_candidate,
+    has_unsupported_generic_record_projection_candidate,
+    has_unsupported_generic_variant_predicate_candidate, has_unsupported_list_concat_candidate,
     has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
-    FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+    FlatCopyRecordAdmission, GenericVariantPredicateAdmission, ScalarCollectionAdmission,
+    GENERIC_VARIANT_PREDICATE_ISLAND, SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
@@ -329,6 +332,14 @@ pub enum MirGenericInstanceContract {
     /// ownership from the native/VM representation.
     OwnedRecordProjection {
         contract: types::MirRecordProjectionContract,
+    },
+    /// A generic `Option<T>.is_some()`/`is_none()` predicate specialized to a
+    /// concrete Copy scalar payload. The predicate is read-only: the
+    /// materialized body carries the same TypeDesc tag receipt consumed by
+    /// the direct `VariantPredicate` node, so no backend may infer the
+    /// variant ABI from a generic instance symbol or runtime tag.
+    ScalarVariantPredicate {
+        contract: types::MirVariantPredicateContract,
     },
 }
 

@@ -29,6 +29,110 @@ use super::{
 
 /// Name of the finite whole-program island closed by this contract.
 pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
+/// Name of the narrow generic Option predicate island.  It admits only
+/// `is_some`/`is_none` over `Option<T>` where the concrete `T` is a signed
+/// scalar/bool; Result predicates and non-Copy payloads remain outside.
+pub const GENERIC_VARIANT_PREDICATE_ISLAND: &str = "generic-option-predicate-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericVariantPredicateAdmission {
+    OutsideProfile,
+    MixedCoverage,
+    CompleteCoverage,
+}
+
+/// Classify the checker-owned generic Option predicate envelope before MIR
+/// materialization.  This is deliberately a declaration/call-shape gate; the
+/// concrete TypeDesc receipt is still rebuilt by generic MIR specialization.
+pub fn classify_generic_variant_predicate_admission(
+    program: &CheckedProgram,
+) -> GenericVariantPredicateAdmission {
+    let has_candidate = program
+        .callables()
+        .values()
+        .any(|callable| is_generic_option_predicate_callable(program, callable));
+    if !has_candidate {
+        return GenericVariantPredicateAdmission::OutsideProfile;
+    }
+    if has_mixed_coverage(program)
+        || program.callables().values().any(|callable| {
+            mentions_generic_option_callable(program, callable)
+                && !is_generic_option_predicate_callable(program, callable)
+        })
+    {
+        GenericVariantPredicateAdmission::MixedCoverage
+    } else {
+        GenericVariantPredicateAdmission::CompleteCoverage
+    }
+}
+
+/// A generic Option-typed callable is a migrated candidate even when its body
+/// or concrete payload is unsupported. Default routing uses this stable hint
+/// to reject the shape before a legacy emitter can observe it if canonical
+/// materialization cannot produce the receipt.
+pub fn has_unsupported_generic_variant_predicate_candidate(program: &CheckedProgram) -> bool {
+    program
+        .callables()
+        .values()
+        .any(|callable| mentions_generic_option_callable(program, callable))
+}
+
+fn mentions_generic_option_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if callable.signature.generic_parameters.len() != 1 {
+        return false;
+    }
+    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(
+            ty,
+            ResolvedType::GenericParameter(parameter)
+                if parameter == &callable.signature.generic_parameters[0]
+        )
+        .then_some(id.clone())
+    }) else {
+        return false;
+    };
+    callable.signature.parameters.iter().any(|parameter| {
+        matches!(
+            program.resolved_types().get(&parameter.ty),
+            Some(ResolvedType::Option(inner)) if inner == &generic_ty
+        )
+    })
+}
+
+fn is_generic_option_predicate_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !mentions_generic_option_callable(program, callable)
+        || callable.signature.parameters.len() != 1
+        || callable.signature.generic_parameters.len() != 1
+        || !matches!(
+            program.resolved_types().get(&callable.signature.result),
+            Some(ResolvedType::Primitive(PrimitiveType::Bool))
+        )
+        || !callable.body.root.statements.is_empty()
+    {
+        return false;
+    }
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name)
+            if matches!(
+                name.as_str(),
+                "builtin.method.option.is_some" | "builtin.method.option.is_none"
+            )
+    ) && call.arguments.len() == 1
+}
 
 /// Checker-owned admission state for the already implemented scalar
 /// collection production island.
@@ -1554,8 +1658,16 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     .is_some_and(|callable| {
                         is_scalar_generic_record_projection_callable(program, callable)
                     });
-                (!generic_record_callable && !function.generics.is_empty())
-                    || (!generic_record_callable && !function.generic_binders.is_empty())
+                let generic_variant_callable = program
+                    .callables()
+                    .get(&function.node_id)
+                    .is_some_and(|callable| {
+                        is_generic_option_predicate_callable(program, callable)
+                    });
+                ((!generic_record_callable && !generic_variant_callable)
+                    && !function.generics.is_empty())
+                    || ((!generic_record_callable && !generic_variant_callable)
+                        && !function.generic_binders.is_empty())
                     || !function.effects.is_empty()
                     || function.is_async
                     || function.is_comptime
@@ -1567,6 +1679,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
             .any(|callable| {
                 (!is_scalar_generic_record_projection_callable(program, callable)
+                    && !is_generic_option_predicate_callable(program, callable)
                     && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()
@@ -1798,6 +1911,18 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
     })
 }
 
+/// Return whether a canonical graph contains a materialized generic Option
+/// predicate instance. The instance contract is the executable receipt; no
+/// source-level generic name or backend representation participates here.
+pub fn contains_generic_variant_predicate_candidate(program: &MirProgram) -> bool {
+    program.instances().values().any(|instance| {
+        matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarVariantPredicate { .. }
+        )
+    })
+}
+
 /// Return whether the canonical executable graph contains the S8 silent-local
 /// Flow transition operation.
 ///
@@ -1896,7 +2021,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
-                | MirGenericInstanceContract::OwnedRecordProjection { .. } => {}
+                | MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::ScalarVariantPredicate { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit
@@ -1912,6 +2038,20 @@ impl<'a> ScalarCollectionValidator<'a> {
             {
                 self.error(format!(
                     "instance '{}' Set facade has no Set value in its canonical body",
+                    instance.id
+                ));
+            }
+            if matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantPredicate { .. }
+            ) && !function.values.values().any(|value| {
+                self.program
+                    .type_catalog()
+                    .variant_layout(&value.ty)
+                    .is_some()
+            }) {
+                self.error(format!(
+                    "instance '{}' Option predicate has no canonical variant value in its body",
                     instance.id
                 ));
             }

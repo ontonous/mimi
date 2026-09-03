@@ -285,11 +285,12 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 4] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 5] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+        crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
     ];
     for profile in PROFILES {
         if let Some(results) = verify_closed_mir_profile(program, profile, source_hash.clone())? {
@@ -332,6 +333,7 @@ fn verify_closed_mir_profile(
                 },
             )?;
         }
+        crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate => {}
     }
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(

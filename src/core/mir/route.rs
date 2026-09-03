@@ -17,12 +17,13 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::CheckedProgram;
 
 use super::{
-    classify_flat_copy_record_admission, classify_option_string_variant_admission,
-    classify_scalar_collection_admission, contains_flat_copy_record_candidate,
+    classify_flat_copy_record_admission, classify_generic_variant_predicate_admission,
+    classify_option_string_variant_admission, classify_scalar_collection_admission,
+    contains_flat_copy_record_candidate, contains_generic_variant_predicate_candidate,
     contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
     is_exact_s8_flow_transition, is_s8_flow_transition_candidate, FlatCopyRecordAdmission,
-    OptionStringVariantAdmission, ScalarCollectionAdmission,
+    GenericVariantPredicateAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub enum CanonicalMirRouteProfile {
     FlatCopyRecord,
     S8FlowTransition,
     NonCopyOptionStringVariant,
+    GenericOptionPredicate,
 }
 
 impl CanonicalMirRouteProfile {
@@ -58,6 +60,7 @@ impl CanonicalMirRouteProfile {
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
+            Self::GenericOptionPredicate => super::GENERIC_VARIANT_PREDICATE_ISLAND,
         }
     }
 
@@ -72,6 +75,7 @@ impl CanonicalMirRouteProfile {
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
             Self::NonCopyOptionStringVariant => admission.option_string_complete(),
+            Self::GenericOptionPredicate => admission.generic_variant_complete(),
         }
     }
 
@@ -83,6 +87,7 @@ impl CanonicalMirRouteProfile {
             Self::FlatCopyRecord => route.materialized_record_candidate,
             Self::S8FlowTransition => route.materialized_flow_candidate,
             Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
+            Self::GenericOptionPredicate => route.materialized_generic_variant_candidate,
         }
     }
 }
@@ -155,6 +160,7 @@ pub struct CanonicalMirRouteAdmission {
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
     pub option_string: OptionStringVariantAdmission,
+    pub generic_variant: GenericVariantPredicateAdmission,
 }
 
 impl CanonicalMirRouteAdmission {
@@ -165,6 +171,10 @@ impl CanonicalMirRouteAdmission {
             || !matches!(
                 self.option_string,
                 OptionStringVariantAdmission::OutsideProfile
+            )
+            || !matches!(
+                self.generic_variant,
+                GenericVariantPredicateAdmission::OutsideProfile
             )
     }
 
@@ -186,6 +196,13 @@ impl CanonicalMirRouteAdmission {
             OptionStringVariantAdmission::CompleteCoverage
         )
     }
+
+    pub const fn generic_variant_complete(self) -> bool {
+        matches!(
+            self.generic_variant,
+            GenericVariantPredicateAdmission::CompleteCoverage
+        )
+    }
 }
 
 /// One immutable canonical graph plus the receipts needed by route owners.
@@ -200,6 +217,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_record_candidate: bool,
     pub materialized_flow_candidate: bool,
     pub materialized_option_string_candidate: bool,
+    pub materialized_generic_variant_candidate: bool,
 }
 
 /// Classify route eligibility once from checker-owned typed facts.
@@ -211,6 +229,7 @@ pub fn classify_canonical_mir_route_admission(
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
         option_string: classify_option_string_variant_admission(program),
+        generic_variant: classify_generic_variant_predicate_admission(program),
     }
 }
 
@@ -259,6 +278,8 @@ pub fn materialize_canonical_mir_route(
     let materialized_record_candidate = contains_flat_copy_record_candidate(&canonical);
     let materialized_flow_candidate = contains_s8_flow_transition_candidate(&canonical);
     let materialized_option_string_candidate = contains_option_string_variant_candidate(&canonical);
+    let materialized_generic_variant_candidate =
+        contains_generic_variant_predicate_candidate(&canonical);
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -292,6 +313,15 @@ pub fn materialize_canonical_mir_route(
                 .into(),
         });
     }
+    if admission.generic_variant_complete() && !materialized_generic_variant_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::GenericOptionPredicate,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete generic Option predicate admission did not materialize a VariantPredicate instance"
+                    .into(),
+        });
+    }
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
@@ -300,6 +330,7 @@ pub fn materialize_canonical_mir_route(
         materialized_record_candidate,
         materialized_flow_candidate,
         materialized_option_string_candidate,
+        materialized_generic_variant_candidate,
     })
 }
 
@@ -329,6 +360,12 @@ fn match_complete_or_compatibility(
     } else if admission.option_string_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+            stage,
+            message,
+        }
+    } else if admission.generic_variant_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::GenericOptionPredicate,
             stage,
             message,
         }
@@ -364,6 +401,7 @@ mod tests {
         assert!(!route.materialized_record_candidate);
         assert!(!route.materialized_flow_candidate);
         assert!(!route.materialized_option_string_candidate);
+        assert!(!route.materialized_generic_variant_candidate);
     }
 
     #[test]
@@ -406,6 +444,7 @@ mod tests {
         assert!(!route.materialized_collection_candidate);
         assert!(!route.materialized_record_candidate);
         assert!(!route.materialized_option_string_candidate);
+        assert!(!route.materialized_generic_variant_candidate);
     }
 
     #[test]
@@ -415,6 +454,7 @@ mod tests {
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,
             option_string: OptionStringVariantAdmission::OutsideProfile,
+            generic_variant: GenericVariantPredicateAdmission::OutsideProfile,
         };
         let error = match_complete_or_compatibility(
             admission,
@@ -445,7 +485,27 @@ mod tests {
         let route = materialize_canonical_mir_route(&program, None)
             .expect("complete Option<string> route must materialize");
         assert!(route.materialized_option_string_candidate);
+        assert!(!route.materialized_generic_variant_candidate);
         assert!(crate::core::mir::validate_option_string_variant_island(&route.program).is_ok());
+    }
+
+    #[test]
+    fn generic_option_predicate_materialization_carries_one_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_predicate.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.generic_variant,
+            GenericVariantPredicateAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete generic Option predicate route must materialize");
+        assert!(route.materialized_generic_variant_candidate);
+        assert!(route.program.instances().values().any(|instance| matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate { .. }
+        )));
     }
 
     #[test]
@@ -461,6 +521,7 @@ mod tests {
             CanonicalMirRouteProfile::FlatCopyRecord,
             CanonicalMirRouteProfile::S8FlowTransition,
             CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+            CanonicalMirRouteProfile::GenericOptionPredicate,
         ];
         for profile in profiles {
             assert_eq!(

@@ -177,6 +177,20 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarVariantPredicate { contract } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_variant_predicate_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' Option predicate contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -1076,7 +1090,8 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
-                | MirGenericInstanceContract::OwnedRecordProjection { .. } => {}
+                | MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::ScalarVariantPredicate { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

@@ -7,6 +7,89 @@ fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
 }
 
 #[test]
+fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option predicate must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantPredicate {
+                    contract: crate::core::mir::types::MirVariantPredicateContract {
+                        predicate: crate::core::mir::MirVariantPredicate::IsSome,
+                        ..
+                    }
+                }
+            )
+        })
+        .expect("generic Option predicate instance");
+    let MirGenericInstanceContract::ScalarVariantPredicate { contract } = &instance.contract else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.variant_name, "Some");
+    assert_eq!(contract.alternate_variant_name, "None");
+    assert_eq!(contract.discriminant, 1);
+
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized generic predicate target");
+    let receipts = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantPredicate {
+                contract: Some(receipt),
+                predicate: crate::core::mir::MirVariantPredicate::IsSome,
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0], contract);
+    let Some(option_desc) = program.type_catalog().get(&receipts[0].variant_ty) else {
+        panic!("specialized Option TypeDesc is absent");
+    };
+    let crate::core::mir::types::MirLayout::Option { inner, .. } = &option_desc.layout else {
+        panic!("generic predicate receipt must point at an Option TypeDesc");
+    };
+    assert_eq!(inner, &instance.arguments[0]);
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option predicate execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn rejects_generic_option_predicate_for_non_copy_payload_before_legacy() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_predicate_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("non-Copy generic Option predicate must fail closed");
+    let message = error.to_string();
+    assert!(
+        message.contains("MIR lowering failed"),
+        "unexpected rejection: {message}"
+    );
+}
+
+#[test]
 fn materializes_generic_scalar_list_len_as_a_canonical_facade() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

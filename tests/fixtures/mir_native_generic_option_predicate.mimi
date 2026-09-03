@@ -1,0 +1,14 @@
+func has_value<T>(value: Option<T>) -> bool {
+    value.is_some()
+}
+
+func has_no_value<T>(value: Option<T>) -> bool {
+    value.is_none()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Option<i32> = Some(41)
+    let none: Option<i32> = None
+    if has_value(value) && has_no_value(none) { 41 } else { 0 }
+}
