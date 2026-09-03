@@ -1458,6 +1458,34 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_direct_owned_string_calls() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_verifier_owned_string_call_return.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference direct owned String call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_owned_string_calls");
+        generator
+            .compile_mir_native(&program)
+            .expect("direct owned String calls must use canonical ABI declarations");
+        generator
+            .module
+            .verify()
+            .expect("native direct owned String call module verifies");
+        for function in ["inner", "relay", "echo", "forward"] {
+            assert!(
+                generator.module.get_function(function).is_some(),
+                "{function}"
+            );
+        }
+        assert!(generator.module.get_function("mimi_string_free").is_some());
+    }
+
+    #[test]
     fn native_emitter_materializes_recursive_owned_tuple_clone_move_and_drop() {
         let program = canonical_program(
             "func make_nested() -> ((string, i32), bool) { ((\"inner\", 41), true) }\nfunc consume_nested(value: ((string, i32), bool)) -> i32 { drop(value); 42 }\nfunc main() -> i32 { let value = make_nested(); let cloned = value; drop(cloned); consume_nested(value) }",

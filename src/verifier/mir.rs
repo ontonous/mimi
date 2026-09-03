@@ -2119,6 +2119,24 @@ fn eval_materialized_call(
         .values()
         .find(|instance| instance.function == *target_owner)
     else {
+        let target = program.functions().get(target_owner).ok_or_else(|| {
+            format!(
+                "MIR verifier direct call target '{}' is absent from canonical MIR",
+                target_owner.0
+            )
+        })?;
+        if catalog.validate_owned_string(&target.result).is_ok() {
+            return eval_direct_owned_string_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+            );
+        }
         return eval_direct_variant_call(
             function,
             program,
@@ -2166,6 +2184,136 @@ fn eval_materialized_call(
             )
         }
     }
+}
+
+/// Symbolically execute a concrete call whose callee returns the canonical
+/// owned String.  The callee body is already in Canonical MIR; this helper
+/// validates its one-block String return ledger, transfers non-Copy arguments
+/// out of the caller state, and reuses the same MIR explorer as the caller.
+/// No source body, LLVM ABI, or legacy verifier path participates here.
+fn eval_direct_owned_string_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    if !type_arguments.is_empty() {
+        return Err(
+            "MIR verifier direct owned String call cannot carry generic type arguments".into(),
+        );
+    }
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier direct owned String call target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    catalog.validate_owned_string(&target.result)?;
+    crate::core::mir::validate_owned_string_return_shape(target, catalog).map_err(|message| {
+        format!(
+            "MIR verifier direct owned String call target '{}' rejected: {message}",
+            target_owner.0
+        )
+    })?;
+    if arguments.len() != target.parameters.len() {
+        return Err("MIR verifier direct owned String call arity disagrees with target".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier direct owned String call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(
+            "MIR verifier direct owned String call result disagrees with target TypeDesc".into(),
+        );
+    }
+
+    let caller_constraints = state.constraints.clone();
+    let mut target_state = SymbolicState {
+        values: BTreeMap::new(),
+        constraints: caller_constraints.clone(),
+        traps: Vec::new(),
+    };
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let argument_info = function.values.get(argument).ok_or_else(|| {
+            format!(
+                "MIR verifier direct owned String call argument '{}' is absent",
+                argument
+            )
+        })?;
+        let parameter_info = target.values.get(parameter).ok_or_else(|| {
+            format!(
+                "MIR verifier direct owned String call parameter '{}' is absent",
+                parameter
+            )
+        })?;
+        if argument_info.ty != parameter_info.ty {
+            return Err(
+                "MIR verifier direct owned String call argument disagrees with target TypeDesc"
+                    .into(),
+            );
+        }
+        let is_non_copy = catalog
+            .get(&argument_info.ty)
+            .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy);
+        let value = if is_non_copy {
+            state.values.remove(argument).ok_or_else(|| {
+                format!(
+                    "MIR verifier direct owned String call argument '{}' is not defined",
+                    argument
+                )
+            })?
+        } else {
+            state.values.get(argument).cloned().ok_or_else(|| {
+                format!(
+                    "MIR verifier direct owned String call argument '{}' is not defined",
+                    argument
+                )
+            })?
+        };
+        if is_non_copy {
+            catalog.validate_glue(&argument_info.ty, MirGlueOperation::MoveOut)?;
+        }
+        if !symbolic_matches_type(catalog, &parameter_info.ty, &value) {
+            return Err(
+                "MIR verifier direct owned String call argument has the wrong symbolic shape"
+                    .into(),
+            );
+        }
+        target_state.values.insert(parameter.clone(), value);
+    }
+
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if !traps.is_empty() {
+        return Err("MIR verifier direct owned String call has a trapping execution path".into());
+    }
+    let [returned] = returns.as_slice() else {
+        return Err(
+            "MIR verifier direct owned String call must have exactly one return path".into(),
+        );
+    };
+    state.constraints = returned.constraints.clone();
+    ensure_result_shape(function, catalog, result, &returned.value)?;
+    state.values.insert(result.clone(), returned.value.clone());
+    Ok(())
 }
 
 /// Symbolically execute the narrow direct-call ABI island for a flat Copy
@@ -3403,6 +3551,102 @@ mod tests {
         assert!(result
             .message
             .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn verifier_proves_direct_owned_string_calls_from_canonical_mir() {
+        let source =
+            include_str!("../../tests/fixtures/mir_verifier_owned_string_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("direct owned String calls must lower to canonical MIR");
+        let results = verify_program(&program, "owned-string-call-source-hash".into())
+            .expect("direct owned String calls must use the MIR verifier");
+        for owner in [
+            "function:echo",
+            "function:forward",
+            "function:inner",
+            "function:relay",
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner)
+                .expect("contract verification result");
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{owner}"
+            );
+            assert!(result
+                .message
+                .contains("canonical MIR ensures contract proven"));
+        }
+    }
+
+    #[test]
+    fn verifier_preserves_copy_arguments_across_owned_string_call() {
+        let source = r#"
+            func render(n: i32) -> string { "rendered" }
+            func observe(n: i32) -> string {
+                ensures: true
+                let text = render(n)
+                println(n)
+                drop(text)
+                "done"
+            }
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results = verify_program(&program, "owned-string-call-copy-source-hash".into())
+            .expect("verifier returns a canonical result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:observe")
+            .expect("observe verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(
+                &crate::core::NodeId("function:observe".into()),
+                &[MirRuntimeValue::Int(7)],
+            )
+            .expect("reference copy argument preservation");
+        assert_eq!(value, MirRuntimeValue::String("done".into()));
+    }
+
+    #[test]
+    fn verifier_rejects_nested_owned_string_call_target_without_call_contract() {
+        let source = r#"
+            func inner() -> string { "inner" }
+            func nested() -> string { inner() }
+            func outer() -> string {
+                ensures: true
+                nested()
+            }
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let results = verify_program(&program, "owned-string-call-rejected-source-hash".into())
+            .expect("verifier returns a stable trusted-subset result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:outer")
+            .expect("outer verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result.message.contains(
+            "direct owned String call target 'function:nested' rejected: owned String return contract only admits String constants and ownership glue"
+        ));
+        assert!(!result.message.contains("flow_ast"));
     }
 
     #[test]

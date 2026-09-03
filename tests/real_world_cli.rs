@@ -679,6 +679,74 @@ fn canonical_mir_verifier_rejects_owned_string_return_branch_before_backend() {
 }
 
 #[test]
+fn canonical_mir_verifier_proves_direct_owned_string_calls_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_owned_string_call_return.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn direct owned String call verifier");
+    assert!(
+        output.status.success(),
+        "direct owned String calls must be proven by canonical MIR verifier:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("4/4 verified"), "{stdout}");
+    assert!(
+        stdout
+            .matches("canonical MIR ensures contract proven")
+            .count()
+            >= 4
+    );
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
+fn canonical_mir_verifier_reports_nested_owned_string_call_boundary() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_owned_string_call_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected nested owned String call verifier");
+    assert!(
+        output.status.success(),
+        "trusted-subset rejection is a verifier result, not a process failure:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.contains(
+            "direct owned String call target 'function:nested' rejected: owned String return contract only admits String constants and ownership glue"
+        ),
+        "{output}"
+    );
+    assert!(
+        !output.contains("flow_ast"),
+        "legacy verifier fallback leaked: {output}"
+    );
+}
+
+#[test]
 fn canonical_mir_native_recursive_tuple_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

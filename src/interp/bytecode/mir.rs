@@ -5161,6 +5161,31 @@ mod tests {
     }
 
     #[test]
+    fn executes_direct_owned_string_calls_through_canonical_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_verifier_owned_string_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("direct owned String calls must lower to canonical MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference direct owned String call execution");
+        let bytecode = compile_mir_program(&mir).expect("direct owned String call bytecode");
+        assert!(bytecode.ast.is_none());
+        assert!(bytecode.functions.iter().any(|function| function
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallMove { .. }))));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("direct owned String call bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_owned_string_clone_and_drop_glue_through_canonical_mir() {
         let source = "func main() -> string { let value = \"owned\"; let copy = value; drop(copy); \"done\" }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

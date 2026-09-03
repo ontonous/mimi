@@ -915,6 +915,47 @@ fn owned_string_return_lowers_to_move_and_reference_preserves_transfer() {
 }
 
 #[test]
+fn direct_owned_string_calls_remain_canonical_and_reference_transfers_arguments() {
+    let source = include_str!("../../../tests/fixtures/mir_verifier_owned_string_call_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("direct owned String calls must lower to canonical MIR");
+    let forward = program
+        .functions()
+        .get(&crate::core::NodeId("function:forward".into()))
+        .expect("forward MIR function");
+    assert!(forward
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .any(|instruction| matches!(
+            instruction.kind,
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(ref owner),
+                result: Some(_),
+                ..
+            } if owner.0 == "function:echo"
+        )));
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &crate::core::NodeId("function:forward".into()),
+            &[crate::core::mir::reference::MirRuntimeValue::String(
+                "oracle".into(),
+            )],
+        )
+        .expect("reference direct owned String call execution");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::String("oracle".into())
+    );
+}
+
+#[test]
 fn non_copy_record_projection_with_non_copy_sibling_fails_closed() {
     let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

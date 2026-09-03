@@ -1,0 +1,27 @@
+func inner() -> string {
+    ensures: true
+    "inner"
+}
+
+func relay() -> string {
+    ensures: true
+    inner()
+}
+
+func echo(text: string) -> string {
+    ensures: true
+    text
+}
+
+func forward(text: string) -> string {
+    ensures: true
+    echo(text)
+}
+
+func main() -> i32 {
+    let result = relay()
+    drop(result)
+    let forwarded = forward("forwarded")
+    drop(forwarded)
+    42
+}
