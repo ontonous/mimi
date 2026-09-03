@@ -1446,6 +1446,39 @@ fn surface_flat_copy_user_enum_constructor_materializes_construct_variant() {
 }
 
 #[test]
+fn surface_flat_copy_user_enum_match_materializes_switch() {
+    let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("flat Copy user-enum match must materialize to MIR");
+    let function = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:read_signal".into()))
+        .expect("read_signal MIR");
+    let switches = function
+        .blocks
+        .values()
+        .filter_map(|block| match &block.terminator {
+            crate::core::mir::MirTerminator::Switch { scrutinee, arms } => Some((scrutinee, arms)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(switches.len(), 1);
+    let (scrutinee, arms) = switches[0];
+    assert_eq!(arms.len(), 2);
+    let scrutinee_ty = &function.values.get(scrutinee).expect("switch scrutinee").ty;
+    assert!(canonical
+        .type_catalog()
+        .validate_flat_copy_variant(scrutinee_ty)
+        .is_ok());
+    assert!(arms.iter().any(|arm| !arm.bindings.is_empty()));
+}
+
+#[test]
 fn surface_non_flat_user_enum_constructor_stays_outside_canonical_mir() {
     let source = include_str!("../../../tests/real_world/custom_enum_string_payload.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -1457,6 +1490,20 @@ fn surface_non_flat_user_enum_constructor_stays_outside_canonical_mir() {
         .expect_err("non-flat user-enum constructor must remain outside this MIR slice");
     let text = format!("{error:?}");
     assert!(text.contains("Constructor") && text.contains("not a materialized MIR function"));
+}
+
+#[test]
+fn surface_mixed_copy_user_enum_match_stays_outside_canonical_mir() {
+    let source = "type Mixed { Number(i32) | Wide(i64) | Empty }\nfunc inspect(value: Mixed) -> i32 { match value { Number(n) => n, Wide(_) => 0, Empty => 0 } }\nfunc main() -> i32 { 0 }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("mixed Copy user-enum match must fail before consumers");
+    let text = format!("{error:?}");
+    assert!(text.contains("flat Copy variant contract"), "{text}");
 }
 
 #[test]

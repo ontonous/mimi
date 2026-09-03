@@ -4776,6 +4776,19 @@ impl MirTypeCatalog {
         scrutinee_ty: &ResolvedTypeId,
         arms: &[crate::core::mir::MirSwitchArm],
     ) -> Result<(), String> {
+        if let Some(descriptor) = self.get(scrutinee_ty) {
+            if descriptor.kind == MirTypeKind::Nominal
+                && descriptor.ownership == MirOwnership::Copy
+                && matches!(descriptor.layout, MirLayout::Enum { .. })
+            {
+                // A surface user-enum match is a read-only Switch.  Keep its
+                // admission exactly aligned with construction and native ABI:
+                // an unsupported enum must fail at the canonical boundary
+                // rather than reach a backend with a partial tag/payload
+                // contract.
+                self.validate_flat_copy_variant(scrutinee_ty)?;
+            }
+        }
         self.validate_variant_switch_cases(scrutinee_ty, arms, false)
     }
 

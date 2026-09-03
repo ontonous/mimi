@@ -3403,6 +3403,7 @@ mod tests {
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
+    use crate::core::mir::types::MirLayout;
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
@@ -5552,6 +5553,58 @@ mod tests {
             Value::CanonicalVariant { tag, payload, .. }
                 if tag == "Number" && payload == vec![Value::Int(7)]
         ));
+    }
+
+    #[test]
+    fn surface_flat_copy_user_enum_match_matches_reference_and_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let signal_ty = mir
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                matches!(
+                    descriptor.layout,
+                    MirLayout::Enum { ref nominal, .. } if nominal.as_str() == "type:Signal"
+                )
+                .then_some(id.clone())
+            })
+            .expect("Signal TypeDesc");
+        let (nominal, variants) = mir
+            .type_catalog()
+            .variant_layout(&signal_ty)
+            .expect("Signal variant layout");
+        let number = variants
+            .iter()
+            .find(|variant| variant.name == "Number")
+            .expect("Number variant");
+        let owner = crate::core::NodeId("function:read_signal".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(
+                &owner,
+                &[MirRuntimeValue::Variant {
+                    nominal: crate::core::ir::NominalTypeId::new(nominal).expect("nominal"),
+                    variant: number.id.clone(),
+                    payload: vec![MirRuntimeValue::Int(7)],
+                }],
+            )
+            .expect("reference surface user-enum match");
+        let bytecode = BytecodeVM::new(compile_mir_program(&mir).expect("MIR bytecode"))
+            .call_named(
+                owner.0.as_str(),
+                vec![Value::CanonicalVariant {
+                    nominal: crate::core::ir::NominalTypeId::new(nominal).expect("nominal"),
+                    variant: number.id.clone(),
+                    tag: "Number".into(),
+                    payload: vec![Value::Int(7)],
+                }],
+            )
+            .expect("bytecode surface user-enum match");
+        assert_eq!(reference, MirRuntimeValue::Int(7));
+        assert!(matches!(bytecode, Value::Int(7)));
     }
 
     #[test]
