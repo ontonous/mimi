@@ -236,11 +236,15 @@ impl<'a> NativeMirValidator<'a> {
             }
         } else if is_variant {
             if is_user_enum {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    "checker-materialized user enum has no native tagged-union ABI contract",
-                ));
-                false
+                if desc.ownership == MirOwnership::Copy {
+                    self.validate_flat_copy_variant(ty, subject, desc)
+                } else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "checker-materialized user enum has no native tagged-union ABI contract",
+                    ));
+                    false
+                }
             } else if desc.ownership == MirOwnership::Copy {
                 self.validate_flat_copy_variant(ty, subject, desc)
             } else {
@@ -278,7 +282,11 @@ impl<'a> NativeMirValidator<'a> {
                 "native canonical non-Copy record contract"
             } else if is_variant {
                 if is_user_enum {
-                    "checker-materialized user-enum native tagged-union contract"
+                    if desc.ownership == MirOwnership::Copy {
+                        "checker-materialized flat Copy user-enum contract"
+                    } else {
+                        "checker-materialized user-enum native tagged-union contract"
+                    }
                 } else if desc.ownership == MirOwnership::Copy {
                     "flat Copy variant contract"
                 } else if matches!(desc.layout, MirLayout::Result { .. }) {

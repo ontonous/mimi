@@ -1367,14 +1367,15 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate the backend-independent flat Copy Option/Result layout.
+    /// Validate the backend-independent flat Copy tagged-variant layout.
     ///
     /// Every variant uses the same one-slot scalar payload ABI; a zero-field
     /// variant is allowed as the tag-only case.  The discriminant, variant
     /// identity, payload field identity and no-op ownership glue are all
     /// TypeDesc facts.  Native code may choose the physical `{i8, payload}`
     /// struct only after this contract succeeds; reference, bytecode and
-    /// verifier consumers use the same semantic table.
+    /// verifier consumers use the same semantic table.  Built-in Option/
+    /// Result and checker-materialized nominal enums share this contract.
     pub fn validate_flat_copy_variant(
         &self,
         ty: &ResolvedTypeId,
@@ -1383,7 +1384,9 @@ impl MirTypeCatalog {
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
         let variants = match &descriptor.layout {
-            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            MirLayout::Option { variants, .. }
+            | MirLayout::Result { variants, .. }
+            | MirLayout::Enum { variants, .. } => variants,
             layout => {
                 return Err(format!(
                     "type '{}' layout {layout:?} is outside the flat Copy variant contract",
@@ -1391,7 +1394,10 @@ impl MirTypeCatalog {
                 ));
             }
         };
-        if descriptor.kind != MirTypeKind::Option && descriptor.kind != MirTypeKind::Result {
+        let is_builtin =
+            descriptor.kind == MirTypeKind::Option || descriptor.kind == MirTypeKind::Result;
+        let is_user_enum = matches!(descriptor.layout, MirLayout::Enum { .. });
+        if !is_builtin && !(is_user_enum && descriptor.kind == MirTypeKind::Nominal) {
             return Err(format!(
                 "variant TypeDesc '{}' kind {:?} is outside the flat Copy variant contract",
                 ty.as_str(),
@@ -1423,20 +1429,13 @@ impl MirTypeCatalog {
             ));
         }
 
-        let expected_nominal = match descriptor.kind {
-            MirTypeKind::Option => "builtin:type:Option",
-            MirTypeKind::Result => "builtin:type:Result",
-            _ => unreachable!("variant kind checked above"),
-        };
         let (actual_nominal, _) = self
             .variant_layout(ty)
-            .expect("Option/Result layout checked above");
-        if actual_nominal != expected_nominal {
+            .expect("tagged-variant layout checked above");
+        if actual_nominal.is_empty() {
             return Err(format!(
-                "variant TypeDesc '{}' nominal '{}' disagrees with '{}'",
-                ty.as_str(),
-                actual_nominal,
-                expected_nominal
+                "variant TypeDesc '{}' has an empty canonical nominal",
+                ty.as_str()
             ));
         }
 
@@ -1498,7 +1497,7 @@ impl MirTypeCatalog {
             }
         }
         payload_type.ok_or_else(|| {
-            "variant has no scalar payload; unit/zero-payload variants are outside the flat Copy variant contract".into()
+            "variant has no scalar payload; an all-zero-payload enum is outside the flat Copy variant contract".into()
         })
     }
 
@@ -1515,7 +1514,9 @@ impl MirTypeCatalog {
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
         let variants = match &descriptor.layout {
-            MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+            MirLayout::Option { variants, .. }
+            | MirLayout::Result { variants, .. }
+            | MirLayout::Enum { variants, .. } => variants,
             layout => {
                 return Err(format!(
                     "type '{}' layout {layout:?} is outside the flat Copy variant contract",

@@ -27,8 +27,9 @@ use crate::core::mir::types::{
     MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirListOperation, MirProjection,
-    MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId, MirVariantPredicate,
+    MirAggregateKind, MirBlock, MirBlockId, MirFunction, MirInstructionKind, MirListOperation,
+    MirProjection, MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
+    MirVariantPredicate,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -274,7 +275,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 
     fn emit(mut self) -> Result<(), NativeMirError> {
         self.create_blocks_and_parameters()?;
-        let blocks = self.function.blocks.values().cloned().collect::<Vec<_>>();
+        let blocks = self.ordered_blocks();
         for block in &blocks {
             let llvm_block = *self
                 .blocks
@@ -290,8 +291,28 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
+    fn ordered_blocks(&self) -> Vec<MirBlock> {
+        // LLVM treats the first basic block created for a function as its
+        // entry block. MIR blocks live in a BTreeMap for stable IDs, so that
+        // lexical order is not the CFG entry order. Keep native and bytecode
+        // consumers on the same declared-entry-first layout contract.
+        let mut blocks = Vec::with_capacity(self.function.blocks.len());
+        if let Some(entry) = self.function.blocks.get(&self.function.entry) {
+            blocks.push(entry.clone());
+        }
+        blocks.extend(
+            self.function
+                .blocks
+                .values()
+                .filter(|block| block.id != self.function.entry)
+                .cloned(),
+        );
+        blocks
+    }
+
     fn create_blocks_and_parameters(&mut self) -> Result<(), NativeMirError> {
-        for block in self.function.blocks.values() {
+        let blocks = self.ordered_blocks();
+        for block in &blocks {
             let llvm_block = self
                 .generator
                 .context
@@ -307,7 +328,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 })?;
             self.values.insert(parameter.clone(), value);
         }
-        for block in self.function.blocks.values() {
+        for block in &blocks {
             let llvm_block = *self.blocks.get(&block.id).expect("created above");
             self.generator.builder.position_at_end(llvm_block);
             for parameter in &block.parameters {
@@ -2082,6 +2103,91 @@ mod tests {
         assert!(
             generator.module.get_function("take").is_none(),
             "L2 requires an unsupported user enum to be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
+    fn native_emitter_consumes_flat_copy_user_enum_abi() {
+        let fixture = crate::core::mir::test_support::direct_flat_copy_enum_switch_fixture();
+        let descriptor = fixture
+            .program
+            .type_catalog()
+            .get(&fixture.source_ty)
+            .expect("Signal TypeDesc");
+        assert_eq!(
+            descriptor.abi,
+            crate::core::mir::types::MirAbiClass::Aggregate
+        );
+        assert_eq!(
+            descriptor.ownership,
+            crate::core::mir::types::MirOwnership::Copy
+        );
+        let (variant_abi, payload_ty) =
+            super::native_variant_abi(fixture.program.type_catalog(), &fixture.source_ty, false)
+                .expect("flat Copy user-enum ABI");
+        assert_eq!(variant_abi.tag_field, 0);
+        assert_eq!(variant_abi.payload_field, 1);
+        assert_eq!(variant_abi.payload_types, vec![payload_ty.clone()]);
+        let payload_slot = variant_abi
+            .payload_slot(&fixture.number)
+            .expect("Number payload ABI slot");
+        assert_eq!(payload_slot.physical_field, 1);
+        assert_eq!(payload_slot.ty, payload_ty);
+
+        let reference = MirReferenceInterpreter::new(&fixture.program)
+            .execute(
+                &fixture.function,
+                &[MirRuntimeValue::Variant {
+                    nominal: fixture.nominal.clone(),
+                    variant: fixture.number.clone(),
+                    payload: vec![MirRuntimeValue::Int(7)],
+                }],
+            )
+            .expect("reference flat Copy user enum switch");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&fixture.program).expect("flat Copy user enum bytecode"),
+        )
+        .call_named(
+            fixture.function.0.as_str(),
+            vec![Value::CanonicalVariant {
+                nominal: fixture.nominal.clone(),
+                variant: fixture.number.clone(),
+                tag: "Number".into(),
+                payload: vec![Value::Int(7)],
+            }],
+        )
+        .expect("bytecode flat Copy user enum switch");
+        assert_eq!(reference, MirRuntimeValue::Int(7));
+        assert!(matches!(bytecode, Value::Int(7)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_flat_copy_user_enum_test");
+        generator
+            .compile_mir_native(&fixture.program)
+            .expect("flat Copy user enum should have a native ABI contract");
+        generator
+            .module
+            .verify()
+            .expect("native flat Copy user enum module verifies");
+        assert!(generator.module.get_function("take_signal").is_some());
+    }
+
+    #[test]
+    fn native_validator_rejects_mixed_copy_user_enum_before_llvm() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_custom_enum_mixed_copy_rejected.mimi"
+        ));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_mixed_user_enum_test");
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("mixed Copy user enum must fail the single-slot ABI gate");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("mixed payload ABI is outside the flat Copy variant contract")));
+        assert!(
+            generator.module.get_function("inspect").is_none(),
+            "L2 requires mixed user-enum ABI rejection before LLVM declarations"
         );
     }
 

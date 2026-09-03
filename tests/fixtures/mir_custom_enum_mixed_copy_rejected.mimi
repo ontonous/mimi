@@ -1,0 +1,11 @@
+// S98 negative checker seed: different scalar payload types cannot share the
+// one physical payload slot of the flat Copy user-enum ABI.
+
+type MixedSignal { Number(i32) | Wide(i64) | Empty }
+
+func inspect(signal: MixedSignal) -> i32 {
+    ensures: true
+    0
+}
+
+func main() -> i32 { 0 }

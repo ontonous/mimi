@@ -1,0 +1,11 @@
+// Canonical MIR S98 checker seed: a Copy user enum whose payload variants
+// share one scalar slot in the native { i8 discriminant, scalar payload } ABI.
+
+type Signal { Number(i32) | Empty }
+
+func take_signal(signal: Signal) -> i32 {
+    ensures: true
+    0
+}
+
+func main() -> i32 { 0 }

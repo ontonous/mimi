@@ -200,13 +200,14 @@ pub(super) fn native_list_kind(
     }
 }
 
-/// Return the one native payload type shared by a bounded Copy built-in variant.
+/// Return the one native payload type shared by a bounded flat Copy variant.
 ///
 /// The physical representation is deliberately narrower than the general MIR
 /// variant contract: `{ i8 discriminant, scalar payload }`.  The payload slot
 /// is present even for a zero-field variant and is zero-filled by the emitter;
-/// that keeps the LLVM ABI stable while making Option/Result shapes with
-/// owned, nested, mixed, or unit payloads fail closed here.
+/// that keeps the LLVM ABI stable while making owned, nested, mixed, or
+/// all-zero-payload shapes fail closed here. Built-in Option/Result and
+/// checker-materialized user-enum layouts share this bounded contract.
 pub(super) fn native_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
@@ -319,7 +320,9 @@ pub(super) fn native_variant_abi(
         vec![native_copy_variant_payload_type(catalog, ty)?]
     };
     let variants = match &descriptor.layout {
-        MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+        MirLayout::Option { variants, .. }
+        | MirLayout::Result { variants, .. }
+        | MirLayout::Enum { variants, .. } => variants,
         layout => {
             return Err(NativeMirError::new(
                 ty.as_str(),
@@ -468,7 +471,7 @@ pub(super) fn native_basic_type<'ctx>(
                 }
                 Ok(context.struct_type(&field_types, false).into())
             }
-            MirLayout::Option { .. } | MirLayout::Result { .. } => {
+            MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. } => {
                 let (variant_abi, _) =
                     native_variant_abi(catalog, ty, desc.ownership != MirOwnership::Copy)?;
                 let mut fields = vec![context.i8_type().into()];

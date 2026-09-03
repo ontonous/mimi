@@ -580,3 +580,183 @@ pub(crate) fn direct_enum_switch_move_fixture() -> DirectEnumSwitchMoveFixture {
         keep: keep_desc.id.clone(),
     }
 }
+
+/// Canonical fixture for the narrow native flat-Copy user-enum ABI.  The
+/// checker supplies the enum TypeDesc; the Switch body is assembled directly
+/// as MIR so the test does not widen surface constructor lowering.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectFlatCopyEnumSwitchFixture {
+    pub(crate) program: MirProgram,
+    pub(crate) function: NodeId,
+    pub(crate) source_ty: ResolvedTypeId,
+    pub(crate) nominal: crate::core::ir::NominalTypeId,
+    pub(crate) number: NodeId,
+}
+
+pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitchFixture {
+    let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+    let tokens = Lexer::new(source).tokenize().expect("flat enum lex");
+    let file = Parser::new(tokens).parse_file().expect("flat enum parse");
+    let checked = crate::core::check_program(&file).expect("flat enum check");
+    let canonical = MirProgram::from_checked_program(&checked).expect("flat enum MIR");
+    let catalog = canonical.type_catalog().clone();
+    let result_ty = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)).then(|| id.clone())
+        })
+        .expect("i32 TypeDesc");
+    let (source_ty, nominal, variants) = catalog
+        .iter()
+        .find_map(|(id, descriptor)| match &descriptor.layout {
+            MirLayout::Enum { nominal, variants } if nominal.as_str().ends_with("Signal") => {
+                Some((id.clone(), nominal.clone(), variants.clone()))
+            }
+            _ => None,
+        })
+        .expect("Signal enum TypeDesc");
+    let number_desc = variants
+        .iter()
+        .find(|variant| variant.name == "Number")
+        .expect("Number variant TypeDesc");
+    let empty_desc = variants
+        .iter()
+        .find(|variant| variant.name == "Empty")
+        .expect("Empty variant TypeDesc");
+    let number_field = number_desc
+        .fields
+        .first()
+        .expect("Number payload TypeDesc")
+        .id
+        .clone();
+    let projection = catalog
+        .validated_variant_payload_projection_contract(
+            &source_ty,
+            &number_desc.id,
+            &number_field,
+            &result_ty,
+        )
+        .expect("flat enum payload projection receipt");
+    let contracts = canonical
+        .functions()
+        .get(&NodeId("function:take_signal".into()))
+        .expect("take_signal source function")
+        .contracts
+        .clone();
+
+    let input = MirValueId::new("v.input").expect("flat enum input value id");
+    let number = MirValueId::new("v.number").expect("flat enum number value id");
+    let empty_result = MirValueId::new("v.empty").expect("flat enum empty value id");
+    let entry = MirBlockId::new("bb.entry").expect("flat enum entry block id");
+    let number_block = MirBlockId::new("bb.number").expect("flat enum number block id");
+    let empty_block = MirBlockId::new("bb.empty").expect("flat enum empty block id");
+    let number_edge = crate::core::mir::MirEdgeId::new("e.number").expect("flat enum number edge");
+    let empty_edge = crate::core::mir::MirEdgeId::new("e.empty").expect("flat enum empty edge");
+    let mut functions = canonical.functions().clone();
+    functions.insert(
+        NodeId("function:take_signal".into()),
+        MirFunction {
+            owner: NodeId("function:take_signal".into()),
+            parameters: vec![input.clone()],
+            result: result_ty.clone(),
+            entry: entry.clone(),
+            values: BTreeMap::from([
+                (
+                    input.clone(),
+                    MirValue {
+                        id: input.clone(),
+                        ty: source_ty.clone(),
+                    },
+                ),
+                (
+                    number.clone(),
+                    MirValue {
+                        id: number.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+                (
+                    empty_result.clone(),
+                    MirValue {
+                        id: empty_result.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+            ]),
+            blocks: BTreeMap::from([
+                (
+                    entry.clone(),
+                    MirBlock {
+                        id: entry,
+                        parameters: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: MirTerminator::Switch {
+                            scrutinee: input,
+                            arms: vec![
+                                MirSwitchArm {
+                                    edge: number_edge,
+                                    target: number_block.clone(),
+                                    arguments: Vec::new(),
+                                    bindings: vec![MirSwitchBinding {
+                                        parameter: number.clone(),
+                                        projection: projection.clone(),
+                                    }],
+                                    case: MirSwitchCase::Variant(number_desc.id.clone()),
+                                },
+                                MirSwitchArm {
+                                    edge: empty_edge,
+                                    target: empty_block.clone(),
+                                    arguments: Vec::new(),
+                                    bindings: Vec::new(),
+                                    case: MirSwitchCase::Variant(empty_desc.id.clone()),
+                                },
+                            ],
+                        },
+                    },
+                ),
+                (
+                    number_block.clone(),
+                    MirBlock {
+                        id: number_block,
+                        parameters: vec![crate::core::mir::MirBlockParameter {
+                            value: number.clone(),
+                        }],
+                        instructions: Vec::new(),
+                        terminator: MirTerminator::Return {
+                            value: Some(number),
+                        },
+                    },
+                ),
+                (
+                    empty_block.clone(),
+                    MirBlock {
+                        id: empty_block,
+                        parameters: Vec::new(),
+                        instructions: vec![MirInstruction {
+                            id: MirInstructionId::new("i.empty-int")
+                                .expect("flat enum empty instruction id"),
+                            kind: MirInstructionKind::Const {
+                                result: empty_result.clone(),
+                                literal: crate::core::ir::ResolvedLiteral::Int(0),
+                            },
+                        }],
+                        terminator: MirTerminator::Return {
+                            value: Some(empty_result),
+                        },
+                    },
+                ),
+            ]),
+            contracts,
+            ownership: MirOwnershipSummary::default(),
+        },
+    );
+    let program = MirProgram::with_type_catalog(functions, catalog)
+        .expect("flat enum switch program validation");
+    DirectFlatCopyEnumSwitchFixture {
+        program,
+        function: NodeId("function:take_signal".into()),
+        source_ty,
+        nominal,
+        number: number_desc.id.clone(),
+    }
+}
