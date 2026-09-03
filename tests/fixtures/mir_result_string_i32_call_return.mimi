@@ -1,0 +1,29 @@
+func make_ok() -> Result<string, i32> {
+    Ok("owned-ok")
+}
+
+func make_err() -> Result<string, i32> {
+    Err(7)
+}
+
+func use_ok() -> i32 {
+    ensures: result == 41
+    let value = make_ok()
+    match value {
+        Ok(_) => 41,
+        Err(code) => code
+    }
+}
+
+func use_err() -> i32 {
+    ensures: result == 7
+    let value = make_err()
+    match value {
+        Ok(_) => 41,
+        Err(code) => code
+    }
+}
+
+func main() -> i32 {
+    use_ok() + use_err()
+}

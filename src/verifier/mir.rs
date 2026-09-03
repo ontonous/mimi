@@ -949,7 +949,7 @@ fn explore_variant_switch(
         nominal,
         tag,
         payload,
-        ..
+        active_variant,
     } = value
     else {
         return Err(
@@ -1000,12 +1000,30 @@ fn explore_variant_switch(
                             binding.projection.field.0
                         )
                     })?;
-                    let value = payload.get(&field.id).cloned().ok_or_else(|| {
-                        format!(
-                            "canonical MIR verifier switch payload field '{}' is absent",
-                            field.id.0
-                        )
-                    })?;
+                    // A direct move-owned call returns one known active variant. The
+                    // verifier still walks the exhaustive inactive arm to prove its
+                    // contract, so give only that unreachable binding a typed opaque /
+                    // zero placeholder; an active arm remains strict about payload
+                    // presence and type.
+                    let value = if let Some(active_variant) = active_variant.as_ref() {
+                        if active_variant != variant_id {
+                            symbolic_zero_for_type(catalog, &field.ty)?
+                        } else {
+                            payload.get(&field.id).cloned().ok_or_else(|| {
+                                format!(
+                                    "canonical MIR verifier switch payload field '{}' is absent",
+                                    field.id.0
+                                )
+                            })?
+                        }
+                    } else {
+                        payload.get(&field.id).cloned().ok_or_else(|| {
+                            format!(
+                                "canonical MIR verifier switch payload field '{}' is absent",
+                                field.id.0
+                            )
+                        })?
+                    };
                     if !symbolic_matches_type(catalog, &parameter.ty, &value) {
                         return Err(format!(
                             "canonical MIR verifier switch binding '{}' disagrees with payload TypeDesc",
@@ -2338,10 +2356,12 @@ fn eval_direct_owned_string_call(
 }
 
 /// Symbolically execute the narrow direct-call ABI island for a flat Copy
-/// Option/Result result. The callee is already concrete MIR, so the verifier
-/// maps symbolic arguments into its entry block and reuses `explore_block`;
-/// it does not inspect a surface body or rediscover a call ABI. Multiple
-/// return paths remain outside this first proof slice and fail closed.
+/// Option/Result or move-owned `Result<string, i32>` result. The callee is
+/// already concrete MIR, so the verifier maps symbolic arguments into its
+/// entry block and reuses `explore_block`; it does not inspect a surface body
+/// or rediscover a call ABI. Move-owned Result calls currently require one
+/// canonical return path, because ownership-bearing payload merge is a
+/// separate contract.
 fn eval_direct_variant_call(
     function: &MirFunction,
     program: &MirProgram,
@@ -2360,9 +2380,7 @@ fn eval_direct_variant_call(
         )
     })?;
     if !type_arguments.is_empty() {
-        return Err(
-            "MIR verifier direct flat-variant call cannot carry generic type arguments".into(),
-        );
+        return Err("MIR verifier direct variant call cannot carry generic type arguments".into());
     }
     let result = result
         .as_ref()
@@ -2390,8 +2408,23 @@ fn eval_direct_variant_call(
     if arguments.len() != parameter_types.len() {
         return Err("MIR verifier direct variant call arity disagrees with target".into());
     }
+    let flat_variant_result = catalog.validate_flat_copy_variant(&target.result).is_ok();
+    let move_owned_result = catalog
+        .validate_result_string_i32_variant(&target.result)
+        .is_ok();
+    if !flat_variant_result && !move_owned_result {
+        return Err(
+            "MIR verifier direct variant call result is outside the canonical call ABI contract"
+                .into(),
+        );
+    }
     let receipt = receipt.ok_or_else(|| {
-        "MIR verifier flat Copy variant call has no canonical ABI receipt".to_string()
+        if flat_variant_result {
+            "MIR verifier flat Copy variant call has no canonical ABI receipt".to_string()
+        } else {
+            "MIR verifier move-owned Result<string, i32> call has no canonical ABI receipt"
+                .to_string()
+        }
     })?;
     catalog.validate_variant_call_abi_receipt(
         target_owner,
@@ -2422,13 +2455,35 @@ fn eval_direct_variant_call(
                 "MIR verifier direct variant call argument TypeDesc disagrees with target".into(),
             );
         }
-        ensure_copy_value(function, catalog, argument)?;
-        let symbolic = state.values.get(argument).cloned().ok_or_else(|| {
-            format!(
-                "MIR verifier direct call argument '{}' is not defined",
-                argument
-            )
-        })?;
+        let symbolic = if !move_owned_result {
+            ensure_copy_value(function, catalog, argument)?;
+            state.values.get(argument).cloned().ok_or_else(|| {
+                format!(
+                    "MIR verifier direct call argument '{}' is not defined",
+                    argument
+                )
+            })?
+        } else {
+            let argument_is_copy = catalog
+                .get(&argument_value.ty)
+                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            if argument_is_copy {
+                state.values.get(argument).cloned().ok_or_else(|| {
+                    format!(
+                        "MIR verifier direct call argument '{}' is not defined",
+                        argument
+                    )
+                })?
+            } else {
+                catalog.validate_glue(&argument_value.ty, MirGlueOperation::MoveOut)?;
+                state.values.remove(argument).ok_or_else(|| {
+                    format!(
+                        "MIR verifier direct call argument '{}' is not available for move",
+                        argument
+                    )
+                })?
+            }
+        };
         if !symbolic_matches_type(catalog, parameter_ty, &symbolic) {
             return Err("MIR verifier direct call argument has the wrong symbolic shape".into());
         }
@@ -2450,14 +2505,24 @@ fn eval_direct_variant_call(
     if !traps.is_empty() {
         return Err("MIR verifier direct variant call has a trapping execution path".into());
     }
-    let merged = merge_direct_variant_return_paths(catalog, &target.result, &returns)?;
+    let returned = if move_owned_result {
+        let [returned] = returns.as_slice() else {
+            return Err(
+                "MIR verifier move-owned Result<string, i32> call requires exactly one return path"
+                    .into(),
+            );
+        };
+        returned.value.clone()
+    } else {
+        merge_direct_variant_return_paths(catalog, &target.result, &returns)?
+    };
     // Callee branch conditions are embedded in the merged symbolic variant;
     // only the caller's constraints remain at this program point.  Copying a
     // single callee path here would unsoundly constrain the caller to one
     // branch and make the proof depend on return-path enumeration order.
     state.constraints = caller_constraints;
-    ensure_result_shape(function, catalog, result, &merged)?;
-    state.values.insert(result.clone(), merged);
+    ensure_result_shape(function, catalog, result, &returned)?;
+    state.values.insert(result.clone(), returned);
     Ok(())
 }
 
@@ -2624,6 +2689,10 @@ fn symbolic_zero_for_type(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("MIR verifier payload TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String) {
+        catalog.validate_owned_string(ty)?;
+        return Ok(SymbolicValue::Opaque { ty: ty.clone() });
+    }
     match descriptor.abi {
         MirAbiClass::Integer {
             bits: 32 | 64,
@@ -3732,6 +3801,100 @@ mod tests {
                     "owned".into(),
                 )],
             }
+        );
+    }
+
+    #[test]
+    fn verifier_proves_move_owned_result_call_return_from_canonical_mir() {
+        let source = include_str!("../../tests/fixtures/mir_result_string_i32_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("move-owned Result call/return must be canonical MIR");
+        let receipts = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+        }));
+
+        let results = verify_program(&program, "result-string-i32-call-return-source-hash".into())
+            .expect("move-owned Result call/return verifier result");
+        for owner in ["function:use_ok", "function:use_err"] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner)
+                .expect("direct Result call verification result");
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{owner}: {}",
+                result.message
+            );
+            assert!(result
+                .message
+                .contains("canonical MIR ensures contract proven"));
+        }
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference move-owned Result call/return execution");
+        assert_eq!(value, MirRuntimeValue::Int(48));
+    }
+
+    #[test]
+    fn verifier_rejects_move_owned_result_call_with_multiple_return_paths() {
+        let source = r#"
+            func choose(flag: bool) -> Result<string, i32> {
+                if flag { Ok("owned") } else { Err(1) }
+            }
+
+            func checked(flag: bool) -> i32 {
+                ensures: result == 4
+                let value = choose(flag)
+                match value {
+                    Ok(_) => 4,
+                    Err(code) => code
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("move-owned Result call must lower before verifier");
+        let results = verify_program(
+            &program,
+            "result-string-i32-call-multipath-source-hash".into(),
+        )
+        .expect("unsupported move-owned call shape must be classified");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:checked")
+            .expect("checked verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(
+            result
+                .message
+                .contains("move-owned Result<string, i32> call requires exactly one return path"),
+            "{}",
+            result.message
         );
     }
 

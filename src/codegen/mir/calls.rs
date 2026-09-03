@@ -587,16 +587,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .filter_map(|parameter| target.values.get(parameter))
             .map(|value| value.ty.clone())
             .collect::<Vec<_>>();
-        if self
+        let flat_variant_result = self
             .program
             .type_catalog()
             .validate_flat_copy_variant(&target.result)
-            .is_ok()
-        {
+            .is_ok();
+        let move_owned_result = self
+            .program
+            .type_catalog()
+            .validate_result_string_i32_variant(&target.result)
+            .is_ok();
+        if flat_variant_result || move_owned_result {
             let receipt = variant_call_contract.ok_or_else(|| {
                 NativeMirError::new(
                     subject,
-                    "call returning flat Copy Option/Result has no canonical ABI receipt",
+                    if flat_variant_result {
+                        "call returning flat Copy Option/Result has no canonical ABI receipt"
+                    } else {
+                        "call returning move-owned Result<string, i32> has no canonical ABI receipt"
+                    },
                 )
             })?;
             self.program
@@ -612,7 +621,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         } else if variant_call_contract.is_some() {
             return Err(NativeMirError::new(
                 subject,
-                "variant call ABI receipt is attached to a non-flat Copy variant result",
+                "variant call ABI receipt is attached to an unsupported variant result",
+            ));
+        } else if self
+            .program
+            .type_catalog()
+            .get(&target.result)
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Result && descriptor.ownership != MirOwnership::Copy
+            })
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "non-Copy Result call result is outside the canonical call ABI contract",
             ));
         }
         self.emit_call_target(result, function, arguments, subject)

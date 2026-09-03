@@ -1400,13 +1400,19 @@ fn validate_call_graph(
                 let flat_variant_result = type_catalog
                     .validate_flat_copy_variant(&target.result)
                     .is_ok();
-                if flat_variant_result {
+                let move_owned_result = type_catalog
+                    .validate_result_string_i32_variant(&target.result)
+                    .is_ok();
+                if flat_variant_result || move_owned_result {
                     let Some(receipt) = variant_call_contract.as_ref() else {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message:
-                                "call returning flat Copy Option/Result has no canonical ABI receipt"
-                                    .into(),
+                                if flat_variant_result {
+                                    "call returning flat Copy Option/Result has no canonical ABI receipt".into()
+                                } else {
+                                    "call returning move-owned Result<string, i32> has no canonical ABI receipt".into()
+                                },
                         });
                         continue;
                     };
@@ -1426,7 +1432,19 @@ fn validate_call_graph(
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message:
-                            "variant call ABI receipt is attached to a non-flat Copy variant result"
+                            "variant call ABI receipt is attached to an unsupported variant result"
+                                .into(),
+                    });
+                } else if matches!(
+                    type_catalog.get(&target.result),
+                    Some(descriptor)
+                        if descriptor.kind == super::types::MirTypeKind::Result
+                            && descriptor.ownership != super::types::MirOwnership::Copy
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message:
+                            "non-Copy Result call result is outside the canonical call ABI contract"
                                 .into(),
                     });
                 }
@@ -3291,16 +3309,25 @@ impl<'a> MirReferenceInterpreter<'a> {
                             format!("callee '{}' has an incomplete MIR signature", owner.0),
                         )
                     })?;
-                if self
+                let flat_variant_result = self
                     .program
                     .type_catalog()
                     .validate_flat_copy_variant(&callee.result)
-                    .is_ok()
-                {
+                    .is_ok();
+                let move_owned_result = self
+                    .program
+                    .type_catalog()
+                    .validate_result_string_i32_variant(&callee.result)
+                    .is_ok();
+                if flat_variant_result || move_owned_result {
                     let receipt = variant_call_contract.as_ref().ok_or_else(|| {
                         self.error(
                             &function.owner,
-                            "call returning flat Copy Option/Result has no canonical ABI receipt",
+                            if flat_variant_result {
+                                "call returning flat Copy Option/Result has no canonical ABI receipt"
+                            } else {
+                                "call returning move-owned Result<string, i32> has no canonical ABI receipt"
+                            },
                         )
                     })?;
                     self.program
@@ -3316,7 +3343,17 @@ impl<'a> MirReferenceInterpreter<'a> {
                 } else if variant_call_contract.is_some() {
                     return Err(self.error(
                         &function.owner,
-                        "variant call ABI receipt is attached to a non-flat Copy variant result",
+                        "variant call ABI receipt is attached to an unsupported variant result",
+                    ));
+                } else if self.program.type_catalog().get(&callee.result).is_some_and(
+                    |descriptor| {
+                        descriptor.kind == super::types::MirTypeKind::Result
+                            && descriptor.ownership != super::types::MirOwnership::Copy
+                    },
+                ) {
+                    return Err(self.error(
+                        &function.owner,
+                        "non-Copy Result call result is outside the canonical call ABI contract",
                     ));
                 }
                 let arguments = self.take_transfer_values(function, values, arguments)?;

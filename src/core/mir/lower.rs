@@ -2487,20 +2487,30 @@ impl<'a> Lowerer<'a> {
             self.error(node_id, "variant call argument has no MIR type");
             return None;
         };
-        match type_catalog.validated_variant_call_abi_contract(
-            owner,
-            type_arguments,
-            &parameter_types,
-            &result_ty,
-        ) {
+        let contract = if type_catalog.validate_flat_copy_variant(&result_ty).is_ok() {
+            type_catalog.validated_variant_call_abi_contract(
+                owner,
+                type_arguments,
+                &parameter_types,
+                &result_ty,
+            )
+        } else if matches!(result_desc.kind, super::types::MirTypeKind::Result) {
+            type_catalog.validated_result_string_i32_call_abi_contract(
+                owner,
+                type_arguments,
+                &parameter_types,
+                &result_ty,
+            )
+        } else {
+            // Non-Copy Option calls remain outside this direct-call receipt
+            // slice; their existing SwitchMove/clone/drop contract remains
+            // valid, but a call receipt is not invented here.
+            return None;
+        };
+        match contract {
             Ok(contract) => Some(contract),
             Err(message) => {
-                // Non-Copy Option/Result calls are outside this flat receipt
-                // slice. They remain explicit MIR Calls and are admitted only
-                // by a consumer that owns their separate glue contract.
-                if !message.contains("not Aggregate/Copy with canonical no-op glue") {
-                    self.error(node_id, message);
-                }
+                self.error(node_id, message);
                 None
             }
         }

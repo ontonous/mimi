@@ -1522,6 +1522,105 @@ fn direct_flat_copy_variant_calls_materialize_signature_receipts() {
 }
 
 #[test]
+fn direct_move_owned_result_calls_materialize_signature_receipts() {
+    let source = include_str!("../../../tests/fixtures/mir_result_string_i32_call_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned Result calls must lower");
+    let owner = crate::core::NodeId("function:main".into());
+    let calls = canonical
+        .functions()
+        .values()
+        .flat_map(|function| function.blocks.values())
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                variant_call_contract: Some(receipt),
+                ..
+            } => Some((callee.clone(), receipt.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for (callee, receipt) in calls {
+        assert_eq!(callee, receipt.callee);
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+        );
+        assert_eq!(receipt.payload_types.len(), 2);
+        assert_eq!(receipt.payload_ty, receipt.payload_types[0]);
+        canonical
+            .type_catalog()
+            .validate_variant_call_abi_receipt(
+                &receipt.callee,
+                &receipt.type_arguments,
+                &receipt.parameter_types,
+                &receipt.result_ty,
+                &receipt,
+            )
+            .expect("move-owned call receipt must be TypeDesc-derived");
+    }
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference move-owned Result call execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(48)
+    );
+}
+
+#[test]
+fn move_owned_result_call_receipt_drift_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_result_string_i32_call_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let mut forged = canonical.functions().clone();
+    let instruction = forged
+        .values_mut()
+        .flat_map(|function| function.blocks.values_mut())
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("move-owned Result call");
+    let crate::core::mir::MirInstructionKind::Call {
+        variant_call_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!("receipt selected above");
+    };
+    receipt.payload_types[1] = receipt.payload_types[0].clone();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("stale move-owned call ABI receipt must fail before a backend");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant call ABI receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
 fn variant_call_abi_receipt_drift_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_variant_call.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

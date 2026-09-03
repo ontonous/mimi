@@ -684,19 +684,33 @@ pub struct MirVariantPredicateContract {
     pub discriminant: u16,
 }
 
-/// Backend-independent ABI receipt for a direct call whose result is a flat
-/// Copy Option/Result.  The callee signature and the complete variant table
-/// travel with the call so a consumer cannot infer the aggregate ABI from an
-/// LLVM struct, a bytecode value, or a runtime tag.  `payload_ty` is shared by
-/// all non-empty variants in the flat contract; zero-payload variants retain
-/// their identity and arity in `variants`.
+/// The ownership/ABI profile proved by a direct variant call receipt.
+///
+/// The profile is part of the receipt rather than a backend-local decision:
+/// a move-owned aggregate must not be silently treated as a Copy return when
+/// a consumer lowers the same MIR Call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirVariantCallAbiMode {
+    FlatCopy,
+    MoveOwned,
+}
+
+/// Backend-independent ABI receipt for a direct call whose result is an
+/// admitted Option/Result shape. The callee signature and complete variant
+/// table travel with the call so a consumer cannot infer aggregate ABI or
+/// ownership from an LLVM struct, a bytecode value, or a runtime tag.
+/// `payload_ty` is retained as the first payload for compatibility with the
+/// original flat contract; `payload_types` records every physical/semantic
+/// payload type in the promoted profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVariantCallAbiContract {
     pub callee: NodeId,
     pub type_arguments: Vec<ResolvedTypeId>,
     pub parameter_types: Vec<ResolvedTypeId>,
     pub result_ty: ResolvedTypeId,
+    pub mode: MirVariantCallAbiMode,
     pub payload_ty: ResolvedTypeId,
+    pub payload_types: Vec<ResolvedTypeId>,
     pub nominal: NominalTypeId,
     pub variants: Vec<MirVariantCallVariant>,
 }
@@ -3689,7 +3703,7 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the complete TypeDesc receipt for a direct call returning
-    /// a flat Copy Option/Result.  Calls returning other shapes deliberately
+    /// a flat Copy Option/Result. Calls returning other shapes deliberately
     /// return an error and remain outside this ABI island until their own
     /// call contract is promoted.
     pub fn validated_variant_call_abi_contract(
@@ -3727,7 +3741,60 @@ impl MirTypeCatalog {
             type_arguments: type_arguments.to_vec(),
             parameter_types: parameter_types.to_vec(),
             result_ty: result_ty.clone(),
-            payload_ty,
+            mode: MirVariantCallAbiMode::FlatCopy,
+            payload_ty: payload_ty.clone(),
+            payload_types: vec![payload_ty.clone()],
+            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            variants,
+        })
+    }
+
+    /// Materialize the narrow move-owned direct-call ABI for
+    /// `Result<string, i32>`. The callee may return either canonical variant,
+    /// but this first call slice intentionally admits one total return path
+    /// per callable; the verifier must not merge ownership-bearing payloads
+    /// from multiple paths until that merge contract is separately proven.
+    pub fn validated_result_string_i32_call_abi_contract(
+        &self,
+        callee: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+        parameter_types: &[ResolvedTypeId],
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantCallAbiContract, String> {
+        self.validate_result_string_i32_variant(result_ty)?;
+        let (nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
+            format!(
+                "variant call result '{}' has no canonical Result layout",
+                result_ty.as_str()
+            )
+        })?;
+        let (ok, error) = match self.get(result_ty).map(|descriptor| &descriptor.layout) {
+            Some(MirLayout::Result { ok, error, .. }) => (ok.clone(), error.clone()),
+            _ => {
+                return Err(format!(
+                    "variant call result '{}' is not the canonical move-owned Result layout",
+                    result_ty.as_str()
+                ));
+            }
+        };
+        let variants = variants
+            .iter()
+            .map(|variant| MirVariantCallVariant {
+                id: variant.id.clone(),
+                name: variant.name.clone(),
+                discriminant: variant.discriminant,
+                payload_field: variant.fields.first().map(|field| field.id.clone()),
+                payload_arity: variant.fields.len(),
+            })
+            .collect();
+        Ok(MirVariantCallAbiContract {
+            callee: callee.clone(),
+            type_arguments: type_arguments.to_vec(),
+            parameter_types: parameter_types.to_vec(),
+            result_ty: result_ty.clone(),
+            mode: MirVariantCallAbiMode::MoveOwned,
+            payload_ty: ok.clone(),
+            payload_types: vec![ok, error],
             nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
             variants,
         })
@@ -3744,12 +3811,21 @@ impl MirTypeCatalog {
         result_ty: &ResolvedTypeId,
         receipt: &MirVariantCallAbiContract,
     ) -> Result<(), String> {
-        let expected = self.validated_variant_call_abi_contract(
-            callee,
-            type_arguments,
-            parameter_types,
-            result_ty,
-        )?;
+        let expected = match receipt.mode {
+            MirVariantCallAbiMode::FlatCopy => self.validated_variant_call_abi_contract(
+                callee,
+                type_arguments,
+                parameter_types,
+                result_ty,
+            )?,
+            MirVariantCallAbiMode::MoveOwned => self
+                .validated_result_string_i32_call_abi_contract(
+                    callee,
+                    type_arguments,
+                    parameter_types,
+                    result_ty,
+                )?,
+        };
         if receipt != &expected {
             return Err("variant call ABI receipt disagrees with TypeDesc".into());
         }
