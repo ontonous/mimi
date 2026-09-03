@@ -259,8 +259,9 @@ pub fn lower_program_with_type_catalog(
 /// monomorphization shortcut: checker-selected type arguments are carried by
 /// the MIR `Call`, the instance table records the template/arguments proof,
 /// and the executable function is already specialized MIR. Only
-/// `identity<T>(T) -> T` instantiated with a Copy signed scalar or bool is
-/// admitted in this slice. All other generic bodies remain fail-closed.
+/// `identity<T>(T) -> T` instantiated with a Copy signed scalar/bool or a
+/// flat Copy Option/Result is admitted in this slice. All other generic
+/// bodies remain fail-closed.
 pub fn materialize_concrete_generic_instances(
     program: &CheckedProgram,
     type_catalog: &MirTypeCatalog,
@@ -388,13 +389,26 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                     message: "generic call site disappeared before instance rewrite".into(),
                 }]);
             };
-            let MirInstructionKind::Call { callee, .. } = &mut instruction.kind else {
+            let MirInstructionKind::Call {
+                callee,
+                variant_call_contract,
+                ..
+            } = &mut instruction.kind
+            else {
                 return Err(vec![MirLoweringError {
                     node_id: NodeId(instruction_id.as_str().to_owned()),
                     message: "generic call site is no longer a MIR Call".into(),
                 }]);
             };
             *callee = ResolvedCallee::Function(target.clone());
+            if let Some(receipt) = variant_call_contract {
+                // S80 materialized the receipt while the call still named
+                // the generic template.  Once this pass installs the
+                // specialized executable function, the receipt must follow
+                // that canonical target identity rather than retain a stale
+                // template owner.
+                receipt.callee = target.clone();
+            }
         }
     }
     Ok(instances)
@@ -421,16 +435,6 @@ fn materialize_generic_instance(
                     .into(),
         }]);
     }
-    type_catalog
-        .validate_scalar_generic_arguments(arguments)
-        .map_err(|message| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: format!(
-                    "generic MIR instance argument is outside scalar contract: {message}"
-                ),
-            }]
-        })?;
     let generic_id = generic_parameter_type_id(program, &callable.signature.generic_parameters[0])
         .ok_or_else(|| {
             vec![MirLoweringError {
@@ -438,22 +442,35 @@ fn materialize_generic_instance(
                 message: "generic signature parameter has no canonical ResolvedTypeId".into(),
             }]
         })?;
+    let is_identity = callable.signature.parameters.len() == 1
+        && callable.signature.parameters[0].ty == generic_id
+        && callable.signature.result == generic_id;
+    let validate_arguments = if is_identity {
+        MirTypeCatalog::validate_generic_identity_arguments
+    } else {
+        MirTypeCatalog::validate_scalar_generic_arguments
+    };
+    validate_arguments(type_catalog, arguments).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: format!(
+                "generic MIR instance argument is outside scalar contract or flat Copy variant contract: {message}"
+            ),
+        }]
+    })?;
     let mut function = lower_callable(callable).map_err(|mut errors| {
         for error in &mut errors {
             error.node_id = subject();
         }
         errors
     })?;
-    let is_identity = callable.signature.parameters.len() == 1
-        && callable.signature.parameters[0].ty == generic_id
-        && callable.signature.result == generic_id;
     if is_identity {
         validate_identity_mir_shape(&function, &generic_id, &subject())?;
     }
     let concrete = arguments.first().cloned().ok_or_else(|| {
         vec![MirLoweringError {
             node_id: subject(),
-            message: "generic instance has no concrete scalar argument".into(),
+            message: "generic instance has no concrete argument".into(),
         }]
     })?;
     let instance_id = MirInstanceId::for_template(template, arguments).map_err(|error| {
@@ -499,16 +516,14 @@ fn materialize_generic_instance(
             })
             .collect::<Vec<_>>()
     })?;
-    type_catalog
-        .validate_scalar_generic_arguments(arguments)
-        .map_err(|message| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: format!(
-                    "specialized generic TypeDesc is outside scalar contract: {message}"
-                ),
-            }]
-        })?;
+    validate_arguments(type_catalog, arguments).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: format!(
+                "specialized generic TypeDesc is outside scalar contract or flat Copy variant contract: {message}"
+            ),
+        }]
+    })?;
     let instance = MirInstance {
         id: instance_id,
         template: template.clone(),

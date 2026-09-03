@@ -1,0 +1,17 @@
+// Canonical concrete generic MIR: identity<T> instantiated with flat Copy
+// Option<i32> and Result<i32, i32>.
+func identity<T>(value: T) -> T {
+    value
+}
+
+func main() -> i32 {
+    let option_value: Option<i32> = Some(7)
+    let result_value: Result<i32, i32> = Ok(11)
+    let option_roundtrip = identity(option_value)
+    let result_roundtrip = identity(result_value)
+    if option_roundtrip.is_some() {
+        if result_roundtrip.is_ok() { 18 } else { 0 }
+    } else {
+        0
+    }
+}

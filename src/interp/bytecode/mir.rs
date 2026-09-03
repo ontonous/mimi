@@ -4145,6 +4145,28 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_variant_identity_through_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_variant_identity.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic variant MIR");
+        assert_eq!(mir.instances().len(), 2);
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic variant execution");
+        let bytecode = compile_mir_program(&mir).expect("generic variant MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic variant bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(18));
+        assert!(matches!(value, Value::Int(18)));
+    }
+
+    #[test]
     fn immutable_scalar_borrow_and_dereference_agree_with_reference_oracle() {
         let source = "func main() -> i32 { let value = 41; *(&value) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

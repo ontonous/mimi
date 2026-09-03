@@ -1437,6 +1437,31 @@ impl MirTypeCatalog {
         self.validate_copy_scalar(ty)
     }
 
+    /// Validate the concrete argument for the generic identity instance.
+    /// Identity is the first generic contract whose result can carry the
+    /// already-closed flat Copy Option/Result ABI receipt; Set facades remain
+    /// scalar-only and continue to use `validate_scalar_generic_arguments`.
+    pub fn validate_generic_identity_arguments(
+        &self,
+        arguments: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        if arguments.len() != 1 {
+            return Err(format!(
+                "generic identity contract requires one type argument, got {}",
+                arguments.len()
+            ));
+        }
+        let ty = &arguments[0];
+        self.validate_copy_scalar(ty)
+            .or_else(|_| self.validate_flat_copy_variant(ty).map(|_| ()))
+            .map_err(|message| {
+                format!(
+                    "type '{}' is outside the concrete generic identity contract: {message}",
+                    ty.as_str()
+                )
+            })
+    }
+
     /// Validate a value boundary against the canonical glue contract.  The
     /// result/source type equality is checked by the MIR instruction validator;
     /// this method only answers whether the operation has a materialized

@@ -1591,6 +1591,28 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_variant_identity() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_variant_identity.mimi"
+        ));
+        assert_eq!(program.instances().len(), 2);
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic variant identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(18));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_variant_identity");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic variant identity must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic variant identity module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_tuple_projection_receipt() {
         let program = canonical_program("func main() -> i32 { let pair = (40, 2); pair.0 }");
         let context = Context::create();

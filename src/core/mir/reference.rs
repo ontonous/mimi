@@ -1192,7 +1192,15 @@ fn validate_instance_table(
                     .into(),
             });
         }
-        if let Err(message) = type_catalog.validate_scalar_generic_arguments(&instance.arguments) {
+        let argument_error = match instance.contract {
+            MirGenericInstanceContract::ScalarIdentity => {
+                type_catalog.validate_generic_identity_arguments(&instance.arguments)
+            }
+            MirGenericInstanceContract::ScalarSetFacade { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
+        };
+        if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
                 subject: id.to_string(),
                 message: format!("generic MIR instance TypeDesc contract is invalid: {message}"),
@@ -4888,6 +4896,57 @@ mod tests {
     }
 
     #[test]
+    fn concrete_generic_identity_reuses_variant_call_abi_receipts() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_variant_identity.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("flat Copy Option/Result generic identities must materialize");
+        assert_eq!(program.instances().len(), 2);
+        assert!(program.instances().values().all(|instance| matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarIdentity
+        )));
+
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR function");
+        let calls = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Call {
+                    type_arguments,
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some((type_arguments, receipt)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(type_arguments, receipt)| {
+            type_arguments.len() == 1
+                && receipt.type_arguments == **type_arguments
+                && receipt.callee.0.starts_with("function:mir:instance:")
+        }));
+        assert!(calls
+            .iter()
+            .any(|(_, receipt)| receipt.nominal.as_str() == "builtin:type:Option"));
+        assert!(calls
+            .iter()
+            .any(|(_, receipt)| receipt.nominal.as_str() == "builtin:type:Result"));
+
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic variant identity execution");
+        assert_eq!(value, MirRuntimeValue::Int(18));
+    }
+
+    #[test]
     fn concrete_scalar_set_facade_instances_are_typed_and_executable() {
         let source = "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } if !set_contains(inserted, 2) { return 2 } let removed = set_remove(inserted, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -4968,6 +5027,33 @@ mod tests {
                 .iter()
                 .any(|error| { error.message.contains("outside scalar contract") })),
             other => panic!("unsupported generic shape crossed the MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_non_copy_generic_variant_identity_fails_closed_before_backend() {
+        let source = r#"
+            func identity<T>(value: T) -> T { value }
+
+            func main() -> i32 {
+                let value: Option<string> = Some("owned")
+                let roundtrip = identity(value)
+                drop(roundtrip)
+                0
+            }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-Copy generic variant identity must remain outside this MIR island");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("outside scalar contract or flat Copy variant contract")
+            })),
+            other => panic!("unsupported generic variant crossed the MIR gate: {other:?}"),
         }
     }
 

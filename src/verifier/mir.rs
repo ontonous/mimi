@@ -2377,8 +2377,8 @@ fn eval_materialized_set_facade_call(
     Ok(())
 }
 
-/// Symbolically consume the scalar generic identity call admitted by this
-/// slice.
+/// Symbolically consume the concrete generic identity call admitted by this
+/// slice: Copy scalars plus flat Copy Option/Result values.
 ///
 /// The verifier does not infer a callee body from a template name.  It first
 /// requires the call to name an instance in the canonical instance table,
@@ -2400,7 +2400,7 @@ fn eval_materialized_identity_call(
         return Err("MIR verifier generic call callee is not a canonical function instance".into());
     };
     if type_arguments.len() != 1 || arguments.len() != 1 {
-        return Err("MIR verifier only admits one-argument scalar generic identity calls".into());
+        return Err("MIR verifier only admits one-argument concrete generic identity calls".into());
     }
     let instance = program
         .instances()
@@ -2418,7 +2418,7 @@ fn eval_materialized_identity_call(
             target_owner.0
         ));
     }
-    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    catalog.validate_generic_identity_arguments(type_arguments)?;
 
     let target = program
         .functions()
@@ -2492,9 +2492,9 @@ fn eval_materialized_identity_call(
         .get(argument)
         .cloned()
         .ok_or_else(|| format!("MIR generic call argument '{}' is not defined", argument))?;
-    value_scalar_kind(function, catalog, argument)?;
+    ensure_copy_value(function, catalog, argument)?;
     if !symbolic_matches_type(catalog, concrete, &symbolic) {
-        return Err("MIR verifier generic call argument has the wrong scalar shape".into());
+        return Err("MIR verifier generic call argument has the wrong concrete Copy shape".into());
     }
     let result = result.as_ref().ok_or_else(|| {
         "MIR verifier generic identity call must produce its canonical result".to_string()
@@ -2941,6 +2941,7 @@ fn contract_binary(
 mod tests {
     use super::verify_program;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use crate::core::mir::MirInstructionKind;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::BTreeMap;
@@ -3156,6 +3157,72 @@ mod tests {
             .iter()
             .find(|result| result.func_name == owner.0)
             .expect("generic contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_generic_variant_identity_call() {
+        let source = r#"
+            func identity<T>(value: T) -> T { value }
+
+            func checked() -> i32 {
+                ensures: result == 18
+                let option_value: Option<i32> = Some(7)
+                let result_value: Result<i32, i32> = Ok(11)
+                let option_roundtrip = identity(option_value)
+                let result_roundtrip = identity(result_value)
+                if option_roundtrip.is_some() {
+                    if result_roundtrip.is_ok() { 18 } else { 0 }
+                } else {
+                    0
+                }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("generic variant MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let receipts = program
+            .functions()
+            .get(&owner)
+            .expect("checked function")
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts
+            .iter()
+            .any(|receipt| receipt.nominal.as_str() == "builtin:type:Option"));
+        assert!(receipts
+            .iter()
+            .any(|receipt| receipt.nominal.as_str() == "builtin:type:Result"));
+
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic variant call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(18));
+        let results = verify_program(&program, "generic-variant-identity-source-hash".into())
+            .expect("verify generic variant MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("generic variant contract verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
     }
 
