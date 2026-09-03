@@ -2173,6 +2173,21 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_flat_copy_user_enum_construction_abi() {
+        let fixture = crate::core::mir::test_support::direct_flat_copy_enum_construct_fixture();
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_flat_copy_enum_construct");
+        generator
+            .compile_mir_native(&fixture.program)
+            .expect("flat Copy user-enum construction should have a native ABI contract");
+        generator
+            .module
+            .verify()
+            .expect("native flat Copy user-enum construction module verifies");
+        assert!(generator.module.get_function("construct_signal").is_some());
+    }
+
+    #[test]
     fn native_validator_rejects_mixed_copy_user_enum_before_llvm() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_custom_enum_mixed_copy_rejected.mimi"

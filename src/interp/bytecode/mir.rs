@@ -5492,6 +5492,43 @@ mod tests {
     }
 
     #[test]
+    fn flat_copy_user_enum_construction_matches_reference_and_bytecode() {
+        let fixture = crate::core::mir::test_support::direct_flat_copy_enum_construct_fixture();
+        let reference = MirReferenceInterpreter::new(&fixture.program)
+            .execute(&fixture.function, &[])
+            .expect("reference flat Copy user-enum construction");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&fixture.program).expect("flat Copy user-enum MIR bytecode"),
+        )
+        .call_named(fixture.function.0.as_str(), Vec::new())
+        .expect("bytecode flat Copy user-enum construction");
+        assert!(matches!(
+            reference,
+            MirRuntimeValue::Variant {
+                nominal,
+                variant,
+                payload,
+            }
+                if nominal == fixture.nominal
+                    && variant == fixture.number
+                    && payload == vec![MirRuntimeValue::Int(7)]
+        ));
+        assert!(matches!(
+            bytecode,
+            Value::CanonicalVariant {
+                nominal,
+                variant,
+                tag,
+                payload,
+            }
+                if nominal == fixture.nominal
+                    && variant == fixture.number
+                    && tag == "Number"
+                    && payload == vec![Value::Int(7)]
+        ));
+    }
+
+    #[test]
     fn rejects_variant_construction_discriminant_drift_before_moving_payload() {
         let source = "func main() -> Option<string> { Some(\"owned\") }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

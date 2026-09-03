@@ -760,3 +760,116 @@ pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitch
         number: number_desc.id.clone(),
     }
 }
+
+/// Canonical fixture for flat Copy user-enum construction.  The function body
+/// is assembled directly as MIR because the source fixture intentionally only
+/// materializes the checker-owned enum declaration.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectFlatCopyEnumConstructFixture {
+    pub(crate) program: MirProgram,
+    pub(crate) function: NodeId,
+    pub(crate) source_ty: ResolvedTypeId,
+    pub(crate) nominal: crate::core::ir::NominalTypeId,
+    pub(crate) number: NodeId,
+    pub(crate) number_field: NodeId,
+}
+
+pub(crate) fn direct_flat_copy_enum_construct_fixture() -> DirectFlatCopyEnumConstructFixture {
+    let switch = direct_flat_copy_enum_switch_fixture();
+    let catalog = switch.program.type_catalog().clone();
+    let variants = match &catalog
+        .get(&switch.source_ty)
+        .expect("Signal TypeDesc")
+        .layout
+    {
+        MirLayout::Enum { variants, .. } => variants.clone(),
+        layout => panic!("Signal has unexpected layout {layout:?}"),
+    };
+    let number_desc = variants
+        .iter()
+        .find(|variant| variant.id == switch.number)
+        .expect("Number variant TypeDesc");
+    let number_field = number_desc
+        .fields
+        .first()
+        .expect("Number payload TypeDesc")
+        .id
+        .clone();
+    let owner = NodeId("function:construct_signal".into());
+    let payload = MirValueId::new("v.payload").expect("construct payload value id");
+    let result = MirValueId::new("v.result").expect("construct result value id");
+    let entry = MirBlockId::new("bb.entry").expect("construct entry block id");
+    let mut functions = switch.program.functions().clone();
+    functions.insert(
+        owner.clone(),
+        MirFunction {
+            owner: owner.clone(),
+            parameters: Vec::new(),
+            result: switch.source_ty.clone(),
+            entry: entry.clone(),
+            values: BTreeMap::from([
+                (
+                    payload.clone(),
+                    MirValue {
+                        id: payload.clone(),
+                        ty: number_desc
+                            .fields
+                            .first()
+                            .expect("Number payload field")
+                            .ty
+                            .clone(),
+                    },
+                ),
+                (
+                    result.clone(),
+                    MirValue {
+                        id: result.clone(),
+                        ty: switch.source_ty.clone(),
+                    },
+                ),
+            ]),
+            blocks: BTreeMap::from([(
+                entry.clone(),
+                MirBlock {
+                    id: entry,
+                    parameters: Vec::new(),
+                    instructions: vec![
+                        MirInstruction {
+                            id: MirInstructionId::new("i.payload")
+                                .expect("construct payload instruction id"),
+                            kind: MirInstructionKind::Const {
+                                result: payload.clone(),
+                                literal: crate::core::ir::ResolvedLiteral::Int(7),
+                            },
+                        },
+                        MirInstruction {
+                            id: MirInstructionId::new("i.construct")
+                                .expect("construct variant instruction id"),
+                            kind: MirInstructionKind::ConstructVariant {
+                                result: result.clone(),
+                                nominal: switch.nominal.clone(),
+                                variant: switch.number.clone(),
+                                fields: vec![(number_field.clone(), payload.clone())],
+                            },
+                        },
+                    ],
+                    terminator: MirTerminator::Return {
+                        value: Some(result),
+                    },
+                },
+            )]),
+            contracts: Vec::new(),
+            ownership: MirOwnershipSummary::default(),
+        },
+    );
+    let program = MirProgram::with_type_catalog(functions, catalog)
+        .expect("flat Copy user-enum construction MIR");
+    DirectFlatCopyEnumConstructFixture {
+        program,
+        function: owner,
+        source_ty: switch.source_ty,
+        nominal: switch.nominal,
+        number: switch.number,
+        number_field,
+    }
+}

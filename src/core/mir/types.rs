@@ -3947,6 +3947,22 @@ impl MirTypeCatalog {
                 field_types.len()
             ));
         }
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "variant result type '{}' is absent from MIR type catalog",
+                result_ty.as_str()
+            )
+        })?;
+        if descriptor.kind == MirTypeKind::Nominal
+            && descriptor.ownership == MirOwnership::Copy
+            && matches!(descriptor.layout, MirLayout::Enum { .. })
+        {
+            // A user-enum ConstructVariant is a Copy physical operation only
+            // after the bounded flat ABI has been proven.  Keep this gate in
+            // the shared TypeDesc contract so reference, bytecode, native and
+            // verifier adapters cannot each invent a wider construction rule.
+            self.validate_flat_copy_variant(result_ty)?;
+        }
         let (expected_nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
             format!(
                 "type '{}' has no canonical variant layout",

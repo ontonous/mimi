@@ -1382,6 +1382,46 @@ fn rejects_shallow_variant_construction_before_any_backend() {
 }
 
 #[test]
+fn flat_copy_user_enum_construction_rejects_forged_field_before_consumers() {
+    let fixture = crate::core::mir::test_support::direct_flat_copy_enum_construct_fixture();
+    let owner = fixture.function.clone();
+    let mut function = fixture
+        .program
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("construct_signal MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::ConstructVariant { .. }
+            )
+        })
+        .expect("flat Copy ConstructVariant");
+    let crate::core::mir::MirInstructionKind::ConstructVariant { fields, .. } =
+        &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    fields[0].0 = crate::core::NodeId("variant:forged-field".into());
+
+    let mut functions = fixture.program.functions().clone();
+    functions.insert(owner, function);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("forged flat Copy construction field must fail at canonical MIR");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("variant payload field") && error.message.contains("absent")
+    }));
+}
+
+#[test]
 fn non_copy_record_materializes_field_drop_schedule_before_backend() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
