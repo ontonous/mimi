@@ -551,11 +551,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirInstructionKind::Call {
                 result,
                 callee,
+                variant_call_contract,
                 arguments,
-                ..
-            } => {
-                self.emit_call(result.as_ref(), callee, arguments, subject)?;
-            }
+                type_arguments,
+            } => self.emit_call(
+                result.as_ref(),
+                callee,
+                type_arguments,
+                arguments,
+                variant_call_contract.as_ref(),
+                subject,
+            )?,
             MirInstructionKind::FlowTransition {
                 result,
                 transition,
@@ -925,6 +931,52 @@ mod tests {
             .module
             .verify()
             .expect("native variant predicate module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_flat_copy_variant_call_abi() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_variant_call.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference direct variant call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("variant call MIR bytecode"))
+                .run_value()
+                .expect("bytecode direct variant call execution");
+        assert!(matches!(bytecode, Value::Int(4)));
+
+        let call_count = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Call {
+                        variant_call_contract: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(call_count, 2);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_call_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native direct variant call lowering");
+        generator
+            .module
+            .verify()
+            .expect("native direct variant call module verifies");
+        assert!(generator.module.get_function("choose").is_some());
         assert!(generator.module.get_function("main").is_some());
     }
 

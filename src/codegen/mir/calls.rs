@@ -558,7 +558,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         &mut self,
         result: Option<&MirValueId>,
         callee: &ResolvedCallee,
+        type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let ResolvedCallee::Function(owner) = callee else {
@@ -573,6 +575,46 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("callee '{}' is absent from native declarations", owner.0),
             )
         })?;
+        let target = self.program.functions().get(owner).ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                format!("callee '{}' is absent from MIR program", owner.0),
+            )
+        })?;
+        let parameter_types = target
+            .parameters
+            .iter()
+            .filter_map(|parameter| target.values.get(parameter))
+            .map(|value| value.ty.clone())
+            .collect::<Vec<_>>();
+        if self
+            .program
+            .type_catalog()
+            .validate_flat_copy_variant(&target.result)
+            .is_ok()
+        {
+            let receipt = variant_call_contract.ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "call returning flat Copy Option/Result has no canonical ABI receipt",
+                )
+            })?;
+            self.program
+                .type_catalog()
+                .validate_variant_call_abi_receipt(
+                    owner,
+                    type_arguments,
+                    &parameter_types,
+                    &target.result,
+                    receipt,
+                )
+                .map_err(|message| NativeMirError::new(subject, message))?;
+        } else if variant_call_contract.is_some() {
+            return Err(NativeMirError::new(
+                subject,
+                "variant call ABI receipt is attached to a non-flat Copy variant result",
+            ));
+        }
         self.emit_call_target(result, function, arguments, subject)
     }
 

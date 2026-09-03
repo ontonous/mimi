@@ -1613,6 +1613,13 @@ impl<'a> Lowerer<'a> {
                         },
                     );
                 } else {
+                    let variant_call_contract = self.variant_call_abi_contract(
+                        &expression.node_id,
+                        &call.callee,
+                        &call.type_arguments,
+                        &result,
+                        &arguments,
+                    );
                     self.emit(
                         &expression.node_id,
                         "call",
@@ -1621,6 +1628,7 @@ impl<'a> Lowerer<'a> {
                             callee: call.callee.clone(),
                             type_arguments: call.type_arguments.clone(),
                             arguments,
+                            variant_call_contract,
                         },
                     );
                 }
@@ -2410,6 +2418,61 @@ impl<'a> Lowerer<'a> {
             Ok(contract) => Some(contract),
             Err(message) => {
                 self.error(node_id, message);
+                None
+            }
+        }
+    }
+
+    fn variant_call_abi_contract(
+        &mut self,
+        node_id: &NodeId,
+        callee: &ResolvedCallee,
+        type_arguments: &[crate::core::ResolvedTypeId],
+        result: &MirValueId,
+        arguments: &[MirValueId],
+    ) -> Option<super::types::MirVariantCallAbiContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            return None;
+        };
+        let ResolvedCallee::Function(owner) = callee else {
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "variant call result has no MIR type");
+            return None;
+        };
+        let Some(result_desc) = type_catalog.get(&result_ty) else {
+            self.error(node_id, "variant call result has no TypeDesc");
+            return None;
+        };
+        if !matches!(
+            result_desc.kind,
+            super::types::MirTypeKind::Option | super::types::MirTypeKind::Result
+        ) {
+            return None;
+        }
+        let Some(parameter_types) = arguments
+            .iter()
+            .map(|argument| self.values.get(argument).map(|value| value.ty.clone()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            self.error(node_id, "variant call argument has no MIR type");
+            return None;
+        };
+        match type_catalog.validated_variant_call_abi_contract(
+            owner,
+            type_arguments,
+            &parameter_types,
+            &result_ty,
+        ) {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                // Non-Copy Option/Result calls are outside this flat receipt
+                // slice. They remain explicit MIR Calls and are admitted only
+                // by a consumer that owns their separate glue contract.
+                if !message.contains("not Aggregate/Copy with canonical no-op glue") {
+                    self.error(node_id, message);
+                }
                 None
             }
         }

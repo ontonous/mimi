@@ -1375,3 +1375,109 @@ fn non_copy_variant_predicate_is_rejected_before_consumers() {
         "unexpected non-Copy predicate diagnostic: {debug}"
     );
 }
+
+#[test]
+fn direct_flat_copy_variant_calls_materialize_signature_receipts() {
+    let source = include_str!("../../../tests/fixtures/mir_native_variant_call.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("flat Copy variant calls must lower");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main MIR");
+    let calls = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                variant_call_contract: Some(receipt),
+                ..
+            } => Some((callee.clone(), receipt.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for (callee, receipt) in calls {
+        assert_eq!(callee, receipt.callee);
+        assert_eq!(
+            receipt.type_arguments,
+            Vec::<crate::core::ResolvedTypeId>::new()
+        );
+        assert_eq!(receipt.parameter_types.len(), 1);
+        assert_eq!(receipt.nominal.as_str(), "builtin:type:Option");
+        assert_eq!(receipt.variants.len(), 2);
+        assert!(receipt
+            .variants
+            .iter()
+            .all(|variant| variant.discriminant <= u8::MAX as u16));
+        canonical
+            .type_catalog()
+            .validate_variant_call_abi_receipt(
+                &receipt.callee,
+                &receipt.type_arguments,
+                &receipt.parameter_types,
+                &receipt.result_ty,
+                &receipt,
+            )
+            .expect("receipt must be TypeDesc-derived");
+    }
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference direct variant call execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(4)
+    );
+}
+
+#[test]
+fn variant_call_abi_receipt_drift_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_variant_call.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical.functions().clone();
+    let main = forged.get_mut(&owner).expect("main MIR");
+    let instruction = main
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("variant call");
+    let crate::core::mir::MirInstructionKind::Call {
+        variant_call_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!("receipt selected above");
+    };
+    receipt.variants[0].discriminant = receipt.variants[0].discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("stale call ABI receipt must fail before a backend");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant call ABI receipt disagrees with TypeDesc")
+    }));
+}

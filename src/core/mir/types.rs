@@ -684,6 +684,33 @@ pub struct MirVariantPredicateContract {
     pub discriminant: u16,
 }
 
+/// Backend-independent ABI receipt for a direct call whose result is a flat
+/// Copy Option/Result.  The callee signature and the complete variant table
+/// travel with the call so a consumer cannot infer the aggregate ABI from an
+/// LLVM struct, a bytecode value, or a runtime tag.  `payload_ty` is shared by
+/// all non-empty variants in the flat contract; zero-payload variants retain
+/// their identity and arity in `variants`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantCallAbiContract {
+    pub callee: NodeId,
+    pub type_arguments: Vec<ResolvedTypeId>,
+    pub parameter_types: Vec<ResolvedTypeId>,
+    pub result_ty: ResolvedTypeId,
+    pub payload_ty: ResolvedTypeId,
+    pub nominal: NominalTypeId,
+    pub variants: Vec<MirVariantCallVariant>,
+}
+
+/// One variant entry in [`MirVariantCallAbiContract`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantCallVariant {
+    pub id: NodeId,
+    pub name: String,
+    pub discriminant: u16,
+    pub payload_field: Option<NodeId>,
+    pub payload_arity: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -3631,6 +3658,74 @@ impl MirTypeCatalog {
             self.validated_variant_predicate_contract(result_ty, variant_ty, predicate)?;
         if receipt != &expected {
             return Err("variant predicate receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete TypeDesc receipt for a direct call returning
+    /// a flat Copy Option/Result.  Calls returning other shapes deliberately
+    /// return an error and remain outside this ABI island until their own
+    /// call contract is promoted.
+    pub fn validated_variant_call_abi_contract(
+        &self,
+        callee: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+        parameter_types: &[ResolvedTypeId],
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantCallAbiContract, String> {
+        let payload_ty = self.validate_flat_copy_variant(result_ty)?;
+        let (nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
+            format!(
+                "variant call result '{}' has no canonical Option/Result layout",
+                result_ty.as_str()
+            )
+        })?;
+        if variants.is_empty() {
+            return Err(format!(
+                "variant call result '{}' has an empty canonical variant table",
+                result_ty.as_str()
+            ));
+        }
+        let variants = variants
+            .iter()
+            .map(|variant| MirVariantCallVariant {
+                id: variant.id.clone(),
+                name: variant.name.clone(),
+                discriminant: variant.discriminant,
+                payload_field: variant.fields.first().map(|field| field.id.clone()),
+                payload_arity: variant.fields.len(),
+            })
+            .collect();
+        Ok(MirVariantCallAbiContract {
+            callee: callee.clone(),
+            type_arguments: type_arguments.to_vec(),
+            parameter_types: parameter_types.to_vec(),
+            result_ty: result_ty.clone(),
+            payload_ty,
+            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            variants,
+        })
+    }
+
+    /// Validate a materialized call receipt against the callee result and
+    /// checker-owned signature facts.  This is the shared pre-backend gate;
+    /// backend adapters may add physical checks but may not replace it.
+    pub fn validate_variant_call_abi_receipt(
+        &self,
+        callee: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+        parameter_types: &[ResolvedTypeId],
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantCallAbiContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_variant_call_abi_contract(
+            callee,
+            type_arguments,
+            parameter_types,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err("variant call ABI receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }

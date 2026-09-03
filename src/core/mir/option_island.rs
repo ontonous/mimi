@@ -668,6 +668,7 @@ impl<'a> OptionStringVariantValidator<'a> {
                 callee,
                 type_arguments,
                 arguments,
+                ..
             } => {
                 let ResolvedCallee::Function(owner) = callee else {
                     self.error(format!(

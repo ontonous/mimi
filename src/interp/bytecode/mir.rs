@@ -580,9 +580,16 @@ impl<'a> FunctionEmitter<'a> {
             MirInstructionKind::Call {
                 result,
                 callee,
+                type_arguments,
                 arguments,
-                ..
-            } => self.emit_call(result.as_ref(), callee, arguments),
+                variant_call_contract,
+            } => self.emit_call(
+                result.as_ref(),
+                callee,
+                type_arguments,
+                arguments,
+                variant_call_contract.as_ref(),
+            ),
             MirInstructionKind::FlowTransition {
                 result,
                 transition,
@@ -1079,7 +1086,9 @@ impl<'a> FunctionEmitter<'a> {
         &mut self,
         result: Option<&MirValueId>,
         callee: &ResolvedCallee,
+        type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
     ) {
         let ResolvedCallee::Function(owner) = callee else {
             self.error(format!("callee {callee:?} is not a canonical function"));
@@ -1089,6 +1098,44 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("callee '{}' is absent from MIR program", owner.0));
             return;
         };
+        let Some(target) = self.program.functions().get(owner) else {
+            self.error(format!("callee '{}' is absent from MIR program", owner.0));
+            return;
+        };
+        let parameter_types = target
+            .parameters
+            .iter()
+            .filter_map(|parameter| target.values.get(parameter))
+            .map(|value| value.ty.clone())
+            .collect::<Vec<_>>();
+        if self
+            .program
+            .type_catalog()
+            .validate_flat_copy_variant(&target.result)
+            .is_ok()
+        {
+            let Some(receipt) = variant_call_contract else {
+                self.error("call returning flat Copy Option/Result has no canonical ABI receipt");
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_variant_call_abi_receipt(
+                    owner,
+                    type_arguments,
+                    &parameter_types,
+                    &target.result,
+                    receipt,
+                )
+            {
+                self.error(message);
+                return;
+            }
+        } else if variant_call_contract.is_some() {
+            self.error("variant call ABI receipt is attached to a non-flat Copy variant result");
+            return;
+        }
         self.emit_call_target(result, func, arguments);
     }
 

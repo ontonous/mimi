@@ -1775,6 +1775,7 @@ fn eval_instruction(
             callee,
             type_arguments,
             arguments,
+            variant_call_contract,
         } => eval_materialized_call(
             function,
             program,
@@ -1784,6 +1785,7 @@ fn eval_instruction(
             callee,
             type_arguments,
             arguments,
+            variant_call_contract.as_ref(),
         )?,
         MirInstructionKind::VariantPredicate {
             result,
@@ -2113,20 +2115,28 @@ fn eval_materialized_call(
     callee: &crate::core::ir::ResolvedCallee,
     type_arguments: &[crate::core::ir::ResolvedTypeId],
     arguments: &[MirValueId],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
 ) -> Result<(), String> {
     let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
         return Err("MIR verifier call callee is not a canonical function instance".into());
     };
-    let instance = program
+    let Some(instance) = program
         .instances()
         .values()
         .find(|instance| instance.function == *target_owner)
-        .ok_or_else(|| {
-            format!(
-                "MIR verifier call target '{}' is absent from the instance table",
-                target_owner.0
-            )
-        })?;
+    else {
+        return eval_direct_variant_call(
+            function,
+            program,
+            catalog,
+            state,
+            result,
+            target_owner,
+            type_arguments,
+            arguments,
+            variant_call_contract,
+        );
+    };
     if instance.arguments != type_arguments {
         return Err(format!(
             "MIR verifier call target '{}' disagrees with its instance arguments",
@@ -2160,6 +2170,128 @@ fn eval_materialized_call(
             )
         }
     }
+}
+
+/// Symbolically execute the narrow direct-call ABI island for a flat Copy
+/// Option/Result result. The callee is already concrete MIR, so the verifier
+/// maps symbolic arguments into its entry block and reuses `explore_block`;
+/// it does not inspect a surface body or rediscover a call ABI. Multiple
+/// return paths remain outside this first proof slice and fail closed.
+fn eval_direct_variant_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    receipt: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier direct call target '{}' is absent from canonical MIR",
+            target_owner.0
+        )
+    })?;
+    if !type_arguments.is_empty() {
+        return Err(
+            "MIR verifier direct flat-variant call cannot carry generic type arguments".into(),
+        );
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier direct variant call must produce a result".to_string())?;
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| format!("MIR verifier direct call result '{}' is absent", result))?;
+    if result_ty.ty != target.result {
+        return Err(
+            "MIR verifier direct variant call result disagrees with target TypeDesc".into(),
+        );
+    }
+    let parameter_types = target
+        .parameters
+        .iter()
+        .map(|parameter| {
+            target
+                .values
+                .get(parameter)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| "MIR verifier direct call parameter TypeDesc is absent".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if arguments.len() != parameter_types.len() {
+        return Err("MIR verifier direct variant call arity disagrees with target".into());
+    }
+    let receipt = receipt.ok_or_else(|| {
+        "MIR verifier flat Copy variant call has no canonical ABI receipt".to_string()
+    })?;
+    catalog.validate_variant_call_abi_receipt(
+        target_owner,
+        type_arguments,
+        &parameter_types,
+        &target.result,
+        receipt,
+    )?;
+
+    let mut target_state = SymbolicState {
+        values: BTreeMap::new(),
+        constraints: state.constraints.clone(),
+        traps: Vec::new(),
+    };
+    for ((argument, parameter), parameter_ty) in arguments
+        .iter()
+        .zip(&target.parameters)
+        .zip(&parameter_types)
+    {
+        let argument_value = function
+            .values
+            .get(argument)
+            .ok_or_else(|| format!("MIR verifier direct call argument '{}' is absent", argument))?;
+        if argument_value.ty != *parameter_ty {
+            return Err(
+                "MIR verifier direct variant call argument TypeDesc disagrees with target".into(),
+            );
+        }
+        ensure_copy_value(function, catalog, argument)?;
+        let symbolic = state.values.get(argument).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier direct call argument '{}' is not defined",
+                argument
+            )
+        })?;
+        if !symbolic_matches_type(catalog, parameter_ty, &symbolic) {
+            return Err("MIR verifier direct call argument has the wrong symbolic shape".into());
+        }
+        target_state.values.insert(parameter.clone(), symbolic);
+    }
+
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if !traps.is_empty() {
+        return Err("MIR verifier direct variant call has a trapping execution path".into());
+    }
+    let [returned] = returns.as_slice() else {
+        return Err(
+            "MIR verifier direct variant call requires exactly one non-trapping return path".into(),
+        );
+    };
+    state.constraints = returned.constraints.clone();
+    ensure_result_shape(function, catalog, result, &returned.value)?;
+    state.values.insert(result.clone(), returned.value.clone());
+    Ok(())
 }
 
 /// Symbolically consume a materialized scalar Set facade call. The target
@@ -3024,6 +3156,59 @@ mod tests {
             .iter()
             .find(|result| result.func_name == owner.0)
             .expect("generic contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_consumes_direct_flat_copy_variant_call_receipt() {
+        let source = r#"
+            func make() -> Option<i32> { Some(7) }
+
+            func checked() -> i32 {
+                ensures: result == 4
+                let value = make()
+                if value.is_some() { 4 } else { 0 }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference direct variant call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+        let call = program
+            .functions()
+            .get(&owner)
+            .expect("checked function")
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("direct variant call receipt");
+        assert_eq!(call.nominal.as_str(), "builtin:type:Option");
+
+        let results =
+            verify_program(&program, "direct-variant-call-source-hash".into()).expect("verify MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("direct variant call verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
     }
 

@@ -437,6 +437,10 @@ pub enum MirInstructionKind {
         /// list is the canonical marker for a non-generic call.
         type_arguments: Vec<ResolvedTypeId>,
         arguments: Vec<MirValueId>,
+        /// TypeDesc/ABI receipt for a direct call returning a flat Copy
+        /// Option/Result. Other call result shapes remain on their existing
+        /// explicit compatibility boundary until their own receipt exists.
+        variant_call_contract: Option<types::MirVariantCallAbiContract>,
     },
     /// Invoke a checker-resolved Flow transition through its materialized
     /// contract.  This is intentionally distinct from ordinary calls: the
@@ -896,8 +900,9 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             callee,
             type_arguments,
             arguments,
+            variant_call_contract,
         } => format!(
-            "call {} {:?}{}({})",
+            "call {} {:?}{}({}){}",
             result
                 .as_ref()
                 .map(ToString::to_string)
@@ -919,7 +924,11 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            variant_call_contract
+                .as_ref()
+                .map(|contract| format!(" [variant_call_contract={contract:?}]"))
+                .unwrap_or_default()
         ),
         MirInstructionKind::FlowTransition {
             result,

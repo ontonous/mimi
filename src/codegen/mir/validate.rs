@@ -837,9 +837,18 @@ impl<'a> NativeMirValidator<'a> {
             MirInstructionKind::Call {
                 result,
                 callee,
+                type_arguments,
                 arguments,
-                ..
-            } => self.validate_call(function, result.as_ref(), callee, arguments, subject),
+                variant_call_contract,
+            } => self.validate_call(
+                function,
+                result.as_ref(),
+                callee,
+                type_arguments,
+                arguments,
+                variant_call_contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::FlowTransition {
                 result,
                 transition,
@@ -1589,7 +1598,9 @@ impl<'a> NativeMirValidator<'a> {
         function: &MirFunction,
         result: Option<&MirValueId>,
         callee: &ResolvedCallee,
+        type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) {
         let ResolvedCallee::Function(owner) = callee else {
@@ -1610,6 +1621,44 @@ impl<'a> NativeMirValidator<'a> {
             self.errors.push(NativeMirError::new(
                 subject,
                 "call arity disagrees with canonical callee",
+            ));
+        }
+        let parameter_types = target
+            .parameters
+            .iter()
+            .filter_map(|parameter| target.values.get(parameter))
+            .map(|value| value.ty.clone())
+            .collect::<Vec<_>>();
+        if self
+            .program
+            .type_catalog()
+            .validate_flat_copy_variant(&target.result)
+            .is_ok()
+        {
+            let Some(receipt) = variant_call_contract else {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "call returning flat Copy Option/Result has no canonical ABI receipt",
+                ));
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_variant_call_abi_receipt(
+                    owner,
+                    type_arguments,
+                    &parameter_types,
+                    &target.result,
+                    receipt,
+                )
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+        } else if variant_call_contract.is_some() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "variant call ABI receipt is attached to a non-flat Copy variant result",
             ));
         }
         for (argument, parameter) in arguments.iter().zip(&target.parameters) {

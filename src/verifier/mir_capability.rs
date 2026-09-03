@@ -745,6 +745,7 @@ impl<'a> CapabilityGate<'a> {
                 callee,
                 type_arguments,
                 arguments,
+                ..
             } => {
                 self.validate_call(
                     function,

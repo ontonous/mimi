@@ -1685,6 +1685,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 callee,
                 type_arguments,
                 arguments,
+                ..
             } => self.validate_call(
                 function,
                 result.clone(),

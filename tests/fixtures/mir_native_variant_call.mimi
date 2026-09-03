@@ -1,0 +1,12 @@
+// Canonical MIR direct-call ABI: both paths return flat Copy Option<i32>.
+func choose(flag: bool) -> Option<i32> {
+    if flag { Some(7) } else { None }
+}
+
+func main() -> i32 {
+    let some = choose(true)
+    let none = choose(false)
+    if some.is_some() {
+        if none.is_none() { 4 } else { 0 }
+    } else { 0 }
+}

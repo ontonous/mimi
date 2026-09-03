@@ -1364,6 +1364,7 @@ fn validate_call_graph(
                     callee,
                     type_arguments,
                     arguments,
+                    variant_call_contract,
                 } = &instruction.kind
                 else {
                     continue;
@@ -1385,6 +1386,46 @@ fn validate_call_graph(
                     });
                     continue;
                 };
+
+                let target_parameter_types = target
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| target.values.get(parameter))
+                    .map(|value| value.ty.clone())
+                    .collect::<Vec<_>>();
+                let flat_variant_result = type_catalog
+                    .validate_flat_copy_variant(&target.result)
+                    .is_ok();
+                if flat_variant_result {
+                    let Some(receipt) = variant_call_contract.as_ref() else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message:
+                                "call returning flat Copy Option/Result has no canonical ABI receipt"
+                                    .into(),
+                        });
+                        continue;
+                    };
+                    if let Err(message) = type_catalog.validate_variant_call_abi_receipt(
+                        target_owner,
+                        type_arguments,
+                        &target_parameter_types,
+                        &target.result,
+                        receipt,
+                    ) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
+                } else if variant_call_contract.is_some() {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message:
+                            "variant call ABI receipt is attached to a non-flat Copy variant result"
+                                .into(),
+                    });
+                }
 
                 let target_instance = instances
                     .values()
@@ -3222,10 +3263,10 @@ impl<'a> MirReferenceInterpreter<'a> {
             MirInstructionKind::Call {
                 result,
                 callee,
+                type_arguments,
                 arguments,
-                ..
+                variant_call_contract,
             } => {
-                let arguments = self.take_transfer_values(function, values, arguments)?;
                 let ResolvedCallee::Function(owner) = callee else {
                     return Err(self.error(
                         &function.owner,
@@ -3235,6 +3276,46 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let callee = self.program.functions.get(owner).ok_or_else(|| {
                     self.error(&function.owner, format!("callee '{}' is absent", owner.0))
                 })?;
+                let parameter_types = callee
+                    .parameters
+                    .iter()
+                    .map(|parameter| callee.values.get(parameter).map(|value| value.ty.clone()))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!("callee '{}' has an incomplete MIR signature", owner.0),
+                        )
+                    })?;
+                if self
+                    .program
+                    .type_catalog()
+                    .validate_flat_copy_variant(&callee.result)
+                    .is_ok()
+                {
+                    let receipt = variant_call_contract.as_ref().ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "call returning flat Copy Option/Result has no canonical ABI receipt",
+                        )
+                    })?;
+                    self.program
+                        .type_catalog()
+                        .validate_variant_call_abi_receipt(
+                            owner,
+                            type_arguments,
+                            &parameter_types,
+                            &callee.result,
+                            receipt,
+                        )
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else if variant_call_contract.is_some() {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant call ABI receipt is attached to a non-flat Copy variant result",
+                    ));
+                }
+                let arguments = self.take_transfer_values(function, values, arguments)?;
                 let output = self.execute_function(callee, &arguments, steps)?;
                 if let Some(result) = result {
                     values.insert(result.clone(), output);
