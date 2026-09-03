@@ -8841,6 +8841,7 @@ mod tests {
 func double(value: i32) -> i32 { value * 2 }
 func option_status(value: Option<i32>) -> bool { value.is_some() }
 func result_map(value: Result<i32, string>) -> Result<i32, string> { value.map(double) }
+func list_reverse(value: List<i32>) -> List<i32> { value.reverse() }
 func shared_value() -> i32 {
     shared value = 1
     let copied = value.clone()
@@ -8878,12 +8879,39 @@ func main() -> i32 { 0 }
         assert_eq!(result.arguments.len(), 2);
         assert_eq!(result.permission, Some(crate::core::Permission::Consume));
 
+        let list = tail_call("function:list_reverse");
+        assert!(matches!(
+            &list.callee,
+            ResolvedCallee::Builtin(id) if id.as_str() == "builtin.method.list.reverse"
+        ));
+        assert_eq!(list.arguments.len(), 1);
+        assert_eq!(list.permission, Some(crate::core::Permission::View));
+
         let shared = tail_call("function:shared_value");
         assert!(matches!(
             &shared.callee,
             ResolvedCallee::Builtin(id) if id.as_str() == "builtin.method.shared.deref"
         ));
         assert_eq!(shared.permission, Some(crate::core::Permission::View));
+    }
+
+    #[test]
+    fn list_reverse_method_rejects_arguments() {
+        let file = parse("func main() -> i32 { let values = [1, 2]; values.reverse(0); 0 }");
+        let errors = crate::core::check_program(&file).expect_err("List.reverse takes no args");
+        let rendered = errors
+            .iter()
+            .map(|error| format!("{error}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("E0242"),
+            "expected E0242, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("List.reverse expects no arguments"),
+            "expected List.reverse arity diagnostic, got:\n{rendered}"
+        );
     }
 
     #[test]

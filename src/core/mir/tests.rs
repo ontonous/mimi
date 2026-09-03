@@ -610,6 +610,46 @@ fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
 }
 
 #[test]
+fn list_reverse_method_materializes_the_same_canonical_operation_receipt() {
+    let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = values.reverse(); drop(values); reversed }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                operation: MirListOperation::Reverse,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some(receipt.clone()),
+            _ => None,
+        })
+        .expect("method call must lower to canonical List.reverse");
+    assert_eq!(receipt.operation, MirListOperation::Reverse);
+    assert_eq!(receipt.list_ty, receipt.result_ty);
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference List.reverse method execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::List(vec![
+            crate::core::mir::reference::MirRuntimeValue::Int(3),
+            crate::core::mir::reference::MirRuntimeValue::Int(2),
+            crate::core::mir::reference::MirRuntimeValue::Int(1),
+        ])
+    );
+}
+
+#[test]
 fn canonical_program_gate_rejects_missing_or_stale_list_operation_receipt() {
     let source = "func main() -> i32 { let values = [10, 20]; len(values) }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

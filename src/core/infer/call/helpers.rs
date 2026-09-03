@@ -540,11 +540,19 @@ impl<'a> Checker<'a> {
     pub(in crate::core) fn check_list_method(
         &mut self,
         method: &str,
-        _args: &[Expr],
+        inner: &Type,
+        args: &[Expr],
         _scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        if !args.is_empty() {
+            self.emit_code(
+                crate::diagnostic::codes::E0242,
+                format!("List.{method} expects no arguments"),
+            );
+        }
         match method {
             "len" => Type::Name("i32".into(), vec![]),
+            "reverse" => Type::Name("List".into(), vec![inner.clone()]),
             _ => {
                 self.emit_code(
                     crate::diagnostic::codes::E0242,

@@ -1199,6 +1199,40 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_scalar_list_reverse_method_as_the_same_mir_op() {
+        let program = canonical_program(
+            "func main() -> i32 { let values = [1, 2, 3]; let reversed = values.reverse(); let count = len(reversed); drop(reversed); drop(values); count }",
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("List.reverse method main MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Reverse,
+                        list_operation_contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_scalar_list_reverse_method_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar List.reverse method should use the canonical ABI adapter");
+        generator
+            .module
+            .verify()
+            .expect("native List.reverse method module verifies");
+    }
+
+    #[test]
     fn native_emitter_materializes_owned_string_clone_move_and_drop() {
         let program = canonical_program(
             "func make_text() -> string { \"canonical\" }\nfunc consume_text(text: string) -> i32 { drop(text); 41 }\nfunc main() -> i32 { let text = make_text(); let cloned = text; drop(cloned); consume_text(text) }",

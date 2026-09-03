@@ -1,0 +1,10 @@
+// Canonical MIR S77: builtin List.reverse method reuses S76's operation receipt.
+func main() -> i32 {
+    let values = [1, 2, 3]
+    let reversed = values.reverse()
+    let reversed_len = len(reversed)
+    let source_len = len(values)
+    drop(reversed)
+    drop(values)
+    reversed_len + source_len
+}

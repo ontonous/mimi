@@ -643,9 +643,11 @@ pub fn resolve_builtin_method(
             ),
             Permission::View,
         ),
-        ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:List" => {
-            ("list", method == "len", Permission::View)
-        }
+        ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:List" => (
+            "list",
+            matches!(method, "len" | "reverse"),
+            Permission::View,
+        ),
         ResolvedType::Nominal { item, .. } if item.as_str() == "builtin:type:Set" => (
             "set",
             matches!(

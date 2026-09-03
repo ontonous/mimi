@@ -1,0 +1,7 @@
+// Canonical MIR S77 negative shape: method reverse still requires Copy scalar elements.
+func main() -> i32 {
+    let values = ["owned"]
+    let reversed = values.reverse()
+    drop(reversed)
+    0
+}

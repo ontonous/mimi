@@ -3402,6 +3402,24 @@ mod tests {
     }
 
     #[test]
+    fn canonical_mir_list_reverse_method_reuses_the_operation_receipt() {
+        let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = values.reverse(); drop(values); reversed }";
+        let report =
+            run_canonical_differential(source).expect("canonical List.reverse method differential");
+        assert!(report.mir_text.contains("= Reverse"));
+        assert_eq!(
+            report.reference.outcome,
+            DifferentialOutcome::Return(MirRuntimeValue::List(vec![
+                MirRuntimeValue::Int(3),
+                MirRuntimeValue::Int(2),
+                MirRuntimeValue::Int(1),
+            ]))
+        );
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
+    }
+
+    #[test]
     fn canonical_mir_rejects_list_len_for_non_copy_elements() {
         let source = "func main() -> i32 { let values = [\"owned\"]; len(values) }";
         let (_, checked) = parse_and_check(source).expect("source type check");

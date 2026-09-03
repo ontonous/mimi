@@ -644,6 +644,30 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_reverse_method_enters_canonical_default_route() {
+        let (checked, file) = checked(
+            "func main() -> i32 { let values = [1, 2, 3]; let reversed = values.reverse(); let n = len(reversed); drop(reversed); drop(values); n }",
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("List.reverse method must select the canonical default route");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::ListOp {
+                            operation: mimi::core::mir::MirListOperation::Reverse,
+                            list_operation_contract: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
     fn unsupported_scalar_list_reverse_cannot_reenter_legacy_with_auto_prelude() {
         let source = include_str!("../../tests/fixtures/mir_native_list_reverse_rejected.mimi");
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
