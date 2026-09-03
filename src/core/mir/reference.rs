@@ -385,6 +385,39 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::VariantProject {
+                            result,
+                            base,
+                            contract,
+                        } => {
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "direct variant projection has no canonical trap receipt"
+                                            .into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog
+                                .validate_variant_projection_trap_receipt(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    receipt,
+                                )
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::Load { result, place } => {
                             let local_id =
                                 match MirValueId::new(format!("local:{}", place.base.0 .0)) {
@@ -2231,6 +2264,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
             base == needle
                 || matches!(projection, super::MirProjection::Index(index) if index == needle)
         }
+        super::MirInstructionKind::VariantProject { base, .. } => base == needle,
         super::MirInstructionKind::Construct { fields, .. } => fields.iter().any(|v| v == needle),
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
@@ -2299,6 +2333,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Borrow { result, .. }
         | super::MirInstructionKind::Project { result, .. }
         | super::MirInstructionKind::MoveProject { result, .. }
+        | super::MirInstructionKind::VariantProject { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
         | super::MirInstructionKind::ListOp { result, .. }
@@ -2741,6 +2776,46 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &base_ty,
                     &result_ty,
                     projection,
+                    self.program.type_catalog(),
+                )?;
+                values.insert(result.clone(), projected);
+            }
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } => {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "variant projection base has no type")
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "variant projection result has no type")
+                    })?;
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "direct variant projection has no canonical trap receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let value = self.read_value(function, values, base)?;
+                let projected = project_variant_value(
+                    &function.owner,
+                    value,
+                    &base_ty,
+                    &result_ty,
+                    receipt,
                     self.program.type_catalog(),
                 )?;
                 values.insert(result.clone(), projected);
@@ -4144,6 +4219,55 @@ fn runtime_literal(literal: &ResolvedLiteral) -> MirRuntimeValue {
         ResolvedLiteral::String(value) => MirRuntimeValue::String(value.clone()),
         ResolvedLiteral::Unit => MirRuntimeValue::Unit,
     }
+}
+
+fn project_variant_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirVariantProjectionTrapContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    type_catalog
+        .validate_variant_projection_trap_receipt(base_ty, result_ty, receipt)
+        .map_err(|message| execution_error(function, message))?;
+    let MirRuntimeValue::Variant {
+        nominal,
+        variant,
+        payload,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "direct variant projection base is not a canonical Variant",
+        ));
+    };
+    if nominal != receipt.projection.nominal {
+        return Err(execution_error(
+            function,
+            "direct variant projection runtime nominal disagrees with TypeDesc",
+        ));
+    }
+    if variant != receipt.projection.variant {
+        return Err(execution_error(
+            function,
+            format!(
+                "{}: canonical direct variant projection expected active variant '{}'",
+                receipt.trap_code, receipt.variant_name
+            ),
+        ));
+    }
+    if payload.len() != receipt.projection.arity {
+        return Err(execution_error(
+            function,
+            "direct variant projection runtime arity disagrees with TypeDesc",
+        ));
+    }
+    payload
+        .get(receipt.projection.field_index)
+        .cloned()
+        .ok_or_else(|| execution_error(function, "direct variant projection field is absent"))
 }
 
 fn project_value(

@@ -1450,6 +1450,63 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
+        MirInstructionKind::VariantProject {
+            result,
+            base,
+            contract,
+        } => {
+            let base_ty = function
+                .values
+                .get(base)
+                .ok_or_else(|| format!("MIR variant projection base '{}' is absent", base))?
+                .ty
+                .clone();
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR variant projection result '{}' is absent", result))?
+                .ty
+                .clone();
+            let receipt = contract.as_ref().ok_or_else(|| {
+                "MIR direct variant projection has no canonical trap receipt".to_string()
+            })?;
+            catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+            let value =
+                state.values.get(base).cloned().ok_or_else(|| {
+                    format!("MIR variant projection base '{}' is not defined", base)
+                })?;
+            let SymbolicValue::Variant {
+                nominal,
+                tag,
+                payload,
+                active_variant,
+            } = value
+            else {
+                return Err(
+                    "MIR direct variant projection requires a symbolic Option/Result value".into(),
+                );
+            };
+            if nominal != receipt.projection.nominal {
+                return Err("MIR direct variant projection nominal disagrees with TypeDesc".into());
+            }
+            let active = tag.eq(Int::from_i64(receipt.discriminant as i64));
+            add_definedness(state, active, &receipt.trap_code)?;
+            let projected = if active_variant
+                .as_ref()
+                .is_some_and(|variant| variant != &receipt.projection.variant)
+            {
+                symbolic_zero_for_type(catalog, &result_ty)?
+            } else {
+                payload
+                    .get(&receipt.projection.field)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "MIR direct variant projection payload field is absent".to_string()
+                    })?
+            };
+            ensure_result_shape(function, catalog, result, &projected)?;
+            state.values.insert(result.clone(), projected);
+        }
         MirInstructionKind::Construct {
             result,
             kind,
@@ -3496,6 +3553,19 @@ mod tests {
             .expect("function")
             .canonical_text()
             .contains("contract"));
+    }
+
+    #[test]
+    fn verifier_materializes_direct_variant_projection_as_an_active_tag_trap() {
+        let fixture = crate::core::mir::test_support::direct_variant_projection_fixture();
+        let results = verify_program(&fixture.program, "direct-variant-project".into())
+            .expect("direct variant projection verification");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == fixture.function.0)
+            .expect("project verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
+        assert!(result.message.contains("trap 'E0800'"), "{result:?}");
     }
 
     #[test]

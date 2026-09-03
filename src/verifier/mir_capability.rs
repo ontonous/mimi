@@ -482,6 +482,30 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} MoveProject is outside the verifier capability"
                 ));
             }
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } => {
+                let (Some(base_ty), Some(result_ty)) =
+                    (value_type(function, base), value_type(function, result))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} direct variant projection has no canonical trap receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) =
+                    catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                {
+                    self.error(format!(
+                        "{subject} direct variant projection rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::Construct {
                 result,
                 kind,

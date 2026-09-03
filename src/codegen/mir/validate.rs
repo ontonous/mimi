@@ -507,6 +507,11 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 projection,
             } => self.validate_move_project(function, result, base, projection, subject),
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } => self.validate_variant_project(function, result, base, contract.as_ref(), subject),
             MirInstructionKind::Borrow {
                 result,
                 source,
@@ -1025,6 +1030,37 @@ impl<'a> NativeMirValidator<'a> {
         }
         if let Err(message) =
             validate_native_non_copy_record_type(self.program.type_catalog(), &base_value.ty)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_variant_project(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirVariantProjectionTrapContract>,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "variant projection result");
+        self.validate_value(function, base, "variant projection base");
+        let (Some(base_value), Some(result_value)) =
+            (function.values.get(base), function.values.get(result))
+        else {
+            return;
+        };
+        let Some(contract) = contract else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "direct variant projection has no canonical trap receipt",
+            ));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_projection_trap_receipt(&base_value.ty, &result_value.ty, contract)
         {
             self.errors.push(NativeMirError::new(subject, message));
         }

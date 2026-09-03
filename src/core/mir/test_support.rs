@@ -1,0 +1,148 @@
+use std::collections::BTreeMap;
+
+use crate::core::ir::{PrimitiveType, ResolvedTypeId};
+use crate::core::mir::reference::MirProgram;
+use crate::core::mir::types::{MirLayout, MirTypeKind, MirVariantProjectionTrapContract};
+use crate::core::mir::{
+    MirBlock, MirBlockId, MirFunction, MirInstruction, MirInstructionId, MirInstructionKind,
+    MirOwnershipSummary, MirTerminator, MirValue, MirValueId,
+};
+use crate::core::NodeId;
+use crate::lexer::Lexer;
+use crate::parser::Parser;
+
+/// A small canonical program used by backend tests for the direct variant
+/// projection island.  The source only seeds the checker-owned Option<i32>
+/// TypeDesc; the test replaces one already-canonical function body with the
+/// hand-built MIR node so the source language does not gain an accidental new
+/// projection syntax as a side effect of this architecture slice.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectVariantProjectionFixture {
+    pub(crate) program: MirProgram,
+    pub(crate) function: NodeId,
+    pub(crate) source_ty: ResolvedTypeId,
+    pub(crate) result_ty: ResolvedTypeId,
+    pub(crate) some: NodeId,
+    pub(crate) none: NodeId,
+    pub(crate) field: NodeId,
+    pub(crate) receipt: MirVariantProjectionTrapContract,
+}
+
+pub(crate) fn direct_variant_projection_fixture() -> DirectVariantProjectionFixture {
+    let source = "func project(value: Option<i32>) -> i32 {\n    ensures: result >= 0\n    0\n}\nfunc main() -> i32 { 0 }";
+    let tokens = Lexer::new(source)
+        .tokenize()
+        .expect("direct projection lex");
+    let file = Parser::new(tokens)
+        .parse_file()
+        .expect("direct projection parse");
+    let checked = crate::core::check_program(&file).expect("direct projection check");
+    let canonical = MirProgram::from_checked_program(&checked).expect("direct projection MIR");
+    let catalog = canonical.type_catalog().clone();
+    let result_ty = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)).then(|| id.clone())
+        })
+        .expect("i32 TypeDesc");
+    let (source_ty, variants) = catalog
+        .iter()
+        .find_map(|(id, descriptor)| match &descriptor.layout {
+            MirLayout::Option { inner, variants } if inner == &result_ty => {
+                Some((id.clone(), variants.clone()))
+            }
+            _ => None,
+        })
+        .expect("Option<i32> TypeDesc");
+    let some = variants
+        .iter()
+        .find(|variant| variant.name == "Some")
+        .expect("Option Some TypeDesc")
+        .id
+        .clone();
+    let none = variants
+        .iter()
+        .find(|variant| variant.name == "None")
+        .expect("Option None TypeDesc")
+        .id
+        .clone();
+    let field = variants
+        .iter()
+        .find(|variant| variant.id == some)
+        .and_then(|variant| variant.fields.first())
+        .expect("Option Some payload TypeDesc")
+        .id
+        .clone();
+    let receipt = catalog
+        .validated_variant_projection_trap_contract(&source_ty, &some, &field, &result_ty)
+        .expect("direct variant projection receipt");
+    let contracts = canonical
+        .functions()
+        .get(&NodeId("function:project".into()))
+        .expect("project source function")
+        .contracts
+        .clone();
+
+    let input = MirValueId::new("v.input").expect("input value id");
+    let result = MirValueId::new("v.result").expect("result value id");
+    let entry = MirBlockId::new("bb.entry").expect("entry block id");
+    let mut functions = canonical.functions().clone();
+    functions.insert(
+        NodeId("function:project".into()),
+        MirFunction {
+            owner: NodeId("function:project".into()),
+            parameters: vec![input.clone()],
+            result: result_ty.clone(),
+            entry: entry.clone(),
+            values: BTreeMap::from([
+                (
+                    input.clone(),
+                    MirValue {
+                        id: input.clone(),
+                        ty: source_ty.clone(),
+                    },
+                ),
+                (
+                    result.clone(),
+                    MirValue {
+                        id: result.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+            ]),
+            blocks: BTreeMap::from([(
+                entry.clone(),
+                MirBlock {
+                    id: entry,
+                    parameters: Vec::new(),
+                    instructions: vec![MirInstruction {
+                        id: MirInstructionId::new("i.variant-project")
+                            .expect("variant projection instruction id"),
+                        kind: MirInstructionKind::VariantProject {
+                            result: result.clone(),
+                            base: input,
+                            contract: Some(receipt.clone()),
+                        },
+                    }],
+                    terminator: MirTerminator::Return {
+                        value: Some(result),
+                    },
+                },
+            )]),
+            contracts,
+            ownership: MirOwnershipSummary::default(),
+        },
+    );
+    let program = MirProgram::with_type_catalog(functions, catalog)
+        .expect("direct variant projection program validation");
+    DirectVariantProjectionFixture {
+        program,
+        function: NodeId("function:project".into()),
+        source_ty,
+        result_ty,
+        some,
+        none,
+        field,
+        receipt,
+    }
+}

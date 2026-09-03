@@ -439,6 +439,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_move_project(result, base, projection, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } => {
+                let value = self.emit_variant_project(result, base, contract.as_ref(), subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::Borrow {
                 result,
                 source,
@@ -1977,6 +1985,25 @@ mod tests {
             .module
             .verify()
             .expect("native tuple projection module verifies");
+    }
+
+    #[test]
+    fn native_emitter_materializes_direct_variant_project_active_tag_guard() {
+        let fixture = crate::core::mir::test_support::direct_variant_projection_fixture();
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_project_test");
+        generator
+            .compile_mir_native(&fixture.program)
+            .expect("native direct variant projection lowering");
+        generator
+            .module
+            .verify()
+            .expect("native direct variant projection module verifies");
+
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_variant_project_active"));
+        assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+        assert!(generator.module.get_function("project").is_some());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
     MirListIndexProjectionContract, MirListOperationContract, MirOwnership,
     MirRecordProjectionContract, MirTypeDesc, MirTypeKind, MirVariantPredicateContract,
+    MirVariantProjectionTrapContract,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -504,6 +505,11 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.emit_move_project(result, base, projection);
             }
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } => self.emit_variant_project(result, base, contract.as_ref()),
             MirInstructionKind::Construct {
                 result,
                 kind: MirAggregateKind::Tuple,
@@ -1597,6 +1603,65 @@ impl<'a> FunctionEmitter<'a> {
             ra,
             field: field_idx,
             contract: Some(contract),
+        });
+    }
+
+    fn emit_variant_project(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        contract: Option<&MirVariantProjectionTrapContract>,
+    ) {
+        let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
+            return;
+        };
+        for value in [result, base] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "variant projection value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let Some(receipt) = contract else {
+            self.error("direct variant projection has no canonical trap receipt");
+            return;
+        };
+        let Some(base_info) = self.function.values.get(base) else {
+            self.error(format!("variant projection base '{}' is absent", base));
+            return;
+        };
+        let Some(result_info) = self.function.values.get(result) else {
+            self.error(format!("variant projection result '{}' is absent", result));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_projection_trap_receipt(&base_info.ty, &result_info.ty, receipt)
+        {
+            self.error(format!(
+                "direct variant projection is unsupported: {message}"
+            ));
+            return;
+        }
+        if receipt.projection.field_index > u16::MAX as usize {
+            self.error("direct variant projection field index exceeds bytecode ABI");
+            return;
+        }
+        let Some(shapes) = self.emit_variant_shape_table(&receipt.source_ty) else {
+            return;
+        };
+        let variant_tag = self
+            .proto
+            .add_const(ConstValue::Str(receipt.variant_name.clone()));
+        self.proto.emit(Op::VariantGet {
+            rd,
+            ra,
+            idx: receipt.projection.field_index as u16,
+            variant_tag,
+            shapes,
         });
     }
 
@@ -3433,6 +3498,58 @@ mod tests {
             assert!(report.mir_bytecode.output.is_empty());
             assert!(report.legacy_bytecode.output.is_empty());
         }
+    }
+
+    #[test]
+    fn canonical_mir_variant_project_matches_reference_and_preserves_active_tag_trap() {
+        let fixture = crate::core::mir::test_support::direct_variant_projection_fixture();
+        let nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
+        let bytecode = compile_mir_program(&fixture.program).expect("MIR bytecode");
+        let project_proto = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name == fixture.function.0.as_str())
+            .expect("project bytecode function");
+        assert!(project_proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::VariantGet { .. })));
+
+        let some = Value::CanonicalVariant {
+            nominal: nominal.clone(),
+            variant: fixture.some.clone(),
+            tag: "Some".into(),
+            payload: vec![Value::Int(41)],
+        };
+        let reference = MirReferenceInterpreter::new(&fixture.program)
+            .execute(
+                &fixture.function,
+                &[MirRuntimeValue::Variant {
+                    nominal,
+                    variant: fixture.some.clone(),
+                    payload: vec![MirRuntimeValue::Int(41)],
+                }],
+            )
+            .expect("reference direct projection");
+        let bytecode_value = BytecodeVM::new(bytecode)
+            .call_named(fixture.function.0.as_str(), vec![some])
+            .expect("bytecode direct projection");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(bytecode_value, Value::Int(41)));
+
+        let bytecode = compile_mir_program(&fixture.program).expect("MIR bytecode");
+        let wrong_variant = Value::CanonicalVariant {
+            nominal: crate::core::ir::NominalTypeId::new("builtin:type:Option")
+                .expect("Option nominal"),
+            variant: fixture.none,
+            tag: "None".into(),
+            payload: Vec::new(),
+        };
+        let error = BytecodeVM::new(bytecode)
+            .call_named(fixture.function.0.as_str(), vec![wrong_variant])
+            .expect_err("bytecode wrong active variant must trap");
+        assert_eq!(error.code(), "E0800");
     }
 
     #[test]

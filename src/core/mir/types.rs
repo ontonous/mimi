@@ -23,6 +23,12 @@ pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-12";
 /// the reference and bytecode representations deterministic.
 pub const MIR_TRAP_CODE_MAX_LEN: usize = 128;
 
+/// Stable runtime classification for a direct variant projection whose
+/// active tag does not match the checker-selected variant.  This is a
+/// generic MIR contract trap, not an argument-count or match-exhaustiveness
+/// diagnostic; all consumers must preserve this identity.
+pub const MIR_VARIANT_PROJECTION_TRAP_CODE: &str = "E0800";
+
 /// Validate the backend-independent contract for a canonical `Trap`.
 ///
 /// A trap has no value operand, layout, ABI, ownership transfer, or drop
@@ -619,6 +625,23 @@ pub struct MirVariantProjectionContract {
     /// on the receipt prevents a consumer from treating an owned payload as a
     /// scalar merely because its physical slot is scalar-shaped.
     pub move_out_glue: MirGlueKind,
+}
+
+/// Complete contract for a read-only direct variant payload projection.
+///
+/// Unlike a `Switch` binding, this operation has no control-flow arm that
+/// proves the active tag.  The receipt therefore carries the physical tag
+/// spelling, discriminant, and explicit trap identity.  It is deliberately
+/// limited to the flat Copy variant island: a non-Copy payload would require
+/// a separate consuming projection and residual/drop proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantProjectionTrapContract {
+    pub source_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub projection: MirVariantProjectionContract,
+    pub variant_name: String,
+    pub discriminant: u16,
+    pub trap_code: String,
 }
 
 /// Backend-independent receipt for one canonical record field projection.
@@ -1451,6 +1474,71 @@ impl MirTypeCatalog {
                 "variant '{}' payload projection is outside the single-payload flat Copy contract",
                 variant.name
             ));
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete contract for a direct, read-only variant
+    /// payload projection.  The active-tag check is part of the operation's
+    /// semantics, so its trap identity and physical discriminant travel with
+    /// the receipt instead of being reconstructed by a backend.
+    pub fn validated_variant_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        self.validated_flat_copy_payload_projection(source_ty, variant_id, field_id, result_ty)?;
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Copy
+            || projection.move_out_glue != MirGlueKind::Noop
+        {
+            return Err(
+                "direct variant projection requires a Copy payload with no-op MoveOut glue".into(),
+            );
+        }
+        let variant = self.validated_variant_switch_case(source_ty, variant_id)?.1;
+        Ok(MirVariantProjectionTrapContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection,
+            variant_name: variant.name.clone(),
+            discriminant: variant.discriminant,
+            trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
+    /// Validate a direct variant projection receipt already materialized in
+    /// canonical MIR.  This is the only boundary a consumer needs; it proves
+    /// TypeDesc identity, flat ABI, Copy ownership, physical tag facts, and
+    /// the stable active-variant trap in one operation.
+    pub fn validate_variant_projection_trap_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantProjectionTrapContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty || receipt.result_ty != *result_ty {
+            return Err("variant projection trap receipt disagrees with MIR value types".into());
+        }
+        validate_trap_code(&receipt.trap_code)?;
+        if receipt.trap_code != MIR_VARIANT_PROJECTION_TRAP_CODE {
+            return Err(format!(
+                "direct variant projection trap code '{}' is not the canonical {}",
+                receipt.trap_code, MIR_VARIANT_PROJECTION_TRAP_CODE
+            ));
+        }
+        let expected = self.validated_variant_projection_trap_contract(
+            source_ty,
+            &receipt.projection.variant,
+            &receipt.projection.field,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err("variant projection trap receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }
@@ -4814,6 +4902,7 @@ mod tests {
     use super::{
         MirAbiClass, MirBuiltinContract, MirBuiltinEffect, MirBuiltinKind, MirGlueKind,
         MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog, MirTypeKind,
+        MIR_VARIANT_PROJECTION_TRAP_CODE,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
@@ -5851,6 +5940,20 @@ mod tests {
         assert_eq!(projection.field_index, 0);
         assert_eq!(projection.arity, 1);
         assert_eq!(projection.field_ty, i32_id);
+        let direct = catalog
+            .validated_variant_projection_trap_contract(&option_id, &some, &some_field, &i32_id)
+            .expect("direct Some projection trap contract");
+        assert_eq!(direct.source_ty, option_id);
+        assert_eq!(direct.result_ty, i32_id);
+        assert_eq!(direct.variant_name, "Some");
+        assert_eq!(direct.discriminant, 1);
+        assert_eq!(direct.trap_code, MIR_VARIANT_PROJECTION_TRAP_CODE);
+        let mut forged = direct.clone();
+        forged.trap_code = "E0805".into();
+        let trap_error = catalog
+            .validate_variant_projection_trap_receipt(&option_id, &i32_id, &forged)
+            .expect_err("non-canonical direct projection trap must fail closed");
+        assert!(trap_error.contains("canonical E0800"), "{trap_error}");
         let projection_error = catalog
             .validate_variant_payload_projection(&option_id, &some, &some_field, &bool_id)
             .expect_err("payload result type must match TypeDesc");
@@ -5869,6 +5972,39 @@ mod tests {
         assert!(
             missing_field.contains("absent from variant"),
             "{missing_field}"
+        );
+        let source =
+            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); drop(value); 0 }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let non_copy = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let (non_copy_id, some, field, string_id) = non_copy
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Option { variants, .. } => {
+                    let some = variants.iter().find(|variant| variant.name == "Some")?;
+                    let field = some.fields.first()?;
+                    Some((
+                        id.clone(),
+                        some.id.clone(),
+                        field.id.clone(),
+                        field.ty.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .expect("Option<string> TypeDesc");
+        let non_copy_error = non_copy
+            .validated_variant_projection_trap_contract(&non_copy_id, &some, &field, &string_id)
+            .expect_err("direct projection of a move-owned payload must fail closed");
+        assert!(
+            non_copy_error.contains("flat Copy variant contract")
+                || non_copy_error.contains("Copy payload")
+                || non_copy_error.contains("Aggregate/Copy"),
+            "{non_copy_error}"
         );
         assert!(catalog
             .validate_variant_construct(

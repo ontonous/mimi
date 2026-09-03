@@ -1769,6 +1769,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::EndBorrow { .. }
             | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
+            | MirInstructionKind::VariantProject { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructVariant { .. }
             | MirInstructionKind::ConstructVariantMove { .. }

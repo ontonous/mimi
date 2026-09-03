@@ -346,6 +346,15 @@ pub enum MirInstructionKind {
         base: MirValueId,
         projection: MirProjection,
     },
+    /// Read one payload field from the checker-selected active variant.
+    /// Unlike a switch binding, this node has no arm-level tag proof, so the
+    /// TypeDesc receipt carries the discriminant and explicit active-variant
+    /// trap contract. The admitted shape is read-only flat Copy Option/Result.
+    VariantProject {
+        result: MirValueId,
+        base: MirValueId,
+        contract: Option<types::MirVariantProjectionTrapContract>,
+    },
     Construct {
         result: MirValueId,
         kind: MirAggregateKind,
@@ -1490,6 +1499,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Borrow { result, .. }
         | MirInstructionKind::Project { result, .. }
         | MirInstructionKind::MoveProject { result, .. }
+        | MirInstructionKind::VariantProject { result, .. }
         | MirInstructionKind::Construct { result, .. }
         | MirInstructionKind::ConstructList { result, .. }
         | MirInstructionKind::ListOp { result, .. }
@@ -1586,6 +1596,7 @@ fn instruction_consumes_owned_string(
         | MirInstructionKind::Move { .. }
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
+        | MirInstructionKind::VariantProject { .. }
         | MirInstructionKind::Nop => {}
     }
     sources.into_iter().any(|source| {
@@ -1638,6 +1649,17 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             base,
             projection,
         } => format!("move_project {result} <- {base}.{projection:?}"),
+        MirInstructionKind::VariantProject {
+            result,
+            base,
+            contract,
+        } => format!(
+            "variant_project {result} <- {base}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [variant_projection={contract:?}]"))
+                .unwrap_or_default()
+        ),
         MirInstructionKind::Construct {
             result,
             kind,
@@ -2130,6 +2152,20 @@ impl<'a> MirValidator<'a> {
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
+            VariantProject {
+                result,
+                base,
+                contract,
+            } => {
+                self.use_value(base);
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "direct variant projection has no canonical trap receipt",
+                    );
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             Construct { result, fields, .. } => {
                 self.values(fields);
                 self.result_at(result, &instruction.id, block, index);
@@ -2613,6 +2649,7 @@ impl<'a> MirValidator<'a> {
                     uses.push(index.clone());
                 }
             }
+            MirInstructionKind::VariantProject { base, .. } => uses.push(base.clone()),
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
             }
@@ -2751,5 +2788,7 @@ impl<'a> MirValidator<'a> {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

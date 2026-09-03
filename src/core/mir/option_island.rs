@@ -723,6 +723,7 @@ impl<'a> OptionStringVariantValidator<'a> {
             | MirInstructionKind::EndBorrow { .. }
             | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
+            | MirInstructionKind::VariantProject { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructList { .. }
             | MirInstructionKind::ListOp { .. }
