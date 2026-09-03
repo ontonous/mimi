@@ -2154,6 +2154,7 @@ fn eval_materialized_call(
                 callee,
                 type_arguments,
                 arguments,
+                variant_call_contract,
             )
         }
         crate::core::mir::MirGenericInstanceContract::ScalarSetFacade { operation } => {
@@ -2627,7 +2628,7 @@ fn eval_materialized_set_facade_call(
 /// The verifier does not infer a callee body from a template name.  It first
 /// requires the call to name an instance in the canonical instance table,
 /// then checks that the executable target still has the exact specialized
-/// `Clone(parameter) -> Return` shape produced by MIR lowering.  This keeps
+/// one-block or total branch identity shape produced by MIR lowering.  This keeps
 /// the proof tied to the same TypeDesc, instance identity, and ownership
 /// contract consumed by the reference, bytecode, and native backends.
 fn eval_materialized_identity_call(
@@ -2639,6 +2640,7 @@ fn eval_materialized_identity_call(
     callee: &crate::core::ir::ResolvedCallee,
     type_arguments: &[crate::core::ir::ResolvedTypeId],
     arguments: &[MirValueId],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
 ) -> Result<(), String> {
     let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
         return Err("MIR verifier generic call callee is not a canonical function instance".into());
@@ -2668,6 +2670,37 @@ fn eval_materialized_identity_call(
         .functions()
         .get(target_owner)
         .ok_or_else(|| format!("MIR verifier generic target '{}' is absent", target_owner.0))?;
+    let flat_variant_result = catalog.validate_flat_copy_variant(&target.result).is_ok();
+    if flat_variant_result {
+        let receipt = variant_call_contract.ok_or_else(|| {
+            "MIR verifier generic flat Copy variant call has no canonical ABI receipt".to_string()
+        })?;
+        let parameter_types = target
+            .parameters
+            .iter()
+            .map(|parameter| {
+                target
+                    .values
+                    .get(parameter)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        "MIR verifier generic target parameter TypeDesc is absent".to_string()
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        catalog.validate_variant_call_abi_receipt(
+            target_owner,
+            type_arguments,
+            &parameter_types,
+            &target.result,
+            receipt,
+        )?;
+    } else if variant_call_contract.is_some() {
+        return Err(
+            "MIR verifier generic variant call receipt is attached to a non-variant result".into(),
+        );
+    }
+    crate::core::mir::validate_generic_identity_shape(target, &target.result)?;
     let [target_parameter] = target.parameters.as_slice() else {
         return Err("MIR verifier generic identity target must have one parameter".into());
     };
@@ -2691,36 +2724,6 @@ fn eval_materialized_identity_call(
                 .into(),
         );
     }
-    let block = target
-        .blocks
-        .get(&target.entry)
-        .filter(|_| target.blocks.len() == 1)
-        .ok_or_else(|| {
-            "MIR verifier generic identity target must have one entry block".to_string()
-        })?;
-    let [instruction] = block.instructions.as_slice() else {
-        return Err("MIR verifier generic identity target must contain exactly one Clone".into());
-    };
-    let MirInstructionKind::Clone {
-        result: cloned_value,
-        source,
-    } = &instruction.kind
-    else {
-        return Err("MIR verifier generic identity target must use Clone".into());
-    };
-    if source != target_parameter
-        || !target
-            .values
-            .get(cloned_value)
-            .is_some_and(|value| value.ty == *concrete)
-        || !matches!(
-            &block.terminator,
-            MirTerminator::Return { value: Some(value) } if value == cloned_value
-        )
-    {
-        return Err("MIR verifier generic identity target must return its cloned parameter".into());
-    }
-
     let argument = arguments
         .first()
         .expect("validated one generic call argument");
@@ -2750,8 +2753,43 @@ fn eval_materialized_identity_call(
     {
         return Err("MIR verifier generic call result disagrees with target TypeDesc".into());
     }
-    ensure_result_shape(function, catalog, result, &symbolic)?;
-    state.values.insert(result.clone(), symbolic);
+    let caller_constraints = state.constraints.clone();
+    if target.blocks.len() == 1 {
+        ensure_result_shape(function, catalog, result, &symbolic)?;
+        state.values.insert(result.clone(), symbolic);
+        return Ok(());
+    }
+    if !flat_variant_result {
+        return Err(
+            "MIR verifier generic identity multi-path merge only admits flat Copy Option/Result"
+                .into(),
+        );
+    }
+    validate_direct_variant_return_coverage(target, &target.entry)?;
+    let mut target_state = SymbolicState {
+        values: BTreeMap::from([(target_parameter.clone(), symbolic)]),
+        constraints: caller_constraints.clone(),
+        traps: Vec::new(),
+    };
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if !traps.is_empty() {
+        return Err("MIR verifier generic identity call has a trapping execution path".into());
+    }
+    let merged = merge_direct_variant_return_paths(catalog, &target.result, &returns)?;
+    state.constraints = caller_constraints;
+    ensure_result_shape(function, catalog, result, &merged)?;
+    state.values.insert(result.clone(), merged);
     Ok(())
 }
 
@@ -3468,6 +3506,81 @@ mod tests {
             .find(|result| result.func_name == owner.0)
             .expect("generic variant contract verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_merges_materialized_generic_variant_identity_branch_paths() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_variant_identity_multipath.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic identity branch MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic branch identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(7));
+
+        let results = verify_program(
+            &program,
+            "generic-variant-identity-multipath-source-hash".into(),
+        )
+        .expect("verify generic branch identity MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("generic branch identity verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_rejects_materialized_generic_scalar_identity_branch_merge() {
+        let source = r#"
+            func identity<T>(value: T) -> T {
+                if true { value } else { value }
+            }
+
+            func checked() -> i32 {
+                ensures: result == 41
+                identity(41)
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic scalar branch identity MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let results = verify_program(
+            &program,
+            "generic-scalar-identity-multipath-source-hash".into(),
+        )
+        .expect("verify should classify unsupported scalar path merge");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("generic scalar branch verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result
+            .message
+            .contains("only admits flat Copy Option/Result"));
     }
 
     #[test]

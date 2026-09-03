@@ -1,0 +1,14 @@
+func identity<T>(value: T) -> T {
+    if true { value } else { value }
+}
+
+func checked() -> i32 {
+    ensures: result >= 0
+    let value: Option<i32> = Some(7)
+    let roundtrip = identity(value)
+    if roundtrip.is_some() { 7 } else { 0 }
+}
+
+func main() -> i32 {
+    checked()
+}

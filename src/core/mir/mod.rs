@@ -755,6 +755,266 @@ impl MirFunction {
     }
 }
 
+/// Validate the closed generic identity body contract shared by lowering,
+/// canonical-program admission, and the MIR verifier. The body may be the
+/// original one-block `Clone; Return` form or an acyclic total `Goto`/`Branch`
+/// CFG in which every path clones the one parameter exactly once and returns
+/// that clone. No frontend or backend fact is consulted here.
+pub(crate) fn validate_generic_identity_shape(
+    function: &MirFunction,
+    expected_type: &ResolvedTypeId,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("generic MIR identity body must have exactly one parameter".into());
+    };
+    if function.result != *expected_type
+        || !function
+            .values
+            .get(parameter)
+            .is_some_and(|value| value.ty == *expected_type)
+    {
+        return Err(
+            "generic MIR identity body must preserve one canonical parameter and result".into(),
+        );
+    }
+    if function.blocks.len() == 1 {
+        return validate_single_block_generic_identity(function, parameter, expected_type);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin {
+        Parameter,
+        Clone,
+        Other,
+    }
+
+    #[derive(Clone)]
+    struct PathState {
+        origins: BTreeMap<MirValueId, Origin>,
+        clone_count: usize,
+    }
+
+    fn edge_state(
+        function: &MirFunction,
+        state: &PathState,
+        target: &MirBlockId,
+        arguments: &[MirValueId],
+    ) -> Result<PathState, String> {
+        let block = function
+            .blocks
+            .get(target)
+            .ok_or_else(|| format!("generic MIR identity target block '{}' is absent", target))?;
+        if block.parameters.len() != arguments.len() {
+            return Err(
+                "generic MIR identity branch edge arguments disagree with block parameters".into(),
+            );
+        }
+        let mut next = state.clone();
+        for (parameter, argument) in block.parameters.iter().zip(arguments) {
+            let origin = state.origins.get(argument).copied().ok_or_else(|| {
+                format!(
+                    "generic MIR identity branch edge argument '{}' is not defined",
+                    argument
+                )
+            })?;
+            next.origins.insert(parameter.value.clone(), origin);
+        }
+        Ok(next)
+    }
+
+    fn visit(
+        function: &MirFunction,
+        block_id: &MirBlockId,
+        mut state: PathState,
+        parameter: &MirValueId,
+        expected_type: &ResolvedTypeId,
+        active: &mut BTreeSet<MirBlockId>,
+        reachable: &mut BTreeSet<MirBlockId>,
+    ) -> Result<(), String> {
+        if !active.insert(block_id.clone()) {
+            return Err("generic MIR identity body does not admit cyclic CFG".into());
+        }
+        reachable.insert(block_id.clone());
+        let block = function
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| format!("generic MIR identity block '{}' is absent", block_id))?;
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                MirInstructionKind::Const { result, literal } => {
+                    if !matches!(literal, ResolvedLiteral::Bool(_)) {
+                        return Err(
+                            "generic MIR identity branch body may only use boolean constants"
+                                .into(),
+                        );
+                    }
+                    state.origins.insert(result.clone(), Origin::Other);
+                }
+                MirInstructionKind::Clone { result, source } => {
+                    if source != parameter
+                        || !function
+                            .values
+                            .get(result)
+                            .is_some_and(|value| value.ty == *expected_type)
+                        || state.clone_count != 0
+                    {
+                        return Err(
+                            "generic MIR identity branch must Clone its parameter exactly once"
+                                .into(),
+                        );
+                    }
+                    state.origins.insert(result.clone(), Origin::Clone);
+                    state.clone_count += 1;
+                }
+                MirInstructionKind::Copy { result, source }
+                | MirInstructionKind::Move { result, source } => {
+                    let origin = state.origins.get(source).copied().ok_or_else(|| {
+                        format!(
+                            "generic MIR identity branch value '{}' is not defined",
+                            source
+                        )
+                    })?;
+                    state.origins.insert(result.clone(), origin);
+                }
+                _ => {
+                    return Err(
+                        "generic MIR identity branch body may only contain Const/Clone/Copy/Move"
+                            .into(),
+                    )
+                }
+            }
+        }
+        match &block.terminator {
+            MirTerminator::Goto {
+                target, arguments, ..
+            } => {
+                let next = edge_state(function, &state, target, arguments)?;
+                visit(
+                    function,
+                    target,
+                    next,
+                    parameter,
+                    expected_type,
+                    active,
+                    reachable,
+                )?;
+            }
+            MirTerminator::Branch {
+                condition,
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+                ..
+            } => {
+                if !state.origins.contains_key(condition) {
+                    return Err(format!(
+                        "generic MIR identity branch condition '{}' is not defined",
+                        condition
+                    ));
+                }
+                let then_state = edge_state(function, &state, then_target, then_arguments)?;
+                visit(
+                    function,
+                    then_target,
+                    then_state,
+                    parameter,
+                    expected_type,
+                    &mut active.clone(),
+                    reachable,
+                )?;
+                let else_state = edge_state(function, &state, else_target, else_arguments)?;
+                visit(
+                    function,
+                    else_target,
+                    else_state,
+                    parameter,
+                    expected_type,
+                    &mut active.clone(),
+                    reachable,
+                )?;
+            }
+            MirTerminator::Return { value: Some(value) } => {
+                if state.clone_count != 1
+                    || state.origins.get(value).copied() != Some(Origin::Clone)
+                {
+                    return Err(
+                        "generic MIR identity branch must return its exactly-once Clone result"
+                            .into(),
+                    );
+                }
+            }
+            MirTerminator::Return { value: None } => {
+                return Err("generic MIR identity branch must return a value".into())
+            }
+            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
+                return Err("generic MIR identity branch body only admits Goto/Branch CFG".into())
+            }
+            MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => {
+                return Err(
+                    "generic MIR identity branch body requires total non-trapping returns".into(),
+                )
+            }
+        }
+        active.remove(block_id);
+        Ok(())
+    }
+
+    let mut origins = BTreeMap::new();
+    origins.insert(parameter.clone(), Origin::Parameter);
+    let mut reachable = BTreeSet::new();
+    visit(
+        function,
+        &function.entry,
+        PathState {
+            origins,
+            clone_count: 0,
+        },
+        parameter,
+        expected_type,
+        &mut BTreeSet::new(),
+        &mut reachable,
+    )?;
+    if reachable.len() != function.blocks.len() {
+        return Err("generic MIR identity body contains unreachable blocks".into());
+    }
+    Ok(())
+}
+
+fn validate_single_block_generic_identity(
+    function: &MirFunction,
+    parameter: &MirValueId,
+    expected_type: &ResolvedTypeId,
+) -> Result<(), String> {
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic MIR identity entry block is absent".to_string())?;
+    let [instruction] = block.instructions.as_slice() else {
+        return Err("generic MIR identity body must contain exactly one Clone instruction".into());
+    };
+    let MirInstructionKind::Clone { result, source } = &instruction.kind else {
+        return Err("generic MIR identity body must use canonical Clone from its parameter".into());
+    };
+    if source != parameter
+        || !function
+            .values
+            .get(result)
+            .is_some_and(|value| value.ty == *expected_type)
+    {
+        return Err("generic MIR identity Clone must copy the canonical parameter".into());
+    }
+    if !matches!(
+        &block.terminator,
+        MirTerminator::Return { value: Some(value) } if value == result
+    ) {
+        return Err("generic MIR identity body must return the Clone result".into());
+    }
+    Ok(())
+}
+
 fn format_params(parameters: &[MirBlockParameter]) -> String {
     parameters
         .iter()

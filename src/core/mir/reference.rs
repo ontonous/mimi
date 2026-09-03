@@ -1261,67 +1261,16 @@ fn validate_generic_identity_instance_function(
     arguments: &[crate::core::ResolvedTypeId],
 ) -> Vec<super::MirValidationError> {
     let subject = instance_id.to_string();
-    let error = |message: &str| super::MirValidationError {
-        subject: subject.clone(),
-        message: message.into(),
-    };
     let Some(concrete) = arguments.first() else {
-        return vec![error(
-            "generic MIR identity instance has no concrete argument",
-        )];
+        return vec![super::MirValidationError {
+            subject,
+            message: "generic MIR identity instance has no concrete argument".into(),
+        }];
     };
-    let mut errors = Vec::new();
-    let Some([parameter]) = function.parameters.get(..) else {
-        return vec![error(
-            "generic MIR identity instance function must have exactly one parameter",
-        )];
-    };
-    if function.result != *concrete
-        || !function
-            .values
-            .get(parameter)
-            .is_some_and(|value| value.ty == *concrete)
-    {
-        errors.push(error(
-            "generic MIR identity instance function parameter/result types disagree with its argument",
-        ));
-    }
-    if function.blocks.len() != 1 {
-        errors.push(error(
-            "generic MIR identity instance function must have exactly one block",
-        ));
-        return errors;
-    }
-    let Some(block) = function.blocks.get(&function.entry) else {
-        return vec![error("generic MIR identity instance entry block is absent")];
-    };
-    let Some([instruction]) = block.instructions.get(..) else {
-        errors.push(error(
-            "generic MIR identity instance body must contain exactly one Clone",
-        ));
-        return errors;
-    };
-    let MirInstructionKind::Clone { result, source } = &instruction.kind else {
-        errors.push(error(
-            "generic MIR identity instance body must use Clone from its parameter",
-        ));
-        return errors;
-    };
-    if source != parameter
-        || !function
-            .values
-            .get(result)
-            .is_some_and(|value| value.ty == *concrete)
-        || !matches!(
-            &block.terminator,
-            MirTerminator::Return { value: Some(value) } if value == result
-        )
-    {
-        errors.push(error(
-            "generic MIR identity instance body must return its cloned parameter",
-        ));
-    }
-    errors
+    super::validate_generic_identity_shape(function, concrete)
+        .err()
+        .map(|message| vec![super::MirValidationError { subject, message }])
+        .unwrap_or_default()
 }
 
 /// Validate the canonical intra-program call ABI before a backend sees MIR.
@@ -4944,6 +4893,39 @@ mod tests {
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference generic variant identity execution");
         assert_eq!(value, MirRuntimeValue::Int(18));
+    }
+
+    #[test]
+    fn reference_executes_materialized_generic_variant_identity_branch_paths() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_variant_identity_multipath.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic identity branch must lower to canonical MIR");
+        let identity = program
+            .instances()
+            .values()
+            .next()
+            .expect("identity instance");
+        let target = program
+            .functions()
+            .get(&identity.function)
+            .expect("materialized identity target");
+        assert!(target.blocks.len() > 1, "fixture must retain branch CFG");
+        assert!(target.blocks.values().any(|block| {
+            matches!(
+                block.terminator,
+                crate::core::mir::MirTerminator::Branch { .. }
+            )
+        }));
+
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic branch identity execution");
+        assert_eq!(value, MirRuntimeValue::Int(7));
     }
 
     #[test]

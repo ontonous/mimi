@@ -465,7 +465,12 @@ fn materialize_generic_instance(
         errors
     })?;
     if is_identity {
-        validate_identity_mir_shape(&function, &generic_id, &subject())?;
+        if let Err(message) = super::validate_generic_identity_shape(&function, &generic_id) {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]);
+        }
     }
     let concrete = arguments.first().cloned().ok_or_else(|| {
         vec![MirLoweringError {
@@ -762,67 +767,6 @@ pub(crate) fn validate_scalar_set_facade_mir(
             .map(|value| &value.ty),
         operation,
     )
-}
-
-fn validate_identity_mir_shape(
-    function: &MirFunction,
-    generic_id: &crate::core::ResolvedTypeId,
-    subject: &NodeId,
-) -> Result<(), Vec<MirLoweringError>> {
-    let error = |message: &str| {
-        vec![MirLoweringError {
-            node_id: subject.clone(),
-            message: message.into(),
-        }]
-    };
-    let [parameter] = function.parameters.as_slice() else {
-        return Err(error(
-            "generic MIR instance body must have exactly one parameter",
-        ));
-    };
-    if function.result != *generic_id
-        || !function
-            .values
-            .get(parameter)
-            .is_some_and(|value| value.ty == *generic_id)
-        || function.blocks.len() != 1
-    {
-        return Err(error(
-            "generic MIR instance body must preserve one canonical T parameter and result",
-        ));
-    }
-    let Some(block) = function.blocks.get(&function.entry) else {
-        return Err(error("generic MIR instance entry block is absent"));
-    };
-    let [instruction] = block.instructions.as_slice() else {
-        return Err(error(
-            "generic MIR identity body must contain exactly one Clone instruction",
-        ));
-    };
-    let MirInstructionKind::Clone { result, source } = &instruction.kind else {
-        return Err(error(
-            "generic MIR identity body must use canonical Clone from its parameter",
-        ));
-    };
-    if source != parameter
-        || !function
-            .values
-            .get(result)
-            .is_some_and(|value| value.ty == *generic_id)
-    {
-        return Err(error(
-            "generic MIR identity Clone must copy the canonical T parameter",
-        ));
-    }
-    if !matches!(
-        &block.terminator,
-        MirTerminator::Return { value: Some(value) } if value == result
-    ) {
-        return Err(error(
-            "generic MIR identity body must return the Clone result",
-        ));
-    }
-    Ok(())
 }
 
 fn generic_parameter_type_id(

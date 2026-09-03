@@ -1613,6 +1613,28 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_variant_identity_branch_paths() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_variant_identity_multipath.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic branch identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(7));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_variant_identity_multipath");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic branch identity must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic branch identity module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_total_direct_variant_call_paths() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_variant_call_multipath.mimi"
