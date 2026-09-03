@@ -613,6 +613,22 @@ pub struct MirVariantProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for one canonical record field projection.
+///
+/// The nominal/field identities, runtime field name, declaration-order index,
+/// record arity, and field type are resolved together from the TypeDesc graph.
+/// A backend may encode the name or index physically, but it must carry the
+/// receipt rather than infer record shape from a map, struct, or AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirRecordProjectionContract {
+    pub nominal: NominalTypeId,
+    pub field: NodeId,
+    pub name: String,
+    pub field_index: usize,
+    pub arity: usize,
+    pub field_ty: ResolvedTypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -2768,9 +2784,58 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate one value projection against the canonical semantic layout.
-    /// Field names are intentionally unavailable here: the stable field ID is
-    /// the only identity that crosses the MIR/backend boundary.
+    /// Resolve the complete TypeDesc receipt for one canonical record field
+    /// projection. The result type is part of the contract so a consumer
+    /// cannot select a physically valid field with a semantically unrelated
+    /// destination type. Ownership policy is deliberately checked by the
+    /// caller because read and move projections have different contracts.
+    pub fn validated_record_field_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirRecordProjectionContract, String> {
+        let descriptor = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "record projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        self.get(result_ty).ok_or_else(|| {
+            format!(
+                "record projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+            return Err(format!(
+                "record projection base type '{}' has no canonical record layout",
+                base_ty.as_str()
+            ));
+        };
+        let (field_index, field) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == *field_id)
+            .ok_or_else(|| format!("record projection field '{}' is absent", field_id.0))?;
+        if field.ty != *result_ty {
+            return Err(format!(
+                "record projection field '{}' type '{}' disagrees with result type '{}'",
+                field_id.0,
+                field.ty.as_str(),
+                result_ty.as_str()
+            ));
+        }
+        Ok(MirRecordProjectionContract {
+            nominal: nominal.clone(),
+            field: field.id.clone(),
+            name: field.name.clone(),
+            field_index,
+            arity: fields.len(),
+            field_ty: field.ty.clone(),
+        })
+    }
+
     pub fn projection_result_type(
         &self,
         base_ty: &ResolvedTypeId,
@@ -2839,19 +2904,9 @@ impl MirTypeCatalog {
                 }
                 Ok(())
             }
-            (MirLayout::Record { fields, .. }, crate::core::mir::MirProjection::Field(field)) => {
-                let expected = fields
-                    .iter()
-                    .find(|candidate| candidate.id == *field)
-                    .ok_or_else(|| format!("record projection field '{}' is absent", field.0))?;
-                if expected.ty != *result_ty {
-                    return Err(format!(
-                        "record projection field '{}' type '{}' disagrees with result type '{}'",
-                        field.0,
-                        expected.ty.as_str(),
-                        result_ty.as_str()
-                    ));
-                }
+            (MirLayout::Record { .. }, crate::core::mir::MirProjection::Field(field)) => {
+                let _ =
+                    self.validated_record_field_projection_contract(base_ty, field, result_ty)?;
                 if result.ownership != MirOwnership::Copy {
                     return Err(format!(
                         "record projection result type '{}' is non-Copy and has no explicit move projection contract",
@@ -2910,7 +2965,7 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        let MirLayout::Record { nominal: _, fields } = &base.layout else {
+        let MirLayout::Record { fields, .. } = &base.layout else {
             return Err("move projection requires a record product base".into());
         };
         if base.ownership == MirOwnership::Copy {
@@ -2921,18 +2976,9 @@ impl MirTypeCatalog {
         let crate::core::mir::MirProjection::Field(field) = projection else {
             return Err("move projection currently supports direct record fields only".into());
         };
-        let selected = fields
-            .iter()
-            .find(|candidate| candidate.id == *field)
-            .ok_or_else(|| format!("move projection field '{}' is absent", field.0))?;
-        if selected.ty != *result_ty {
-            return Err(format!(
-                "move projection field '{}' type '{}' disagrees with result type '{}'",
-                field.0,
-                selected.ty.as_str(),
-                result_ty.as_str()
-            ));
-        }
+        let receipt = self
+            .validated_record_field_projection_contract(base_ty, field, result_ty)
+            .map_err(|message| message.replacen("record projection", "move projection", 1))?;
         if result.ownership == MirOwnership::Copy {
             return Err(format!(
                 "move projection result type '{}' must be non-Copy",
@@ -2948,7 +2994,10 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             ));
         }
-        for sibling in fields.iter().filter(|candidate| candidate.id != *field) {
+        for sibling in fields
+            .iter()
+            .filter(|candidate| candidate.id != receipt.field)
+        {
             let sibling_desc = self.get(&sibling.ty).ok_or_else(|| {
                 format!(
                     "move projection sibling field '{}' type '{}' is absent",
@@ -4699,6 +4748,17 @@ mod tests {
         assert!(catalog
             .validate_projection(&point_ty, &x.ty, &MirProjection::Field(x.id.clone()),)
             .is_ok());
+        let receipt = catalog
+            .validated_record_field_projection_contract(&point_ty, &x.id, &x.ty)
+            .expect("record projection receipt");
+        assert_eq!(receipt.field, x.id);
+        assert_eq!(receipt.name, "x");
+        assert_eq!(receipt.field_index, 0);
+        assert_eq!(receipt.arity, 2);
+        assert_eq!(receipt.field_ty, x.ty);
+        assert!(catalog
+            .validated_record_field_projection_contract(&point_ty, &x.id, &y.ty)
+            .is_err());
         let unknown = catalog
             .validate_projection(
                 &point_ty,

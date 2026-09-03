@@ -1990,6 +1990,7 @@ impl BytecodeCompiler {
                     rd,
                     ra: r_obj,
                     field: field_idx,
+                    contract: None,
                 });
                 Ok(rd)
             }
@@ -2183,6 +2184,7 @@ impl BytecodeCompiler {
                     rd: r_field,
                     ra: r_obj,
                     field: field_idx,
+                    contract: None,
                 });
                 // Wrap the field value back in Some.
                 fc.emit(Op::Some { rd, ra: r_field });
@@ -5443,6 +5445,7 @@ impl BytecodeCompiler {
                     rd: r_next,
                     ra: r_cur,
                     field: f_idx,
+                    contract: None,
                 });
             }
             temps.push(r_next);
@@ -7453,6 +7456,7 @@ mod peephole_tests {
                 rd: 10,
                 ra: 9,
                 field: 1,
+                contract: None,
             },
             Op::Ret { ra: 10 },
         ];

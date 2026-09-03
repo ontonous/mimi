@@ -660,6 +660,9 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
         field: ConstIdx,
+        /// Optional canonical MIR record projection receipt. `None` is kept
+        /// for legacy bytecode only; canonical MIR emission must populate it.
+        contract: Option<ConstIdx>,
     },
     /// rd = consume ra and move ra.field[field_name] out of the record.
     /// The canonical MIR contract guarantees that no non-Copy residual field
@@ -669,6 +672,9 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
         field: ConstIdx,
+        /// Optional canonical MIR record projection receipt. `None` is kept
+        /// for legacy bytecode only; canonical MIR emission must populate it.
+        contract: Option<ConstIdx>,
     },
     /// ra.field[field_name] = rb — field name is a string constant
     RecordSet {
@@ -1452,6 +1458,9 @@ pub enum ConstValue {
     /// arity copied only from a validated MIR TypeDesc table; the VM must
     /// reject tags or payloads outside it.
     VariantShapes(Vec<VariantShape>),
+    /// Canonical record projection receipts encoded for the bytecode physical
+    /// ABI. The MIR adapter copies this only from a validated TypeDesc.
+    RecordProjection(RecordProjectionShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1468,6 +1477,19 @@ pub struct VariantShape {
     pub variant: crate::core::NodeId,
     pub tag: String,
     pub discriminant: VariantIdx,
+    pub arity: u16,
+}
+
+/// One canonical record field projection in the bytecode physical contract.
+/// The field type remains in the core MIR receipt; the VM needs the nominal,
+/// field name, declaration-order index, and arity to reject forged records
+/// before it reads or consumes a source register.
+#[derive(Debug, Clone)]
+pub struct RecordProjectionShape {
+    pub nominal: crate::core::ir::NominalTypeId,
+    pub field: crate::core::NodeId,
+    pub name: String,
+    pub index: FieldIdx,
     pub arity: u16,
 }
 

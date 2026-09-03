@@ -191,6 +191,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+                ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -375,6 +376,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+                ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -567,7 +569,12 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 *base as u16 + count.saturating_sub(1)
             )
         }
-        Op::RecordGet { rd, ra, field } => {
+        Op::RecordGet {
+            rd,
+            ra,
+            field,
+            contract,
+        } => {
             let fname = proto
                 .constants
                 .get(*field as usize)
@@ -576,9 +583,24 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     _ => "?",
                 })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = r{}.{}", pc, name, rd, ra, fname)
+            format!(
+                "{:04}  {:<16} r{} = r{}.{}{}",
+                pc,
+                name,
+                rd,
+                ra,
+                fname,
+                contract
+                    .map(|idx| format!(" [contract {}]", idx))
+                    .unwrap_or_default()
+            )
         }
-        Op::RecordMoveGet { rd, ra, field } => {
+        Op::RecordMoveGet {
+            rd,
+            ra,
+            field,
+            contract,
+        } => {
             let fname = proto
                 .constants
                 .get(*field as usize)
@@ -587,7 +609,17 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     _ => "?",
                 })
                 .unwrap_or("?");
-            format!("{:04}  {:<16} r{} = move r{}.{}", pc, name, rd, ra, fname)
+            format!(
+                "{:04}  {:<16} r{} = move r{}.{}{}",
+                pc,
+                name,
+                rd,
+                ra,
+                fname,
+                contract
+                    .map(|idx| format!(" [contract {}]", idx))
+                    .unwrap_or_default()
+            )
         }
         Op::RecordSet { ra, field, rb } => {
             let fname = proto
@@ -929,6 +961,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::Pattern(p) => format!("pattern {:?}", p),
             ConstValue::StrVec(v) => format!("strvec {:?}", v),
             ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+            ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

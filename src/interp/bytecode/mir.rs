@@ -15,7 +15,7 @@ use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, Resolve
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout, MirOwnership,
-    MirTypeDesc, MirTypeKind,
+    MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -24,7 +24,8 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, Op, Reg, VariantShape,
+    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, Op, RecordProjectionShape, Reg,
+    VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -843,43 +844,31 @@ impl<'a> FunctionEmitter<'a> {
                     ty: projected_ty,
                     ..
                 } => {
-                    let Some(desc) = self.program.type_catalog().get(&current_ty) else {
-                        self.error(format!(
-                            "projected load base type '{}' is absent",
-                            current_ty.as_str()
-                        ));
+                    let receipt = match self
+                        .program
+                        .type_catalog()
+                        .validated_record_field_projection_contract(
+                            &current_ty,
+                            field,
+                            projected_ty,
+                        ) {
+                        Ok(receipt) => receipt,
+                        Err(message) => {
+                            self.error(format!(
+                                "record projected load has no canonical contract: {message}"
+                            ));
+                            return;
+                        }
+                    };
+                    let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                    let Some(contract) = self.add_record_projection_contract(&receipt) else {
                         return;
                     };
-                    let MirLayout::Record { fields, .. } = &desc.layout else {
-                        self.error(format!(
-                            "projected load base type '{}' is not a record",
-                            current_ty.as_str()
-                        ));
-                        return;
-                    };
-                    let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field)
-                    else {
-                        self.error(format!(
-                            "projected load field '{}' is absent from TypeDesc",
-                            field.0
-                        ));
-                        return;
-                    };
-                    if &field_desc.ty != projected_ty {
-                        self.error(format!(
-                            "record projected load type '{}' disagrees with layout type '{}'",
-                            projected_ty.as_str(),
-                            field_desc.ty.as_str()
-                        ));
-                        return;
-                    }
-                    let field_idx = self
-                        .proto
-                        .add_const(ConstValue::Str(field_desc.name.clone()));
                     self.proto.emit(Op::RecordGet {
                         rd: destination,
                         ra: current_reg,
                         field: field_idx,
+                        contract: Some(contract),
                     });
                     current_ty = projected_ty.clone();
                 }
@@ -1338,31 +1327,32 @@ impl<'a> FunctionEmitter<'a> {
                     idx: *index as u16,
                 });
             }
-            (MirLayout::Record { fields, .. }, MirProjection::Field(field)) => {
-                let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field)
-                else {
-                    self.error(format!(
-                        "record projection field '{}' is absent from TypeDesc",
-                        field.0
-                    ));
+            (MirLayout::Record { .. }, MirProjection::Field(field)) => {
+                let receipt = match self
+                    .program
+                    .type_catalog()
+                    .validated_record_field_projection_contract(
+                        &base_desc.id,
+                        field,
+                        &result_desc.id,
+                    ) {
+                    Ok(receipt) => receipt,
+                    Err(message) => {
+                        self.error(format!(
+                            "record projection has no canonical contract: {message}"
+                        ));
+                        return;
+                    }
+                };
+                let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                let Some(contract) = self.add_record_projection_contract(&receipt) else {
                     return;
                 };
-                if field_desc.ty != result_desc.id {
-                    self.error(format!(
-                        "record projection result '{}' has type '{}' but field selects '{}'",
-                        result,
-                        result_desc.id.as_str(),
-                        field_desc.ty.as_str()
-                    ));
-                    return;
-                }
-                let field_idx = self
-                    .proto
-                    .add_const(ConstValue::Str(field_desc.name.clone()));
                 self.proto.emit(Op::RecordGet {
                     rd,
                     ra,
                     field: field_idx,
+                    contract: Some(contract),
                 });
             }
             (MirLayout::List { element }, MirProjection::Index(index)) => {
@@ -1452,29 +1442,57 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         }
-        let MirLayout::Record { fields, .. } = &base_desc.layout else {
-            self.error("move projection base has no record layout");
-            return;
-        };
         let MirProjection::Field(field) = projection else {
             self.error("move projection requires a direct record field");
             return;
         };
-        let Some(field_desc) = fields.iter().find(|candidate| candidate.id == *field) else {
-            self.error(format!(
-                "move projection field '{}' is absent from TypeDesc",
-                field.0
-            ));
+        let receipt = match self
+            .program
+            .type_catalog()
+            .validated_record_field_projection_contract(&base_desc.id, field, &result_desc.id)
+        {
+            Ok(receipt) => receipt,
+            Err(message) => {
+                self.error(format!(
+                    "move projection has no canonical receipt: {message}"
+                ));
+                return;
+            }
+        };
+        let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+        let Some(contract) = self.add_record_projection_contract(&receipt) else {
             return;
         };
-        let field_idx = self
-            .proto
-            .add_const(ConstValue::Str(field_desc.name.clone()));
         self.proto.emit(Op::RecordMoveGet {
             rd,
             ra,
             field: field_idx,
+            contract: Some(contract),
         });
+    }
+
+    fn add_record_projection_contract(
+        &mut self,
+        receipt: &MirRecordProjectionContract,
+    ) -> Option<ConstIdx> {
+        let Ok(index) = u16::try_from(receipt.field_index) else {
+            self.error("record projection field index exceeds bytecode ABI");
+            return None;
+        };
+        let Ok(arity) = u16::try_from(receipt.arity) else {
+            self.error("record projection arity exceeds bytecode ABI");
+            return None;
+        };
+        Some(
+            self.proto
+                .add_const(ConstValue::RecordProjection(RecordProjectionShape {
+                    nominal: receipt.nominal.clone(),
+                    field: receipt.field.clone(),
+                    name: receipt.name.clone(),
+                    index,
+                    arity,
+                })),
+        )
     }
 
     fn emit_list_construct(&mut self, result: &MirValueId, elements: &[MirValueId]) {
@@ -2850,7 +2868,7 @@ mod tests {
     use crate::core::mir::{MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
-    use crate::interp::bytecode::Op;
+    use crate::interp::bytecode::{ConstValue, Op};
     use crate::interp::value::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -3765,8 +3783,56 @@ mod tests {
     fn executes_record_projection_and_update_through_canonical_mir() {
         let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { y: true, x: 40 }; let q = Point { y: false, ..p }; q.x }";
         let program = compile(source);
+        let main = &program.functions[program.entry as usize];
+        let projection_contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::RecordGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical record projection contract");
+        let ConstValue::RecordProjection(shape) = &main.constants[projection_contract as usize]
+        else {
+            panic!("record projection must carry a canonical shape constant");
+        };
+        assert_eq!(shape.name, "x");
+        assert_eq!(shape.index, 0);
+        assert_eq!(shape.arity, 2);
         let value = BytecodeVM::new(program).run_value().expect("VM execution");
         assert!(matches!(value, Value::Int(40)));
+    }
+
+    #[test]
+    fn canonical_record_projection_rejects_forged_nominal_before_read() {
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 40, y: true }; p.x }";
+        let mut program = (*compile(source)).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::RecordGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical record projection contract");
+        let ConstValue::RecordProjection(shape) = &mut main.constants[contract as usize] else {
+            panic!("record projection must carry a canonical shape constant");
+        };
+        shape.nominal =
+            crate::core::ir::NominalTypeId::new("type:forged").expect("forged nominal identity");
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("forged canonical record identity must trap");
+        assert!(error
+            .message()
+            .contains("canonical nominal disagrees with projection contract"));
     }
 
     #[test]
@@ -3810,10 +3876,24 @@ mod tests {
             .expect("reference move projection");
         let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
         let main = &bytecode.functions[bytecode.entry as usize];
-        assert!(main
+        let projection_contract = main
             .code
             .iter()
-            .any(|op| matches!(op, Op::RecordMoveGet { .. })));
+            .find_map(|op| match op {
+                Op::RecordMoveGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical record move projection contract");
+        let ConstValue::RecordProjection(shape) = &main.constants[projection_contract as usize]
+        else {
+            panic!("record move projection must carry a canonical shape constant");
+        };
+        assert_eq!(shape.name, "name");
+        assert_eq!(shape.index, 0);
+        assert_eq!(shape.arity, 2);
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("bytecode move projection");

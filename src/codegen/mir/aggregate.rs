@@ -433,25 +433,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ));
         };
         let base_ty = self.value_type(base, subject)?;
-        let descriptor =
-            self.program.type_catalog().get(&base_ty).ok_or_else(|| {
-                NativeMirError::new(subject, "projection base TypeDesc is absent")
-            })?;
-        let MirLayout::Record { fields, .. } = &descriptor.layout else {
-            return Err(NativeMirError::new(
-                subject,
-                "projection base has no canonical record layout",
-            ));
-        };
-        let index = fields
-            .iter()
-            .position(|field| field.id == *field_id)
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    format!("record field '{}' is absent from TypeDesc", field_id.0),
-                )
-            })?;
+        let result_ty = self.value_type(result, subject)?;
+        let receipt = self
+            .program
+            .type_catalog()
+            .validated_record_field_projection_contract(&base_ty, field_id, &result_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let index = receipt.field_index;
         let aggregate = self.value(base, subject)?.into_struct_value();
         self.generator
             .builder
@@ -484,24 +472,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "native MoveProject requires a direct record field",
             ));
         };
-        let descriptor = self.program.type_catalog().get(&base_ty).ok_or_else(|| {
-            NativeMirError::new(subject, "move projection base TypeDesc is absent")
-        })?;
-        let MirLayout::Record { fields, .. } = &descriptor.layout else {
-            return Err(NativeMirError::new(
-                subject,
-                "move projection base has no canonical record layout",
-            ));
-        };
-        let index = fields
-            .iter()
-            .position(|field| field.id == *field_id)
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    format!("record field '{}' is absent from TypeDesc", field_id.0),
-                )
-            })?;
+        let receipt = self
+            .program
+            .type_catalog()
+            .validated_record_field_projection_contract(&base_ty, field_id, &result_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let index = receipt.field_index;
         let aggregate = self.value(base, subject)?.into_struct_value();
         self.generator
             .builder

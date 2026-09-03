@@ -1672,6 +1672,7 @@ impl BytecodeVM {
                         | Some(ConstValue::Pattern(_))
                         | Some(ConstValue::StrVec(_))
                         | Some(ConstValue::VariantShapes(_))
+                        | Some(ConstValue::RecordProjection(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2367,14 +2368,25 @@ impl BytecodeVM {
                     }
                     self.set_reg(rd, Value::Record(type_name_str, fields));
                 }
-                Op::RecordGet { rd, ra, field } => {
-                    let field_name = match &proto.constants[field as usize] {
-                        ConstValue::Str(s) => s.clone(),
-                        _ => String::new(),
-                    };
+                Op::RecordGet {
+                    rd,
+                    ra,
+                    field,
+                    contract,
+                } => {
+                    let (field_name, contract) =
+                        Self::record_projection_contract(proto, field, contract)?;
                     // Borrow record, extract only the field value (avoid cloning entire record).
                     let v = match self.get_reg(ra) {
                         Value::Record(_, fields) => {
+                            if let Some(contract) = contract.as_ref() {
+                                Self::validate_canonical_record_projection(
+                                    self.get_reg(ra),
+                                    &field_name,
+                                    contract,
+                                    "record get",
+                                )?;
+                            }
                             fields.get(&field_name).cloned().ok_or_else(|| {
                                 InterpError::new(format!("record has no field '{}'", field_name))
                             })?
@@ -2435,15 +2447,25 @@ impl BytecodeVM {
                     };
                     self.set_reg(rd, v);
                 }
-                Op::RecordMoveGet { rd, ra, field } => {
-                    let field_name = match proto.constants.get(field as usize) {
-                        Some(ConstValue::Str(s)) => s.clone(),
-                        _ => {
-                            return Err(InterpError::new(
-                                "record move get: field constant is not a string",
-                            ))
-                        }
-                    };
+                Op::RecordMoveGet {
+                    rd,
+                    ra,
+                    field,
+                    contract,
+                } => {
+                    let (field_name, contract) =
+                        Self::record_projection_contract(proto, field, contract)?;
+                    // Validate the complete canonical identity and shape before
+                    // replacing the source register. A forged receipt must not
+                    // consume ownership as a side effect of rejection.
+                    if let Some(contract) = contract.as_ref() {
+                        Self::validate_canonical_record_projection(
+                            self.get_reg(ra),
+                            &field_name,
+                            contract,
+                            "record move get",
+                        )?;
+                    }
                     let source =
                         std::mem::replace(&mut self.cur_frame_mut().regs[ra as usize], Value::Unit);
                     let value = match source {
@@ -4471,6 +4493,98 @@ impl BytecodeVM {
         }
     }
 
+    /// Decode the optional canonical record projection receipt and prove that
+    /// its physical field name agrees with the opcode operand. Legacy
+    /// bytecode intentionally returns `None`; canonical MIR always supplies
+    /// the receipt before this VM dispatch path is reached.
+    fn record_projection_contract(
+        proto: &FunctionProto,
+        field: ConstIdx,
+        contract: Option<ConstIdx>,
+    ) -> Result<(String, Option<RecordProjectionShape>), InterpError> {
+        let field_name = match proto.constants.get(field as usize) {
+            Some(ConstValue::Str(name)) => name.clone(),
+            Some(_) => {
+                return Err(InterpError::new(
+                    "record projection: field constant is not a string",
+                ))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "record projection: field constant {} is absent",
+                    field
+                )))
+            }
+        };
+        let Some(contract_idx) = contract else {
+            return Ok((field_name, None));
+        };
+        let shape = match proto.constants.get(contract_idx as usize) {
+            Some(ConstValue::RecordProjection(shape)) => shape.clone(),
+            Some(_) => {
+                return Err(InterpError::new(format!(
+                    "record projection: contract constant {} is not a RecordProjection",
+                    contract_idx
+                )))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "record projection: contract constant {} is absent",
+                    contract_idx
+                )))
+            }
+        };
+        if shape.name != field_name {
+            return Err(InterpError::new(format!(
+                "record projection: field '{}' disagrees with canonical receipt name '{}'",
+                field_name, shape.name
+            )));
+        }
+        Ok((field_name, Some(shape)))
+    }
+
+    /// Validate a canonical record source before a backend reads or consumes
+    /// it. The runtime representation is still a map, but nominal identity,
+    /// declaration-order index, arity, and field presence come from the MIR
+    /// receipt rather than from map shape inference.
+    fn validate_canonical_record_projection<'a>(
+        value: &'a Value,
+        field_name: &str,
+        shape: &RecordProjectionShape,
+        operation: &str,
+    ) -> Result<&'a std::collections::HashMap<String, Value>, InterpError> {
+        let Value::Record(Some(actual_nominal), fields) = value else {
+            return Err(InterpError::new(format!(
+                "{operation}: canonical projection requires a nominal Record source"
+            )));
+        };
+        if actual_nominal != shape.nominal.as_str() {
+            return Err(InterpError::new(format!(
+                "{operation}: canonical nominal disagrees with projection contract"
+            )));
+        }
+        if fields.len() != shape.arity as usize {
+            return Err(InterpError::new(format!(
+                "{operation}: record arity {} disagrees with projection contract arity {}",
+                fields.len(),
+                shape.arity
+            )));
+        }
+        if shape.index >= shape.arity {
+            return Err(InterpError::new(format!(
+                "{operation}: projection index {} is outside canonical arity {}",
+                shape.index, shape.arity
+            )));
+        }
+        if !fields.contains_key(field_name) {
+            return Err(InterpError::new(format!(
+                "{operation}: record has no canonical field '{}'",
+                field_name
+            )));
+        }
+        Ok(fields)
+    }
+
     /// Resolve the runtime shape for a variant construction and, for
     /// canonical MIR instructions, prove that its tag/discriminant/arity
     /// triple is the one emitted from the TypeDesc shape table.  Legacy
@@ -4642,6 +4756,7 @@ impl BytecodeVM {
             ConstValue::Pattern(_) => Value::Unit,
             ConstValue::StrVec(_) => Value::Unit,
             ConstValue::VariantShapes(_) => Value::Unit,
+            ConstValue::RecordProjection(_) => Value::Unit,
         }
     }
 

@@ -2543,6 +2543,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             } => {
                 let value = self.read_value(function, values, base)?;
                 let base_ty = function.values.get(base).map(|value| &value.ty);
+                let result_ty = function.values.get(result).map(|value| &value.ty);
                 let index_value = match projection {
                     MirProjection::Index(index) => Some(self.read_value(function, values, index)?),
                     _ => None,
@@ -2551,6 +2552,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &function.owner,
                     value,
                     base_ty,
+                    result_ty,
                     projection,
                     index_value.as_ref(),
                     self.program.type_catalog(),
@@ -3111,6 +3113,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 &function.owner,
                 value,
                 Some(&current_ty),
+                Some(projection.ty()),
                 &mir_projection,
                 None,
                 self.program.type_catalog(),
@@ -3796,6 +3799,7 @@ fn project_value(
     function: &NodeId,
     value: MirRuntimeValue,
     base_ty: Option<&crate::core::ResolvedTypeId>,
+    result_ty: Option<&crate::core::ResolvedTypeId>,
     projection: &MirProjection,
     index_value: Option<&MirRuntimeValue>,
     type_catalog: &MirTypeCatalog,
@@ -3812,39 +3816,35 @@ fn project_value(
                     "record projection has no base type",
                 ));
             };
-            let Some(descriptor) = type_catalog.get(base_ty) else {
+            let Some(result_ty) = result_ty else {
                 return Err(execution_error(
                     function,
-                    "record projection base has no TypeDesc",
+                    "record projection has no result type",
                 ));
             };
-            let MirLayout::Record {
-                nominal: expected_nominal,
-                fields: layout_fields,
-            } = &descriptor.layout
-            else {
+            let contract = type_catalog
+                .validated_record_field_projection_contract(base_ty, field, result_ty)
+                .map_err(|message| execution_error(function, message))?;
+            if nominal != contract.nominal {
                 return Err(execution_error(
                     function,
-                    "record projection base has no record layout",
-                ));
-            };
-            if &nominal != expected_nominal {
-                return Err(execution_error(
-                    function,
-                    "record runtime nominal disagrees with TypeDesc",
+                    "record runtime nominal disagrees with projection contract",
                 ));
             }
-            let Some(index) = layout_fields
-                .iter()
-                .position(|candidate| candidate.id == *field)
-            else {
+            if fields.len() != contract.arity {
                 return Err(execution_error(
                     function,
-                    "record projection field is absent from TypeDesc",
+                    "record runtime field arity disagrees with projection contract",
                 ));
-            };
+            }
+            if contract.field != *field {
+                return Err(execution_error(
+                    function,
+                    "record projection field identity disagrees with contract",
+                ));
+            }
             fields
-                .get(index)
+                .get(contract.field_index)
                 .cloned()
                 .ok_or_else(|| execution_error(function, "record field vector is too short"))
         }
@@ -3923,44 +3923,24 @@ fn move_project_value(
             "move projection base is not a record",
         ));
     };
-    let MirLayout::Record {
-        nominal: expected_nominal,
-        fields: layout_fields,
-    } = &type_catalog
-        .get(base_ty)
-        .ok_or_else(|| execution_error(function, "move projection base has no TypeDesc"))?
-        .layout
-    else {
-        return Err(execution_error(
-            function,
-            "move projection base has no record layout",
-        ));
-    };
-    if &nominal != expected_nominal || fields.len() != layout_fields.len() {
-        return Err(execution_error(
-            function,
-            "move projection record disagrees with TypeDesc",
-        ));
-    }
     let MirProjection::Field(field) = projection else {
         return Err(execution_error(
             function,
             "move projection requires a direct record field",
         ));
     };
-    let selected = layout_fields
-        .iter()
-        .position(|candidate| candidate.id == *field)
-        .ok_or_else(|| execution_error(function, "move projection field is absent"))?;
-    if layout_fields[selected].ty != *result_ty {
+    let contract = type_catalog
+        .validated_record_field_projection_contract(base_ty, field, result_ty)
+        .map_err(|message| execution_error(function, message))?;
+    if nominal != contract.nominal || fields.len() != contract.arity {
         return Err(execution_error(
             function,
-            "move projection result type disagrees with TypeDesc",
+            "move projection record disagrees with TypeDesc",
         ));
     }
     Ok(std::mem::replace(
         fields
-            .get_mut(selected)
+            .get_mut(contract.field_index)
             .ok_or_else(|| execution_error(function, "move projection field is out of bounds"))?,
         MirRuntimeValue::Unit,
     ))
