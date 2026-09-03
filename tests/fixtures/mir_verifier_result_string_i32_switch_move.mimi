@@ -1,0 +1,17 @@
+func consume(value: Result<string, i32>) -> string {
+    ensures: true
+    match value {
+        Ok(v) => v,
+        Err(_) => "fallback"
+    }
+}
+
+func main() -> i32 {
+    let ok_value: Result<string, i32> = Ok("owned")
+    let ok_output = consume(ok_value)
+    drop(ok_output)
+    let err_value: Result<string, i32> = Err(-1)
+    let err_output = consume(err_value)
+    drop(err_output)
+    42
+}

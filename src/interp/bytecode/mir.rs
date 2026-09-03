@@ -2610,7 +2610,7 @@ impl<'a> FunctionEmitter<'a> {
         let validation = if consume_scrutinee {
             self.program
                 .type_catalog()
-                .validate_switch_move(&scrutinee_info.ty, arms)
+                .validate_variant_switch_move_contract(&scrutinee_info.ty, arms)
         } else {
             self.program
                 .type_catalog()
@@ -5118,6 +5118,56 @@ mod tests {
                     && variant.0 == "builtin:variant:Result::Ok"
                     && tag == "Ok"
                     && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+        ));
+    }
+
+    #[test]
+    fn executes_result_string_i32_consuming_switch_through_both_oracles() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let consume_owner = crate::core::NodeId("function:consume".into());
+        let result_nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Result").expect("Result nominal");
+        let ok_variant = crate::core::NodeId("builtin:variant:Result::Ok".into());
+        let err_variant = crate::core::NodeId("builtin:variant:Result::Err".into());
+        let ok = MirReferenceInterpreter::new(&mir)
+            .execute(
+                &consume_owner,
+                &[MirRuntimeValue::Variant {
+                    nominal: result_nominal.clone(),
+                    variant: ok_variant,
+                    payload: vec![MirRuntimeValue::String("owned".into())],
+                }],
+            )
+            .expect("reference Ok switch");
+        let err = MirReferenceInterpreter::new(&mir)
+            .execute(
+                &consume_owner,
+                &[MirRuntimeValue::Variant {
+                    nominal: result_nominal,
+                    variant: err_variant,
+                    payload: vec![MirRuntimeValue::Int(-1)],
+                }],
+            )
+            .expect("reference Err switch");
+        assert_eq!(ok, MirRuntimeValue::String("owned".into()));
+        assert_eq!(err, MirRuntimeValue::String("fallback".into()));
+
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        assert!(bytecode
+            .functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .any(|op| matches!(op, Op::DestructureVariantMove { .. })));
+        assert!(matches!(
+            BytecodeVM::new(bytecode)
+                .run_value()
+                .expect("bytecode execution"),
+            Value::Int(42)
         ));
     }
 

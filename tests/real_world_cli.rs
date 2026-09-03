@@ -809,6 +809,37 @@ fn canonical_mir_verifier_proves_non_copy_result_string_i32_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_verifier_proves_non_copy_result_string_i32_switch_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_result_string_i32_switch_move.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn Result SwitchMove verifier");
+    assert!(
+        output.status.success(),
+        "Result SwitchMove must be proven by canonical MIR verifier:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
 fn canonical_mir_verifier_classifies_result_string_string_without_fallback() {
     let fixture = project_root()
         .join("tests")

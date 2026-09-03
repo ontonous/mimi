@@ -4375,6 +4375,60 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the complete TypeDesc-side contract for a consuming variant
+    /// switch.  `validate_switch_move` proves that the scrutinee is a
+    /// non-Copy built-in variant and that its CFG is exhaustive; this
+    /// companion additionally proves every materialized payload binding
+    /// receipt and the child MoveOut glue for fields transferred into an arm.
+    /// Fields without a binding are released by the already-validated active
+    /// variant drop plan.  Consumers must call this entry point instead of
+    /// independently deciding whether a binding is a move, clone, or drop.
+    pub fn validate_variant_switch_move_contract(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+    ) -> Result<(), String> {
+        self.validate_switch_move(scrutinee_ty, arms)?;
+        for arm in arms {
+            let crate::core::mir::MirSwitchCase::Variant(variant_id) = &arm.case else {
+                continue;
+            };
+            let (_, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
+            let mut bound_fields = BTreeSet::new();
+            for binding in &arm.bindings {
+                self.validate_variant_payload_projection_receipt(
+                    scrutinee_ty,
+                    variant_id,
+                    &binding.projection.field_ty,
+                    &binding.projection,
+                )?;
+                let field = variant
+                    .fields
+                    .get(binding.projection.field_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "switch-move binding field '{}' is outside variant '{}'",
+                            binding.projection.field.0, variant.name
+                        )
+                    })?;
+                if !bound_fields.insert(field.id.clone()) {
+                    return Err(format!(
+                        "switch-move binding field '{}' is repeated",
+                        field.id.0
+                    ));
+                }
+                self.validate_glue(&field.ty, MirGlueOperation::MoveOut)
+                    .map_err(|message| {
+                        format!(
+                            "switch-move bound field '{}' has no canonical MoveOut glue: {message}",
+                            field.id.0
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn canonical_text(&self) -> String {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {

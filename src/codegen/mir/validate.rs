@@ -1344,7 +1344,7 @@ impl<'a> NativeMirValidator<'a> {
         if let Err(message) = self
             .program
             .type_catalog()
-            .validate_switch_move(&scrutinee_value.ty, arms)
+            .validate_variant_switch_move_contract(&scrutinee_value.ty, arms)
         {
             self.errors.push(NativeMirError::new(subject, message));
             return;

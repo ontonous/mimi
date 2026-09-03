@@ -886,7 +886,8 @@ impl MirProgram {
                     let move_scrutinee =
                         matches!(&block.terminator, super::MirTerminator::SwitchMove { .. });
                     let validation = if move_scrutinee {
-                        type_catalog.validate_switch_move(&scrutinee_value.ty, arms)
+                        type_catalog
+                            .validate_variant_switch_move_contract(&scrutinee_value.ty, arms)
                     } else {
                         type_catalog.validate_switch(&scrutinee_value.ty, arms)
                     };

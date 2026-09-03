@@ -928,7 +928,7 @@ fn explore_variant_switch(
         .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
     if consume_scrutinee {
         catalog.validate_non_copy_variant_contract(&scrutinee_ty)?;
-        catalog.validate_switch_move(&scrutinee_ty, arms)?;
+        catalog.validate_variant_switch_move_contract(&scrutinee_ty, arms)?;
         validate_explicit_variant_switch_move(catalog, &scrutinee_ty, arms)?;
     } else {
         catalog.validate_switch(&scrutinee_ty, arms)?;
@@ -3759,6 +3759,98 @@ mod tests {
             crate::verifier::VerifStatus::NotInTrustedSubset
         );
         assert!(result.message.contains("Result<string, i32>"));
+    }
+
+    #[test]
+    fn verifier_proves_result_string_i32_consuming_switch_with_shared_receipt() {
+        let source =
+            include_str!("../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Result switch must be canonical MIR");
+        let consume_owner = crate::core::NodeId("function:consume".into());
+        let consume = program
+            .functions()
+            .get(&consume_owner)
+            .expect("consume MIR function");
+        let (scrutinee, arms) = consume
+            .blocks
+            .values()
+            .find_map(|block| match &block.terminator {
+                crate::core::mir::MirTerminator::SwitchMove { scrutinee, arms } => {
+                    Some((scrutinee, arms))
+                }
+                _ => None,
+            })
+            .expect("Result SwitchMove");
+        let scrutinee_ty = consume
+            .values
+            .get(scrutinee)
+            .expect("switch scrutinee value")
+            .ty
+            .clone();
+        program
+            .type_catalog()
+            .validate_variant_switch_move_contract(&scrutinee_ty, arms)
+            .expect("shared Result switch-move contract");
+        assert!(arms.iter().any(|arm| !arm.bindings.is_empty()));
+        assert!(arms.iter().any(|arm| arm.bindings.is_empty()));
+
+        let results = verify_program(&program, "result-string-i32-switch-source-hash".into())
+            .expect("Result switch verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:consume")
+            .expect("consume verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result switch execution");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn canonical_gate_rejects_result_switch_projection_receipt_drift() {
+        let source =
+            include_str!("../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:consume".into());
+        let mut function = program
+            .functions()
+            .get(&owner)
+            .cloned()
+            .expect("consume MIR");
+        let binding = function
+            .blocks
+            .values_mut()
+            .find_map(|block| match &mut block.terminator {
+                crate::core::mir::MirTerminator::SwitchMove { arms, .. } => {
+                    arms.iter_mut().find_map(|arm| arm.bindings.first_mut())
+                }
+                _ => None,
+            })
+            .expect("Result payload binding");
+        binding.projection.field_index = 1;
+        let errors = MirProgram::with_type_catalog(
+            std::collections::BTreeMap::from([(owner, function)]),
+            program.type_catalog().clone(),
+        )
+        .expect_err("stale Result projection receipt must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("disagrees with TypeDesc")
+                    || error.message.contains("outside variant")
+                    || error
+                        .message
+                        .contains("projection index is outside its payload arity")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]

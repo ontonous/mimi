@@ -818,7 +818,7 @@ impl<'a> OptionStringVariantValidator<'a> {
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validate_switch_move(&scrutinee_ty, arms)
+                    .validate_variant_switch_move_contract(&scrutinee_ty, arms)
                 {
                     self.error(format!("{subject} SwitchMove rejected: {message}"));
                 }
