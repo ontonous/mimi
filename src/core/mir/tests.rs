@@ -6,6 +6,109 @@ fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
     table.intern_resolved(ty).expect("test type must intern")
 }
 
+#[test]
+fn materializes_generic_scalar_list_len_as_a_canonical_facade() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List.len must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List.len instance");
+    assert!(matches!(
+        instance.contract,
+        MirGenericInstanceContract::ScalarListFacade {
+            operation: crate::core::mir::MirListOperation::Len
+        }
+    ));
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized List.len target");
+    let list_operations = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                operation: crate::core::mir::MirListOperation::Len,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(list_operations.len(), 1);
+    assert!(matches!(
+        program
+            .type_catalog()
+            .get(&list_operations[0].element_ty)
+            .map(|descriptor| &descriptor.kind),
+        Some(crate::core::mir::types::MirTypeKind::Primitive(
+            PrimitiveType::I32
+        ))
+    ));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List.len facade execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(3));
+}
+
+#[test]
+fn rejects_generic_list_facade_with_multiple_operations_before_backends() {
+    let source = r#"
+        func bad<T>(values: List<T>) -> i32 {
+            let first = len(values)
+            let second = len(values)
+            first + second
+        }
+
+        func main() -> i32 {
+            let values: List<i32> = [1, 2]
+            bad(values)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("unsupported generic List body must fail closed");
+    let message = format!("{error:?}");
+    assert!(message.contains("generic List facade must lower to exactly one canonical ListOp"));
+}
+
+#[test]
+fn rejects_generic_list_len_for_non_copy_elements_at_the_mir_gate() {
+    let source = r#"
+        func list_len<T>(values: List<T>) -> i32 { len(values) }
+
+        func main() -> i32 {
+            let values: List<string> = ["not-copy"]
+            list_len(values)
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("non-Copy generic List.len must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("outside scalar contract"),
+        "unexpected non-Copy generic List.len rejection: {message}"
+    );
+}
+
 fn fixture() -> MirFunction {
     let mut types = ResolvedTypeTable::new();
     let i64_ty = type_id(&mut types, ResolvedType::Primitive(PrimitiveType::I64));

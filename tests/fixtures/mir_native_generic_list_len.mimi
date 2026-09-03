@@ -1,0 +1,11 @@
+// Canonical concrete generic MIR: a List<T> facade specialized to i32.
+func list_len<T>(values: List<T>) -> i32 {
+    len(values)
+}
+
+func main() -> i32 {
+    let values: List<i32> = [4, 5, 6]
+    let count = list_len(values)
+    drop(values)
+    count
+}

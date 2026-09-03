@@ -5,8 +5,9 @@
 //! flow, Copy record aggregates, and recursive Move-owned tuple/record product
 //! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
 //! The first container slice adds List construction and the `Len`/`Reverse`
-//! operations for concrete Copy scalar elements; all other List operations
-//! and element shapes remain fail-closed.
+//! operations for concrete Copy scalar elements; a narrow generic `Len`
+//! facade is materialized only after its specialized body is proven. All
+//! other List operations and element shapes remain fail-closed.
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
@@ -255,13 +256,13 @@ pub fn lower_program_with_type_catalog(
 
 /// Materialize the first concrete generic MIR instance family.
 ///
-/// This is intentionally a closed identity contract, not a backend-specific
+/// This is intentionally a closed contract family, not a backend-specific
 /// monomorphization shortcut: checker-selected type arguments are carried by
 /// the MIR `Call`, the instance table records the template/arguments proof,
-/// and the executable function is already specialized MIR. Only
-/// `identity<T>(T) -> T` instantiated with a Copy signed scalar/bool or a
-/// flat Copy Option/Result is admitted in this slice. All other generic
-/// bodies remain fail-closed.
+/// and the executable function is already specialized MIR. The admitted
+/// families are scalar/flat-variant identity, owned String identity, scalar
+/// Set facades, and the concrete Copy-scalar List `Len` facade. All other
+/// generic bodies remain fail-closed.
 pub fn materialize_concrete_generic_instances(
     program: &CheckedProgram,
     type_catalog: &MirTypeCatalog,
@@ -442,6 +443,22 @@ fn materialize_generic_instance(
                 message: "generic signature parameter has no canonical ResolvedTypeId".into(),
             }]
         })?;
+    let generic_list_facade = callable.signature.parameters.iter().any(|parameter| {
+        mentions_generic_list_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
+    }) || mentions_generic_list_type(
+        program,
+        &callable.signature.result,
+        &generic_id,
+        &mut HashSet::new(),
+    );
+    let generic_set_facade = callable.signature.parameters.iter().any(|parameter| {
+        mentions_generic_set_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
+    }) || mentions_generic_set_type(
+        program,
+        &callable.signature.result,
+        &generic_id,
+        &mut HashSet::new(),
+    );
     let is_identity = callable.signature.parameters.len() == 1
         && callable.signature.parameters[0].ty == generic_id
         && callable.signature.result == generic_id;
@@ -466,12 +483,16 @@ fn materialize_generic_instance(
             ),
         }]
     })?;
-    let mut function = lower_callable(callable).map_err(|mut errors| {
-        for error in &mut errors {
-            error.node_id = subject();
-        }
-        errors
-    })?;
+    // Generic List operations need their checker-derived receipt while the
+    // polymorphic body is lowered. The receipt is specialized below after
+    // every MIR value has received its concrete TypeDesc identity.
+    let mut function =
+        lower_callable_with_type_catalog(callable, type_catalog).map_err(|mut errors| {
+            for error in &mut errors {
+                error.node_id = subject();
+            }
+            errors
+        })?;
     if is_identity && !is_owned_string_identity {
         if let Err(message) = super::validate_generic_identity_shape(&function, &generic_id) {
             return Err(vec![MirLoweringError {
@@ -507,6 +528,108 @@ fn materialize_generic_instance(
     }
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
+    }
+    let list_operations = function
+        .blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| match &instruction.kind {
+                    MirInstructionKind::ListOp {
+                        result,
+                        list,
+                        argument,
+                        operation,
+                        list_operation_contract: Some(_),
+                    } => Some((
+                        block_id.clone(),
+                        index,
+                        result.clone(),
+                        list.clone(),
+                        argument.clone(),
+                        *operation,
+                    )),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (block_id, instruction_index, result, list, argument, operation) in list_operations {
+        let result_ty = function
+            .values
+            .get(&result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List facade result has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let list_ty = function
+            .values
+            .get(&list)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List facade receiver has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let argument_ty = argument
+            .as_ref()
+            .map(|value| {
+                function
+                    .values
+                    .get(value)
+                    .map(|info| info.ty.clone())
+                    .ok_or_else(|| {
+                        vec![MirLoweringError {
+                            node_id: subject(),
+                            message: "generic List facade argument has no specialized TypeDesc"
+                                .into(),
+                        }]
+                    })
+            })
+            .transpose()?;
+        let receipt = type_catalog
+            .validated_list_operation_contract_with_argument(
+                &result_ty,
+                &list_ty,
+                argument_ty.as_ref(),
+                operation,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "generic List facade receipt specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = function
+            .blocks
+            .get_mut(&block_id)
+            .and_then(|block| block.instructions.get_mut(instruction_index))
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List facade operation disappeared during specialization"
+                        .into(),
+                }]
+            })?;
+        let MirInstructionKind::ListOp {
+            list_operation_contract,
+            ..
+        } = &mut instruction.kind
+        else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic List facade operation changed during specialization".into(),
+            }]);
+        };
+        *list_operation_contract = Some(receipt);
     }
     if is_owned_string_identity {
         let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
@@ -553,6 +676,19 @@ fn materialize_generic_instance(
         } else {
             MirGenericInstanceContract::ScalarIdentity
         }
+    } else if generic_set_facade {
+        let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::ScalarSetFacade { operation }
+    } else if generic_list_facade
+        || function.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction.kind, MirInstructionKind::ListOp { .. }))
+        })
+    {
+        let operation = detect_scalar_list_facade_operation(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::ScalarListFacade { operation }
     } else {
         let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::ScalarSetFacade { operation }
@@ -590,6 +726,146 @@ fn materialize_generic_instance(
         contract,
     };
     Ok((instance, function))
+}
+
+fn detect_scalar_list_facade_operation(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::MirListOperation, Vec<MirLoweringError>> {
+    let operations = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match instruction.kind {
+            MirInstructionKind::ListOp { operation, .. } => Some(operation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [operation] = operations.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic List facade must lower to exactly one canonical ListOp".into(),
+        }]);
+    };
+    if *operation != super::MirListOperation::Len {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic List facade only admits canonical ListOp::Len".into(),
+        }]);
+    }
+    validate_scalar_list_facade_mir(function, type_catalog, *operation).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: format!("generic List facade contract is invalid: {message}"),
+        }]
+    })?;
+    Ok(*operation)
+}
+
+/// Validate the concrete body of the generic List `Len` facade. The body is
+/// deliberately structural: one List parameter is cloned exactly once, the
+/// clone is the receiver of one receipt-bearing `ListOp::Len`, and that
+/// result is returned. This keeps a specialized generic function from hiding
+/// an arbitrary body behind a canonical-looking instance symbol.
+pub(crate) fn validate_scalar_list_facade_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    operation: super::MirListOperation,
+) -> Result<(), String> {
+    if operation != super::MirListOperation::Len {
+        return Err("scalar List facade only admits ListOp::Len".into());
+    }
+    let [list_parameter] = function.parameters.as_slice() else {
+        return Err("scalar List facade must have exactly one List parameter".into());
+    };
+    let list_ty = function
+        .values
+        .get(list_parameter)
+        .ok_or_else(|| "scalar List facade receiver parameter is absent".to_string())?
+        .ty
+        .clone();
+    let Some(super::types::MirLayout::List { .. }) = type_catalog
+        .get(&list_ty)
+        .map(|descriptor| &descriptor.layout)
+    else {
+        return Err("scalar List facade receiver is not a canonical List<T>".into());
+    };
+    let Some(block) = function.blocks.get(&function.entry) else {
+        return Err("scalar List facade entry block is absent".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("scalar List facade must have exactly one MIR block".into());
+    }
+    let mut list_op = None;
+    let mut clones = Vec::new();
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::Clone { result, source } => {
+                clones.push((result.clone(), source.clone()));
+            }
+            MirInstructionKind::ListOp {
+                result,
+                operation: actual,
+                list,
+                argument,
+                list_operation_contract,
+            } => {
+                if *actual != operation {
+                    return Err("scalar List facade contains a different ListOp operation".into());
+                }
+                if list_op
+                    .replace((
+                        result.clone(),
+                        list.clone(),
+                        argument.clone(),
+                        list_operation_contract.clone(),
+                    ))
+                    .is_some()
+                {
+                    return Err("scalar List facade must contain exactly one ListOp".into());
+                }
+            }
+            _ => return Err(
+                "scalar List facade body may contain only parameter Clone and ListOp instructions"
+                    .into(),
+            ),
+        }
+    }
+    let Some((list_result, list_operand, argument, receipt)) = list_op else {
+        return Err("scalar List facade must contain exactly one ListOp".into());
+    };
+    if clones.len() != 1
+        || clones
+            .first()
+            .is_none_or(|(_, source)| *source != *list_parameter)
+    {
+        return Err("scalar List facade must clone its List parameter exactly once".into());
+    }
+    if list_operand != clones[0].0 || argument.is_some() {
+        return Err(
+            "scalar List facade ListOp must read the cloned List without an argument".into(),
+        );
+    }
+    let receipt =
+        receipt.ok_or_else(|| "scalar List facade ListOp has no canonical receipt".to_string())?;
+    let result_ty = function
+        .values
+        .get(&list_result)
+        .ok_or_else(|| "scalar List facade result value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_list_operation_receipt(&result_ty, &list_ty, operation, &receipt)?;
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err("scalar List facade must return its ListOp result".into());
+    };
+    if returned != &list_result {
+        return Err("scalar List facade return value is not the ListOp result".into());
+    }
+    Ok(())
 }
 
 /// Substitute one checker-owned generic parameter in the small set of
@@ -835,6 +1111,132 @@ fn generic_parameter_type_id(
             }
             _ => None,
         })
+}
+
+fn mentions_generic_list_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    mentions_generic_container_type(program, id, generic_id, "builtin:type:List", seen)
+}
+
+fn mentions_generic_set_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    mentions_generic_container_type(program, id, generic_id, "builtin:type:Set", seen)
+}
+
+fn mentions_generic_container_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    container_item: &str,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            if item.as_str() == container_item {
+                arguments.iter().any(|argument| {
+                    contains_generic_type(program, argument, generic_id, &mut HashSet::new())
+                })
+            } else {
+                arguments.iter().any(|argument| {
+                    mentions_generic_container_type(
+                        program,
+                        argument,
+                        generic_id,
+                        container_item,
+                        seen,
+                    )
+                })
+            }
+        }
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            mentions_generic_container_type(program, inner, generic_id, container_item, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            mentions_generic_container_type(program, ok, generic_id, container_item, seen)
+                || mentions_generic_container_type(program, error, generic_id, container_item, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items.iter().any(|item| {
+            mentions_generic_container_type(program, item, generic_id, container_item, seen)
+        }),
+        Some(ResolvedType::Array { element, .. }) => {
+            mentions_generic_container_type(program, element, generic_id, container_item, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters.iter().any(|parameter| {
+                mentions_generic_container_type(
+                    program,
+                    parameter,
+                    generic_id,
+                    container_item,
+                    seen,
+                )
+            }) || mentions_generic_container_type(program, result, generic_id, container_item, seen)
+        }
+        _ => false,
+    }
+}
+
+fn contains_generic_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if id == generic_id || !seen.insert(id.clone()) {
+        return id == generic_id;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal { arguments, .. }) => arguments
+            .iter()
+            .any(|argument| contains_generic_type(program, argument, generic_id, seen)),
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            contains_generic_type(program, inner, generic_id, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            contains_generic_type(program, ok, generic_id, seen)
+                || contains_generic_type(program, error, generic_id, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| contains_generic_type(program, item, generic_id, seen)),
+        Some(ResolvedType::Array { element, .. }) => {
+            contains_generic_type(program, element, generic_id, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters
+                .iter()
+                .any(|parameter| contains_generic_type(program, parameter, generic_id, seen))
+                || contains_generic_type(program, result, generic_id, seen)
+        }
+        _ => false,
+    }
 }
 
 fn is_concrete_callable(callable: &crate::core::ResolvedCallable) -> bool {
@@ -2414,6 +2816,29 @@ impl<'a> Lowerer<'a> {
             operation,
         ) {
             Ok(contract) => Some(contract),
+            Err(message)
+                if operation == super::MirListOperation::Len
+                    && argument_ty.is_none()
+                    && type_catalog.get(&list_ty).is_some_and(|descriptor| {
+                        matches!(
+                            descriptor.layout,
+                            super::types::MirLayout::List { ref element }
+                                if type_catalog.get(element).is_some_and(|element| {
+                                    element.kind == super::types::MirTypeKind::GenericParameter
+                                })
+                        )
+                    }) =>
+            {
+                match type_catalog
+                    .validated_generic_list_len_operation_contract(&result_ty, &list_ty)
+                {
+                    Ok(contract) => Some(contract),
+                    Err(generic_message) => {
+                        self.error(node_id, generic_message);
+                        None
+                    }
+                }
+            }
             Err(message) => {
                 self.error(node_id, message);
                 None

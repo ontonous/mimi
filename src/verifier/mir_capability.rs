@@ -90,6 +90,18 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarListFacade { operation } => {
+                    if let Err(message) = crate::core::mir::lower::validate_scalar_list_facade_mir(
+                        function,
+                        self.program.type_catalog(),
+                        operation,
+                    ) {
+                        self.error(format!(
+                            "instance '{}' List facade contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -929,7 +941,8 @@ impl<'a> CapabilityGate<'a> {
             match instance.contract {
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity
-                | MirGenericInstanceContract::ScalarSetFacade { .. } => {}
+                | MirGenericInstanceContract::ScalarSetFacade { .. }
+                | MirGenericInstanceContract::ScalarListFacade { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

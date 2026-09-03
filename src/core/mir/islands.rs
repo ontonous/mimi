@@ -350,7 +350,9 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 {
                     self.has_unsupported_list_concat_candidate = true;
                 }
-                if is_scalar_set_facade_call(self.program, call) {
+                if is_scalar_set_facade_call(self.program, call)
+                    || is_scalar_list_facade_call(self.program, call)
+                {
                     self.has_candidate = true;
                 }
                 if is_scalar_set_contains_call(self.program, call)
@@ -601,6 +603,97 @@ fn is_scalar_set_facade_call(
             &callable.signature.result,
             &callable.signature.generic_parameters,
         )
+}
+
+fn is_scalar_list_facade_call(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Function(template) = &call.callee else {
+        return false;
+    };
+    let Some(callable) = program.callable(template) else {
+        return false;
+    };
+    !call.type_arguments.is_empty()
+        && callable.signature.generic_parameters.len() == 1
+        && mentions_generic_list(
+            program,
+            &callable.signature.parameters,
+            &callable.signature.result,
+            &callable.signature.generic_parameters,
+        )
+}
+
+fn mentions_generic_list(
+    program: &CheckedProgram,
+    parameters: &[crate::core::ir::ResolvedParameter],
+    result: &crate::core::ResolvedTypeId,
+    generic_parameters: &[NodeId],
+) -> bool {
+    parameters.iter().any(|parameter| {
+        mentions_generic_list_type(
+            program,
+            &parameter.ty,
+            generic_parameters,
+            &mut BTreeSet::new(),
+        )
+    }) || mentions_generic_list_type(program, result, generic_parameters, &mut BTreeSet::new())
+}
+
+fn mentions_generic_list_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_parameters: &[NodeId],
+    seen: &mut BTreeSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            (item.as_str() == "builtin:type:List"
+                && arguments.iter().any(|argument| {
+                    contains_generic_parameter(
+                        program,
+                        argument,
+                        generic_parameters,
+                        &mut BTreeSet::new(),
+                    )
+                }))
+                || arguments.iter().any(|argument| {
+                    mentions_generic_list_type(program, argument, generic_parameters, seen)
+                })
+        }
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            mentions_generic_list_type(program, inner, generic_parameters, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            mentions_generic_list_type(program, ok, generic_parameters, seen)
+                || mentions_generic_list_type(program, error, generic_parameters, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| mentions_generic_list_type(program, item, generic_parameters, seen)),
+        Some(ResolvedType::Array { element, .. }) => {
+            mentions_generic_list_type(program, element, generic_parameters, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters.iter().any(|parameter| {
+                mentions_generic_list_type(program, parameter, generic_parameters, seen)
+            }) || mentions_generic_list_type(program, result, generic_parameters, seen)
+        }
+        _ => false,
+    }
 }
 
 fn mentions_generic_set(
@@ -1100,7 +1193,8 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len`/`Reverse`/`Concat`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
+/// `ListOp::Len`/`Reverse`/`Concat`, `SetOp::Contains`, or checker-owned scalar
+/// Set/List facade instance,
 /// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
 /// S11 production boundary.
 /// Keeping this fact next to the island contract prevents the CLI and direct
@@ -1163,6 +1257,7 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
             matches!(
                 instance.contract,
                 MirGenericInstanceContract::ScalarSetFacade { .. }
+                    | MirGenericInstanceContract::ScalarListFacade { .. }
             )
         })
 }
@@ -1306,7 +1401,8 @@ impl<'a> ScalarCollectionValidator<'a> {
             match instance.contract {
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity
-                | MirGenericInstanceContract::ScalarSetFacade { .. } => {}
+                | MirGenericInstanceContract::ScalarSetFacade { .. }
+                | MirGenericInstanceContract::ScalarListFacade { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit
@@ -1322,6 +1418,19 @@ impl<'a> ScalarCollectionValidator<'a> {
             {
                 self.error(format!(
                     "instance '{}' Set facade has no Set value in its canonical body",
+                    instance.id
+                ));
+            }
+            if matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarListFacade { .. }
+            ) && !function
+                .values
+                .values()
+                .any(|value| self.is_list_type(&value.ty))
+            {
+                self.error(format!(
+                    "instance '{}' List facade has no List value in its canonical body",
                     instance.id
                 ));
             }

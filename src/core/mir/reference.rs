@@ -1319,6 +1319,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarSetFacade { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarListFacade { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1384,6 +1387,16 @@ fn validate_instance_table(
                     errors.push(super::MirValidationError {
                         subject: id.to_string(),
                         message: format!("generic MIR Set facade contract is invalid: {message}"),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarListFacade { operation } => {
+                if let Err(message) =
+                    super::lower::validate_scalar_list_facade_mir(function, type_catalog, operation)
+                {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!("generic MIR List facade contract is invalid: {message}"),
                     });
                 }
             }

@@ -2398,6 +2398,19 @@ fn eval_materialized_call(
                 operation,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarListFacade { operation } => {
+            eval_materialized_list_facade_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                operation,
+            )
+        }
     }
 }
 
@@ -3007,6 +3020,79 @@ fn eval_materialized_set_facade_call(
         receiver,
         argument,
     )?;
+    ensure_result_shape(function, catalog, result, &output)?;
+    state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume a materialized scalar List facade call. The target
+/// body is already proven as `Clone; ListOp::Len; Return`; this helper applies
+/// that receipt to the caller's symbolic List without reconstructing the
+/// generic body from a template or backend ABI.
+fn eval_materialized_list_facade_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    operation: crate::core::mir::MirListOperation,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier List facade target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_list_facade_mir(target, catalog, operation)?;
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if arguments.len() != target.parameters.len() {
+        return Err("MIR verifier List facade call arity disagrees with target".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier List facade call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err("MIR verifier List facade call result disagrees with target TypeDesc".into());
+    }
+    let argument = arguments
+        .first()
+        .ok_or_else(|| "MIR verifier List facade receiver argument is absent".to_string())?;
+    let argument_info = function
+        .values
+        .get(argument)
+        .ok_or_else(|| format!("MIR verifier List facade argument '{}' is absent", argument))?;
+    let parameter = target
+        .parameters
+        .first()
+        .ok_or_else(|| "MIR verifier List facade target parameter is absent".to_string())?;
+    let parameter_info = target
+        .values
+        .get(parameter)
+        .ok_or_else(|| "MIR verifier List facade parameter TypeDesc is absent".to_string())?;
+    if argument_info.ty != parameter_info.ty {
+        return Err("MIR verifier List facade argument disagrees with target TypeDesc".into());
+    }
+    let SymbolicValue::List { length } = state.values.get(argument).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier List facade argument '{}' is not defined",
+            argument
+        )
+    })?
+    else {
+        return Err("MIR verifier List facade receiver is not a symbolic List".into());
+    };
+    if operation != crate::core::mir::MirListOperation::Len {
+        return Err("MIR verifier List facade only admits ListOp::Len".into());
+    }
+    add_definedness(state, length.le(Int::from_i64(i32::MAX as i64)), "E0802")?;
+    let output = SymbolicValue::Int(length);
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
     Ok(())
@@ -4310,6 +4396,53 @@ mod tests {
             .find(|result| result.func_name == owner.0)
             .expect("generic contract verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_len_call() {
+        let source = r#"
+            func list_len<T>(values: List<T>) -> i32 { len(values) }
+
+            func checked() -> i32 {
+                ensures: result == 3
+                let values: List<i32> = [4, 5, 6]
+                let count = list_len(values)
+                drop(values)
+                count
+            }
+
+            func main() -> i32 { checked() }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("generic List.len MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List.len instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                operation: crate::core::mir::MirListOperation::Len
+            }
+        ));
+        let results = verify_program(&program, "generic-list-len-source-hash".into())
+            .expect("verify generic List.len MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:checked")
+            .expect("List.len checked verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
     }
 
     #[test]
