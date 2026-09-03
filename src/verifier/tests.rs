@@ -1247,6 +1247,41 @@ fn owned_generic_record_projection_is_verified_from_consuming_mir() {
 }
 
 #[test]
+fn owned_mixed_generic_record_projection_is_verified_from_consuming_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi");
+    let file =
+        parse_memory_source(source, "mir-owned-mixed-generic-record-projection").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical mixed owned generic record projection MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { ref contract }
+            if contract.arity == 2 && contract.name == "value"
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("mixed owned generic record projection verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn owned_generic_record_projection_rvalue_is_verified_from_consuming_mir() {
     require_z3!();
     let source = include_str!(

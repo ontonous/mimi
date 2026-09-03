@@ -322,10 +322,11 @@ pub enum MirGenericInstanceContract {
     ScalarRecordProjection {
         contract: types::MirRecordProjectionContract,
     },
-    /// A generic one-field record projection specialized to an owned String
-    /// field. The executable body is a consuming `MoveProject`; the receipt
-    /// fixes the nominal/field identity so consumers cannot silently clone a
-    /// payload or infer ownership from the native/VM representation.
+    /// A generic one- or two-field record projection specialized to an owned
+    /// String field. The executable body is a consuming `MoveProject`; the
+    /// receipt fixes nominal/field identity and the TypeDesc proves any
+    /// sibling is Copy, so consumers cannot silently clone a payload or infer
+    /// ownership from the native/VM representation.
     OwnedRecordProjection {
         contract: types::MirRecordProjectionContract,
     },

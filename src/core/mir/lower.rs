@@ -2095,12 +2095,11 @@ fn detect_owned_record_projection_contract(
                 ),
             }]
         })?;
-    if receipt.arity != 1 || function.result != result_ty {
+    if !matches!(receipt.arity, 1 | 2) || function.result != result_ty {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message:
-                "owned generic record projection requires one field and a direct result identity"
-                    .into(),
+                "owned generic record projection requires one or two fields and a direct result identity".into(),
         }]);
     }
     let MirTerminator::Return {
@@ -2201,7 +2200,8 @@ pub(crate) fn validate_scalar_record_projection_mir(
 /// instance.  This is the consuming counterpart of the Copy projection
 /// validator: the complete record is moved, one owned String field is
 /// returned, and the TypeDesc contract proves there is no residual non-Copy
-/// sibling left behind.
+/// sibling left behind. A two-field record is admitted only when its other
+/// field is a concrete Copy scalar, so no residual/drop node is needed.
 pub(crate) fn validate_owned_record_projection_mir(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -2261,10 +2261,9 @@ pub(crate) fn validate_owned_record_projection_mir(
     if &expected != contract {
         return Err("owned generic record projection receipt disagrees with TypeDesc".into());
     }
-    if contract.arity != 1 || function.result != result_ty {
+    if !matches!(contract.arity, 1 | 2) || function.result != result_ty {
         return Err(
-            "owned generic record projection requires one field and a direct result identity"
-                .into(),
+            "owned generic record projection requires one or two fields and a direct result identity".into(),
         );
     }
     if type_catalog.validate_owned_string(&result_ty).is_err() {

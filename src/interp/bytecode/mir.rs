@@ -5108,6 +5108,43 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_mixed_generic_record_projection_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("mixed owned generic record projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("mixed owned generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { ref contract }
+                if contract.arity == 2 && contract.name == "value"
+        ));
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("mixed owned generic record projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference mixed owned generic projection execution");
+        let bytecode = compile_mir_program(&mir).expect("mixed owned generic projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("mixed owned generic projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_generic_record_projection_rvalue_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"

@@ -2354,6 +2354,43 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_owned_mixed_generic_record_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("mixed owned generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { ref contract }
+                if contract.arity == 2 && contract.name == "value"
+        ));
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("mixed owned generic record projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference mixed owned generic projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_owned_string_mixed");
+        generator
+            .compile_mir_native(&program)
+            .expect("native mixed owned generic record projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native mixed owned generic record projection module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_generic_record_projection_rvalue() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"

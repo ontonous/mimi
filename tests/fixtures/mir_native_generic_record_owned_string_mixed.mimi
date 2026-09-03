@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: move the generic String field while a
+// fixed Copy-scalar sibling remains in the consumed record.
+type Tagged<T> { value: T, tag: i32 }
+
+func take_value<T>(tagged: Tagged<T>) -> T {
+    tagged.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let tagged = Tagged { value: "owned", tag: 7 }
+    let picked = take_value(tagged)
+    drop(picked)
+    41
+}

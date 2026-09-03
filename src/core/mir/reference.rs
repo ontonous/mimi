@@ -5892,6 +5892,60 @@ mod tests {
     }
 
     #[test]
+    fn concrete_owned_mixed_generic_record_projection_consumes_move_project() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("mixed owned generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("mixed owned generic record projection instance");
+        let MirGenericInstanceContract::OwnedRecordProjection { contract } = &instance.contract
+        else {
+            panic!("mixed owned generic record projection must carry consuming receipt");
+        };
+        assert_eq!(contract.arity, 2);
+        assert_eq!(contract.name, "value");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("mixed owned generic record projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("mixed owned record projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("mixed owned record projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 2
+                    && fields[0].ty == contract.field_ty
+                    && program.type_catalog().get(&fields[1].ty).is_some_and(|sibling| {
+                        sibling.ownership == crate::core::mir::types::MirOwnership::Copy
+                    })
+        ));
+        assert!(program
+            .type_catalog()
+            .validate_owned_string(&instance.arguments[0])
+            .is_ok());
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference mixed owned generic projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn owned_generic_record_projection_call_clone_cannot_cross_mir_gate() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
@@ -6142,6 +6196,26 @@ mod tests {
                 "unexpected errors: {errors:?}"
             ),
             other => panic!("mixed managed generic record crossed MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_owned_generic_record_projection_with_noncopy_sibling_fails_closed() {
+        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: \"owned\", tag: \"residual\" }; let picked = get(tagged); drop(picked); 41 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("non-Copy sibling must prevent an owned projection");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(
+                errors.iter().any(|error| {
+                    error.message.contains("generic record projection")
+                        && error.message.contains("direct field Project")
+                }),
+                "unexpected errors: {errors:?}"
+            ),
+            other => panic!("non-Copy sibling crossed the MIR gate: {other:?}"),
         }
     }
 

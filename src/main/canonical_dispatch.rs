@@ -614,6 +614,26 @@ mod tests {
     }
 
     #[test]
+    fn owned_mixed_generic_record_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("mixed owned generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordProjection {
+                ref contract
+            } if contract.arity == 2 && contract.name == "value"
+        )));
+    }
+
+    #[test]
     fn owned_generic_record_projection_rvalue_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
@@ -678,6 +698,17 @@ mod tests {
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("mixed managed generic record projection must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
+    }
+
+    #[test]
+    fn mixed_owned_generic_record_projection_with_noncopy_sibling_is_rejected_before_legacy_route()
+    {
+        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: \"owned\", tag: \"residual\" }; let picked = get(tagged); drop(picked); 41 }";
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("non-Copy sibling must fail closed before legacy route");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
     }
