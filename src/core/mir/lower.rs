@@ -359,6 +359,30 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             sites.first().map(|(_, _, _, instruction)| instruction),
         )?;
         let target = instance.function.clone();
+        let owned_record_target_parameter = matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedRecordProjection { .. }
+        )
+        .then(|| {
+            function
+                .parameters
+                .first()
+                .and_then(|parameter| function.values.get(parameter))
+                .map(|value| value.ty.clone())
+        })
+        .flatten();
+        if matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedRecordProjection { .. }
+        ) && owned_record_target_parameter.is_none()
+        {
+            return Err(vec![MirLoweringError {
+                node_id: template.clone(),
+                message:
+                    "owned generic record projection target has no canonical parameter TypeDesc"
+                        .into(),
+            }]);
+        }
         if functions.insert(target.clone(), function).is_some() {
             return Err(vec![MirLoweringError {
                 node_id: template.clone(),
@@ -380,6 +404,15 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                     ),
                 }]);
             };
+            if let Some(target_parameter_ty) = owned_record_target_parameter.as_ref() {
+                rewrite_owned_record_call_argument(
+                    function,
+                    &block_id,
+                    index,
+                    target_parameter_ty,
+                    type_catalog,
+                )?;
+            }
             let Some(instruction) = function
                 .blocks
                 .get_mut(&block_id)
@@ -413,6 +446,204 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
         }
     }
     Ok(instances)
+}
+
+/// Transfer a direct local into an owned generic record projection call.
+///
+/// Generic argument lowering ordinarily emits `Clone` for an identifier so
+/// Copy-oriented calls can share the same value path.  An
+/// `OwnedRecordProjection` instance is different: its `MoveProject` consumes
+/// the complete record, so keeping the caller's local alive would split the
+/// ownership ledger.  Materialization therefore rewrites the immediately
+/// preceding direct Clone into Move, and the shared call-graph validator below
+/// proves this shape before any backend runs.  Rvalues and indirect producers
+/// stay fail-closed until they have their own transfer receipt.
+fn rewrite_owned_record_call_argument(
+    caller: &mut MirFunction,
+    block_id: &MirBlockId,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), Vec<MirLoweringError>> {
+    let subject = caller
+        .blocks
+        .get(block_id)
+        .and_then(|block| block.instructions.get(call_index))
+        .map(|instruction| NodeId(instruction.id.as_str().to_owned()))
+        .unwrap_or_else(|| caller.owner.clone());
+    let Some(block) = caller.blocks.get_mut(block_id) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call block is absent".into(),
+        }]);
+    };
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call instruction is absent".into(),
+        }]);
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call requires one argument".into(),
+        }]);
+    };
+    let Some(producer_index) = call_index.checked_sub(1) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call argument has no producer".into(),
+        }]);
+    };
+    let Some(MirInstruction {
+        kind:
+            MirInstructionKind::Clone {
+                result: produced,
+                source,
+            },
+        ..
+    }) = block.instructions.get(producer_index)
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call requires a direct local Clone producer"
+                .into(),
+        }]);
+    };
+    if produced != argument {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call argument is not the direct Clone result"
+                .into(),
+        }]);
+    }
+    if !source.as_str().starts_with("local:") {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call Clone source is not a local".into(),
+        }]);
+    }
+    let Some(source_ty) = caller.values.get(source).map(|value| value.ty.clone()) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call Move source TypeDesc is absent".into(),
+        }]);
+    };
+    if source_ty != *target_parameter_ty {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: format!(
+                "owned generic record projection call source type '{}' disagrees with target parameter '{}'",
+                source_ty.as_str(),
+                target_parameter_ty.as_str()
+            ),
+        }]);
+    }
+    let Some(descriptor) = type_catalog.get(&source_ty) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call source has no TypeDesc".into(),
+        }]);
+    };
+    if descriptor.ownership != super::types::MirOwnership::Move {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic record projection call source is not Move-owned".into(),
+        }]);
+    }
+    if let Err(message) =
+        type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
+    {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: format!(
+                "owned generic record projection call source lacks MoveOut glue: {message}"
+            ),
+        }]);
+    }
+    let MirInstruction {
+        kind:
+            MirInstructionKind::Clone {
+                result: produced,
+                source,
+            },
+        ..
+    } = &mut block.instructions[producer_index]
+    else {
+        unreachable!("producer checked above")
+    };
+    block.instructions[producer_index].kind = MirInstructionKind::Move {
+        result: produced.clone(),
+        source: source.clone(),
+    };
+    Ok(())
+}
+
+/// Validate the materialized call-site transfer for an owned generic record
+/// projection.  This is intentionally separate from the target body receipt:
+/// both the callee's consuming `MoveProject` and the caller's source transfer
+/// must be present before reference, bytecode, native or verifier consumers.
+pub(crate) fn validate_owned_record_call_argument(
+    caller: &MirFunction,
+    block: &MirBlock,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), String> {
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err("owned generic record projection call instruction is absent".into());
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err("owned generic record projection call requires one argument".into());
+    };
+    let producer_index = call_index.checked_sub(1).ok_or_else(|| {
+        "owned generic record projection call argument has no producer".to_string()
+    })?;
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Move { result, source },
+        ..
+    }) = block.instructions.get(producer_index)
+    else {
+        return Err(
+            "owned generic record projection call requires a direct local Move producer".into(),
+        );
+    };
+    if result != argument {
+        return Err(
+            "owned generic record projection call argument is not the direct Move result".into(),
+        );
+    }
+    if !source.as_str().starts_with("local:") {
+        return Err("owned generic record projection call Move source is not a local".into());
+    }
+    let source_ty = caller
+        .values
+        .get(source)
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| {
+            "owned generic record projection call Move source TypeDesc is absent".to_string()
+        })?;
+    if source_ty != *target_parameter_ty {
+        return Err(
+            "owned generic record projection call source type disagrees with target parameter"
+                .into(),
+        );
+    }
+    let descriptor = type_catalog
+        .get(&source_ty)
+        .ok_or_else(|| "owned generic record projection call source has no TypeDesc".to_string())?;
+    if descriptor.ownership != super::types::MirOwnership::Move {
+        return Err("owned generic record projection call source is not Move-owned".into());
+    }
+    type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
 }
 
 fn materialize_generic_instance(

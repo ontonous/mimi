@@ -1556,8 +1556,8 @@ fn validate_call_graph(
         transitions,
     ));
     for function in functions.values() {
-        for block in function.blocks.values() {
-            for instruction in &block.instructions {
+        for (_block_id, block) in &function.blocks {
+            for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                 if let super::MirInstructionKind::FlowTransition {
                     result,
                     transition,
@@ -1711,6 +1711,43 @@ fn validate_call_graph(
                                     .join(",")
                             ),
                         });
+                    }
+                    if let MirGenericInstanceContract::OwnedRecordProjection { .. } =
+                        &instance.contract
+                    {
+                        let Some(target_parameter) = target.parameters.first() else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "owned generic record projection target has no parameter"
+                                    .into(),
+                            });
+                            continue;
+                        };
+                        let Some(target_parameter_ty) = target
+                            .values
+                            .get(target_parameter)
+                            .map(|value| value.ty.clone())
+                        else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "owned generic record projection target parameter TypeDesc is absent".into(),
+                            });
+                            continue;
+                        };
+                        if let Err(message) = super::lower::validate_owned_record_call_argument(
+                            function,
+                            block,
+                            instruction_index,
+                            &target_parameter_ty,
+                            type_catalog,
+                        ) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "owned generic record projection call transfer is invalid: {message}"
+                                ),
+                            });
+                        }
                     }
                 }
 
@@ -5101,7 +5138,7 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
-    use crate::core::mir::{MirGenericInstanceContract, MirInstructionKind};
+    use crate::core::mir::{MirGenericInstanceContract, MirInstruction, MirInstructionKind};
     use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -5647,6 +5684,36 @@ mod tests {
             .is_some_and(|descriptor| {
                 descriptor.ownership == crate::core::mir::types::MirOwnership::Move
             }));
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("owned generic projection caller");
+        let (_, call_index, call_argument) = main
+            .blocks
+            .iter()
+            .find_map(|(block_id, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, instruction)| match &instruction.kind {
+                        MirInstructionKind::Call { arguments, .. } => arguments
+                            .first()
+                            .cloned()
+                            .map(|argument| (block_id, index, argument)),
+                        _ => None,
+                    })
+            })
+            .expect("owned generic projection call");
+        assert!(matches!(
+            main.blocks
+                .values()
+                .find_map(|block| block.instructions.get(call_index.saturating_sub(1))),
+            Some(MirInstruction {
+                kind: MirInstructionKind::Move { result, .. },
+                ..
+            }) if result == &call_argument
+        ));
         assert!(program
             .type_catalog()
             .validate_owned_string(&instance.arguments[0])
@@ -5655,6 +5722,79 @@ mod tests {
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference owned generic record projection execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn owned_generic_record_projection_call_clone_cannot_cross_mir_gate() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record projection must materialize");
+        let owner = NodeId("function:main".into());
+        let mut main = program
+            .functions()
+            .get(&owner)
+            .cloned()
+            .expect("owned generic projection caller");
+        let block =
+            main.blocks
+                .values_mut()
+                .find(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(instruction.kind, MirInstructionKind::Call { .. })
+                    })
+                })
+                .expect("owned generic projection call block");
+        let call_index = block
+            .instructions
+            .iter()
+            .position(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+            .expect("owned generic projection call");
+        let (result, source) = match &block.instructions[call_index.saturating_sub(1)].kind {
+            MirInstructionKind::Move { result, source } => (result.clone(), source.clone()),
+            other => panic!("expected materialized Move producer, got {other:?}"),
+        };
+        block.instructions[call_index.saturating_sub(1)].kind =
+            MirInstructionKind::Clone { result, source };
+        let mut functions = program.functions().clone();
+        functions.insert(owner, main);
+        let errors = MirProgram::with_type_catalog_and_instances(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+        )
+        .expect_err("owned generic call with a cloned source must fail closed");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("owned generic record projection call transfer is invalid")
+                    && error.message.contains("direct local Move producer")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn owned_generic_record_projection_rvalue_argument_fails_closed() {
+        let source = "type Box<T> { value: T }\nfunc take<T>(boxed: Box<T>) -> T { boxed.value }\nfunc main() -> i32 { let picked = take(Box { value: \"owned\" }); drop(picked); 41 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("owned generic record projection rvalue must remain fail-closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("owned generic record projection call requires a direct local Clone producer")
+            }), "{errors:?}"),
+            other => panic!("owned generic record rvalue crossed the MIR gate: {other:?}"),
+        }
     }
 
     #[test]
