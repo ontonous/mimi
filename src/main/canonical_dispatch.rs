@@ -754,6 +754,29 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_generic_list_index_one_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Copy-scalar generic List index-one projection must select canonical route");
+        };
+        assert!(program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                    index_value: 1,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
     fn unsupported_generic_list_facade_cannot_reenter_legacy_route() {
         let source = r#"
             func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {

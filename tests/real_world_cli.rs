@@ -3285,6 +3285,85 @@ fn canonical_mir_generic_list_projection_is_atomic_across_consumers_and_default_
 }
 
 #[test]
+fn canonical_mir_generic_list_index_one_projection_is_atomic_across_consumers_and_default_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_list_projection_index_one.mimi");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical generic List index-one MIR dump");
+    assert!(mir.status.success());
+    assert!(
+        String::from_utf8_lossy(&mir.stdout).contains("list_index=MirListIndexProjectionContract")
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical generic List index-one reference run");
+    assert_eq!(mir_run.status.code(), Some(41));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-generic-list-index-one-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical generic List index-one native build");
+    assert!(build.status.success());
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical generic List index-one native binary");
+    let _ = std::fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(41));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical generic List index-one verifier");
+    assert!(verification.status.success());
+    let verification_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(verification_text.contains("canonical MIR ensures contract proven"));
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic List index-one run");
+    assert_eq!(default_run.status.code(), Some(41));
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default generic List index-one native emit-ir");
+    assert!(default_ir.status.success());
+    assert!(String::from_utf8_lossy(&default_ir.stdout).contains("mimi_mir_list_get_scalar"));
+}
+
+#[test]
 fn default_route_rejects_non_copy_generic_list_projection_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")

@@ -3320,8 +3320,8 @@ fn eval_materialized_list_projection_call(
     else {
         return Err("MIR verifier List projection argument is not a symbolic List".into());
     };
-    let zero = Int::from_i64(0);
-    add_definedness(state, zero.lt(&length), "E0803")?;
+    let index = Int::from_i64(index_value);
+    add_definedness(state, index.lt(&length), "E0803")?;
     let (output, constraints) = symbolic_value_for_type(
         catalog,
         &contract.result_ty,
@@ -4848,6 +4848,41 @@ mod tests {
         assert!(result
             .message
             .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_index_one_projection_call() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic List index-one MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List index-one projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                index_value: 1,
+                ..
+            }
+        ));
+        let results = verify_program(&program, "generic-list-index-one-source-hash".into())
+            .expect("verify generic List index-one projection MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("List index-one main verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
     }
 
     #[test]

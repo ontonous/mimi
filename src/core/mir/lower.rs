@@ -1338,21 +1338,24 @@ fn detect_scalar_list_projection_contract(
         .flat_map(|block| block.instructions.iter())
         .find_map(|instruction| match &instruction.kind {
             MirInstructionKind::Const { result, literal } => {
-                matches!(literal, crate::core::ir::ResolvedLiteral::Int(0))
-                    .then_some((result.clone(), 0))
+                if let crate::core::ir::ResolvedLiteral::Int(value) = literal {
+                    (*value == 0 || *value == 1).then_some((result.clone(), *value))
+                } else {
+                    None
+                }
             }
             _ => None,
         });
     let Some((index_id, index_value)) = index_value else {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic List projection requires a constant index literal 0".into(),
+            message: "generic List projection requires a constant index literal 0 or 1".into(),
         }]);
     };
     if projection[0].2 != index_id {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic List projection index must be the constant literal 0".into(),
+            message: "generic List projection index must be the constant literal 0 or 1".into(),
         }]);
     }
     validate_scalar_list_projection_mir(function, type_catalog, contract, index_value).map_err(
@@ -1368,7 +1371,7 @@ fn detect_scalar_list_projection_contract(
 
 /// Validate the concrete body of the single-element generic List projection
 /// facade. The body is deliberately structural: one callable List parameter
-/// is cloned exactly once, one literal-zero index is projected through the
+/// is cloned exactly once, one admitted constant index is projected through the
 /// receipt-bearing `Project`, and that Copy element is returned directly.
 pub(crate) fn validate_scalar_list_projection_mir(
     function: &MirFunction,
@@ -1382,8 +1385,8 @@ pub(crate) fn validate_scalar_list_projection_mir(
     if function.blocks.len() != 1 {
         return Err("scalar generic List projection must have exactly one MIR block".into());
     }
-    if index_value != 0 {
-        return Err("scalar generic List projection index must be the literal 0".into());
+    if !matches!(index_value, 0 | 1) {
+        return Err("scalar generic List projection index must be the literal 0 or 1".into());
     }
     let block = function
         .blocks
@@ -1448,8 +1451,8 @@ pub(crate) fn validate_scalar_list_projection_mir(
     }
     let (constant_result, literal) = constant
         .ok_or_else(|| "scalar generic List projection is missing index Const".to_string())?;
-    if !matches!(literal, crate::core::ir::ResolvedLiteral::Int(0)) {
-        return Err("scalar generic List projection index Const must be literal 0".into());
+    if !matches!(literal, crate::core::ir::ResolvedLiteral::Int(0 | 1)) {
+        return Err("scalar generic List projection index Const must be literal 0 or 1".into());
     }
     let (project_result, project_base, project_index, receipt) = projection
         .ok_or_else(|| "scalar generic List projection is missing indexed Project".to_string())?;
@@ -1457,7 +1460,7 @@ pub(crate) fn validate_scalar_list_projection_mir(
         return Err("scalar generic List projection must project the cloned List parameter".into());
     }
     if project_index != constant_result {
-        return Err("scalar generic List projection must use its literal-zero index".into());
+        return Err("scalar generic List projection must use its admitted constant index".into());
     }
     let receipt = receipt
         .ok_or_else(|| "scalar generic List projection has no canonical receipt".to_string())?;

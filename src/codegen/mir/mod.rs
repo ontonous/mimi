@@ -2121,6 +2121,44 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_scalar_generic_list_index_one_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List index-one projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                index_value: 1,
+                ..
+            }
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic List index-one projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_list_projection_index_one");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic List index-one projection must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic List index-one projection module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_get_scalar")
+            .is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_string_generic_identity_with_explicit_drop() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi"

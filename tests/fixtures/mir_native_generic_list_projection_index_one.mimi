@@ -1,0 +1,13 @@
+// Canonical generic MIR: the bounded second admitted constant-index projection.
+func first<T>(values: List<T>) -> T {
+    values[1]
+}
+
+func main() -> i32 {
+    // The projection result is Copy scalar; verifier proves the shape and bound.
+    ensures: result == result
+    let values = [40, 41]
+    let picked = first(values)
+    drop(values)
+    picked
+}

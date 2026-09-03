@@ -291,6 +291,32 @@ fn materializes_generic_scalar_list_projection_with_a_constant_zero_receipt() {
 }
 
 #[test]
+fn materializes_generic_scalar_list_projection_with_a_constant_one_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List index-one projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List index-one projection instance");
+    assert!(matches!(
+        instance.contract,
+        MirGenericInstanceContract::ScalarListProjection { index_value: 1, .. }
+    ));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List index-one projection execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
 fn rejects_generic_list_projection_for_managed_elements_at_the_mir_gate() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi");
@@ -313,7 +339,7 @@ fn rejects_generic_list_projection_for_managed_elements_at_the_mir_gate() {
 fn rejects_generic_list_projection_for_nonzero_constant_index_at_the_mir_gate() {
     let source = r#"
         func first<T>(values: List<T>) -> T {
-            values[1]
+            values[2]
         }
 
         func main() -> i32 {
@@ -332,7 +358,7 @@ fn rejects_generic_list_projection_for_nonzero_constant_index_at_the_mir_gate() 
         .expect_err("nonzero generic List projection must fail closed");
     let message = format!("{error:?}");
     assert!(
-        message.contains("constant index literal 0")
+        message.contains("constant index literal 0 or 1")
             || message.contains("literal-zero")
             || message.contains("constant zero"),
         "unexpected nonzero generic List projection rejection: {message}"
