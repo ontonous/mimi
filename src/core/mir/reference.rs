@@ -5527,6 +5527,70 @@ mod tests {
     }
 
     #[test]
+    fn concrete_scalar_generic_record_projection_covers_i64_and_bool_abi_family() {
+        for (source, expected) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_record_projection_i64.mimi"
+                ),
+                MirRuntimeValue::Int(41),
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_record_projection_bool.mimi"
+                ),
+                MirRuntimeValue::Bool(true),
+            ),
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            let program = MirProgram::from_checked_program(&checked)
+                .expect("scalar generic record projection must materialize");
+            let instance = program
+                .instances()
+                .values()
+                .next()
+                .expect("generic record projection instance");
+            let MirGenericInstanceContract::ScalarRecordProjection { contract } =
+                &instance.contract
+            else {
+                panic!("scalar generic record projection must carry a record receipt");
+            };
+            assert_eq!(contract.arity, 1);
+            assert_eq!(contract.name, "value");
+            let target = program
+                .functions()
+                .get(&instance.function)
+                .expect("materialized generic record projection target");
+            assert_eq!(contract.field_ty, target.result);
+            let result_desc = program
+                .type_catalog()
+                .get(&target.result)
+                .expect("concrete scalar result TypeDesc");
+            assert_eq!(
+                result_desc.ownership,
+                crate::core::mir::types::MirOwnership::Copy
+            );
+            assert_eq!(
+                result_desc.layout,
+                crate::core::mir::types::MirLayout::Scalar
+            );
+            assert!(matches!(
+                result_desc.abi,
+                crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                } | crate::core::mir::types::MirAbiClass::Bool
+            ));
+            let value = MirReferenceInterpreter::new(&program)
+                .execute(&NodeId("function:main".into()), &[])
+                .expect("reference scalar generic record projection execution");
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
     fn unsupported_generic_record_projection_shape_fails_closed() {
         let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

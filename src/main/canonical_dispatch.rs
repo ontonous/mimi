@@ -557,6 +557,27 @@ mod tests {
     }
 
     #[test]
+    fn scalar_generic_record_projection_i64_and_bool_enter_canonical_default_route() {
+        for source in [
+            include_str!("../../tests/fixtures/mir_native_generic_record_projection_i64.mimi"),
+            include_str!("../../tests/fixtures/mir_native_generic_record_projection_bool.mimi"),
+        ] {
+            let (checked, file) = checked(source);
+            assert_eq!(
+                mimi::core::mir::classify_flat_copy_record_admission(&checked),
+                mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+            );
+            let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+                panic!("supported scalar generic record projection must select canonical MIR");
+            };
+            assert!(program.instances().values().any(|instance| matches!(
+                instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+            )));
+        }
+    }
+
+    #[test]
     fn unsupported_generic_record_projection_is_rejected_before_legacy_route() {
         let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
         let (checked, file) = checked(source);

@@ -1,0 +1,13 @@
+// Canonical generic MIR candidate: bool Copy field projection from Box<T>.
+type Box<T> { value: T }
+
+func get<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> bool {
+    ensures: result == result
+    let boxed = Box { value: true }
+    let picked = get(boxed)
+    picked
+}

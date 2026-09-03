@@ -2189,6 +2189,51 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_scalar_generic_record_projection_i64_and_bool() {
+        for (module_name, source, expected) in [
+            (
+                "mir_native_generic_record_projection_i64",
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_record_projection_i64.mimi"
+                ),
+                MirRuntimeValue::Int(41),
+            ),
+            (
+                "mir_native_generic_record_projection_bool",
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_record_projection_bool.mimi"
+                ),
+                MirRuntimeValue::Bool(true),
+            ),
+        ] {
+            let program = canonical_program(source);
+            let instance = program
+                .instances()
+                .values()
+                .next()
+                .expect("generic record projection instance");
+            assert!(matches!(
+                instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+            ));
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference scalar generic record projection execution");
+            assert_eq!(reference, expected);
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native(&program)
+                .expect("native scalar generic record projection must consume MIR");
+            generator
+                .module
+                .verify()
+                .expect("native scalar generic record projection module verifies");
+        }
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_string_generic_identity_with_explicit_drop() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi"

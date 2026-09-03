@@ -1,0 +1,13 @@
+// Canonical generic MIR candidate: i64 Copy field projection from Box<T>.
+type Box<T> { value: T }
+
+func get<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let boxed = Box { value: 41 }
+    let picked = get(boxed)
+    picked
+}
