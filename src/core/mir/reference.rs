@@ -1342,6 +1342,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarListProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarRecordProjection { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1448,6 +1451,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR List projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarRecordProjection { ref contract } => {
+                if let Err(message) = super::lower::validate_scalar_record_projection_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR record projection contract is invalid: {message}"
                         ),
                     });
                 }
@@ -5452,6 +5469,80 @@ mod tests {
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn concrete_scalar_generic_record_projection_is_canonical_and_borrowed() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic record projection must materialize in canonical MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic record projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("generic record projection must carry a record receipt");
+        };
+        assert_eq!(contract.arity, 1);
+        assert_eq!(contract.name, "value");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("materialized generic record projection target");
+        assert_eq!(contract.field_ty, target.result);
+        let parameter_ty = target
+            .parameters
+            .first()
+            .and_then(|parameter| target.values.get(parameter))
+            .map(|value| value.ty.clone())
+            .expect("record projection parameter TypeDesc");
+        let parameter_desc = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("record projection concrete TypeDesc");
+        assert_eq!(
+            parameter_desc.ownership,
+            crate::core::mir::types::MirOwnership::Copy
+        );
+        assert_eq!(
+            parameter_desc.abi,
+            crate::core::mir::types::MirAbiClass::Aggregate
+        );
+        assert!(matches!(
+            parameter_desc.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 1 && fields[0].ty == contract.field_ty
+        ));
+        assert!(target.canonical_text().contains("project"));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn unsupported_generic_record_projection_shape_fails_closed() {
+        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("multi-field generic record projection must remain fail-closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("generic record projection")),
+                "unexpected errors: {errors:?}"
+            ),
+            other => panic!("unsupported generic record shape crossed MIR gate: {other:?}"),
+        }
     }
 
     #[test]

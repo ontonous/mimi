@@ -459,6 +459,14 @@ fn materialize_generic_instance(
         &generic_id,
         &mut HashSet::new(),
     );
+    let generic_record_facade = callable.signature.parameters.iter().any(|parameter| {
+        mentions_generic_record_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
+    }) || mentions_generic_record_type(
+        program,
+        &callable.signature.result,
+        &generic_id,
+        &mut HashSet::new(),
+    );
     let is_identity = callable.signature.parameters.len() == 1
         && callable.signature.parameters[0].ty == generic_id
         && callable.signature.result == generic_id;
@@ -864,6 +872,14 @@ fn materialize_generic_instance(
             contract,
             index_value,
         }
+    } else if generic_record_facade {
+        let contract = detect_scalar_record_projection_contract(
+            &function,
+            type_catalog,
+            &generic_id,
+            &subject(),
+        )?;
+        MirGenericInstanceContract::ScalarRecordProjection { contract }
     } else if generic_list_facade
         || function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -1298,6 +1314,204 @@ fn detect_scalar_set_facade_operation(
         }]
     })?;
     Ok(*operation)
+}
+
+fn detect_scalar_record_projection_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    generic_id: &crate::core::ResolvedTypeId,
+    subject: &NodeId,
+) -> Result<super::types::MirRecordProjectionContract, Vec<MirLoweringError>> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection must have exactly one parameter".into(),
+        }]);
+    };
+    if function.blocks.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection must have exactly one MIR block".into(),
+        }]);
+    }
+    let block = function.blocks.get(&function.entry).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection entry block is absent".into(),
+        }]
+    })?;
+    let projection = block
+        .instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Field(field),
+                ..
+            } => Some((result.clone(), base.clone(), field.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(_, _, _)] = projection.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection must contain exactly one field Project".into(),
+        }]);
+    };
+    if block.instructions.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection body may contain only one field Project".into(),
+        }]);
+    }
+    let (project_result, project_base, field) = projection[0].clone();
+    if project_base != *parameter {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection must project its record parameter".into(),
+        }]);
+    }
+    let base_ty = function
+        .values
+        .get(&project_base)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection base value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(&project_result)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection result value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    if base_ty == *generic_id || result_ty == *generic_id {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection was not concretely specialized".into(),
+        }]);
+    }
+    type_catalog
+        .validate_flat_copy_record(&base_ty)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!("generic record projection base is unsupported: {message}"),
+            }]
+        })?;
+    let receipt = type_catalog
+        .validated_record_field_projection_contract(&base_ty, &field, &result_ty)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!(
+                    "generic record projection receipt specialization failed: {message}"
+                ),
+            }]
+        })?;
+    if receipt.arity != 1 || function.result != result_ty {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection requires one field and a direct result identity"
+                .into(),
+        }]);
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection must directly return its Project result".into(),
+        }]);
+    };
+    if returned != &project_result {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record projection return value is not the Project result".into(),
+        }]);
+    }
+    Ok(receipt)
+}
+
+/// Validate the materialized body behind a `ScalarRecordProjection` generic
+/// instance.  The receipt is already concrete, so this validator only accepts
+/// the one-block/one-field-project/direct-return shape and proves that every
+/// TypeDesc identity agrees with the checker-owned receipt.
+pub(crate) fn validate_scalar_record_projection_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirRecordProjectionContract,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("generic record projection must have exactly one parameter".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("generic record projection must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic record projection entry block is absent".to_string())?;
+    if block.instructions.len() != 1 {
+        return Err("generic record projection body may contain only one field Project".into());
+    }
+    let MirInstruction {
+        kind:
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Field(field),
+                ..
+            },
+        ..
+    } = &block.instructions[0]
+    else {
+        return Err("generic record projection must contain exactly one field Project".into());
+    };
+    if base != parameter {
+        return Err("generic record projection must project its record parameter".into());
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| "generic record projection base value is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| "generic record projection result value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_flat_copy_record(&base_ty)?;
+    let expected =
+        type_catalog.validated_record_field_projection_contract(&base_ty, field, &result_ty)?;
+    if &expected != contract {
+        return Err("generic record projection receipt disagrees with TypeDesc".into());
+    }
+    if contract.arity != 1 || function.result != result_ty {
+        return Err(
+            "generic record projection requires one field and a direct result identity".into(),
+        );
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err("generic record projection must directly return its Project result".into());
+    };
+    if returned != result {
+        return Err("generic record projection return value is not the Project result".into());
+    }
+    Ok(())
 }
 
 fn detect_scalar_list_projection_contract(
@@ -1822,6 +2036,61 @@ fn mentions_generic_set_type(
     seen: &mut HashSet<crate::core::ResolvedTypeId>,
 ) -> bool {
     mentions_generic_container_type(program, id, generic_id, "builtin:type:Set", seen)
+}
+
+fn mentions_generic_record_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+            let is_record = program
+                .type_def(qualified_name)
+                .is_some_and(|definition| definition.kind == crate::core::ResolvedTypeKind::Record);
+            (is_record
+                && arguments.iter().any(|argument| {
+                    contains_generic_type(program, argument, generic_id, &mut HashSet::new())
+                }))
+                || arguments.iter().any(|argument| {
+                    mentions_generic_record_type(program, argument, generic_id, seen)
+                })
+        }
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            mentions_generic_record_type(program, inner, generic_id, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            mentions_generic_record_type(program, ok, generic_id, seen)
+                || mentions_generic_record_type(program, error, generic_id, seen)
+        }
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| mentions_generic_record_type(program, item, generic_id, seen)),
+        Some(ResolvedType::Array { element, .. }) => {
+            mentions_generic_record_type(program, element, generic_id, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters
+                .iter()
+                .any(|parameter| mentions_generic_record_type(program, parameter, generic_id, seen))
+                || mentions_generic_record_type(program, result, generic_id, seen)
+        }
+        _ => false,
+    }
 }
 
 fn mentions_generic_container_type(
@@ -3763,10 +4032,23 @@ impl<'a> Lowerer<'a> {
         };
         let type_catalog = self.type_catalog?;
         let base_ty = self.values.get(base)?.ty.clone();
-        type_catalog
-            .validate_projection(&base_ty, result_ty, &projection)
-            .is_ok()
-            .then_some(projection)
+        let result_is_generic = type_catalog.get(result_ty).is_some_and(|descriptor| {
+            descriptor.kind == super::types::MirTypeKind::GenericParameter
+        });
+        if result_is_generic {
+            let super::MirProjection::Field(field) = &projection else {
+                return None;
+            };
+            type_catalog
+                .validated_generic_record_field_projection_contract(&base_ty, field, result_ty)
+                .is_ok()
+                .then_some(projection)
+        } else {
+            type_catalog
+                .validate_projection(&base_ty, result_ty, &projection)
+                .is_ok()
+                .then_some(projection)
+        }
     }
 }
 

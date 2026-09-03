@@ -1181,11 +1181,12 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
     let unsupported_record_declared = program.type_defs().values().any(|definition| {
         definition.kind == crate::core::ResolvedTypeKind::Record
             && !is_flat_copy_record_definition(program, definition)
+            && !is_scalar_generic_record_definition(program, definition)
     });
     let record_ids = program
         .type_defs()
         .values()
-        .filter(|definition| is_flat_copy_record_definition(program, definition))
+        .filter(|definition| definition.kind == crate::core::ResolvedTypeKind::Record)
         .map(|definition| definition.node_id.0.clone())
         .collect::<BTreeSet<_>>();
     if record_ids.is_empty() {
@@ -1205,6 +1206,54 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
     } else {
         FlatCopyRecordAdmission::CompleteCoverage
     }
+}
+
+/// Return whether a checker-resolved generic record projection looks like the
+/// S108 candidate but its declaration/body shape is outside the admitted
+/// one-field Copy contract.  Default dispatch uses this only on the mixed
+/// compatibility path to reject instead of silently handing the candidate to
+/// legacy code.
+pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        if callable.signature.generic_parameters.len() != 1
+            || callable.signature.parameters.len() != 1
+        {
+            return false;
+        }
+        let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
+            matches!(
+                ty,
+                ResolvedType::GenericParameter(candidate)
+                    if candidate == &callable.signature.generic_parameters[0]
+            )
+            .then_some(id.clone())
+        }) else {
+            return false;
+        };
+        let Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) = program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+        else {
+            return false;
+        };
+        let qualified_name = item
+            .as_str()
+            .strip_prefix("type:")
+            .unwrap_or(item.as_str());
+        let Some(definition) = program.type_def(qualified_name) else {
+            return false;
+        };
+        arguments.as_slice() == [generic_ty.clone()]
+            && callable.signature.result == generic_ty
+            && matches!(
+                callable.body.root.result.as_deref().map(|expr| &expr.kind),
+                Some(ResolvedExprKind::Load(place))
+                    if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
+            )
+            && !is_scalar_generic_record_definition(program, definition)
+    })
 }
 
 /// Check the checker-owned shape that the flat record island is allowed to
@@ -1237,6 +1286,76 @@ fn is_flat_copy_record_definition(
                 )
             })
     })
+}
+
+/// The first generic record island is deliberately one shape only: a single
+/// `Record<T>` field whose declaration type is exactly its sole generic
+/// binder.  Concrete `T` is supplied by the nominal use and materialized into
+/// TypeDesc before any backend consumes the layout.
+fn is_scalar_generic_record_definition(
+    program: &CheckedProgram,
+    definition: &crate::core::ResolvedTypeDef,
+) -> bool {
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || definition.fields.len() != 1
+    {
+        return false;
+    }
+    let binder = &definition.generic_parameters[0].1;
+    let (name, _) = &definition.fields[0];
+    definition
+        .field_ids
+        .get(name)
+        .and_then(|field_id| program.resolved_field_type(field_id))
+        .and_then(|field_ty| program.resolved_types().get(field_ty))
+        .is_some_and(|field_ty| {
+            matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
+        })
+}
+
+/// Recognize the only generic callable admitted with the generic record
+/// declaration: `get<T>(Record<T>) -> T { record.field }`.  The body check is
+/// intentionally syntactic over Resolved IR only; all TypeDesc and receipt
+/// details are revalidated after specialization by the MIR builder.
+fn is_scalar_generic_record_projection_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if callable.signature.generic_parameters.len() != 1 || callable.signature.parameters.len() != 1
+    {
+        return false;
+    }
+    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(
+            ty,
+            ResolvedType::GenericParameter(candidate)
+                if candidate == &callable.signature.generic_parameters[0]
+        )
+        .then_some(id.clone())
+    }) else {
+        return false;
+    };
+    let Some(ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program
+        .resolved_types()
+        .get(&callable.signature.parameters[0].ty)
+    else {
+        return false;
+    };
+    let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    let Some(definition) = program.type_def(qualified_name) else {
+        return false;
+    };
+    is_scalar_generic_record_definition(program, definition)
+        && arguments.as_slice() == [generic_ty.clone()]
+        && callable.signature.result == generic_ty
+        && matches!(
+            callable.body.root.result.as_deref().map(|expr| &expr.kind),
+            Some(ResolvedExprKind::Load(place))
+                if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
+        )
 }
 
 /// Keep the flat-record island closed over the complete typed body, not only
@@ -1402,7 +1521,8 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
         || !program.backend_requirements().is_empty()
         || program.type_defs().values().any(|definition| {
             matches!(definition.origin, crate::core::Origin::User(_))
-                && (!definition.generic_parameters.is_empty()
+                && (!is_scalar_generic_record_definition(program, definition)
+                    && !definition.generic_parameters.is_empty()
                     || definition.kind != crate::core::ResolvedTypeKind::Record
                         && definition.kind != crate::core::ResolvedTypeKind::Alias
                         && definition.kind != crate::core::ResolvedTypeKind::Newtype)
@@ -1412,8 +1532,14 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .values()
             .filter(|function| !is_prelude_origin(program, &function.origin))
             .any(|function| {
-                !function.generics.is_empty()
-                    || !function.generic_binders.is_empty()
+                let generic_record_callable = program
+                    .callables()
+                    .get(&function.node_id)
+                    .is_some_and(|callable| {
+                        is_scalar_generic_record_projection_callable(program, callable)
+                    });
+                (!generic_record_callable && !function.generics.is_empty())
+                    || (!generic_record_callable && !function.generic_binders.is_empty())
                     || !function.effects.is_empty()
                     || function.is_async
                     || function.is_comptime
@@ -1424,7 +1550,8 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .values()
             .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
             .any(|callable| {
-                !callable.signature.generic_parameters.is_empty()
+                (!is_scalar_generic_record_projection_callable(program, callable)
+                    && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()
                     || !callable.body.default_values.is_empty()
@@ -1746,7 +1873,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarSetFacade { .. }
                 | MirGenericInstanceContract::ScalarListFacade { .. }
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
-                | MirGenericInstanceContract::ScalarListProjection { .. } => {}
+                | MirGenericInstanceContract::ScalarListProjection { .. }
+                | MirGenericInstanceContract::ScalarRecordProjection { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit

@@ -34,7 +34,8 @@ pub use islands::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    has_unsupported_generic_list_facade_candidate, has_unsupported_list_concat_candidate,
+    has_unsupported_generic_list_facade_candidate,
+    has_unsupported_generic_record_projection_candidate, has_unsupported_list_concat_candidate,
     has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
     FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
@@ -313,6 +314,12 @@ pub enum MirGenericInstanceContract {
     ScalarListProjection {
         contract: types::MirListIndexProjectionContract,
         index_value: i64,
+    },
+    /// A generic one-field record projection specialized to a concrete
+    /// Copy-scalar field. The instance receipt fixes the nominal/field
+    /// identity so consumers cannot infer a generic record ABI from names.
+    ScalarRecordProjection {
+        contract: types::MirRecordProjectionContract,
     },
 }
 

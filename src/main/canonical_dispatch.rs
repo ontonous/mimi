@@ -242,6 +242,17 @@ pub(crate) fn select_default_route(
                     "canonical generic List facade candidate did not materialize a supported scalar MIR shape",
                 );
             }
+            if record_hint
+                && mimi::core::mir::has_unsupported_generic_record_projection_candidate(checked)
+            {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    false,
+                    true,
+                    false,
+                    "canonical generic record projection candidate did not materialize a supported scalar MIR shape",
+                );
+            }
             // S8 keeps its existing candidate hard boundary: the front-end
             // candidate predicate is intentionally stricter than
             // collection/record compatibility and must not fall back.
@@ -525,6 +536,34 @@ mod tests {
             select_default_route(&checked, &file),
             DefaultMirRoute::Canonical(_)
         ));
+    }
+
+    #[test]
+    fn generic_copy_record_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Copy-record projection must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+        )));
+    }
+
+    #[test]
+    fn unsupported_generic_record_projection_is_rejected_before_legacy_route() {
+        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("unsupported generic record projection must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
     }
 
     #[test]

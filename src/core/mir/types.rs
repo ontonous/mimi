@@ -659,7 +659,7 @@ pub struct MirVariantProjectionTrapContract {
 /// record arity, and field type are resolved together from the TypeDesc graph.
 /// A backend may encode the name or index physically, but it must carry the
 /// receipt rather than infer record shape from a map, struct, or AST.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirRecordProjectionContract {
     pub nominal: NominalTypeId,
     pub field: NodeId,
@@ -1070,7 +1070,10 @@ impl MirTypeCatalog {
         let mut catalog = Self::from_resolved_types(program.resolved_types())?;
         let mut errors = Vec::new();
         for (id, ty) in program.resolved_types().iter() {
-            let ResolvedType::Nominal { item, .. } = ty else {
+            let ResolvedType::Nominal {
+                item, arguments, ..
+            } = ty
+            else {
                 continue;
             };
             let Some(type_def) = program.type_def(item.as_str()).or_else(|| {
@@ -1163,14 +1166,30 @@ impl MirTypeCatalog {
                     ));
                     continue;
                 };
-                let Some(field_ty) = program.resolved_field_type(field_id) else {
+                let Some(declared_field_ty) = program.resolved_field_type(field_id) else {
                     errors.push(format!(
                         "record '{}' field '{}' has no resolved type",
                         type_def.qualified_name, name
                     ));
                     continue;
                 };
-                if catalog.get(field_ty).is_none() {
+                // A record declaration owns its generic binder identities,
+                // while each nominal use carries concrete arguments.  Direct
+                // generic fields must therefore be instantiated here, before
+                // layout/ABI/glue are derived.  Leaving the declaration-time
+                // placeholder in `Box<i32>.value` would make TypeDesc claim an
+                // opaque field even though the checker resolved a Copy scalar.
+                let field_ty = match program.resolved_types().get(declared_field_ty) {
+                    Some(ResolvedType::GenericParameter(binder)) => type_def
+                        .generic_parameters
+                        .iter()
+                        .position(|(_, candidate)| candidate == binder)
+                        .and_then(|index| arguments.get(index))
+                        .cloned()
+                        .unwrap_or_else(|| declared_field_ty.clone()),
+                    _ => declared_field_ty.clone(),
+                };
+                if catalog.get(&field_ty).is_none() {
                     errors.push(format!(
                         "record '{}' field '{}' references a type absent from MIR catalog",
                         type_def.qualified_name, name
@@ -3770,6 +3789,77 @@ impl MirTypeCatalog {
                 field.ty.as_str(),
                 result_ty.as_str()
             ));
+        }
+        Ok(MirRecordProjectionContract {
+            nominal: nominal.clone(),
+            field: field.id.clone(),
+            name: field.name.clone(),
+            field_index,
+            arity: fields.len(),
+            field_ty: field.ty.clone(),
+        })
+    }
+
+    /// Build the non-executable placeholder receipt for the only generic
+    /// record projection shape currently admitted: a one-field `Record<T>`
+    /// whose field and result are the same GenericParameter.  Concrete
+    /// specialization must call `validated_record_field_projection_contract`
+    /// again so the backend never consumes a generic TypeDesc.
+    pub(crate) fn validated_generic_record_field_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirRecordProjectionContract, String> {
+        let descriptor = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "generic record projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+            return Err(format!(
+                "generic record projection base type '{}' has no canonical record layout",
+                base_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Nominal
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || fields.len() != 1
+        {
+            return Err(
+                "generic record projection requires a one-field Copy record contract".into(),
+            );
+        }
+        let (field_index, field) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == *field_id)
+            .ok_or_else(|| format!("generic record projection field '{}' is absent", field_id.0))?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic record projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if result.kind != MirTypeKind::GenericParameter
+            || field.ty != *result_ty
+            || self
+                .get(&field.ty)
+                .is_none_or(|field_ty| field_ty.kind != MirTypeKind::GenericParameter)
+        {
+            return Err(
+                "generic record projection placeholder requires a GenericParameter field/result identity".into(),
+            );
         }
         Ok(MirRecordProjectionContract {
             nominal: nominal.clone(),

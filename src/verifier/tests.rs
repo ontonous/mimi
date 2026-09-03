@@ -1036,6 +1036,33 @@ fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
 }
 
 #[test]
+fn generic_record_projection_is_consumed_by_mir_verifier_without_ast_fallback() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_record_projection.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-projection").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic record projection MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic record projection verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn flat_copy_variant_predicates_are_verified_from_canonical_mir() {
     require_z3!();
     let source = r#"

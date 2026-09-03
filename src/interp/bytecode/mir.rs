@@ -4916,6 +4916,36 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_scalar_generic_record_projection_through_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic record projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic record projection execution");
+        let bytecode = compile_mir_program(&mir).expect("generic record projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic record projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_string_generic_identity_with_explicit_drop_through_mir_bytecode() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");
