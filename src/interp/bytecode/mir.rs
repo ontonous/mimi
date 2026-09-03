@@ -3118,7 +3118,7 @@ mod tests {
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
-    use crate::core::mir::{MirOwnershipEvent, MirOwnershipEventKind};
+    use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
     use crate::interp::bytecode::{ConstValue, Op};
@@ -5128,6 +5128,36 @@ mod tests {
             .expect("bytecode execution");
         assert_eq!(reference, MirRuntimeValue::String("owned".into()));
         assert!(matches!(bytecode, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn executes_owned_string_return_move_contract_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_owned_string_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("canonical owned String return MIR");
+        let echo = mir
+            .functions()
+            .get(&crate::core::NodeId("function:echo".into()))
+            .expect("echo MIR function");
+        assert!(echo
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Move { .. })));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned String return execution");
+        let bytecode = compile_mir_program(&mir).expect("owned String return MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("owned String return bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
     }
 
     #[test]

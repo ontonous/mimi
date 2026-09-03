@@ -870,6 +870,51 @@ fn non_copy_record_projection_lowers_to_explicit_move_project() {
 }
 
 #[test]
+fn owned_string_return_lowers_to_move_and_reference_preserves_transfer() {
+    let source = include_str!("../../../tests/fixtures/mir_native_owned_string_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical owned String return MIR");
+    let owner = crate::core::NodeId("function:echo".into());
+    let function = canonical
+        .functions()
+        .get(&owner)
+        .expect("echo MIR function");
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .expect("echo entry block");
+    let [instruction] = block.instructions.as_slice() else {
+        panic!("owned String return must have one ownership instruction");
+    };
+    let MirInstructionKind::Move { result, source } = &instruction.kind else {
+        panic!("direct owned String return must move its source");
+    };
+    assert_eq!(source, &function.parameters[0]);
+    assert!(matches!(
+        &block.terminator,
+        MirTerminator::Return { value: Some(value) } if value == result
+    ));
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::String(
+                "oracle".into(),
+            )],
+        )
+        .expect("reference direct owned String return");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::String("oracle".into())
+    );
+}
+
+#[test]
 fn non_copy_record_projection_with_non_copy_sibling_fails_closed() {
     let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

@@ -107,7 +107,7 @@ fn lower_body_impl(
     lowerer.lower_root(&body.root);
     if !lowerer.current_is_terminated() && lowerer.errors.is_empty() {
         if let Some(result) = body.root.result.as_deref() {
-            let value = lowerer.lower_expr(result);
+            let value = lowerer.lower_return_expr(result);
             if lowerer.errors.is_empty() {
                 lowerer.terminate(MirTerminator::Return { value: Some(value) });
             }
@@ -1112,7 +1112,7 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ResolvedStmtKind::Return { value, .. } => {
-                    let value = value.as_ref().map(|value| self.lower_expr(value));
+                    let value = value.as_ref().map(|value| self.lower_return_expr(value));
                     self.terminate(MirTerminator::Return { value });
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
@@ -1832,6 +1832,22 @@ impl<'a> Lowerer<'a> {
         self.lower_expr(expression)
     }
 
+    /// Lower an expression in a return position. Direct owned `String` locals
+    /// are transferred to the caller; an ordinary expression keeps its
+    /// existing lowering because its result is a fresh value or belongs to a
+    /// wider aggregate/control-flow contract. The TypeDesc is the only source
+    /// of the ownership decision.
+    fn lower_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        if self
+            .type_catalog
+            .is_some_and(|catalog| catalog.validate_owned_string(&expression.ty).is_ok())
+        {
+            self.lower_consuming_expr(expression)
+        } else {
+            self.lower_expr(expression)
+        }
+    }
+
     fn lower_switch_bindings(
         &mut self,
         pattern: &ResolvedPattern,
@@ -2264,7 +2280,7 @@ impl<'a> Lowerer<'a> {
                     self.lower_continue(&statement.node_id);
                 }
                 ResolvedStmtKind::Return { value, .. } => {
-                    let value = value.as_ref().map(|value| self.lower_expr(value));
+                    let value = value.as_ref().map(|value| self.lower_return_expr(value));
                     self.terminate(MirTerminator::Return { value });
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
@@ -2277,7 +2293,7 @@ impl<'a> Lowerer<'a> {
         block
             .result
             .as_deref()
-            .map(|result| self.lower_expr(result))
+            .map(|result| self.lower_return_expr(result))
     }
 
     fn fallback_value(&mut self, expression: &ResolvedExpr) -> MirValueId {

@@ -618,7 +618,7 @@ fn canonical_mir_native_owned_string_glue_matches_mir_run() {
 }
 
 #[test]
-fn canonical_mir_verifier_reports_owned_string_result_without_fallback() {
+fn canonical_mir_verifier_proves_owned_string_result_without_fallback() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -632,17 +632,49 @@ fn canonical_mir_verifier_reports_owned_string_result_without_fallback() {
         .expect("failed to spawn canonical MIR owned String result verifier");
     assert!(
         output.status.success(),
-        "verifier should report a closed subset"
+        "verifier should prove the canonical owned String return"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("owned String slice requires a Copy scalar result"),
+        stdout.contains("canonical MIR ensures contract proven"),
         "{stdout}"
     );
-    assert!(stdout.contains("0/1 verified"), "{stdout}");
+    assert!(stdout.contains("1/1 verified"), "{stdout}");
     assert!(
         !stdout.contains("flow_ast"),
         "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
+fn canonical_mir_verifier_rejects_owned_string_return_branch_before_backend() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_owned_string_return_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected canonical MIR owned String verifier");
+    assert!(
+        !output.status.success(),
+        "branch-shaped return must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("canonical MIR verifier input rejected"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("owned String return contract requires one canonical MIR block"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stderr}"
     );
 }
 

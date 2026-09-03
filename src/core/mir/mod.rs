@@ -1086,6 +1086,368 @@ pub(crate) fn validate_owned_string_identity_shape(
     Ok(())
 }
 
+/// Return whether a function enters the narrow direct owned-`String` return
+/// island. The candidate predicate is intentionally structural and
+/// TypeDesc-driven: a function with a direct String result is only claimed by
+/// this contract once its MIR contains an explicit String Move/Clone/Drop.
+/// Wider String producers (calls, concatenation, projections, and variant
+/// control flow) remain outside this slice until their own return contracts
+/// are materialized.
+pub(crate) fn is_owned_string_return_candidate(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> bool {
+    type_catalog.validate_owned_string(&function.result).is_ok()
+        && (has_direct_owned_string_return_glue(function, type_catalog)
+            || has_string_branch_merge(function, type_catalog))
+        && function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| match &instruction.kind {
+                MirInstructionKind::Move { result, source }
+                | MirInstructionKind::Clone { result, source } => {
+                    function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+                        || function.values.get(source).is_some_and(|value| {
+                            type_catalog.validate_owned_string(&value.ty).is_ok()
+                        })
+                }
+                MirInstructionKind::Drop { value } => function
+                    .values
+                    .get(value)
+                    .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok()),
+                _ => false,
+            })
+}
+
+fn has_direct_owned_string_return_glue(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> bool {
+    if function.blocks.len() != 1 {
+        return false;
+    }
+    function.blocks.values().any(|block| {
+        let MirTerminator::Return {
+            value: Some(return_value),
+        } = &block.terminator
+        else {
+            return false;
+        };
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. }
+                    | MirInstructionKind::Clone { result, .. }
+                    if result == return_value
+            ) && function
+                .values
+                .get(return_value)
+                .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+        })
+    })
+}
+
+fn has_string_branch_merge(function: &MirFunction, type_catalog: &types::MirTypeCatalog) -> bool {
+    function.blocks.values().any(|block| {
+        let MirTerminator::Branch {
+            then_target,
+            else_target,
+            ..
+        } = &block.terminator
+        else {
+            return false;
+        };
+        let Some((then_join, then_arguments)) =
+            function.blocks.get(then_target).and_then(|target_block| {
+                match &target_block.terminator {
+                    MirTerminator::Goto {
+                        target, arguments, ..
+                    } => Some((target, arguments)),
+                    _ => None,
+                }
+            })
+        else {
+            return false;
+        };
+        let Some((else_join, else_arguments)) =
+            function.blocks.get(else_target).and_then(|target_block| {
+                match &target_block.terminator {
+                    MirTerminator::Goto {
+                        target, arguments, ..
+                    } => Some((target, arguments)),
+                    _ => None,
+                }
+            })
+        else {
+            return false;
+        };
+        then_join == else_join
+            && then_arguments.iter().any(|value| {
+                function
+                    .values
+                    .get(value)
+                    .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+            })
+            && else_arguments.iter().any(|value| {
+                function
+                    .values
+                    .get(value)
+                    .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+            })
+    })
+}
+
+/// Validate the direct owned-`String` return contract shared by the canonical
+/// program gate and all consumers that admit this island. The contract is
+/// deliberately a one-block ownership ledger: String parameters and literal
+/// results are live values, Move consumes its source, Clone preserves its
+/// source while introducing a new owned value, Drop consumes a value, and the
+/// Return transfers the final live value. No backend may infer these facts
+/// from a pointer, register, or runtime handle.
+pub(crate) fn validate_owned_string_return_shape(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<(), String> {
+    type_catalog.validate_owned_string(&function.result)?;
+    if function.blocks.len() != 1 {
+        return Err("owned String return contract requires one canonical MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "owned String return entry block is absent".to_string())?;
+
+    let is_string = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+    };
+    let mut live = BTreeSet::new();
+    for parameter in &function.parameters {
+        if is_string(parameter) {
+            live.insert(parameter.clone());
+        }
+    }
+
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::Const { result, literal } => {
+                if is_string(result) {
+                    if !matches!(literal, ResolvedLiteral::String(_)) {
+                        return Err(
+                            "owned String return constant does not match canonical String ABI"
+                                .into(),
+                        );
+                    }
+                    live.insert(result.clone());
+                }
+            }
+            MirInstructionKind::Move { result, source } => {
+                let result_is_string = is_string(result);
+                let source_is_string = is_string(source);
+                if result_is_string != source_is_string {
+                    return Err(
+                        "owned String return Move type disagrees with canonical String".into(),
+                    );
+                }
+                if source_is_string {
+                    if !live.remove(source) {
+                        return Err(format!(
+                            "owned String return Move source '{}' is unavailable",
+                            source
+                        ));
+                    }
+                    live.insert(result.clone());
+                }
+            }
+            MirInstructionKind::Clone { result, source } => {
+                let result_is_string = is_string(result);
+                let source_is_string = is_string(source);
+                if result_is_string != source_is_string {
+                    return Err(
+                        "owned String return Clone type disagrees with canonical String".into(),
+                    );
+                }
+                if source_is_string {
+                    if !live.contains(source) {
+                        return Err(format!(
+                            "owned String return Clone source '{}' is unavailable",
+                            source
+                        ));
+                    }
+                    live.insert(result.clone());
+                }
+            }
+            MirInstructionKind::Drop { value } => {
+                if is_string(value) && !live.remove(value) {
+                    return Err(format!(
+                        "owned String return Drop value '{}' is unavailable",
+                        value
+                    ));
+                }
+            }
+            kind if instruction_produces_owned_string(function, type_catalog, kind)
+                || instruction_consumes_owned_string(function, type_catalog, kind) =>
+            {
+                return Err(
+                    "owned String return contract only admits String constants and ownership glue"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    match &block.terminator {
+        MirTerminator::Return { value: Some(value) } if is_string(value) => {
+            if !live.remove(value) {
+                return Err(format!(
+                    "owned String return value '{}' is unavailable",
+                    value
+                ));
+            }
+        }
+        MirTerminator::Return { value: Some(_) } => {
+            return Err("owned String return value does not match canonical String ABI".into())
+        }
+        MirTerminator::Return { value: None } => {
+            return Err("owned String return requires a value Return".into())
+        }
+        _ => return Err("owned String return contract requires a value Return".into()),
+    }
+
+    if let Some(value) = live.into_iter().next() {
+        return Err(format!(
+            "owned String return leaves source '{}' live",
+            value
+        ));
+    }
+    Ok(())
+}
+
+fn instruction_produces_owned_string(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+    kind: &MirInstructionKind,
+) -> bool {
+    let result = match kind {
+        MirInstructionKind::Load { result, .. }
+        | MirInstructionKind::Copy { result, .. }
+        | MirInstructionKind::Convert { result, .. }
+        | MirInstructionKind::Borrow { result, .. }
+        | MirInstructionKind::Project { result, .. }
+        | MirInstructionKind::MoveProject { result, .. }
+        | MirInstructionKind::Construct { result, .. }
+        | MirInstructionKind::ConstructList { result, .. }
+        | MirInstructionKind::ListOp { result, .. }
+        | MirInstructionKind::VariantPredicate { result, .. }
+        | MirInstructionKind::ConstructSet { result, .. }
+        | MirInstructionKind::SetOp { result, .. }
+        | MirInstructionKind::ConstructVariant { result, .. }
+        | MirInstructionKind::ConstructVariantMove { result, .. }
+        | MirInstructionKind::UpdateRecord { result, .. }
+        | MirInstructionKind::Binary { result, .. }
+        | MirInstructionKind::Unary { result, .. }
+        | MirInstructionKind::BuiltinCall { result, .. }
+        | MirInstructionKind::FlowTransition { result, .. } => Some(result),
+        MirInstructionKind::Call { result, .. } => result.as_ref(),
+        MirInstructionKind::Const { .. }
+        | MirInstructionKind::Move { .. }
+        | MirInstructionKind::Clone { .. }
+        | MirInstructionKind::Drop { .. }
+        | MirInstructionKind::EndBorrow { .. }
+        | MirInstructionKind::Nop => None,
+    };
+    result.is_some_and(|result| {
+        function
+            .values
+            .get(result)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+    })
+}
+
+fn instruction_consumes_owned_string(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+    kind: &MirInstructionKind,
+) -> bool {
+    let mut sources = Vec::new();
+    match kind {
+        MirInstructionKind::Load { place, .. } => {
+            if let Ok(value) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
+                sources.push(value);
+            }
+        }
+        MirInstructionKind::Copy { source, .. }
+        | MirInstructionKind::Convert { source, .. }
+        | MirInstructionKind::Borrow { source, .. }
+        | MirInstructionKind::Project { base: source, .. }
+        | MirInstructionKind::MoveProject { base: source, .. }
+        | MirInstructionKind::VariantPredicate {
+            variant: source, ..
+        }
+        | MirInstructionKind::EndBorrow { borrow: source } => sources.push(source.clone()),
+        MirInstructionKind::Call { arguments, .. }
+        | MirInstructionKind::FlowTransition { arguments, .. }
+        | MirInstructionKind::BuiltinCall { arguments, .. }
+        | MirInstructionKind::Construct {
+            fields: arguments, ..
+        }
+        | MirInstructionKind::ConstructList {
+            elements: arguments,
+            ..
+        }
+        | MirInstructionKind::ConstructSet {
+            elements: arguments,
+            ..
+        } => sources.extend(arguments.iter().cloned()),
+        MirInstructionKind::ListOp { list, argument, .. } => {
+            sources.push(list.clone());
+            if let Some(argument) = argument {
+                sources.push(argument.clone());
+            }
+        }
+        MirInstructionKind::SetOp { set, argument, .. } => {
+            sources.push(set.clone());
+            if let Some(argument) = argument {
+                sources.push(argument.clone());
+            }
+        }
+        MirInstructionKind::ConstructVariant { fields, .. }
+        | MirInstructionKind::ConstructVariantMove { fields, .. } => {
+            sources.extend(fields.iter().map(|(_, value)| value.clone()))
+        }
+        MirInstructionKind::UpdateRecord {
+            base,
+            fields: arguments,
+            ..
+        } => {
+            sources.push(base.clone());
+            sources.extend(arguments.iter().cloned());
+        }
+        MirInstructionKind::Binary { left, right, .. } => {
+            sources.extend([left.clone(), right.clone()])
+        }
+        MirInstructionKind::Unary { operand, .. } => sources.push(operand.clone()),
+        MirInstructionKind::Const { .. }
+        | MirInstructionKind::Move { .. }
+        | MirInstructionKind::Clone { .. }
+        | MirInstructionKind::Drop { .. }
+        | MirInstructionKind::Nop => {}
+    }
+    sources.into_iter().any(|source| {
+        function
+            .values
+            .get(&source)
+            .is_some_and(|value| type_catalog.validate_owned_string(&value.ty).is_ok())
+    })
+}
+
 fn format_params(parameters: &[MirBlockParameter]) -> String {
     parameters
         .iter()

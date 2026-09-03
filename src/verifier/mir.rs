@@ -195,20 +195,14 @@ fn verify_function(
         ));
     }
 
-    // The owned-String verifier slice proves only arithmetic contracts whose
-    // observable result is a Copy scalar.  String payloads stay opaque in the
-    // symbolic domain; admitting an aggregate or owned result here would
-    // silently turn this proof into a new ABI/ownership slice.  The check is
-    // intentionally driven by the canonical value catalog, never by a
-    // surface type or backend-specific representation.
-    let has_owned_string_value = function
-        .values
-        .values()
-        .any(|value| catalog.validate_owned_string(&value.ty).is_ok());
-    if has_owned_string_value && catalog.validate_copy_scalar(&function.result).is_err() {
-        return Err(
-            "canonical MIR verifier owned String slice requires a Copy scalar result".into(),
-        );
+    // The verifier admits an owned String result only through the same
+    // canonical one-block Move/Clone/Drop ledger used by MIR construction and
+    // native admission. String payloads stay opaque in Z3, but their TypeDesc
+    // ABI and exactly-once ownership transfer are still checked before any
+    // arithmetic contract is proved.
+    if crate::core::mir::is_owned_string_return_candidate(function, catalog) {
+        crate::core::mir::validate_owned_string_return_shape(function, catalog)
+            .map_err(|message| format!("canonical MIR owned String return rejected: {message}"))?;
     }
 
     let mut initial = initial_state(function, catalog, session)?;
@@ -3386,7 +3380,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_owned_string_result_without_fallback() {
+    fn verifier_proves_owned_string_result_without_fallback() {
         let source = r#"
             func echo(text: string) -> string {
                 ensures: true
@@ -3400,18 +3394,42 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         let results = verify_program(&program, "owned-string-result-source-hash".into())
-            .expect("verifier should classify unsupported owned result");
+            .expect("verifier should prove canonical owned String result");
         let result = results
             .iter()
             .find(|result| result.func_name.ends_with("echo"))
             .expect("echo verification result");
-        assert_eq!(
-            result.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
-        );
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
         assert!(result
             .message
-            .contains("owned String slice requires a Copy scalar result"));
+            .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn canonical_gate_rejects_owned_string_return_branch_before_verifier() {
+        let source = r#"
+            func echo(text: string) -> string {
+                ensures: true
+                if true { text } else { "fallback" }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect_err("branch-shaped owned String return must fail closed");
+        match error {
+            crate::core::mir::reference::MirProgramBuildError::Validation(errors) => {
+                assert!(errors.iter().any(|error| {
+                    error
+                        .message
+                        .contains("owned String return contract requires one canonical MIR block")
+                }));
+            }
+            other => panic!("unsupported owned String return crossed the MIR gate: {other:?}"),
+        }
     }
 
     #[test]

@@ -53,6 +53,14 @@ impl<'a> NativeMirValidator<'a> {
         }
         self.validate_signature_type(&function.result, "result", true);
         self.reject_reference_type(&function.result, "reference result");
+        if crate::core::mir::is_owned_string_return_candidate(function, catalog) {
+            if let Err(message) =
+                crate::core::mir::validate_owned_string_return_shape(function, catalog)
+            {
+                self.errors
+                    .push(NativeMirError::new(function.owner.0.clone(), message));
+            }
+        }
 
         for block in function.blocks.values() {
             for parameter in &block.parameters {

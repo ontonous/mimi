@@ -1,0 +1,10 @@
+func echo(text: string) -> string {
+    ensures: true
+    text
+}
+
+func main() -> i32 {
+    let result = echo("owned")
+    drop(result)
+    42
+}

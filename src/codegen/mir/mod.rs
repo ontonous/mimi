@@ -1417,6 +1417,47 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_owned_string_move_return_contract() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_owned_string_return.mimi"
+        ));
+        let echo = program
+            .functions()
+            .get(&crate::core::NodeId("function:echo".into()))
+            .expect("echo MIR function");
+        assert!(echo
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Move { .. }
+            )));
+
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned String return execution");
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("owned String return bytecode"))
+                .run_value()
+                .expect("owned String return bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_owned_string_return");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned String return must consume canonical Move");
+        generator
+            .module
+            .verify()
+            .expect("native owned String return module verifies");
+        assert!(generator.module.get_function("echo").is_some());
+        assert!(generator.module.get_function("mimi_string_free").is_some());
+    }
+
+    #[test]
     fn native_emitter_materializes_recursive_owned_tuple_clone_move_and_drop() {
         let program = canonical_program(
             "func make_nested() -> ((string, i32), bool) { ((\"inner\", 41), true) }\nfunc consume_nested(value: ((string, i32), bool)) -> i32 { drop(value); 42 }\nfunc main() -> i32 { let value = make_nested(); let cloned = value; drop(cloned); consume_nested(value) }",
