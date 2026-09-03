@@ -261,7 +261,7 @@ pub fn lower_program_with_type_catalog(
 /// the MIR `Call`, the instance table records the template/arguments proof,
 /// and the executable function is already specialized MIR. The admitted
 /// families are scalar/flat-variant identity, owned String identity, scalar
-/// Set facades, and concrete Copy-scalar List `Len`/`Reverse` facades. All other
+/// Set facades, and concrete Copy-scalar List `Len`/`Reverse`/`Concat` facades. All other
 /// generic bodies remain fail-closed.
 pub fn materialize_concrete_generic_instances(
     program: &CheckedProgram,
@@ -750,12 +750,13 @@ fn detect_scalar_list_facade_operation(
     };
     if !matches!(
         operation,
-        super::MirListOperation::Len | super::MirListOperation::Reverse
+        super::MirListOperation::Len
+            | super::MirListOperation::Reverse
+            | super::MirListOperation::Concat
     ) {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic List facade only admits canonical ListOp::Len or ListOp::Reverse"
-                .into(),
+            message: "generic List facade only admits canonical ListOp::Len, ListOp::Reverse, or ListOp::Concat".into(),
         }]);
     }
     validate_scalar_list_facade_mir(function, type_catalog, *operation).map_err(|message| {
@@ -767,11 +768,12 @@ fn detect_scalar_list_facade_operation(
     Ok(*operation)
 }
 
-/// Validate the concrete body of the generic scalar List `Len`/`Reverse`
-/// facade. The body is deliberately structural: one List parameter is cloned
-/// exactly once, the clone is the receiver of one receipt-bearing ListOp, and
-/// that result is returned. This keeps a specialized generic function from
-/// hiding an arbitrary body behind a canonical-looking instance symbol.
+/// Validate the concrete body of the generic scalar List facade. The body is
+/// deliberately structural: every callable List parameter has exactly one
+/// ownership-aware input edge into one receipt-bearing ListOp, and that result
+/// is returned. `Len`/`Reverse` clone one input; `Concat` moves two inputs.
+/// This keeps a specialized generic function from hiding an arbitrary body
+/// behind a canonical-looking instance symbol.
 pub(crate) fn validate_scalar_list_facade_mir(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -779,25 +781,53 @@ pub(crate) fn validate_scalar_list_facade_mir(
 ) -> Result<(), String> {
     if !matches!(
         operation,
-        super::MirListOperation::Len | super::MirListOperation::Reverse
+        super::MirListOperation::Len
+            | super::MirListOperation::Reverse
+            | super::MirListOperation::Concat
     ) {
-        return Err("scalar List facade only admits ListOp::Len or ListOp::Reverse".into());
+        return Err(
+            "scalar List facade only admits ListOp::Len, ListOp::Reverse, or ListOp::Concat".into(),
+        );
     }
-    let [list_parameter] = function.parameters.as_slice() else {
-        return Err("scalar List facade must have exactly one List parameter".into());
+    let expected_parameter_count = match operation {
+        super::MirListOperation::Concat => 2,
+        super::MirListOperation::Len | super::MirListOperation::Reverse => 1,
     };
-    let list_ty = function
-        .values
-        .get(list_parameter)
-        .ok_or_else(|| "scalar List facade receiver parameter is absent".to_string())?
-        .ty
-        .clone();
-    let Some(super::types::MirLayout::List { .. }) = type_catalog
-        .get(&list_ty)
-        .map(|descriptor| &descriptor.layout)
-    else {
-        return Err("scalar List facade receiver is not a canonical List<T>".into());
-    };
+    if function.parameters.len() != expected_parameter_count {
+        return Err(match operation {
+            super::MirListOperation::Concat => {
+                "scalar List.concat facade must have exactly two List parameters".into()
+            }
+            super::MirListOperation::Len | super::MirListOperation::Reverse => {
+                "scalar List facade must have exactly one List parameter".into()
+            }
+        });
+    }
+    let parameter_types = function
+        .parameters
+        .iter()
+        .map(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .ok_or_else(|| "scalar List facade parameter is absent".to_string())
+                .map(|value| value.ty.clone())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parameter_types.iter().any(|parameter_ty| {
+        !matches!(
+            type_catalog
+                .get(parameter_ty)
+                .map(|descriptor| &descriptor.layout),
+            Some(super::types::MirLayout::List { .. })
+        )
+    }) {
+        return Err("scalar List facade parameter is not a canonical List<T>".into());
+    }
+    if operation == super::MirListOperation::Concat && parameter_types[0] != parameter_types[1] {
+        return Err("scalar List.concat facade parameters must share one List TypeDesc".into());
+    }
+    let list_ty = parameter_types[0].clone();
     let Some(block) = function.blocks.get(&function.entry) else {
         return Err("scalar List facade entry block is absent".into());
     };
@@ -806,10 +836,14 @@ pub(crate) fn validate_scalar_list_facade_mir(
     }
     let mut list_op = None;
     let mut clones = Vec::new();
+    let mut moves = Vec::new();
     for instruction in &block.instructions {
         match &instruction.kind {
             MirInstructionKind::Clone { result, source } => {
                 clones.push((result.clone(), source.clone()));
+            }
+            MirInstructionKind::Move { result, source } => {
+                moves.push((result.clone(), source.clone()));
             }
             MirInstructionKind::ListOp {
                 result,
@@ -833,26 +867,130 @@ pub(crate) fn validate_scalar_list_facade_mir(
                     return Err("scalar List facade must contain exactly one ListOp".into());
                 }
             }
-            _ => return Err(
-                "scalar List facade body may contain only parameter Clone and ListOp instructions"
-                    .into(),
-            ),
+            _ => return Err("scalar List facade body may contain only parameter Clone/Move and ListOp instructions".into()),
         }
     }
     let Some((list_result, list_operand, argument, receipt)) = list_op else {
         return Err("scalar List facade must contain exactly one ListOp".into());
     };
-    if clones.len() != 1
-        || clones
-            .first()
-            .is_none_or(|(_, source)| *source != *list_parameter)
+    let inputs = match operation {
+        super::MirListOperation::Len | super::MirListOperation::Reverse => {
+            if !moves.is_empty() {
+                return Err(
+                    "scalar List Len/Reverse facade cannot move a callable parameter".into(),
+                );
+            }
+            &clones
+        }
+        super::MirListOperation::Concat => {
+            if !clones.is_empty() {
+                return Err(
+                    "scalar List.concat facade must move, not clone, both List parameters".into(),
+                );
+            }
+            &moves
+        }
+    };
+    if inputs.len() != function.parameters.len()
+        || inputs.iter().any(|(_, source)| {
+            !function
+                .parameters
+                .iter()
+                .any(|parameter| parameter == source)
+        })
+        || inputs
+            .iter()
+            .map(|(_, source)| source)
+            .collect::<HashSet<_>>()
+            .len()
+            != inputs.len()
     {
-        return Err("scalar List facade must clone its List parameter exactly once".into());
+        return Err(match operation {
+            super::MirListOperation::Concat => {
+                "scalar List.concat facade must move each callable List parameter exactly once"
+                    .into()
+            }
+            super::MirListOperation::Len | super::MirListOperation::Reverse => {
+                "scalar List facade must clone each callable List parameter exactly once".into()
+            }
+        });
     }
-    if list_operand != clones[0].0 || argument.is_some() {
+    let input_for = |source: &MirValueId| {
+        inputs
+            .iter()
+            .find_map(|(result, candidate)| (candidate == source).then_some(result.clone()))
+    };
+    for (result, source) in inputs.iter() {
+        let source_ty = function
+            .values
+            .get(source)
+            .ok_or_else(|| "scalar List facade Move/Clone source is absent".to_string())?
+            .ty
+            .clone();
+        let result_ty = function
+            .values
+            .get(result)
+            .ok_or_else(|| "scalar List facade Move/Clone result is absent".to_string())?
+            .ty
+            .clone();
+        if source_ty != result_ty {
+            return Err(
+                "scalar List facade Move/Clone result TypeDesc disagrees with its parameter".into(),
+            );
+        }
+    }
+    if input_for(&function.parameters[0]).as_ref() != Some(&list_operand) {
+        return Err(match operation {
+            super::MirListOperation::Concat => {
+                "scalar List.concat facade receiver is not the moved first List parameter".into()
+            }
+            super::MirListOperation::Len | super::MirListOperation::Reverse => {
+                "scalar List facade ListOp receiver is not the cloned List parameter".into()
+            }
+        });
+    }
+    let list_operand_ty = function
+        .values
+        .get(&list_operand)
+        .ok_or_else(|| "scalar List facade ListOp receiver value is absent".to_string())?
+        .ty
+        .clone();
+    if list_operand_ty != list_ty {
         return Err(
-            "scalar List facade ListOp must read the cloned List without an argument".into(),
+            "scalar List facade ListOp receiver TypeDesc disagrees with its parameter".into(),
         );
+    }
+    match operation {
+        super::MirListOperation::Len | super::MirListOperation::Reverse => {
+            if argument.is_some() {
+                return Err(
+                    "scalar List facade read/clone operation unexpectedly has an argument".into(),
+                );
+            }
+        }
+        super::MirListOperation::Concat => {
+            let expected = input_for(&function.parameters[1]).ok_or_else(|| {
+                "scalar List.concat facade second parameter has no Move".to_string()
+            })?;
+            if argument.as_ref() != Some(&expected) {
+                return Err(
+                    "scalar List.concat facade argument is not the moved second List parameter"
+                        .into(),
+                );
+            }
+            let argument_ty = function
+                .values
+                .get(&expected)
+                .ok_or_else(|| "scalar List.concat facade argument value is absent".to_string())?
+                .ty
+                .clone();
+            if argument_ty != parameter_types[1] {
+                return Err(
+                    "scalar List.concat facade argument TypeDesc disagrees with its parameter"
+                        .into(),
+                );
+            }
+        }
     }
     let receipt =
         receipt.ok_or_else(|| "scalar List facade ListOp has no canonical receipt".to_string())?;
@@ -862,7 +1000,17 @@ pub(crate) fn validate_scalar_list_facade_mir(
         .ok_or_else(|| "scalar List facade result value is absent".to_string())?
         .ty
         .clone();
-    type_catalog.validate_list_operation_receipt(&result_ty, &list_ty, operation, &receipt)?;
+    let argument_ty = argument
+        .as_ref()
+        .and_then(|argument| function.values.get(argument))
+        .map(|value| &value.ty);
+    type_catalog.validate_list_operation_receipt_with_argument(
+        &result_ty,
+        &list_ty,
+        argument_ty,
+        operation,
+        &receipt,
+    )?;
     let MirTerminator::Return {
         value: Some(returned),
     } = &block.terminator
@@ -2824,28 +2972,34 @@ impl<'a> Lowerer<'a> {
         ) {
             Ok(contract) => Some(contract),
             Err(message)
-                if matches!(
-                    operation,
-                    super::MirListOperation::Len | super::MirListOperation::Reverse
-                ) && argument_ty.is_none()
-                    && type_catalog.get(&list_ty).is_some_and(|descriptor| {
-                        matches!(
-                            descriptor.layout,
-                            super::types::MirLayout::List { ref element }
-                                if type_catalog.get(element).is_some_and(|element| {
-                                    element.kind == super::types::MirTypeKind::GenericParameter
-                                })
-                        )
-                    }) =>
+                if type_catalog.get(&list_ty).is_some_and(|descriptor| {
+                    matches!(
+                        descriptor.layout,
+                        super::types::MirLayout::List { ref element }
+                            if type_catalog.get(element).is_some_and(|element| {
+                                element.kind == super::types::MirTypeKind::GenericParameter
+                            })
+                    )
+                }) && match operation {
+                    super::MirListOperation::Len | super::MirListOperation::Reverse => {
+                        argument_ty.is_none()
+                    }
+                    super::MirListOperation::Concat => argument_ty.is_some(),
+                } =>
             {
                 let placeholder = match operation {
                     super::MirListOperation::Len => type_catalog
                         .validated_generic_list_len_operation_contract(&result_ty, &list_ty),
                     super::MirListOperation::Reverse => type_catalog
                         .validated_generic_list_reverse_operation_contract(&result_ty, &list_ty),
-                    super::MirListOperation::Concat => unreachable!(
-                        "List.concat cannot use the no-argument generic List placeholder"
-                    ),
+                    super::MirListOperation::Concat => type_catalog
+                        .validated_generic_list_concat_operation_contract(
+                            &result_ty,
+                            &list_ty,
+                            argument_ty
+                                .as_ref()
+                                .expect("Concat placeholder has an argument"),
+                        ),
                 };
                 match placeholder {
                     Ok(contract) => Some(contract),

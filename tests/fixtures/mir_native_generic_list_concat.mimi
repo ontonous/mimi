@@ -1,0 +1,16 @@
+// Canonical concrete generic MIR: a two-input List<T> consuming transform.
+func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
+    left.concat(right)
+}
+
+func main() -> i32 {
+    ensures: result == 5
+    let left: List<i32> = [1, 2]
+    let right: List<i32> = [3, 4, 5]
+    let joined = list_concat(left, right)
+    let count = len(joined)
+    drop(left)
+    drop(right)
+    drop(joined)
+    count
+}

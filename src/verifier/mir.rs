@@ -3026,7 +3026,8 @@ fn eval_materialized_set_facade_call(
 }
 
 /// Symbolically consume a materialized scalar List facade call. The target
-/// body is already proven as `Clone; ListOp::Len; Return`; this helper applies
+/// body is already proven as `Clone; ListOp; Return` (or the two-input
+/// `Move; Move; ListOp; Return` concat shape); this helper applies
 /// that receipt to the caller's symbolic List without reconstructing the
 /// generic body from a template or backend ABI.
 fn eval_materialized_list_facade_call(
@@ -3095,7 +3096,48 @@ fn eval_materialized_list_facade_call(
         }
         crate::core::mir::MirListOperation::Reverse => SymbolicValue::List { length },
         crate::core::mir::MirListOperation::Concat => {
-            return Err("MIR verifier List facade does not admit ListOp::Concat".into())
+            let second_argument = arguments
+                .get(1)
+                .ok_or_else(|| "MIR verifier List.concat facade argument is absent".to_string())?;
+            let second_info = function.values.get(second_argument).ok_or_else(|| {
+                format!(
+                    "MIR verifier List.concat facade argument '{}' is absent",
+                    second_argument
+                )
+            })?;
+            let second_parameter = target.parameters.get(1).ok_or_else(|| {
+                "MIR verifier List.concat facade target second parameter is absent".to_string()
+            })?;
+            let second_parameter_info = target.values.get(second_parameter).ok_or_else(|| {
+                "MIR verifier List.concat facade second parameter TypeDesc is absent".to_string()
+            })?;
+            if second_info.ty != second_parameter_info.ty {
+                return Err(
+                    "MIR verifier List.concat facade argument disagrees with target TypeDesc"
+                        .into(),
+                );
+            }
+            let SymbolicValue::List { length: right } =
+                state.values.get(second_argument).cloned().ok_or_else(|| {
+                    format!(
+                        "MIR verifier List.concat facade argument '{}' is not defined",
+                        second_argument
+                    )
+                })?
+            else {
+                return Err(
+                    "MIR verifier List.concat facade argument is not a symbolic List".into(),
+                );
+            };
+            let length = Int::add(&[&length, &right]);
+            add_definedness(state, length.le(Int::from_i64(i64::MAX)), "E0800")?;
+            // The specialized concat contract moves both call arguments out
+            // of the caller.  Keep the caller's source values (which were
+            // cloned before the call) untouched, but consume these argument
+            // value ids before publishing the fresh result.
+            state.values.remove(argument);
+            state.values.remove(second_argument);
+            SymbolicValue::List { length }
         }
     };
     ensure_result_shape(function, catalog, result, &output)?;
@@ -4494,6 +4536,59 @@ mod tests {
             "{}",
             result.message
         );
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_concat_call() {
+        let source = r#"
+            func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
+                left.concat(right)
+            }
+
+            func checked() -> i32 {
+                ensures: result == 5
+                let left: List<i32> = [1, 2]
+                let right: List<i32> = [3, 4, 5]
+                let joined = list_concat(left, right)
+                let count = len(joined)
+                drop(left)
+                drop(right)
+                drop(joined)
+                count
+            }
+
+            func main() -> i32 { checked() }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("generic List.concat MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List.concat instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                operation: crate::core::mir::MirListOperation::Concat
+            }
+        ));
+        let results = verify_program(&program, "generic-list-concat-source-hash".into())
+            .expect("verify generic List.concat MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:checked")
+            .expect("List.concat checked verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
     }
 
     #[test]

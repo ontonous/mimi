@@ -2933,6 +2933,195 @@ fn canonical_mir_std_set_generic_facade_is_atomic_across_consumers() {
 }
 
 #[test]
+fn canonical_mir_generic_list_concat_is_atomic_across_consumers_and_default_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_list_concat.mimi");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical generic List.concat MIR dump");
+    assert!(
+        mir.status.success(),
+        "canonical generic List.concat MIR dump failed:\n{}",
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    let mir_text = String::from_utf8_lossy(&mir.stdout);
+    assert!(
+        mir_text.contains("Concat"),
+        "MIR dump omitted ListOp::Concat:\n{mir_text}"
+    );
+    assert!(
+        mir_text.contains("list_contract=MirListOperationContract"),
+        "MIR dump omitted the canonical TypeDesc receipt:\n{mir_text}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical generic List.concat reference run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(5),
+        "canonical generic List.concat reference run failed:\n{}",
+        String::from_utf8_lossy(&mir_run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-generic-list-concat-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical generic List.concat native build");
+    assert!(
+        build.status.success(),
+        "canonical generic List.concat native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical generic List.concat native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(
+        native.status.code(),
+        Some(5),
+        "canonical generic List.concat native run failed:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical generic List.concat verifier");
+    assert!(
+        verification.status.success(),
+        "canonical generic List.concat verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    let verification_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(verification_text.contains("canonical MIR ensures contract proven"));
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic List.concat run");
+    assert_eq!(
+        default_run.status.code(),
+        Some(5),
+        "default generic List.concat run failed:\n{}",
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default generic List.concat native emit-ir");
+    assert!(
+        default_ir.status.success(),
+        "default generic List.concat build failed:\n{}",
+        String::from_utf8_lossy(&default_ir.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&default_ir.stdout).contains("mimi_mir_list_concat_scalar"),
+        "default route did not select canonical List.concat native helper:\n{}",
+        String::from_utf8_lossy(&default_ir.stdout)
+    );
+
+    let default_verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic List.concat verifier");
+    assert!(
+        default_verification.status.success(),
+        "default generic List.concat verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&default_verification.stderr),
+        String::from_utf8_lossy(&default_verification.stdout)
+    );
+}
+
+#[test]
+fn default_route_rejects_non_copy_generic_list_concat_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_list_concat_rejected.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected generic List.concat default run");
+    assert!(
+        !run.status.success(),
+        "non-Copy generic concat must fail closed"
+    );
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run_stderr.contains("default Canonical MIR route rejected"),
+        "unexpected default generic concat diagnostic:\n{run_stderr}"
+    );
+    assert!(run_stderr.contains("generic List facade"), "{run_stderr}");
+    assert!(
+        !run_stderr.contains("bytecode runtime error"),
+        "{run_stderr}"
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-list-concat-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn rejected generic List.concat default build");
+    let _ = fs::remove_file(&binary);
+    assert!(
+        !build.status.success(),
+        "non-Copy generic concat build must fail closed"
+    );
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(build_stderr.contains("default Canonical MIR route rejected"));
+    assert!(build_stderr.contains("generic List facade"));
+    assert!(
+        !build_stderr.contains("E0700"),
+        "legacy compiler leaked into route failure"
+    );
+}
+
+#[test]
 fn canonical_default_does_not_promote_non_facade_set_program() {
     let fixture = project_root()
         .join("tests")

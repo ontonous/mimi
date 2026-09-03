@@ -231,6 +231,17 @@ pub(crate) fn select_default_route(
                     "canonical List.concat candidate did not materialize a supported MIR shape",
                 );
             }
+            if collection_hint
+                && mimi::core::mir::has_unsupported_generic_list_facade_candidate(checked)
+            {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    true,
+                    false,
+                    false,
+                    "canonical generic List facade candidate did not materialize a supported scalar MIR shape",
+                );
+            }
             // S8 keeps its existing candidate hard boundary: the front-end
             // candidate predicate is intentionally stricter than
             // collection/record compatibility and must not fall back.
@@ -675,6 +686,58 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn scalar_collection_generic_list_concat_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_concat.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Copy-scalar generic List.concat must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                    operation: mimi::core::mir::MirListOperation::Concat
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn unsupported_generic_list_facade_cannot_reenter_legacy_route() {
+        let source = r#"
+            func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
+                left.concat(right)
+            }
+
+            func main() -> i32 {
+                let left: List<string> = ["a"]
+                let right: List<string> = ["b"]
+                let joined = list_concat(left, right)
+                let count = len(joined)
+                drop(left)
+                drop(right)
+                drop(joined)
+                count
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert!(mimi::core::mir::has_unsupported_generic_list_facade_candidate(&checked));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("unsupported generic List facade must fail closed instead of using legacy");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("generic List facade"), "{reason}");
     }
 
     #[test]

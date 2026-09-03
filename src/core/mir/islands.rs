@@ -60,7 +60,7 @@ pub enum ScalarCollectionAdmission {
 /// the retained source file, invoke a backend, or infer a candidate from the
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
-/// identity/Set facade family, List len/reverse, or an exact Copy-scalar stdout effect can make
+/// identity/Set facade family, List len/reverse/concat, or an exact Copy-scalar stdout effect can make
 /// them part of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
     let scanner = scan_scalar_collection_admission(program);
@@ -74,9 +74,9 @@ pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarC
 }
 
 /// Return whether checker-owned resolved bodies contain a direct List
-/// `reverse` operation that is supposed to cross the scalar collection
-/// boundary.  This is kept separate from `ScalarCollectionAdmission`: a mixed
-/// graph may still be a compatibility input, but an unsupported S76 reverse
+/// `reverse`/`concat` operation that is supposed to cross the scalar collection
+/// boundary. This is kept separate from `ScalarCollectionAdmission`: a mixed
+/// graph may still be a compatibility input, but an unsupported List operation
 /// shape must not silently reach the legacy emitter after MIR construction
 /// fails. List `len` retains the pre-existing compatibility policy here.
 pub fn has_unsupported_list_reverse_candidate(program: &CheckedProgram) -> bool {
@@ -87,6 +87,14 @@ pub fn has_unsupported_list_concat_candidate(program: &CheckedProgram) -> bool {
     scan_scalar_collection_admission(program).has_unsupported_list_concat_candidate
 }
 
+/// Return whether a checker-owned generic List facade call has a concrete
+/// argument outside the admitted Copy-scalar collection set. Such a call is
+/// still a migrated candidate, so default routing must reject it before
+/// invoking legacy code.
+pub fn has_unsupported_generic_list_facade_candidate(program: &CheckedProgram) -> bool {
+    scan_scalar_collection_admission(program).has_unsupported_generic_list_facade_candidate
+}
+
 fn scan_scalar_collection_admission(
     program: &CheckedProgram,
 ) -> ScalarCollectionAdmissionScanner<'_> {
@@ -95,6 +103,7 @@ fn scan_scalar_collection_admission(
         has_candidate: false,
         has_unsupported_list_reverse_candidate: false,
         has_unsupported_list_concat_candidate: false,
+        has_unsupported_generic_list_facade_candidate: false,
         mixed: false,
         seen_types: BTreeSet::new(),
     };
@@ -163,6 +172,7 @@ struct ScalarCollectionAdmissionScanner<'a> {
     has_candidate: bool,
     has_unsupported_list_reverse_candidate: bool,
     has_unsupported_list_concat_candidate: bool,
+    has_unsupported_generic_list_facade_candidate: bool,
     mixed: bool,
     seen_types: BTreeSet<crate::core::ResolvedTypeId>,
 }
@@ -354,6 +364,19 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     || is_scalar_list_facade_call(self.program, call)
                 {
                     self.has_candidate = true;
+                }
+                if concrete
+                    && is_scalar_list_facade_call(self.program, call)
+                    && generic_list_operation_facade_body(self.program, call)
+                    && call.arguments.iter().any(|argument| {
+                        !is_scalar_collection_type(
+                            self.program,
+                            &argument.value.ty,
+                            &mut BTreeSet::new(),
+                        )
+                    })
+                {
+                    self.has_unsupported_generic_list_facade_candidate = true;
                 }
                 if is_scalar_set_contains_call(self.program, call)
                     || is_scalar_println_call(self.program, call)
@@ -623,6 +646,170 @@ fn is_scalar_list_facade_call(
             &callable.signature.result,
             &callable.signature.generic_parameters,
         )
+}
+
+/// Distinguish the small generic List operation facades admitted by this
+/// island from unrelated generic functions that merely mention `List<T>`.
+/// Projection (`first<T>(List<T>)`), construction (`wrap<T>(T) -> List<T>`),
+/// and nested container helpers remain compatibility shapes; only a generic
+/// body containing a direct List `len`/`reverse`/`concat` builtin is subject
+/// to the migrated-candidate hard boundary below.
+fn generic_list_operation_facade_body(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Function(template) = &call.callee else {
+        return false;
+    };
+    let Some(callable) = program.callable(template) else {
+        return false;
+    };
+    fn expr_has_operation(expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::Call(call) => {
+                let direct = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(name)
+                        if matches!(name.as_str(),
+                            "len"
+                                | "builtin.method.list.len"
+                                | "reverse"
+                                | "builtin.method.list.reverse"
+                                | "builtin.method.list.concat")
+                );
+                direct || call
+                    .arguments
+                    .iter()
+                    .any(|argument| expr_has_operation(&argument.value))
+            }
+            ResolvedExprKind::FString(parts) => parts.iter().any(|part| {
+                matches!(part, ResolvedFStringPart::Interpolation(value) if expr_has_operation(value))
+            }),
+            ResolvedExprKind::Project { value, projection } => {
+                expr_has_operation(value)
+                    || matches!(projection, ResolvedValueProjection::Index(index) if expr_has_operation(index))
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                expr_has_operation(left) || expr_has_operation(right)
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => expr_has_operation(operand),
+            ResolvedExprKind::Tuple(items)
+            | ResolvedExprKind::List(items)
+            | ResolvedExprKind::Set(items) => items.iter().any(expr_has_operation),
+            ResolvedExprKind::Map(items) => items
+                .iter()
+                .any(|(key, value)| expr_has_operation(key) || expr_has_operation(value)),
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                expr_has_operation(value)
+                    || expr_has_operation(iterable)
+                    || guard.as_ref().is_some_and(|guard| expr_has_operation(guard))
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => expr_has_operation(receiver),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                fields.iter().any(|field| expr_has_operation(&field.value))
+                    || rest.as_ref().is_some_and(|value| expr_has_operation(value))
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => block_has_operation(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                expr_has_operation(condition)
+                    || block_has_operation(then_block)
+                    || block_has_operation(else_block)
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                expr_has_operation(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_operation)
+                            || expr_has_operation(&arm.body)
+                    })
+            }
+            ResolvedExprKind::Try { value, .. } => expr_has_operation(value),
+            ResolvedExprKind::Range { start, end } => {
+                expr_has_operation(start) || expr_has_operation(end)
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                expr_has_operation(target)
+                    || start.as_ref().is_some_and(|value| expr_has_operation(value))
+                    || end.as_ref().is_some_and(|value| expr_has_operation(value))
+            }
+            ResolvedExprKind::Cast { value, .. } => expr_has_operation(value),
+            ResolvedExprKind::Lambda(lambda) => block_has_operation(&lambda.body),
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Load(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => false,
+        }
+    }
+    fn statement_has_operation(statement: &crate::core::ir::ResolvedStmt) -> bool {
+        match &statement.kind {
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|value| expr_has_operation(value)),
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => expr_has_operation(value),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_some_and(|value| expr_has_operation(value)),
+            ResolvedStmtKind::While { condition, body } => {
+                expr_has_operation(condition) || block_has_operation(body)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => expr_has_operation(initializer) || block_has_operation(body),
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_has_operation(initializer)
+                    || block_has_operation(then_block)
+                    || else_block.as_ref().is_some_and(block_has_operation)
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                block_has_operation(body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                expr_has_operation(iterable) || block_has_operation(body)
+            }
+            ResolvedStmtKind::Math(expressions) => expressions.iter().any(expr_has_operation),
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                expr_has_operation(value) || block_has_operation(body)
+            }
+            ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::Continue
+            | ResolvedStmtKind::NestedCallable(_) => false,
+        }
+    }
+    fn block_has_operation(block: &crate::core::ir::ResolvedBlock) -> bool {
+        block.statements.iter().any(statement_has_operation)
+            || block
+                .result
+                .as_ref()
+                .is_some_and(|value| expr_has_operation(value))
+    }
+    block_has_operation(&callable.body.root)
 }
 
 fn mentions_generic_list(

@@ -110,6 +110,129 @@ fn materializes_generic_scalar_list_reverse_as_a_canonical_facade() {
 }
 
 #[test]
+fn materializes_generic_scalar_list_concat_as_a_two_input_move_facade() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_concat.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List.concat must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List.concat instance");
+    assert!(matches!(
+        instance.contract,
+        MirGenericInstanceContract::ScalarListFacade {
+            operation: crate::core::mir::MirListOperation::Concat
+        }
+    ));
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized List.concat target");
+    let mut move_results = Vec::new();
+    let mut concat_receipt = None;
+    for instruction in target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+    {
+        match &instruction.kind {
+            MirInstructionKind::Move { result, .. } => move_results.push(result.clone()),
+            MirInstructionKind::ListOp {
+                operation: crate::core::mir::MirListOperation::Concat,
+                list,
+                argument: Some(argument),
+                list_operation_contract: Some(receipt),
+                ..
+            } => concat_receipt = Some((list.clone(), argument.clone(), receipt.clone())),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        move_results.len(),
+        2,
+        "Concat must move both callable inputs"
+    );
+    let (list, argument, receipt) = concat_receipt.expect("canonical concat receipt");
+    assert!(move_results.contains(&list));
+    assert!(move_results.contains(&argument));
+    assert_eq!(receipt.argument_ty, Some(receipt.list_ty.clone()));
+    assert_eq!(
+        receipt.operation,
+        crate::core::mir::MirListOperation::Concat
+    );
+    assert_eq!(receipt.result_ty, receipt.list_ty);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List.concat facade execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(5));
+}
+
+#[test]
+fn rejects_generic_list_concat_for_non_copy_elements_at_the_mir_gate() {
+    let source = r#"
+        func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
+            left.concat(right)
+        }
+
+        func main() -> i32 {
+            let left: List<string> = ["a"]
+            let right: List<string> = ["b"]
+            let joined = list_concat(left, right)
+            let count = len(joined)
+            drop(left)
+            drop(right)
+            drop(joined)
+            count
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("List<string> generic concat must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("outside the canonical Copy scalar contract"),
+        "unexpected non-Copy generic List.concat rejection: {message}"
+    );
+}
+
+#[test]
+fn rejects_generic_list_concat_body_without_a_canonical_operation() {
+    let source = r#"
+        func bad<T>(left: List<T>, right: List<T>) -> List<T> { left }
+
+        func main() -> i32 {
+            let left: List<i32> = [1]
+            let right: List<i32> = [2]
+            let joined = bad(left, right)
+            let count = len(joined)
+            drop(left)
+            drop(right)
+            drop(joined)
+            count
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic List.concat body without ListOp must fail closed");
+    let message = format!("{error:?}");
+    assert!(message.contains("generic List facade must lower to exactly one canonical ListOp"));
+}
+
+#[test]
 fn rejects_generic_list_facade_with_multiple_operations_before_backends() {
     let source = r#"
         func bad<T>(values: List<T>) -> i32 {

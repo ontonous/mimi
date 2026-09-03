@@ -1,0 +1,16 @@
+// Canonical generic List.concat negative: managed elements are outside the
+// scalar Copy island and must be rejected before default legacy routing.
+func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
+    left.concat(right)
+}
+
+func main() -> i32 {
+    let left: List<string> = ["a"]
+    let right: List<string> = ["b"]
+    let joined = list_concat(left, right)
+    let count = len(joined)
+    drop(left)
+    drop(right)
+    drop(joined)
+    count
+}

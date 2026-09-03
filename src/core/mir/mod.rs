@@ -34,9 +34,9 @@ pub use islands::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    has_unsupported_list_concat_candidate, has_unsupported_list_reverse_candidate,
-    validate_scalar_collection_island, FlatCopyRecordAdmission, ScalarCollectionAdmission,
-    SCALAR_COLLECTION_ISLAND,
+    has_unsupported_generic_list_facade_candidate, has_unsupported_list_concat_candidate,
+    has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
+    FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
@@ -290,9 +290,10 @@ pub enum MirGenericInstanceContract {
     ScalarSetFacade {
         operation: MirSetOperation,
     },
-    /// A generic scalar List facade (`Len` or `Reverse`) specialized to a
+    /// A generic scalar List facade (`Len`, `Reverse`, or `Concat`) specialized to a
     /// concrete Copy scalar element. The executable body remains a canonical
-    /// `Clone; ListOp; Return` shape; this contract prevents consumers from
+    /// `Clone; ListOp; Return` shape for the read/clone operations; `Concat`
+    /// carries two moved List inputs. This contract prevents consumers from
     /// treating an arbitrary generic List body as a trusted instance.
     ScalarListFacade {
         operation: MirListOperation,
