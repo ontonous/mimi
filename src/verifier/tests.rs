@@ -1036,6 +1036,52 @@ fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
 }
 
 #[test]
+fn flat_copy_variant_predicates_are_verified_from_canonical_mir() {
+    require_z3!();
+    let source = r#"
+        func main() -> i32 {
+            ensures: result == 4
+            let some: Option<i32> = Some(41)
+            let none: Option<i32> = None
+            let ok: Result<i32, i32> = Ok(7)
+            let err: Result<i32, i32> = Err(9)
+            let all_true = some.is_some() && none.is_none() && ok.is_ok() && err.is_err()
+            if all_true { 4 } else { 0 }
+        }
+    "#;
+    let file = parse_memory_source(source, "mir-variant-predicate").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical variant predicate MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("flat Copy variant predicate capability");
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(4)
+    );
+
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("canonical MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_flow_transition.mimi");

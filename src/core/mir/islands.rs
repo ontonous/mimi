@@ -1771,6 +1771,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::ConstructVariant { .. }
             | MirInstructionKind::ConstructVariantMove { .. }
             | MirInstructionKind::UpdateRecord { .. }
+            | MirInstructionKind::VariantPredicate { .. }
             | MirInstructionKind::FlowTransition { .. } => self.error(format!(
                 "{subject} MIR operation is outside {SCALAR_COLLECTION_ISLAND}"
             )),

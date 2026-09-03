@@ -211,6 +211,17 @@ pub enum MirListOperation {
     Concat,
 }
 
+/// Read-only predicates over a checker-owned Option/Result discriminant.
+/// The source is borrowed; the TypeDesc receipt fixes the family, variant
+/// identity, and discriminant before a backend reads a physical tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirVariantPredicate {
+    IsSome,
+    IsNone,
+    IsOk,
+    IsErr,
+}
+
 /// Effect boundary carried by a materialized Flow transition contract.  The
 /// first production island admits only a local silent self-loop; boundary
 /// effects stay explicit so no consumer can accidentally erase epoch,
@@ -357,6 +368,14 @@ pub enum MirInstructionKind {
         /// TypeDesc receipt required for canonical List operations.
         /// Legacy/non-canonical constructors must not be presented as MIR.
         list_operation_contract: Option<types::MirListOperationContract>,
+    },
+    /// Read the active tag of a flat Copy Option/Result without consuming it.
+    /// The receipt is mandatory for canonical consumers.
+    VariantPredicate {
+        result: MirValueId,
+        predicate: MirVariantPredicate,
+        variant: MirValueId,
+        contract: Option<types::MirVariantPredicateContract>,
     },
     /// Construct a move-owned Set from concrete Copy-scalar elements. The
     /// Set<T> layout, equality representation, and handle glue are supplied
@@ -797,6 +816,18 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             list_operation_contract
                 .as_ref()
                 .map(|contract| format!(" [list_contract={contract:?}]"))
+                .unwrap_or_default()
+        ),
+        MirInstructionKind::VariantPredicate {
+            result,
+            predicate,
+            variant,
+            contract,
+        } => format!(
+            "variant_predicate {result} = {predicate:?} {variant}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [variant_contract={contract:?}]"))
                 .unwrap_or_default()
         ),
         MirInstructionKind::ConstructSet { result, elements } => {
@@ -1285,6 +1316,21 @@ impl<'a> MirValidator<'a> {
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
+            VariantPredicate {
+                result,
+                variant,
+                contract,
+                ..
+            } => {
+                self.use_value(variant);
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "Variant predicate has no canonical receipt",
+                    );
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             ConstructSet { result, elements } => {
                 self.values(elements);
                 self.result_at(result, &instruction.id, block, index);
@@ -1729,6 +1775,7 @@ impl<'a> MirValidator<'a> {
                     uses.push(argument.clone());
                 }
             }
+            MirInstructionKind::VariantPredicate { variant, .. } => uses.push(variant.clone()),
             MirInstructionKind::ConstructSet { elements, .. } => {
                 uses.extend(elements.iter().cloned());
             }

@@ -28,7 +28,7 @@ use crate::core::mir::types::{
 };
 use crate::core::mir::{
     MirAggregateKind, MirBlockId, MirFunction, MirInstructionKind, MirListOperation, MirProjection,
-    MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
+    MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId, MirVariantPredicate,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -508,6 +508,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::VariantPredicate {
+                result,
+                predicate,
+                variant,
+                contract,
+            } => {
+                let value = self.emit_variant_predicate(
+                    result,
+                    *predicate,
+                    variant,
+                    contract.as_ref(),
+                    subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::ConstructSet { result, elements } => {
                 let value = self.emit_set_construct(result, elements, subject)?;
                 self.values.insert(result.clone(), value);
@@ -866,6 +881,51 @@ mod tests {
                 .expect("native flat Copy variant module verifies");
             assert!(generator.module.get_function("main").is_some());
         }
+    }
+
+    #[test]
+    fn native_emitter_materializes_flat_copy_variant_predicates() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_variant_predicate.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference variant predicate execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("variant predicate MIR bytecode"))
+                .run_value()
+                .expect("bytecode variant predicate execution");
+        assert!(matches!(bytecode, Value::Int(4)));
+
+        let predicate_count = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::VariantPredicate {
+                        contract: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(predicate_count, 4);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_predicate_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native variant predicate lowering");
+        generator
+            .module
+            .verify()
+            .expect("native variant predicate module verifies");
+        assert!(generator.module.get_function("main").is_some());
     }
 
     #[test]

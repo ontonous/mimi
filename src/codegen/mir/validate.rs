@@ -648,6 +648,38 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
+            MirInstructionKind::VariantPredicate {
+                result,
+                predicate,
+                variant,
+                contract,
+            } => {
+                self.validate_value(function, result, "variant predicate result");
+                self.validate_value(function, variant, "variant predicate source");
+                let (Some(result_value), Some(variant_value)) =
+                    (function.values.get(result), function.values.get(variant))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "variant predicate has no canonical receipt",
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog.validate_variant_predicate_receipt(
+                    &result_value.ty,
+                    &variant_value.ty,
+                    *predicate,
+                    receipt,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+                if let Err(message) = catalog.validate_flat_copy_variant(&variant_value.ty) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.validate_value(function, result, "Set result");
                 let element_types = elements

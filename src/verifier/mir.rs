@@ -66,6 +66,11 @@ enum SymbolicValue {
         nominal: crate::core::ir::NominalTypeId,
         tag: Int,
         payload: BTreeMap<crate::core::NodeId, SymbolicValue>,
+        /// `None` means this is a symbolic input whose payload contains the
+        /// union of all variant fields. `Some` records the active shape of a
+        /// canonical construction, so result-shape checks do not confuse an
+        /// active zero-field `None`/`Err` with the input union shape.
+        active_variant: Option<crate::core::NodeId>,
     },
 }
 
@@ -508,6 +513,7 @@ fn symbolic_value_for_type(
                         .map_err(|error| error.to_string())?,
                     tag,
                     payload,
+                    active_variant: None,
                 },
                 constraints,
             ))
@@ -773,6 +779,7 @@ fn symbolic_variant_construct(
         nominal: nominal.clone(),
         tag: Int::from_i64(expected_variant.discriminant as i64),
         payload,
+        active_variant: Some(expected_variant.id.clone()),
     })
 }
 
@@ -948,6 +955,7 @@ fn explore_variant_switch(
         nominal,
         tag,
         payload,
+        ..
     } = value
     else {
         return Err(
@@ -1777,6 +1785,46 @@ fn eval_instruction(
             type_arguments,
             arguments,
         )?,
+        MirInstructionKind::VariantPredicate {
+            result,
+            predicate,
+            variant,
+            contract,
+        } => {
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR variant predicate result '{}' is absent", result))?
+                .ty
+                .clone();
+            let variant_ty = function
+                .values
+                .get(variant)
+                .ok_or_else(|| format!("MIR variant predicate source '{}' is absent", variant))?
+                .ty
+                .clone();
+            let receipt = contract
+                .as_ref()
+                .ok_or_else(|| "MIR variant predicate has no canonical receipt".to_string())?;
+            catalog.validate_variant_predicate_receipt(
+                &result_ty,
+                &variant_ty,
+                *predicate,
+                receipt,
+            )?;
+            let value = state.values.get(variant).cloned().ok_or_else(|| {
+                format!("MIR variant predicate source '{}' is not defined", variant)
+            })?;
+            let SymbolicValue::Variant { nominal, tag, .. } = value else {
+                return Err("MIR variant predicate source is not symbolic Option/Result".into());
+            };
+            if nominal != receipt.nominal {
+                return Err("MIR variant predicate nominal disagrees with TypeDesc".into());
+            }
+            let output = SymbolicValue::Bool(tag.eq(Int::from_i64(receipt.discriminant as i64)));
+            ensure_result_shape(function, catalog, result, &output)?;
+            state.values.insert(result.clone(), output);
+        }
         MirInstructionKind::FlowTransition {
             result,
             transition,
@@ -2411,6 +2459,7 @@ fn symbolic_matches_type(
                 nominal: actual_nominal,
                 tag: _,
                 payload,
+                active_variant,
             },
         ) => {
             let expected_nominal = if matches!(&descriptor.layout, MirLayout::Option { .. }) {
@@ -2418,20 +2467,31 @@ fn symbolic_matches_type(
             } else {
                 "builtin:type:Result"
             };
-            actual_nominal.as_str() == expected_nominal
-                && payload.len()
-                    == variants
-                        .iter()
-                        .map(|variant| variant.fields.len())
-                        .sum::<usize>()
-                && variants
+            let fields_match = if let Some(active_variant) = active_variant {
+                variants
                     .iter()
-                    .flat_map(|variant| &variant.fields)
-                    .all(|field| {
+                    .find(|variant| variant.id == *active_variant)
+                    .is_some_and(|variant| {
+                        payload.len() == variant.fields.len()
+                            && variant.fields.iter().all(|field| {
+                                payload.get(&field.id).is_some_and(|value| {
+                                    symbolic_matches_type(catalog, &field.ty, value)
+                                })
+                            })
+                    })
+            } else {
+                let expected_fields = variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter())
+                    .collect::<Vec<_>>();
+                payload.len() == expected_fields.len()
+                    && expected_fields.iter().all(|field| {
                         payload
                             .get(&field.id)
                             .is_some_and(|value| symbolic_matches_type(catalog, &field.ty, value))
                     })
+            };
+            actual_nominal.as_str() == expected_nominal && fields_match
         }
         _ => false,
     }

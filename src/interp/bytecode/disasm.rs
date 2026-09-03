@@ -106,6 +106,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirListLen { .. } => "MIR_LIST_LEN",
         Op::MirListReverse { .. } => "MIR_LIST_REVERSE",
         Op::MirListConcat { .. } => "MIR_LIST_CONCAT",
+        Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
@@ -197,6 +198,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
+                ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -385,6 +387,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
+                ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -757,6 +760,22 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     .unwrap_or_default()
             )
         }
+        Op::MirVariantPredicate {
+            rd,
+            ra,
+            predicate,
+            contract,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_variant_predicate::{:?}(r{}){}",
+            pc,
+            name,
+            rd,
+            predicate,
+            ra,
+            contract
+                .map(|contract| format!(" contract={contract}"))
+                .unwrap_or_default()
+        ),
         Op::NewVariant {
             rd,
             type_name,
@@ -1038,6 +1057,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
             ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
+            ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

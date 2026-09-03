@@ -1240,3 +1240,138 @@ fn rejects_reuse_of_tuple_field_after_aggregate_construction() {
         .iter()
         .any(|error| error.message.contains("use after consuming non-Copy value")));
 }
+
+#[test]
+fn flat_copy_variant_predicates_materialize_checker_receipts() {
+    let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("flat Copy variant predicates must lower");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main MIR");
+    let predicates = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::VariantPredicate {
+                predicate,
+                result,
+                variant,
+                contract: Some(receipt),
+                ..
+            } => Some((*predicate, result.clone(), variant.clone(), receipt.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(predicates.len(), 4);
+    for (predicate, result, variant, receipt) in predicates {
+        assert_eq!(receipt.variant_ty, function.values[&variant].ty);
+        assert_eq!(receipt.result_ty, function.values[&result].ty);
+        assert_eq!(
+            canonical
+                .type_catalog()
+                .get(&receipt.result_ty)
+                .map(|desc| &desc.kind),
+            Some(&crate::core::mir::types::MirTypeKind::Primitive(
+                crate::core::PrimitiveType::Bool
+            ))
+        );
+        assert_eq!(receipt.predicate, predicate);
+        assert_eq!(
+            receipt.nominal.as_str(),
+            match predicate {
+                crate::core::mir::MirVariantPredicate::IsSome
+                | crate::core::mir::MirVariantPredicate::IsNone => "builtin:type:Option",
+                crate::core::mir::MirVariantPredicate::IsOk
+                | crate::core::mir::MirVariantPredicate::IsErr => "builtin:type:Result",
+            }
+        );
+        assert_eq!(
+            receipt.variant_name,
+            match predicate {
+                crate::core::mir::MirVariantPredicate::IsSome => "Some",
+                crate::core::mir::MirVariantPredicate::IsNone => "None",
+                crate::core::mir::MirVariantPredicate::IsOk => "Ok",
+                crate::core::mir::MirVariantPredicate::IsErr => "Err",
+            }
+        );
+        assert!(receipt.discriminant <= u8::MAX as u16);
+    }
+    let text = function.canonical_text();
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.contains("variant_predicate "))
+            .count(),
+        4
+    );
+    assert!(text.contains("variant_contract=MirVariantPredicateContract"));
+}
+
+#[test]
+fn variant_predicate_receipt_drift_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let instruction = forged
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::VariantPredicate { .. }
+            )
+        })
+        .expect("variant predicate");
+    let crate::core::mir::MirInstructionKind::VariantPredicate {
+        contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!("predicate receipt is mandatory in canonical MIR");
+    };
+    receipt.discriminant = receipt.discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, forged)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("stale variant predicate receipt must fail before consumers");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant predicate receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn non_copy_variant_predicate_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("non-Copy variant predicate must fail closed");
+    let debug = format!("{error:?}");
+    assert!(
+        debug.contains("Aggregate/Copy") && debug.contains("canonical no-op glue"),
+        "unexpected non-Copy predicate diagnostic: {debug}"
+    );
+}

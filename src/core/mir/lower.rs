@@ -26,6 +26,7 @@ use super::{
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
     MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary,
     MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue, MirValueId,
+    MirVariantPredicate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1577,6 +1578,30 @@ impl<'a> Lowerer<'a> {
                             "List.concat canonical MIR operation requires receiver and argument",
                         );
                     }
+                } else if let Some(predicate) = variant_predicate_builtin(call) {
+                    if let Some(variant) = arguments.first() {
+                        let contract = self.variant_predicate_contract(
+                            &expression.node_id,
+                            &result,
+                            variant,
+                            predicate,
+                        );
+                        self.emit(
+                            &expression.node_id,
+                            "variant_predicate",
+                            MirInstructionKind::VariantPredicate {
+                                result: result.clone(),
+                                predicate,
+                                variant: variant.clone(),
+                                contract,
+                            },
+                        );
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "Option/Result variant predicate requires one receiver",
+                        );
+                    }
                 } else if let Some(contract) = call_builtin_contract(call, self.type_catalog) {
                     self.emit(
                         &expression.node_id,
@@ -2358,6 +2383,38 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn variant_predicate_contract(
+        &mut self,
+        node_id: &NodeId,
+        result: &MirValueId,
+        variant: &MirValueId,
+        predicate: MirVariantPredicate,
+    ) -> Option<super::types::MirVariantPredicateContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "Variant predicate requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "Variant predicate result has no MIR type");
+            return None;
+        };
+        let Some(variant_ty) = self.values.get(variant).map(|value| value.ty.clone()) else {
+            self.error(node_id, "Variant predicate receiver has no MIR type");
+            return None;
+        };
+        match type_catalog.validated_variant_predicate_contract(&result_ty, &variant_ty, predicate)
+        {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                self.error(node_id, message);
+                None
+            }
+        }
+    }
+
     fn move_projection_for_place(
         &self,
         base: &MirValueId,
@@ -2522,6 +2579,22 @@ fn is_list_concat_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCata
             })
         })
     })
+}
+
+fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate> {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    if call.arguments.len() != 1 {
+        return None;
+    }
+    match builtin.as_str() {
+        "builtin.method.option.is_some" => Some(MirVariantPredicate::IsSome),
+        "builtin.method.option.is_none" => Some(MirVariantPredicate::IsNone),
+        "builtin.method.result.is_ok" => Some(MirVariantPredicate::IsOk),
+        "builtin.method.result.is_err" => Some(MirVariantPredicate::IsErr),
+        _ => None,
+    }
 }
 
 fn set_builtin_contract(

@@ -1676,6 +1676,7 @@ impl BytecodeVM {
                         | Some(ConstValue::TupleProjection(_))
                         | Some(ConstValue::ListProjection(_))
                         | Some(ConstValue::ListOperation(_))
+                        | Some(ConstValue::VariantPredicate(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2779,6 +2780,57 @@ impl BytecodeVM {
                     combined.extend(left.iter().cloned());
                     combined.extend(right.iter().cloned());
                     self.set_reg(rd, Value::List(std::sync::Arc::new(combined)));
+                }
+                Op::MirVariantPredicate {
+                    rd,
+                    ra,
+                    predicate,
+                    contract,
+                } => {
+                    let shape = self.variant_predicate_contract(contract)?.ok_or_else(|| {
+                        InterpError::new("variant predicate: canonical operation has no receipt")
+                    })?;
+                    if shape.predicate != predicate {
+                        return Err(InterpError::new(
+                            "variant predicate: opcode predicate disagrees with receipt",
+                        ));
+                    }
+                    let Value::CanonicalVariant {
+                        nominal,
+                        variant,
+                        tag,
+                        ..
+                    } = self.get_reg(ra)
+                    else {
+                        return Err(InterpError::new(
+                            "variant predicate: expected canonical Variant source",
+                        ));
+                    };
+                    if nominal != &shape.nominal {
+                        return Err(InterpError::new(
+                            "variant predicate: runtime nominal disagrees with receipt",
+                        ));
+                    }
+                    let is_target = if variant == &shape.variant {
+                        if tag != &shape.variant_name {
+                            return Err(InterpError::new(
+                                "variant predicate: target tag disagrees with receipt",
+                            ));
+                        }
+                        true
+                    } else if variant == &shape.alternate_variant {
+                        if tag != &shape.alternate_variant_name {
+                            return Err(InterpError::new(
+                                "variant predicate: alternate tag disagrees with receipt",
+                            ));
+                        }
+                        false
+                    } else {
+                        return Err(InterpError::new(
+                            "variant predicate: runtime variant disagrees with receipt",
+                        ));
+                    };
+                    self.set_reg(rd, Value::Bool(is_target));
                 }
 
                 // ── Map / Set ────────────────────────────────
@@ -4710,6 +4762,30 @@ impl BytecodeVM {
         }
     }
 
+    /// Decode the mandatory canonical Option/Result predicate receipt.
+    fn variant_predicate_contract(
+        &self,
+        contract: Option<ConstIdx>,
+    ) -> Result<Option<crate::interp::bytecode::instr::VariantPredicateShape>, InterpError> {
+        let Some(contract_idx) = contract else {
+            return Ok(None);
+        };
+        match self.program.functions[self.cur_frame().proto_idx as usize]
+            .constants
+            .get(contract_idx as usize)
+        {
+            Some(ConstValue::VariantPredicate(shape)) => Ok(Some(shape.clone())),
+            Some(_) => Err(InterpError::new(format!(
+                "variant predicate: contract constant {} is not a VariantPredicate",
+                contract_idx
+            ))),
+            None => Err(InterpError::new(format!(
+                "variant predicate: contract constant {} is absent",
+                contract_idx
+            ))),
+        }
+    }
+
     fn validate_canonical_list_operation(
         value: &Value,
         shape: &crate::interp::bytecode::instr::ListOperationShape,
@@ -5051,6 +5127,7 @@ impl BytecodeVM {
             ConstValue::TupleProjection(_) => Value::Unit,
             ConstValue::ListProjection(_) => Value::Unit,
             ConstValue::ListOperation(_) => Value::Unit,
+            ConstValue::VariantPredicate(_) => Value::Unit,
         }
     }
 

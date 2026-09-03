@@ -796,6 +796,14 @@ pub enum Op {
         /// Canonical MIR always supplies a ListOperationShape here.
         contract: Option<ConstIdx>,
     },
+    /// rd = canonical Option/Result predicate(ra). The receipt is mandatory
+    /// for MIR bytecode and carries the TypeDesc-selected discriminant.
+    MirVariantPredicate {
+        rd: Reg,
+        ra: Reg,
+        predicate: crate::core::mir::MirVariantPredicate,
+        contract: Option<ConstIdx>,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1117,6 +1125,7 @@ impl Op {
             | MirListLen { rd, .. }
             | MirListReverse { rd, .. }
             | MirListConcat { rd, .. }
+            | MirVariantPredicate { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1362,6 +1371,7 @@ impl Op {
             | MirSetToList { ra, .. }
             | MirListLen { ra, .. }
             | MirListReverse { ra, .. }
+            | MirVariantPredicate { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
             | Ret { ra, .. }
@@ -1502,6 +1512,9 @@ pub enum ConstValue {
     /// Canonical List operation receipts encoded for the bytecode physical
     /// ABI. Legacy MirListLen has no receipt and remains separate.
     ListOperation(ListOperationShape),
+    /// Canonical Option/Result predicate receipt encoded for the bytecode
+    /// physical ABI.
+    VariantPredicate(VariantPredicateShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1519,6 +1532,20 @@ pub struct VariantShape {
     pub tag: String,
     pub discriminant: VariantIdx,
     pub arity: u16,
+}
+
+/// Canonical Option/Result predicate receipt copied from MIR TypeDesc.
+#[derive(Debug, Clone)]
+pub struct VariantPredicateShape {
+    pub variant_ty: crate::core::ResolvedTypeId,
+    pub result_ty: crate::core::ResolvedTypeId,
+    pub nominal: crate::core::ir::NominalTypeId,
+    pub variant: crate::core::NodeId,
+    pub variant_name: String,
+    pub alternate_variant: crate::core::NodeId,
+    pub alternate_variant_name: String,
+    pub predicate: crate::core::mir::MirVariantPredicate,
+    pub discriminant: VariantIdx,
 }
 
 /// One canonical record field projection in the bytecode physical contract.

@@ -16,7 +16,7 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
     MirListIndexProjectionContract, MirListOperationContract, MirOwnership,
-    MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
+    MirRecordProjectionContract, MirTypeDesc, MirTypeKind, MirVariantPredicateContract,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -26,7 +26,8 @@ use crate::core::NodeId;
 
 use super::instr::{
     BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
-    ListProjectionShape, Op, RecordProjectionShape, Reg, TupleProjectionShape, VariantShape,
+    ListProjectionShape, Op, RecordProjectionShape, Reg, TupleProjectionShape,
+    VariantPredicateShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -524,6 +525,12 @@ impl<'a> FunctionEmitter<'a> {
                 argument.as_ref(),
                 list_operation_contract.as_ref(),
             ),
+            MirInstructionKind::VariantPredicate {
+                result,
+                predicate,
+                variant,
+                contract,
+            } => self.emit_variant_predicate(result, *predicate, variant, contract.as_ref()),
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.emit_set_construct(result, elements)
             }
@@ -1841,6 +1848,61 @@ impl<'a> FunctionEmitter<'a> {
                 argument_ty: receipt.argument_ty.clone(),
                 operation: receipt.operation,
             }))
+    }
+
+    fn emit_variant_predicate(
+        &mut self,
+        result: &MirValueId,
+        predicate: crate::core::mir::MirVariantPredicate,
+        variant: &MirValueId,
+        receipt: Option<&MirVariantPredicateContract>,
+    ) {
+        let Some(rd) = self.reg(result) else { return };
+        let Some(ra) = self.reg(variant) else { return };
+        let Some(result_info) = self.function.values.get(result) else {
+            self.error(format!("variant predicate result '{}' is absent", result));
+            return;
+        };
+        let Some(variant_info) = self.function.values.get(variant) else {
+            self.error(format!("variant predicate source '{}' is absent", variant));
+            return;
+        };
+        let Some(receipt) = receipt else {
+            self.error("variant predicate has no canonical receipt");
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_predicate_receipt(
+                &result_info.ty,
+                &variant_info.ty,
+                predicate,
+                receipt,
+            )
+        {
+            self.error(format!("variant predicate is unsupported: {message}"));
+            return;
+        }
+        let contract = self
+            .proto
+            .add_const(ConstValue::VariantPredicate(VariantPredicateShape {
+                variant_ty: receipt.variant_ty.clone(),
+                result_ty: receipt.result_ty.clone(),
+                nominal: receipt.nominal.clone(),
+                variant: receipt.variant.clone(),
+                variant_name: receipt.variant_name.clone(),
+                alternate_variant: receipt.alternate_variant.clone(),
+                alternate_variant_name: receipt.alternate_variant_name.clone(),
+                predicate: receipt.predicate,
+                discriminant: receipt.discriminant,
+            }));
+        self.proto.emit(Op::MirVariantPredicate {
+            rd,
+            ra,
+            predicate,
+            contract: Some(contract),
+        });
     }
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
@@ -3471,6 +3533,133 @@ mod tests {
             report.legacy_bytecode.outcome,
             DifferentialOutcome::Error { ref class, .. } if class == "runtime:E0800"
         ));
+    }
+
+    #[test]
+    fn canonical_mir_variant_predicates_match_reference_and_materialize_receipts() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+        let (_, checked) = parse_and_check(source).expect("flat Copy variant predicate check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference variant predicate execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+
+        let bytecode = compile_mir_program(&mir).expect("variant predicate MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let main = &bytecode.functions[bytecode.entry as usize];
+        let shapes = main
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                Op::MirVariantPredicate {
+                    contract: Some(contract),
+                    ..
+                } => Some(contract),
+                _ => None,
+            })
+            .map(|contract| {
+                let ConstValue::VariantPredicate(shape) = &main.constants[*contract as usize]
+                else {
+                    panic!("canonical predicate must carry a VariantPredicate shape");
+                };
+                shape.clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shapes.len(), 4);
+        assert!(shapes.iter().all(|shape| {
+            !shape.variant_ty.as_str().is_empty()
+                && !shape.result_ty.as_str().is_empty()
+                && !shape.variant.0.is_empty()
+                && !shape.alternate_variant.0.is_empty()
+        }));
+
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode variant predicate execution");
+        assert!(matches!(value, Value::Int(4)));
+    }
+
+    #[test]
+    fn canonical_mir_variant_predicate_receipt_rejects_wrong_constant_before_read() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+        let mut program = (*compile(source)).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirVariantPredicate {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical variant predicate contract");
+        main.constants[contract as usize] = ConstValue::Unit;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("wrong predicate receipt must fail before source read");
+        assert!(error
+            .message()
+            .contains("variant predicate: contract constant"));
+    }
+
+    #[test]
+    fn canonical_mir_variant_predicate_receipt_rejects_identity_drift_before_read() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+        let mut program = (*compile(source)).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirVariantPredicate {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical variant predicate contract");
+        let ConstValue::VariantPredicate(shape) = &mut main.constants[contract as usize] else {
+            panic!("canonical predicate must carry a VariantPredicate shape");
+        };
+        shape.variant_name = "forged".into();
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("forged predicate identity must fail before result");
+        assert!(error
+            .message()
+            .contains("variant predicate: target tag disagrees with receipt"));
+    }
+
+    #[test]
+    fn canonical_mir_variant_predicate_opcode_rejects_predicate_drift_before_read() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_predicate.mimi");
+        let mut program = (*compile(source)).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirVariantPredicate {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical variant predicate contract");
+        let ConstValue::VariantPredicate(shape) = &mut main.constants[contract as usize] else {
+            panic!("canonical predicate must carry a VariantPredicate shape");
+        };
+        shape.predicate = crate::core::mir::MirVariantPredicate::IsNone;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("opcode/receipt predicate drift must fail before result");
+        assert!(error
+            .message()
+            .contains("variant predicate: opcode predicate disagrees with receipt"));
     }
 
     #[test]

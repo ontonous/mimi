@@ -68,7 +68,15 @@ impl<'a> Checker<'a> {
                 }
                 self.unification.zonk_or_unknown(inner)
             }
-            "is_some" | "is_none" => Type::Name("bool".into(), vec![]),
+            "is_some" | "is_none" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("Option.{} expects no arguments", method),
+                    );
+                }
+                Type::Name("bool".into(), vec![])
+            }
             "ok_or" => {
                 let err_ty = args
                     .first()
@@ -213,7 +221,15 @@ impl<'a> Checker<'a> {
                 }
                 self.unification.zonk_or_unknown(ok_ty)
             }
-            "is_ok" | "is_err" => Type::Name("bool".into(), vec![]),
+            "is_ok" | "is_err" => {
+                if !args.is_empty() {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        format!("Result.{} expects no arguments", method),
+                    );
+                }
+                Type::Name("bool".into(), vec![])
+            }
             "ok_or" => {
                 // Result::ok_or is not a standard combinator; treat it as producing Option<T>.
                 Type::Option(Box::new(self.unification.zonk_or_unknown(ok_ty)))

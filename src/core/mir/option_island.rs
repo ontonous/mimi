@@ -728,6 +728,7 @@ impl<'a> OptionStringVariantValidator<'a> {
             | MirInstructionKind::ConstructSet { .. }
             | MirInstructionKind::SetOp { .. }
             | MirInstructionKind::ConstructVariant { .. }
+            | MirInstructionKind::VariantPredicate { .. }
             | MirInstructionKind::UpdateRecord { .. }
             | MirInstructionKind::BuiltinCall { .. }
             | MirInstructionKind::FlowTransition { .. } => self.error(format!(

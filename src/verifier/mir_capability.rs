@@ -691,6 +691,36 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
             }
+            MirInstructionKind::VariantPredicate {
+                result,
+                predicate,
+                variant,
+                contract,
+            } => {
+                let (Some(result_ty), Some(variant_ty)) =
+                    (value_type(function, result), value_type(function, variant))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} variant predicate has no canonical receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_variant_predicate_receipt(
+                        &result_ty,
+                        &variant_ty,
+                        *predicate,
+                        receipt,
+                    )
+                {
+                    self.error(format!("{subject} variant predicate rejected: {message}"));
+                }
+            }
             MirInstructionKind::Convert { result, source } => {
                 let (Some(source_ty), Some(result_ty)) =
                     (value_type(function, source), value_type(function, result))

@@ -668,6 +668,22 @@ pub struct MirListOperationContract {
     pub operation: crate::core::mir::MirListOperation,
 }
 
+/// Backend-independent receipt for a read-only Option/Result predicate.
+/// `variant` and `discriminant` are redundant by design: the checker-owned
+/// identity and the physical tag must agree at every consumer boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirVariantPredicateContract {
+    pub variant_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub nominal: NominalTypeId,
+    pub variant: NodeId,
+    pub variant_name: String,
+    pub alternate_variant: NodeId,
+    pub alternate_variant_name: String,
+    pub predicate: crate::core::mir::MirVariantPredicate,
+    pub discriminant: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -3501,6 +3517,122 @@ impl MirTypeCatalog {
     ) -> Result<(), String> {
         self.validated_variant_construct(result_ty, nominal, variant, field_ids, field_types)
             .map(|_| ())
+    }
+
+    /// Validate and materialize the receipt for a read-only Option/Result
+    /// predicate. Only flat Copy variants are admitted in this slice: the
+    /// predicate itself does not move the source, but its physical tag must
+    /// still have the same deterministic ABI as the canonical construction
+    /// and switch contracts.
+    pub fn validated_variant_predicate_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        variant_ty: &ResolvedTypeId,
+        predicate: crate::core::mir::MirVariantPredicate,
+    ) -> Result<MirVariantPredicateContract, String> {
+        self.validate_flat_copy_variant(variant_ty)?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "variant predicate result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        if result.kind != MirTypeKind::Primitive(PrimitiveType::Bool)
+            || result.abi != MirAbiClass::Bool
+            || result.layout != MirLayout::Scalar
+            || result.ownership != MirOwnership::Copy
+            || result.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err("variant predicate result must be the canonical Copy bool TypeDesc".into());
+        }
+
+        let (expected_nominal, expected_variant, expected_name) = match predicate {
+            crate::core::mir::MirVariantPredicate::IsSome => (
+                "builtin:type:Option",
+                "builtin:variant:Option::Some",
+                "Some",
+            ),
+            crate::core::mir::MirVariantPredicate::IsNone => (
+                "builtin:type:Option",
+                "builtin:variant:Option::None",
+                "None",
+            ),
+            crate::core::mir::MirVariantPredicate::IsOk => {
+                ("builtin:type:Result", "builtin:variant:Result::Ok", "Ok")
+            }
+            crate::core::mir::MirVariantPredicate::IsErr => {
+                ("builtin:type:Result", "builtin:variant:Result::Err", "Err")
+            }
+        };
+        let (actual_nominal, variants) = self.variant_layout(variant_ty).ok_or_else(|| {
+            format!(
+                "variant predicate source type '{}' has no canonical Option/Result layout",
+                variant_ty.as_str()
+            )
+        })?;
+        if actual_nominal != expected_nominal {
+            return Err(format!(
+                "variant predicate {:?} requires '{}', found '{}'",
+                predicate, expected_nominal, actual_nominal
+            ));
+        }
+        let variant = variants
+            .iter()
+            .find(|candidate| candidate.id.0 == expected_variant && candidate.name == expected_name)
+            .ok_or_else(|| {
+                format!(
+                    "variant predicate {:?} target '{}' is absent from TypeDesc",
+                    predicate, expected_variant
+                )
+            })?;
+        if variants.len() != 2 {
+            return Err(format!(
+                "variant predicate source '{}' has {} variants; canonical Option/Result predicate requires exactly two",
+                variant_ty.as_str(),
+                variants.len()
+            ));
+        }
+        let alternate = variants
+            .iter()
+            .find(|candidate| candidate.id != variant.id)
+            .ok_or_else(|| {
+                "variant predicate alternate variant is absent from TypeDesc".to_string()
+            })?;
+        Ok(MirVariantPredicateContract {
+            variant_ty: variant_ty.clone(),
+            result_ty: result_ty.clone(),
+            nominal: NominalTypeId::new(expected_nominal)
+                .expect("static canonical variant nominal"),
+            variant: variant.id.clone(),
+            variant_name: variant.name.clone(),
+            alternate_variant: alternate.id.clone(),
+            alternate_variant_name: alternate.name.clone(),
+            predicate,
+            discriminant: variant.discriminant,
+        })
+    }
+
+    /// Validate a materialized predicate receipt against the checker-owned
+    /// TypeDesc graph. A stale discriminant, family, or predicate identity is
+    /// invalid MIR and must be rejected before any backend reads a value.
+    pub fn validate_variant_predicate_receipt(
+        &self,
+        result_ty: &ResolvedTypeId,
+        variant_ty: &ResolvedTypeId,
+        predicate: crate::core::mir::MirVariantPredicate,
+        receipt: &MirVariantPredicateContract,
+    ) -> Result<(), String> {
+        let expected =
+            self.validated_variant_predicate_contract(result_ty, variant_ty, predicate)?;
+        if receipt != &expected {
+            return Err("variant predicate receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
     }
 
     /// Validate the first backend-independent non-Copy variant contract.

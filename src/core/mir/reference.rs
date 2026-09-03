@@ -516,6 +516,36 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::VariantPredicate {
+                            result,
+                            predicate,
+                            variant,
+                            contract,
+                        } => {
+                            let (Some(result_value), Some(variant_value)) =
+                                (function.values.get(result), function.values.get(variant))
+                            else {
+                                continue;
+                            };
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "Variant predicate has no canonical receipt".into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_variant_predicate_receipt(
+                                &result_value.ty,
+                                &variant_value.ty,
+                                *predicate,
+                                receipt,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::ConstructSet { result, elements } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
@@ -2135,6 +2165,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::ListOp { list, argument, .. } => {
             list == needle || argument.as_ref() == Some(needle)
         }
+        super::MirInstructionKind::VariantPredicate { variant, .. } => variant == needle,
         super::MirInstructionKind::ConstructSet { elements, .. } => {
             elements.iter().any(|v| v == needle)
         }
@@ -2198,6 +2229,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
         | super::MirInstructionKind::ListOp { result, .. }
+        | super::MirInstructionKind::VariantPredicate { result, .. }
         | super::MirInstructionKind::ConstructSet { result, .. }
         | super::MirInstructionKind::SetOp { result, .. }
         | super::MirInstructionKind::ConstructVariant { result, .. }
@@ -2775,6 +2807,70 @@ impl<'a> MirReferenceInterpreter<'a> {
                     }
                 };
                 values.insert(result.clone(), output);
+            }
+            MirInstructionKind::VariantPredicate {
+                result,
+                predicate,
+                variant,
+                contract,
+            } => {
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "variant predicate result has no MIR type")
+                    })?;
+                let variant_ty = function
+                    .values
+                    .get(variant)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "variant predicate source has no MIR type")
+                    })?;
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "variant predicate has no canonical receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_variant_predicate_receipt(
+                        &result_ty,
+                        &variant_ty,
+                        *predicate,
+                        receipt,
+                    )
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let MirRuntimeValue::Variant {
+                    nominal,
+                    variant: actual_variant,
+                    ..
+                } = self.read_value(function, values, variant)?
+                else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant predicate source is not a canonical Variant",
+                    ));
+                };
+                if nominal != receipt.nominal {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant predicate runtime nominal disagrees with TypeDesc",
+                    ));
+                }
+                let is_target = if actual_variant == receipt.variant {
+                    true
+                } else if actual_variant == receipt.alternate_variant {
+                    false
+                } else {
+                    return Err(self.error(
+                        &function.owner,
+                        "variant predicate runtime variant disagrees with TypeDesc",
+                    ));
+                };
+                values.insert(result.clone(), MirRuntimeValue::Bool(is_target));
             }
             MirInstructionKind::ConstructSet { result, elements } => {
                 let element_types = elements

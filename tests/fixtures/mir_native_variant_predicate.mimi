@@ -1,0 +1,9 @@
+// Canonical MIR S79: flat Copy Option/Result predicates.
+func main() -> i32 {
+    let some: Option<i32> = Some(41)
+    let none: Option<i32> = None
+    let ok: Result<i32, i32> = Ok(7)
+    let err: Result<i32, i32> = Err(9)
+    let all_true = some.is_some() && none.is_none() && ok.is_ok() && err.is_err()
+    if all_true { 4 } else { 0 }
+}

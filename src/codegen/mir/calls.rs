@@ -3,6 +3,48 @@
 use super::*;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
+    pub(super) fn emit_variant_predicate(
+        &mut self,
+        result: &MirValueId,
+        predicate: MirVariantPredicate,
+        variant: &MirValueId,
+        receipt: Option<&crate::core::mir::types::MirVariantPredicateContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let variant_ty = self.value_type(variant, subject)?;
+        let receipt = receipt.ok_or_else(|| {
+            NativeMirError::new(subject, "variant predicate has no canonical receipt")
+        })?;
+        self.program
+            .type_catalog()
+            .validate_variant_predicate_receipt(&result_ty, &variant_ty, predicate, receipt)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &variant_ty, false)?;
+        let value = self.value(variant, subject)?.into_struct_value();
+        let tag = self
+            .generator
+            .builder
+            .build_extract_value(value, variant_abi.tag_field, "mir_variant_predicate_tag")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let expected = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(u64::from(receipt.discriminant), false);
+        self.generator
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                expected,
+                "mir_variant_predicate",
+            )
+            .map(BasicValueEnum::from)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
     pub(super) fn emit_list_op(
         &mut self,
         result: &MirValueId,
