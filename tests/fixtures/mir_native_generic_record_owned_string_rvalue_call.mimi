@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: a freshly constructed owned String record
+// is transferred directly into the consuming projection call.
+type Box<T> { value: T }
+
+func take<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let picked = take(Box { value: "rvalue" })
+    drop(picked)
+    41
+}

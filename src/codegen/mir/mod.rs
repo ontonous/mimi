@@ -2269,6 +2269,27 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_owned_generic_record_projection_rvalue() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic record rvalue execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_owned_string_rvalue");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic record rvalue must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic record rvalue module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_string_generic_identity_with_explicit_drop() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi"

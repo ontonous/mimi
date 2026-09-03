@@ -5138,7 +5138,9 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
-    use crate::core::mir::{MirGenericInstanceContract, MirInstruction, MirInstructionKind};
+    use crate::core::mir::{
+        MirAggregateKind, MirGenericInstanceContract, MirInstruction, MirInstructionKind,
+    };
     use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -5773,27 +5775,80 @@ mod tests {
                 error
                     .message
                     .contains("owned generic record projection call transfer is invalid")
-                    && error.message.contains("direct local Move producer")
+                    && error
+                        .message
+                        .contains("direct local Move or fresh Record Construct producer")
             }),
             "{errors:?}"
         );
     }
 
     #[test]
-    fn owned_generic_record_projection_rvalue_argument_fails_closed() {
-        let source = "type Box<T> { value: T }\nfunc take<T>(boxed: Box<T>) -> T { boxed.value }\nfunc main() -> i32 { let picked = take(Box { value: \"owned\" }); drop(picked); 41 }";
+    fn concrete_owned_generic_record_projection_rvalue_call_moves_construct() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
+        );
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("owned generic record projection rvalue must remain fail-closed");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record rvalue call must materialize");
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("owned generic rvalue caller");
+        let (_, call_index, call_argument) = main
+            .blocks
+            .iter()
+            .find_map(|(block_id, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, instruction)| match &instruction.kind {
+                        MirInstructionKind::Call { arguments, .. } => arguments
+                            .first()
+                            .cloned()
+                            .map(|argument| (block_id, index, argument)),
+                        _ => None,
+                    })
+            })
+            .expect("owned generic rvalue call");
+        assert!(matches!(
+            main.blocks
+                .values()
+                .find_map(|block| block.instructions.get(call_index.saturating_sub(1))),
+            Some(MirInstruction {
+                kind: MirInstructionKind::Construct {
+                    result,
+                    kind: MirAggregateKind::Record { .. },
+                    ..
+                },
+                ..
+            }) if result == &call_argument
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic rvalue projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn owned_generic_record_projection_indirect_argument_fails_closed() {
+        let source = "type Box<T> { value: T }\nfunc take<T>(boxed: Box<T>) -> T { boxed.value }\nfunc main() -> i32 { let picked = take(if true { Box { value: \"owned\" } } else { Box { value: \"other\" } }); drop(picked); 41 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked).expect_err(
+            "owned generic record projection indirect argument must remain fail-closed",
+        );
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
                 error
                     .message
-                    .contains("owned generic record projection call requires a direct local Clone producer")
+                    .contains("owned generic record projection call requires a direct local Clone or fresh Record Construct producer")
             }), "{errors:?}"),
-            other => panic!("owned generic record rvalue crossed the MIR gate: {other:?}"),
+            other => panic!("owned generic record indirect argument crossed the MIR gate: {other:?}"),
         }
     }
 

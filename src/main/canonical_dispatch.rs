@@ -596,6 +596,24 @@ mod tests {
     }
 
     #[test]
+    fn owned_generic_record_projection_rvalue_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("owned generic record rvalue projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordProjection { .. }
+        )));
+    }
+
+    #[test]
     fn unsupported_generic_record_projection_is_rejected_before_legacy_route() {
         let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
         let (checked, file) = checked(source);

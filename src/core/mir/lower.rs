@@ -496,9 +496,68 @@ fn rewrite_owned_record_call_argument(
     let Some(producer_index) = call_index.checked_sub(1) else {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call argument has no producer".into(),
+            message: "owned generic record projection call requires a direct local Clone or fresh Record Construct producer".into(),
         }]);
     };
+    if let Some(MirInstruction {
+        kind:
+            MirInstructionKind::Construct {
+                result: produced,
+                kind: MirAggregateKind::Record { .. },
+                ..
+            },
+        ..
+    }) = block.instructions.get(producer_index)
+    {
+        if produced != argument {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message:
+                    "owned generic record projection call argument is not the direct Record Construct result"
+                        .into(),
+            }]);
+        }
+        let Some(result_ty) = caller.values.get(produced).map(|value| value.ty.clone()) else {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "owned generic record projection call Construct result TypeDesc is absent"
+                    .into(),
+            }]);
+        };
+        if result_ty != *target_parameter_ty {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: format!(
+                    "owned generic record projection call Construct type '{}' disagrees with target parameter '{}'",
+                    result_ty.as_str(),
+                    target_parameter_ty.as_str()
+                ),
+            }]);
+        }
+        let Some(descriptor) = type_catalog.get(&result_ty) else {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "owned generic record projection call Construct has no TypeDesc".into(),
+            }]);
+        };
+        if descriptor.ownership != super::types::MirOwnership::Move {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "owned generic record projection call Construct is not Move-owned".into(),
+            }]);
+        }
+        if let Err(message) =
+            type_catalog.validate_glue(&result_ty, super::types::MirGlueOperation::MoveOut)
+        {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: format!(
+                    "owned generic record projection call Construct lacks MoveOut glue: {message}"
+                ),
+            }]);
+        }
+        return Ok(());
+    }
     let Some(MirInstruction {
         kind:
             MirInstructionKind::Clone {
@@ -510,8 +569,7 @@ fn rewrite_owned_record_call_argument(
     else {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call requires a direct local Clone producer"
-                .into(),
+            message: "owned generic record projection call requires a direct local Clone or fresh Record Construct producer".into(),
         }]);
     };
     if produced != argument {
@@ -605,16 +663,50 @@ pub(crate) fn validate_owned_record_call_argument(
         return Err("owned generic record projection call requires one argument".into());
     };
     let producer_index = call_index.checked_sub(1).ok_or_else(|| {
-        "owned generic record projection call argument has no producer".to_string()
+        "owned generic record projection call requires a direct local Move or fresh Record Construct producer".to_string()
     })?;
+    if let Some(MirInstruction {
+        kind:
+            MirInstructionKind::Construct {
+                result,
+                kind: MirAggregateKind::Record { .. },
+                ..
+            },
+        ..
+    }) = block.instructions.get(producer_index)
+    {
+        if result != argument {
+            return Err(
+                "owned generic record projection call argument is not the direct Record Construct result".into(),
+            );
+        }
+        let result_ty = caller
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                "owned generic record projection call Construct result TypeDesc is absent"
+                    .to_string()
+            })?;
+        if result_ty != *target_parameter_ty {
+            return Err(
+                "owned generic record projection call Construct type disagrees with target parameter".into(),
+            );
+        }
+        let descriptor = type_catalog.get(&result_ty).ok_or_else(|| {
+            "owned generic record projection call Construct has no TypeDesc".to_string()
+        })?;
+        if descriptor.ownership != super::types::MirOwnership::Move {
+            return Err("owned generic record projection call Construct is not Move-owned".into());
+        }
+        return type_catalog.validate_glue(&result_ty, super::types::MirGlueOperation::MoveOut);
+    }
     let Some(MirInstruction {
         kind: MirInstructionKind::Move { result, source },
         ..
     }) = block.instructions.get(producer_index)
     else {
-        return Err(
-            "owned generic record projection call requires a direct local Move producer".into(),
-        );
+        return Err("owned generic record projection call requires a direct local Move or fresh Record Construct producer".into());
     };
     if result != argument {
         return Err(
