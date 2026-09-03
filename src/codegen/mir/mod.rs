@@ -1198,6 +1198,40 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_merges_move_owned_result_call_return_paths() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference move-owned Result multi-path execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("move-owned Result multi-path MIR bytecode"),
+        )
+        .run_value()
+        .expect("move-owned Result multi-path MIR-bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(bytecode, Value::Int(48)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_move_owned_result_multipath");
+        generator
+            .compile_mir_native(&program)
+            .expect("native move-owned Result multi-path call must use its MIR contract");
+        generator
+            .module
+            .verify()
+            .expect("native move-owned Result multi-path module verifies");
+        for function in ["choose", "checked", "main"] {
+            assert!(
+                generator.module.get_function(function).is_some(),
+                "{function}"
+            );
+        }
+    }
+
+    #[test]
     fn native_validator_rejects_result_string_string_before_llvm_declarations() {
         let program = canonical_program(
             "func main() -> i32 { let value: Result<string, string> = Ok(\"owned\"); drop(value); 42 }",

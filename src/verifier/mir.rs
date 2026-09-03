@@ -2359,9 +2359,8 @@ fn eval_direct_owned_string_call(
 /// Option/Result or move-owned `Result<string, i32>` result. The callee is
 /// already concrete MIR, so the verifier maps symbolic arguments into its
 /// entry block and reuses `explore_block`; it does not inspect a surface body
-/// or rediscover a call ABI. Move-owned Result calls currently require one
-/// canonical return path, because ownership-bearing payload merge is a
-/// separate contract.
+/// or rediscover a call ABI. Ownership-bearing Result paths use the explicit
+/// path-exclusive merge contract carried by the canonical receipt.
 fn eval_direct_variant_call(
     function: &MirFunction,
     program: &MirProgram,
@@ -2433,7 +2432,11 @@ fn eval_direct_variant_call(
         &target.result,
         receipt,
     )?;
-    validate_direct_variant_return_coverage(target, &target.entry)?;
+    if move_owned_result {
+        crate::core::mir::validate_move_owned_result_return_merge(target, catalog)?;
+    } else {
+        crate::core::mir::validate_variant_call_return_coverage(target)?;
+    }
 
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
@@ -2506,13 +2509,7 @@ fn eval_direct_variant_call(
         return Err("MIR verifier direct variant call has a trapping execution path".into());
     }
     let returned = if move_owned_result {
-        let [returned] = returns.as_slice() else {
-            return Err(
-                "MIR verifier move-owned Result<string, i32> call requires exactly one return path"
-                    .into(),
-            );
-        };
-        returned.value.clone()
+        merge_move_owned_result_return_paths(catalog, &target.result, &returns)?
     } else {
         merge_direct_variant_return_paths(catalog, &target.result, &returns)?
     };
@@ -2524,72 +2521,6 @@ fn eval_direct_variant_call(
     ensure_result_shape(function, catalog, result, &returned)?;
     state.values.insert(result.clone(), returned);
     Ok(())
-}
-
-/// Validate the structural coverage required before a direct variant call can
-/// merge return paths.  This is deliberately a small CFG contract: acyclic
-/// Goto/Branch graphs whose reachable terminal blocks all return a value.  It
-/// rejects Switch, Unreachable, Fault, and Trap terminals here so the merge
-/// helper cannot silently select a fallback value for an uncovered input.
-fn validate_direct_variant_return_coverage(
-    function: &MirFunction,
-    entry: &crate::core::mir::MirBlockId,
-) -> Result<(), String> {
-    fn visit(
-        function: &MirFunction,
-        block_id: &crate::core::mir::MirBlockId,
-        active: &mut BTreeSet<crate::core::mir::MirBlockId>,
-        visited: &mut BTreeSet<crate::core::mir::MirBlockId>,
-    ) -> Result<(), String> {
-        if !active.insert(block_id.clone()) {
-            return Err(
-                "MIR verifier direct variant call return merge does not admit cyclic CFG".into(),
-            );
-        }
-        if !visited.insert(block_id.clone()) {
-            active.remove(block_id);
-            return Ok(());
-        }
-        let block = function.blocks.get(block_id).ok_or_else(|| {
-            format!(
-                "MIR verifier direct variant call return block '{}' is absent",
-                block_id
-            )
-        })?;
-        match &block.terminator {
-            MirTerminator::Goto { target, .. } => visit(function, target, active, visited)?,
-            MirTerminator::Branch {
-                then_target,
-                else_target,
-                ..
-            } => {
-                visit(function, then_target, active, visited)?;
-                visit(function, else_target, active, visited)?;
-            }
-            MirTerminator::Return { value: Some(_) } => {}
-            MirTerminator::Return { value: None } => {
-                return Err(
-                    "MIR verifier direct variant call return merge requires value returns".into(),
-                )
-            }
-            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
-                return Err(
-                    "MIR verifier direct variant call return merge only admits Goto/Branch CFG"
-                        .into(),
-                )
-            }
-            MirTerminator::Trap { .. }
-            | MirTerminator::Unreachable
-            | MirTerminator::Fault { .. } => return Err(
-                "MIR verifier direct variant call return merge requires total non-trapping returns"
-                    .into(),
-            ),
-        }
-        active.remove(block_id);
-        Ok(())
-    }
-
-    visit(function, entry, &mut BTreeSet::new(), &mut BTreeSet::new())
 }
 
 /// Merge the complete return set of a direct flat Copy variant call into one
@@ -2630,6 +2561,51 @@ fn merge_direct_variant_return_paths(
     let (_, last) = normalized
         .pop()
         .expect("validated non-empty direct variant return paths");
+    let mut merged = last;
+    for (condition, value) in normalized.into_iter().rev() {
+        merged = merge_symbolic_variants(&condition, value, merged)?;
+    }
+    Ok(merged)
+}
+
+/// Merge ownership-bearing `Result<string, i32>` returns after the canonical
+/// MIR path validator has proved that every reachable path is total and
+/// non-trapping.  The String payload is intentionally opaque to Z3, so the
+/// merge preserves its TypeDesc identity while the Copy `i32` payload remains
+/// symbolically selectable by the path condition.
+fn merge_move_owned_result_return_paths(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ResolvedTypeId,
+    returns: &[ReturnPath],
+) -> Result<SymbolicValue, String> {
+    if returns.is_empty() {
+        return Err("MIR verifier direct variant call has no return paths to merge".into());
+    }
+    catalog.validate_result_string_i32_variant(result_ty)?;
+    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
+        return Err("MIR verifier direct variant call has no canonical Result layout".into());
+    };
+    let nominal =
+        crate::core::ir::NominalTypeId::new(expected_nominal).map_err(|error| error.to_string())?;
+    let all_fields = variants
+        .iter()
+        .flat_map(|variant| variant.fields.iter())
+        .map(|field| (field.id.clone(), field.ty.clone()))
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(returns.len());
+    for path in returns {
+        let value = normalize_direct_variant_return(
+            catalog,
+            result_ty,
+            &nominal,
+            &all_fields,
+            &path.value,
+        )?;
+        normalized.push((conjunction(&path.constraints), value));
+    }
+    let (_, last) = normalized
+        .pop()
+        .expect("validated non-empty move-owned Result return paths");
     let mut merged = last;
     for (condition, value) in normalized.into_iter().rev() {
         merged = merge_symbolic_variants(&condition, value, merged)?;
@@ -2767,6 +2743,11 @@ fn merge_symbolic_scalars(
         }
         (SymbolicValue::Bool(when_true), SymbolicValue::Bool(when_false)) => {
             Ok(SymbolicValue::Bool(condition.ite(&when_true, &when_false)))
+        }
+        (SymbolicValue::Opaque { ty: when_true }, SymbolicValue::Opaque { ty: when_false })
+            if when_true == when_false =>
+        {
+            Ok(SymbolicValue::Opaque { ty: when_true })
         }
         _ => Err("MIR verifier direct variant call merge requires scalar payloads".into()),
     }
@@ -3007,7 +2988,7 @@ fn eval_materialized_identity_call(
                 .into(),
         );
     }
-    validate_direct_variant_return_coverage(target, &target.entry)?;
+    crate::core::mir::validate_variant_call_return_coverage(target)?;
     let mut target_state = SymbolicState {
         values: BTreeMap::from([(target_parameter.clone(), symbolic)]),
         constraints: caller_constraints.clone(),
@@ -3854,14 +3835,14 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_move_owned_result_call_with_multiple_return_paths() {
+    fn verifier_proves_move_owned_result_call_with_exclusive_return_paths() {
         let source = r#"
             func choose(flag: bool) -> Result<string, i32> {
                 if flag { Ok("owned") } else { Err(1) }
             }
 
             func checked(flag: bool) -> i32 {
-                ensures: result == 4
+                ensures: result >= 0
                 let value = choose(flag)
                 match value {
                     Ok(_) => 4,
@@ -3880,22 +3861,20 @@ mod tests {
             &program,
             "result-string-i32-call-multipath-source-hash".into(),
         )
-        .expect("unsupported move-owned call shape must be classified");
+        .expect("move-owned multi-path call should be classified");
         let result = results
             .iter()
             .find(|result| result.func_name == "function:checked")
             .expect("checked verification result");
         assert_eq!(
             result.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
-        );
-        assert!(
-            result
-                .message
-                .contains("move-owned Result<string, i32> call requires exactly one return path"),
+            crate::verifier::VerifStatus::Proven,
             "{}",
             result.message
         );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
     }
 
     #[test]

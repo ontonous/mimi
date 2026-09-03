@@ -1,0 +1,16 @@
+func choose(flag: bool) -> Result<string, i32> {
+    if flag { Ok("owned-ok") } else { Err(7) }
+}
+
+func checked(flag: bool) -> i32 {
+    ensures: result >= 0
+    let value = choose(flag)
+    match value {
+        Ok(_) => 41,
+        Err(code) => code
+    }
+}
+
+func main() -> i32 {
+    checked(true) + checked(false)
+}

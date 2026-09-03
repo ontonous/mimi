@@ -1553,6 +1553,10 @@ fn direct_move_owned_result_calls_materialize_signature_receipts() {
             receipt.mode,
             crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
         );
+        assert_eq!(
+            receipt.return_mode,
+            crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        );
         assert_eq!(receipt.payload_types.len(), 2);
         assert_eq!(receipt.payload_ty, receipt.payload_types[0]);
         canonical
@@ -1617,6 +1621,76 @@ fn move_owned_result_call_receipt_drift_is_rejected_before_consumers() {
         error
             .message
             .contains("variant call ABI receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn move_owned_result_return_merge_rejects_switch_before_consumers() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:choose".into());
+    let mut forged = canonical.functions().clone();
+    let choose = forged.get_mut(&owner).expect("choose MIR");
+    let entry = choose.entry.clone();
+    let old_terminator = choose
+        .blocks
+        .get(&entry)
+        .expect("choose entry")
+        .terminator
+        .clone();
+    let crate::core::mir::MirTerminator::Branch {
+        condition,
+        then_edge,
+        then_target,
+        then_arguments,
+        else_edge,
+        else_target,
+        else_arguments,
+    } = old_terminator
+    else {
+        panic!("choose must start with a canonical Branch");
+    };
+    choose
+        .blocks
+        .get_mut(&entry)
+        .expect("choose entry")
+        .terminator = crate::core::mir::MirTerminator::Switch {
+        scrutinee: condition,
+        arms: vec![
+            crate::core::mir::MirSwitchArm {
+                edge: then_edge,
+                target: then_target,
+                arguments: then_arguments,
+                bindings: vec![],
+                case: crate::core::mir::MirSwitchCase::Literal(crate::core::ResolvedLiteral::Bool(
+                    true,
+                )),
+            },
+            crate::core::mir::MirSwitchArm {
+                edge: else_edge,
+                target: else_target,
+                arguments: else_arguments,
+                bindings: vec![],
+                case: crate::core::mir::MirSwitchCase::Default,
+            },
+        ],
+    };
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("unsupported ownership merge CFG must fail before consumers");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("MIR verifier direct variant call return merge only admits Goto/Branch CFG")
     }));
 }
 

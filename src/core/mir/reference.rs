@@ -1428,6 +1428,16 @@ fn validate_call_graph(
                             message,
                         });
                     }
+                    if move_owned_result {
+                        if let Err(message) =
+                            super::validate_move_owned_result_return_merge(target, type_catalog)
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message,
+                            });
+                        }
+                    }
                 } else if variant_call_contract.is_some() {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
@@ -3340,6 +3350,13 @@ impl<'a> MirReferenceInterpreter<'a> {
                             receipt,
                         )
                         .map_err(|message| self.error(&function.owner, message))?;
+                    if move_owned_result {
+                        super::validate_move_owned_result_return_merge(
+                            callee,
+                            self.program.type_catalog(),
+                        )
+                        .map_err(|message| self.error(&function.owner, message))?;
+                    }
                 } else if variant_call_contract.is_some() {
                     return Err(self.error(
                         &function.owner,

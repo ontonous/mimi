@@ -618,6 +618,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     receipt,
                 )
                 .map_err(|message| NativeMirError::new(subject, message))?;
+            if move_owned_result {
+                crate::core::mir::validate_move_owned_result_return_merge(
+                    target,
+                    self.program.type_catalog(),
+                )
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            }
         } else if variant_call_contract.is_some() {
             return Err(NativeMirError::new(
                 subject,

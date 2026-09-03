@@ -1677,6 +1677,14 @@ impl<'a> NativeMirValidator<'a> {
             {
                 self.errors.push(NativeMirError::new(subject, message));
             }
+            if move_owned_result {
+                if let Err(message) = crate::core::mir::validate_move_owned_result_return_merge(
+                    target,
+                    self.program.type_catalog(),
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
         } else if variant_call_contract.is_some() {
             self.errors.push(NativeMirError::new(
                 subject,

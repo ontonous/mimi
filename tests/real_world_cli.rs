@@ -1832,6 +1832,46 @@ fn canonical_mir_native_result_string_i32_call_return_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_result_string_i32_call_return_multipath_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_string_i32_call_return_multipath.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR Result multi-path reference run");
+    assert_eq!(mir_run.status.code(), Some(48));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-result-string-i32-call-return-multipath-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR Result multi-path native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR Result multi-path native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR Result multi-path native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(48));
+}
+
+#[test]
 fn canonical_mir_native_option_overflow_matches_mir_trap_class() {
     let fixture = project_root()
         .join("tests")

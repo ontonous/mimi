@@ -1141,6 +1141,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.error(message);
                 return;
             }
+            if move_owned_result {
+                if let Err(message) = crate::core::mir::validate_move_owned_result_return_merge(
+                    target,
+                    self.program.type_catalog(),
+                ) {
+                    self.error(message);
+                    return;
+                }
+            }
         } else if variant_call_contract.is_some() {
             self.error("variant call ABI receipt is attached to an unsupported variant result");
             return;

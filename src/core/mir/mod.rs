@@ -1330,6 +1330,154 @@ pub(crate) fn validate_owned_string_return_shape(
     Ok(())
 }
 
+/// Validate the return CFG shared by direct variant-call consumers.  The
+/// path set is deliberately closed: every reachable terminal must return a
+/// value, and the graph must be acyclic `Goto`/`Branch`.  This proof is about
+/// canonical MIR control flow only; it does not inspect a surface body or a
+/// backend representation.
+pub(crate) fn validate_variant_call_return_coverage(function: &MirFunction) -> Result<(), String> {
+    fn visit(
+        function: &MirFunction,
+        block_id: &MirBlockId,
+        active: &mut BTreeSet<MirBlockId>,
+        visited: &mut BTreeSet<MirBlockId>,
+    ) -> Result<(), String> {
+        if !active.insert(block_id.clone()) {
+            return Err(
+                "MIR variant call return merge does not admit cyclic canonical MIR CFG".into(),
+            );
+        }
+        if !visited.insert(block_id.clone()) {
+            active.remove(block_id);
+            return Ok(());
+        }
+        let block = function
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| format!("MIR variant call return block '{}' is absent", block_id))?;
+        match &block.terminator {
+            MirTerminator::Goto { target, .. } => visit(function, target, active, visited)?,
+            MirTerminator::Branch {
+                then_target,
+                else_target,
+                ..
+            } => {
+                visit(function, then_target, active, visited)?;
+                visit(function, else_target, active, visited)?;
+            }
+            MirTerminator::Return { value: Some(value) } => {
+                let value_info = function.values.get(value).ok_or_else(|| {
+                    format!(
+                        "MIR variant call return value '{}' is absent from the value catalog",
+                        value
+                    )
+                })?;
+                if value_info.ty != function.result {
+                    return Err(
+                        "MIR variant call return value disagrees with the function result TypeDesc"
+                            .into(),
+                    );
+                }
+            }
+            MirTerminator::Return { value: None } => {
+                return Err("MIR variant call return merge requires value returns".into())
+            }
+            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
+                return Err(
+                    "MIR verifier direct variant call return merge only admits Goto/Branch CFG"
+                        .into(),
+                )
+            }
+            MirTerminator::Trap { .. }
+            | MirTerminator::Unreachable
+            | MirTerminator::Fault { .. } => {
+                return Err(
+                    "MIR variant call return merge requires total non-trapping returns".into(),
+                )
+            }
+        }
+        active.remove(block_id);
+        Ok(())
+    }
+
+    visit(
+        function,
+        &function.entry,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )
+}
+
+/// Validate the ownership-bearing return merge profile for the promoted
+/// `Result<string, i32>` direct-call ABI.  A returned aggregate may be
+/// assembled on several mutually-exclusive Branch paths, but every reachable
+/// path must be total and return the exact canonical Result TypeDesc.  The
+/// ownership ledger and TypeDesc glue checks remain the proof of the actual
+/// Move/Drop/Return events; this helper proves only that no path is silently
+/// selected or dropped at the call boundary.
+pub(crate) fn validate_move_owned_result_return_merge(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<(), String> {
+    type_catalog.validate_result_string_i32_variant(&function.result)?;
+    validate_variant_call_return_coverage(function)?;
+
+    // A Branch is the only admitted path split.  Prove its selector from
+    // TypeDesc as well: the structural validator above cannot distinguish a
+    // Boolean path predicate from an arbitrary scalar, while the merge proof
+    // relies on the two outgoing edges being mutually exclusive and
+    // exhaustive.
+    let mut pending = vec![function.entry.clone()];
+    let mut visited = BTreeSet::new();
+    while let Some(block_id) = pending.pop() {
+        if !visited.insert(block_id.clone()) {
+            continue;
+        }
+        let block = function
+            .blocks
+            .get(&block_id)
+            .ok_or_else(|| format!("MIR variant call return block '{}' is absent", block_id))?;
+        match &block.terminator {
+            MirTerminator::Goto { target, .. } => pending.push(target.clone()),
+            MirTerminator::Branch {
+                condition,
+                then_target,
+                else_target,
+                ..
+            } => {
+                let condition_ty = function
+                    .values
+                    .get(condition)
+                    .map(|value| &value.ty)
+                    .ok_or_else(|| {
+                        format!(
+                            "MIR variant call return Branch condition '{}' is absent from the value catalog",
+                            condition
+                        )
+                    })?;
+                let is_bool = type_catalog.get(condition_ty).is_some_and(|descriptor| {
+                    descriptor.layout == types::MirLayout::Scalar
+                        && descriptor.abi == types::MirAbiClass::Bool
+                });
+                if !is_bool {
+                    return Err(
+                        "MIR variant call return merge requires TypeDesc Boolean Branch conditions"
+                            .into(),
+                    );
+                }
+                pending.extend([then_target.clone(), else_target.clone()]);
+            }
+            MirTerminator::Return { .. }
+            | MirTerminator::Switch { .. }
+            | MirTerminator::SwitchMove { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => {}
+        }
+    }
+    Ok(())
+}
+
 fn instruction_produces_owned_string(
     function: &MirFunction,
     type_catalog: &types::MirTypeCatalog,
