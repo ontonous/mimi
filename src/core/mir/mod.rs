@@ -283,7 +283,13 @@ impl MirTransitionContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirGenericInstanceContract {
     ScalarIdentity,
-    ScalarSetFacade { operation: MirSetOperation },
+    /// `identity<T>(T) -> T` specialized to the canonical move-owned String
+    /// ABI.  This is separate from the Copy/flat-variant identity island so
+    /// consumers cannot accidentally treat an owned handle as a no-op value.
+    OwnedStringIdentity,
+    ScalarSetFacade {
+        operation: MirSetOperation,
+    },
 }
 
 /// Operations with explicit value and ownership boundaries. The MIR validator
@@ -1011,6 +1017,71 @@ fn validate_single_block_generic_identity(
         MirTerminator::Return { value: Some(value) } if value == result
     ) {
         return Err("generic MIR identity body must return the Clone result".into());
+    }
+    Ok(())
+}
+
+/// Validate the ownership-complete specialization of generic identity for
+/// the move-owned String ABI.  A Copy identity may leave its parameter
+/// untouched because the value has no destruction obligation; a String
+/// identity must explicitly clone the returned value and drop the consumed
+/// parameter before returning.  Keeping this as a distinct MIR shape prevents
+/// a backend from silently treating an owned handle as a shallow Copy.
+pub(crate) fn validate_owned_string_identity_shape(
+    function: &MirFunction,
+    expected_type: &ResolvedTypeId,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("owned String generic identity body must have exactly one parameter".into());
+    };
+    if function.result != *expected_type
+        || !function
+            .values
+            .get(parameter)
+            .is_some_and(|value| value.ty == *expected_type)
+    {
+        return Err(
+            "owned String generic identity body must preserve one canonical parameter and result"
+                .into(),
+        );
+    }
+    if function.blocks.len() != 1 {
+        return Err(
+            "owned String generic identity body currently requires one canonical MIR block".into(),
+        );
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "owned String generic identity entry block is absent".to_string())?;
+    let [clone, drop] = block.instructions.as_slice() else {
+        return Err(
+            "owned String generic identity body must contain Clone followed by Drop".into(),
+        );
+    };
+    let MirInstructionKind::Clone {
+        result: clone_result,
+        source: clone_source,
+    } = &clone.kind
+    else {
+        return Err("owned String generic identity body must clone its canonical parameter".into());
+    };
+    if clone_source != parameter
+        || !function
+            .values
+            .get(clone_result)
+            .is_some_and(|value| value.ty == *expected_type)
+    {
+        return Err("owned String generic identity Clone must copy the canonical parameter".into());
+    }
+    if !matches!(&drop.kind, MirInstructionKind::Drop { value } if value == parameter) {
+        return Err("owned String generic identity body must drop its consumed parameter".into());
+    }
+    if !matches!(
+        &block.terminator,
+        MirTerminator::Return { value: Some(value) } if value == clone_result
+    ) {
+        return Err("owned String generic identity body must return the cloned value".into());
     }
     Ok(())
 }

@@ -4145,6 +4145,39 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_string_generic_identity_with_explicit_drop_through_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("owned String generic identity MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("owned String identity instance");
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("owned String identity target");
+        assert!(target.canonical_text().contains("clone"));
+        assert!(target.canonical_text().contains("drop"));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned String generic identity execution");
+        let bytecode = compile_mir_program(&mir).expect("owned String generic identity bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("owned String generic identity bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_materialized_generic_variant_identity_through_mir_bytecode() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_variant_identity.mimi");

@@ -1591,6 +1591,41 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_owned_string_generic_identity_with_explicit_drop() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned String identity instance");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned String identity target");
+        assert!(target.canonical_text().contains("clone"));
+        assert!(target.canonical_text().contains("drop"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned String generic identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_owned_string_identity");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned String generic identity must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned String generic identity module verifies");
+        assert!(generator.module.get_function("mimi_str_clone").is_some());
+        assert!(generator.module.get_function("mimi_string_free").is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_variant_identity() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_variant_identity.mimi"

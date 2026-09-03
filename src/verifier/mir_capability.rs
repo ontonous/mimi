@@ -64,11 +64,12 @@ impl<'a> CapabilityGate<'a> {
                 continue;
             };
             match instance.contract {
-                MirGenericInstanceContract::ScalarIdentity => {
+                MirGenericInstanceContract::ScalarIdentity
+                | MirGenericInstanceContract::OwnedStringIdentity => {
                     if let Err(message) = self
                         .program
                         .type_catalog()
-                        .validate_scalar_generic_arguments(&instance.arguments)
+                        .validate_generic_identity_arguments(&instance.arguments)
                     {
                         self.error(format!(
                             "instance '{}' identity TypeDesc contract is unsupported: {message}",
@@ -85,6 +86,29 @@ impl<'a> CapabilityGate<'a> {
                     ) {
                         self.error(format!(
                             "instance '{}' Set facade contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
+            }
+            if matches!(
+                instance.contract,
+                MirGenericInstanceContract::OwnedStringIdentity
+            ) {
+                if let Some(concrete) = instance.arguments.first() {
+                    if let Err(message) =
+                        self.program.type_catalog().validate_owned_string(concrete)
+                    {
+                        self.error(format!(
+                            "instance '{}' owned String TypeDesc contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                    if let Err(message) =
+                        crate::core::mir::validate_owned_string_identity_shape(function, concrete)
+                    {
+                        self.error(format!(
+                            "instance '{}' owned String identity shape is unsupported: {message}",
                             instance.id
                         ));
                     }
@@ -851,6 +875,7 @@ impl<'a> CapabilityGate<'a> {
             }
             match instance.contract {
                 MirGenericInstanceContract::ScalarIdentity
+                | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. } => {}
             }
         } else if !type_arguments.is_empty() {

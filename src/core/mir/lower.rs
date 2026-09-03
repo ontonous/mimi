@@ -445,6 +445,14 @@ fn materialize_generic_instance(
     let is_identity = callable.signature.parameters.len() == 1
         && callable.signature.parameters[0].ty == generic_id
         && callable.signature.result == generic_id;
+    let concrete = arguments.first().cloned().ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic instance has no concrete argument".into(),
+        }]
+    })?;
+    let is_owned_string_identity =
+        is_identity && type_catalog.validate_owned_string(&concrete).is_ok();
     let validate_arguments = if is_identity {
         MirTypeCatalog::validate_generic_identity_arguments
     } else {
@@ -464,7 +472,7 @@ fn materialize_generic_instance(
         }
         errors
     })?;
-    if is_identity {
+    if is_identity && !is_owned_string_identity {
         if let Err(message) = super::validate_generic_identity_shape(&function, &generic_id) {
             return Err(vec![MirLoweringError {
                 node_id: subject(),
@@ -472,12 +480,6 @@ fn materialize_generic_instance(
             }]);
         }
     }
-    let concrete = arguments.first().cloned().ok_or_else(|| {
-        vec![MirLoweringError {
-            node_id: subject(),
-            message: "generic instance has no concrete argument".into(),
-        }]
-    })?;
     let instance_id = MirInstanceId::for_template(template, arguments).map_err(|error| {
         vec![MirLoweringError {
             node_id: subject(),
@@ -506,12 +508,63 @@ fn materialize_generic_instance(
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
     }
+    if is_owned_string_identity {
+        let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: "owned String generic identity entry block is absent".into(),
+            }]
+        })?;
+        let source = match block.instructions.as_slice() {
+            [MirInstruction {
+                kind: MirInstructionKind::Clone { source, .. },
+                ..
+            }] => Ok(source.clone()),
+            [_] => Err("owned String generic identity specialization must clone its parameter"),
+            _ => Err("owned String generic identity specialization requires one Clone instruction"),
+        };
+        let source = match source {
+            Ok(source) => source,
+            Err(message) => {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: message.into(),
+                }])
+            }
+        };
+        let drop_id = MirInstructionId::new(format!(
+            "inst:drop:owned-string-identity:{}",
+            function.owner.0
+        ))
+        .map_err(|error| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: error.to_string(),
+            }]
+        })?;
+        block.instructions.push(MirInstruction {
+            id: drop_id,
+            kind: MirInstructionKind::Drop { value: source },
+        });
+    }
     let contract = if is_identity {
-        MirGenericInstanceContract::ScalarIdentity
+        if type_catalog.validate_owned_string(&concrete).is_ok() {
+            MirGenericInstanceContract::OwnedStringIdentity
+        } else {
+            MirGenericInstanceContract::ScalarIdentity
+        }
     } else {
         let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::ScalarSetFacade { operation }
     };
+    if is_owned_string_identity {
+        if let Err(message) = super::validate_owned_string_identity_shape(&function, &concrete) {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]);
+        }
+    }
     function.validate().map_err(|errors| {
         errors
             .into_iter()

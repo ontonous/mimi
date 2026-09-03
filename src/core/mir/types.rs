@@ -1454,6 +1454,7 @@ impl MirTypeCatalog {
         let ty = &arguments[0];
         self.validate_copy_scalar(ty)
             .or_else(|_| self.validate_flat_copy_variant(ty).map(|_| ()))
+            .or_else(|_| self.validate_owned_string(ty))
             .map_err(|message| {
                 format!(
                     "type '{}' is outside the concrete generic identity contract: {message}",

@@ -1,0 +1,10 @@
+func identity<T>(value: T) -> T {
+    value
+}
+
+func main() -> i32 {
+    ensures: result == 42
+    let result = identity("owned")
+    drop(result)
+    42
+}

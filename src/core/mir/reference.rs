@@ -1193,7 +1193,8 @@ fn validate_instance_table(
             });
         }
         let argument_error = match instance.contract {
-            MirGenericInstanceContract::ScalarIdentity => {
+            MirGenericInstanceContract::ScalarIdentity
+            | MirGenericInstanceContract::OwnedStringIdentity => {
                 type_catalog.validate_generic_identity_arguments(&instance.arguments)
             }
             MirGenericInstanceContract::ScalarSetFacade { .. } => {
@@ -1240,6 +1241,23 @@ fn validate_instance_table(
                     &instance.arguments,
                 ));
             }
+            MirGenericInstanceContract::OwnedStringIdentity => {
+                if let Some(concrete) = instance.arguments.first() {
+                    if let Err(message) = type_catalog.validate_owned_string(concrete) {
+                        errors.push(super::MirValidationError {
+                            subject: id.to_string(),
+                            message: format!(
+                                "owned String generic identity TypeDesc contract is invalid: {message}"
+                            ),
+                        });
+                    }
+                }
+                errors.extend(validate_owned_string_identity_instance_function(
+                    id,
+                    function,
+                    &instance.arguments,
+                ));
+            }
             MirGenericInstanceContract::ScalarSetFacade { operation } => {
                 if let Err(message) =
                     super::lower::validate_scalar_set_facade_mir(function, type_catalog, operation)
@@ -1268,6 +1286,24 @@ fn validate_generic_identity_instance_function(
         }];
     };
     super::validate_generic_identity_shape(function, concrete)
+        .err()
+        .map(|message| vec![super::MirValidationError { subject, message }])
+        .unwrap_or_default()
+}
+
+fn validate_owned_string_identity_instance_function(
+    instance_id: &MirInstanceId,
+    function: &MirFunction,
+    arguments: &[crate::core::ResolvedTypeId],
+) -> Vec<super::MirValidationError> {
+    let subject = instance_id.to_string();
+    let Some(concrete) = arguments.first() else {
+        return vec![super::MirValidationError {
+            subject,
+            message: "owned String generic identity instance has no concrete argument".into(),
+        }];
+    };
+    super::validate_owned_string_identity_shape(function, concrete)
         .err()
         .map(|message| vec![super::MirValidationError { subject, message }])
         .unwrap_or_default()
@@ -5019,18 +5055,64 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_non_scalar_generic_identity_fails_closed_before_backend() {
+    fn concrete_owned_string_generic_identity_materializes_explicit_drop_glue() {
         let source =
-            "func identity<T>(value: T) -> T { value }\nfunc main() -> string { identity(\"owned\") }";
+            include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned String generic identity must materialize canonical MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned String identity instance");
+        assert!(matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedStringIdentity
+        ));
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned String identity target");
+        assert!(target
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Clone { .. })));
+        assert!(target
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::Drop { .. })));
+        let string_ty = instance.arguments.first().expect("String argument");
+        assert!(program
+            .type_catalog()
+            .validate_owned_string(string_ty)
+            .is_ok());
+
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned String generic identity execution");
+        assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn unsupported_non_scalar_generic_identity_branch_fails_closed_before_backend() {
+        let source =
+            "func identity<T>(value: T) -> T { if true { value } else { value } }\nfunc main() -> string { identity(\"owned\") }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("non-scalar generic identity must remain outside this MIR island");
         match error {
-            MirProgramBuildError::Lowering(errors) => assert!(errors
-                .iter()
-                .any(|error| { error.message.contains("outside scalar contract") })),
+            MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
+                error.message.contains(
+                    "owned String generic identity specialization must clone its parameter",
+                )
+            })),
             other => panic!("unsupported generic shape crossed the MIR gate: {other:?}"),
         }
     }

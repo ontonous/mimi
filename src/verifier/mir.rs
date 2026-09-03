@@ -2144,7 +2144,8 @@ fn eval_materialized_call(
         ));
     }
     match instance.contract {
-        crate::core::mir::MirGenericInstanceContract::ScalarIdentity => {
+        crate::core::mir::MirGenericInstanceContract::ScalarIdentity
+        | crate::core::mir::MirGenericInstanceContract::OwnedStringIdentity => {
             eval_materialized_identity_call(
                 function,
                 program,
@@ -2700,13 +2701,18 @@ fn eval_materialized_identity_call(
             "MIR verifier generic variant call receipt is attached to a non-variant result".into(),
         );
     }
-    crate::core::mir::validate_generic_identity_shape(target, &target.result)?;
     let [target_parameter] = target.parameters.as_slice() else {
         return Err("MIR verifier generic identity target must have one parameter".into());
     };
     let concrete = type_arguments
         .first()
         .expect("validated one generic type argument");
+    let is_owned_string_identity = catalog.validate_owned_string(concrete).is_ok();
+    if is_owned_string_identity {
+        crate::core::mir::validate_owned_string_identity_shape(target, concrete)?;
+    } else {
+        crate::core::mir::validate_generic_identity_shape(target, concrete)?;
+    }
     let target_parameter_ty = target
         .values
         .get(target_parameter)
@@ -2739,7 +2745,11 @@ fn eval_materialized_identity_call(
         .get(argument)
         .cloned()
         .ok_or_else(|| format!("MIR generic call argument '{}' is not defined", argument))?;
-    ensure_copy_value(function, catalog, argument)?;
+    if catalog.validate_owned_string(concrete).is_err() {
+        ensure_copy_value(function, catalog, argument)?;
+    } else {
+        catalog.validate_glue(concrete, MirGlueOperation::Clone)?;
+    }
     if !symbolic_matches_type(catalog, concrete, &symbolic) {
         return Err("MIR verifier generic call argument has the wrong concrete Copy shape".into());
     }
@@ -3439,6 +3449,39 @@ mod tests {
             .iter()
             .find(|result| result.func_name == owner.0)
             .expect("generic contract verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_consumes_owned_string_generic_identity_glue_contract() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("owned String generic identity MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned String identity instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedStringIdentity
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference owned String generic identity execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let results = verify_program(&program, "generic-owned-string-source-hash".into())
+            .expect("verify owned String generic identity MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("owned String generic identity verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
     }
 

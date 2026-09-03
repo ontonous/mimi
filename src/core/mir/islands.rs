@@ -1305,6 +1305,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             }
             match instance.contract {
                 MirGenericInstanceContract::ScalarIdentity
+                | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. } => {}
             }
             // The program constructor and the generic MIR validator already
