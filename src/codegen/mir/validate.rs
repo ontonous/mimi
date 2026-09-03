@@ -641,7 +641,11 @@ impl<'a> NativeMirValidator<'a> {
             } => self.validate_construct_variant_move(
                 function, result, nominal, variant, fields, subject,
             ),
-            MirInstructionKind::ConstructList { result, elements } => {
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => {
                 self.validate_value(function, result, "List result");
                 let element_types = elements
                     .iter()
@@ -655,9 +659,18 @@ impl<'a> NativeMirValidator<'a> {
                         "List element is absent from MIR value catalog",
                     ));
                 } else if let Some(result_value) = function.values.get(result) {
-                    if let Err(message) =
-                        catalog.validate_list_construct(&result_value.ty, &element_types)
-                    {
+                    let Some(receipt) = list_construct_contract.as_ref() else {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "List construction has no canonical receipt",
+                        ));
+                        return;
+                    };
+                    if let Err(message) = catalog.validate_list_construct_receipt(
+                        &result_value.ty,
+                        &element_types,
+                        receipt,
+                    ) {
                         self.errors.push(NativeMirError::new(subject, message));
                     }
                 }

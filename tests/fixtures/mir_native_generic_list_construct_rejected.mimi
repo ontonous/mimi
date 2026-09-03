@@ -1,0 +1,12 @@
+// Negative canonical generic MIR: managed List<T> construction is outside the
+// first Copy-scalar construction contract and must fail before any backend.
+func singleton<T>(value: T) -> List<T> {
+    [value]
+}
+
+func main() -> i32 {
+    let values = singleton("managed")
+    let count = len(values)
+    drop(values)
+    count
+}

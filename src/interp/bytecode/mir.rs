@@ -543,9 +543,11 @@ impl<'a> FunctionEmitter<'a> {
                 kind: MirAggregateKind::Tuple,
                 fields,
             } => self.emit_tuple_construct(result, fields),
-            MirInstructionKind::ConstructList { result, elements } => {
-                self.emit_list_construct(result, elements)
-            }
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => self.emit_list_construct(result, elements, list_construct_contract.as_ref()),
             MirInstructionKind::ListOp {
                 result,
                 operation,
@@ -1916,7 +1918,12 @@ impl<'a> FunctionEmitter<'a> {
         )
     }
 
-    fn emit_list_construct(&mut self, result: &MirValueId, elements: &[MirValueId]) {
+    fn emit_list_construct(
+        &mut self,
+        result: &MirValueId,
+        elements: &[MirValueId],
+        receipt: Option<&crate::core::mir::types::MirListConstructContract>,
+    ) {
         let Some(rd) = self.reg(result) else { return };
         let Some(result_desc) = self.type_of(result).cloned() else {
             self.error(format!("List result '{}' has no type descriptor", result));
@@ -1939,11 +1946,15 @@ impl<'a> FunctionEmitter<'a> {
             self.error("List construction element is absent from MIR value catalog");
             return;
         };
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_list_construct(&result_desc.id, &element_types)
-        {
+        let Some(receipt) = receipt else {
+            self.error("List construction has no canonical receipt");
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_list_construct_receipt(
+            &result_desc.id,
+            &element_types,
+            receipt,
+        ) {
             self.error(format!("List construction is unsupported: {message}"));
             return;
         }
@@ -4795,6 +4806,41 @@ mod tests {
             .expect("generic List.concat bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(5));
         assert!(matches!(value, Value::Int(5)));
+    }
+
+    #[test]
+    fn executes_materialized_scalar_generic_list_construct_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_list_construct.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic List construction MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("generic List construction instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+        ));
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("materialized List construction target");
+        assert!(target.canonical_text().contains("list_construct_contract"));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference List construction execution");
+        let bytecode = compile_mir_program(&mir).expect("generic List construction bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic List construction bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(1));
+        assert!(matches!(value, Value::Int(1)));
     }
 
     #[test]

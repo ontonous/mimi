@@ -8,7 +8,7 @@
 
 ## 0.1.7 状态更新
 
-- `tests/real_world_cli.rs` 的 `KNOWN_GAPS` 已清空：`flow_order_system.mimi` 与 `flow_system_trace.mimi` 现在在 interpreter 与 codegen 双后端均通过。
+- `tests/real_world_cli.rs` 的 `KNOWN_GAPS` 目前仅保留 `core_generics_return_abi.mimi`：该 fixture 依赖 `List<string>` / `List<List<string>>` 的泛型构造，S105 的 Canonical MIR 构造岛只接受单元素 Copy-scalar receipt，因此默认 `run/build` 稳定拒绝且不得回退 legacy；`flow_order_system.mimi` 与 `flow_system_trace.mimi` 仍在 interpreter 与 codegen 双后端通过。
 - 完整 CLI MCDD 套件通过：所有 `tests/real_world/*.mimi`（除 interpreter-only 的 `flow_test_macros.mimi`）均通过 `mimi run`、`mimi build` 和 native exec，且 stdout 与 interpreter 一致。
 - 新增 `std_mimispec_ast_typechecks` 回归：`mimi check std/mimispec/ast.mimi` 通过。
 

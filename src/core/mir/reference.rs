@@ -563,7 +563,11 @@ impl MirProgram {
                                 });
                             }
                         }
-                        super::MirInstructionKind::ConstructList { result, elements } => {
+                        super::MirInstructionKind::ConstructList {
+                            result,
+                            elements,
+                            list_construct_contract,
+                        } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
                             };
@@ -580,9 +584,19 @@ impl MirProgram {
                                 });
                                 continue;
                             }
-                            if let Err(message) = type_catalog
-                                .validate_list_construct(&result_value.ty, &element_types)
+                            let validation = if let Some(receipt) = list_construct_contract.as_ref()
                             {
+                                type_catalog.validate_list_construct_receipt(
+                                    &result_value.ty,
+                                    &element_types,
+                                    receipt,
+                                )
+                            } else {
+                                type_catalog
+                                    .validate_list_construct(&result_value.ty, &element_types)
+                                    .and(Err("List construction has no canonical receipt".into()))
+                            };
+                            if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -1322,6 +1336,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarListFacade { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarListConstruct { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1397,6 +1414,20 @@ fn validate_instance_table(
                     errors.push(super::MirValidationError {
                         subject: id.to_string(),
                         message: format!("generic MIR List facade contract is invalid: {message}"),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarListConstruct { ref contract } => {
+                if let Err(message) = super::lower::validate_scalar_list_construct_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR List construction contract is invalid: {message}"
+                        ),
                     });
                 }
             }
@@ -3029,7 +3060,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 };
                 values.insert(result.clone(), value);
             }
-            MirInstructionKind::ConstructList { result, elements } => {
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => {
                 let element_types = elements
                     .iter()
                     .map(|element| {
@@ -3047,9 +3082,15 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .get(result)
                     .map(|value| value.ty.clone())
                     .ok_or_else(|| self.error(&function.owner, "List result has no MIR type"))?;
+                let receipt = list_construct_contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "List construction has no canonical receipt",
+                    )
+                })?;
                 self.program
                     .type_catalog()
-                    .validate_list_construct(&result_ty, &element_types)
+                    .validate_list_construct_receipt(&result_ty, &element_types, receipt)
                     .map_err(|message| self.error(&function.owner, message))?;
                 let elements = self.take_transfer_values(function, values, elements)?;
                 values.insert(result.clone(), MirRuntimeValue::List(elements));

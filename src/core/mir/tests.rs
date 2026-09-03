@@ -174,6 +174,71 @@ fn materializes_generic_scalar_list_concat_as_a_two_input_move_facade() {
 }
 
 #[test]
+fn materializes_generic_scalar_list_construct_with_a_type_desc_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_construct.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List construction must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List construction instance");
+    let MirGenericInstanceContract::ScalarListConstruct { contract } = &instance.contract else {
+        panic!("expected a ScalarListConstruct instance contract");
+    };
+    assert_eq!(contract.element_count, 1);
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized List construction target");
+    let receipts = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ConstructList {
+                list_construct_contract: Some(receipt),
+                elements,
+                ..
+            } => Some((receipt, elements.len())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].0, contract);
+    assert_eq!(receipts[0].1, 1);
+    assert!(target.canonical_text().contains("list_construct_contract"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List construction execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(1));
+}
+
+#[test]
+fn rejects_generic_list_construct_for_non_copy_elements_at_the_mir_gate() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_list_construct_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("List<string> generic construction must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("outside the canonical Copy scalar contract")
+            || message.contains("generic List facade candidate did not materialize"),
+        "unexpected non-Copy generic List construction rejection: {message}"
+    );
+}
+
+#[test]
 fn rejects_generic_list_concat_for_non_copy_elements_at_the_mir_gate() {
     let source = r#"
         func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {

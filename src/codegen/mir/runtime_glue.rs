@@ -8,6 +8,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         &mut self,
         result: &MirValueId,
         elements: &[MirValueId],
+        receipt: Option<&crate::core::mir::types::MirListConstructContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let result_ty = self.value_type(result, subject)?;
@@ -21,14 +22,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "List construction result has no canonical List layout",
             ));
         };
+        let element_types = elements
+            .iter()
+            .map(|value| self.value_type(value, subject))
+            .collect::<Result<Vec<_>, _>>()?;
+        let receipt = receipt.ok_or_else(|| {
+            NativeMirError::new(subject, "List construction has no canonical receipt")
+        })?;
         catalog
-            .validate_list_construct(
-                &result_ty,
-                &elements
-                    .iter()
-                    .map(|value| self.value_type(value, subject))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
+            .validate_list_construct_receipt(&result_ty, &element_types, receipt)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let kind = native_list_kind(catalog, &result_ty)?;
         let kind_value = self

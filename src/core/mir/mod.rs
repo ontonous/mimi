@@ -280,7 +280,7 @@ impl MirTransitionContract {
 /// table is part of the canonical program, so consumers must not guess which
 /// generic template family a specialized body belongs to from its symbol name
 /// or physical ABI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirGenericInstanceContract {
     ScalarIdentity,
     /// `identity<T>(T) -> T` specialized to the canonical move-owned String
@@ -297,6 +297,13 @@ pub enum MirGenericInstanceContract {
     /// treating an arbitrary generic List body as a trusted instance.
     ScalarListFacade {
         operation: MirListOperation,
+    },
+    /// A generic single-element List construction specialized to a concrete
+    /// Copy scalar. The construction receipt is part of the instance
+    /// contract so consumers cannot treat a generic List literal as an
+    /// unchecked backend container.
+    ScalarListConstruct {
+        contract: types::MirListConstructContract,
     },
 }
 
@@ -392,6 +399,10 @@ pub enum MirInstructionKind {
     ConstructList {
         result: MirValueId,
         elements: Vec<MirValueId>,
+        /// TypeDesc receipt required for canonical List construction.
+        /// Generic placeholders are replaced during concrete instance
+        /// materialization before any consumer is invoked.
+        list_construct_contract: Option<types::MirListConstructContract>,
     },
     /// Execute a canonical operation over a Copy-scalar List. `Len` returns a
     /// Copy i32 without transferring the source; `Reverse` returns a fresh
@@ -1718,8 +1729,19 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             kind,
             fields,
         } => format!("construct {result} = {kind:?}({})", format_values(fields)),
-        MirInstructionKind::ConstructList { result, elements } => {
-            format!("construct_list {result} = [{}]", format_values(elements))
+        MirInstructionKind::ConstructList {
+            result,
+            elements,
+            list_construct_contract,
+        } => {
+            format!(
+                "construct_list {result} = [{}]{}",
+                format_values(elements),
+                list_construct_contract
+                    .as_ref()
+                    .map(|contract| format!(" [list_construct_contract={contract:?}]"))
+                    .unwrap_or_default()
+            )
         }
         MirInstructionKind::ListOp {
             result,
@@ -2261,7 +2283,9 @@ impl<'a> MirValidator<'a> {
                 self.values(fields);
                 self.result_at(result, &instruction.id, block, index);
             }
-            ConstructList { result, elements } => {
+            ConstructList {
+                result, elements, ..
+            } => {
                 self.values(elements);
                 self.result_at(result, &instruction.id, block, index);
             }

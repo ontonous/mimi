@@ -63,7 +63,7 @@ impl<'a> CapabilityGate<'a> {
                 ));
                 continue;
             };
-            match instance.contract {
+            match &instance.contract {
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity => {
                     if let Err(message) = self
@@ -82,7 +82,7 @@ impl<'a> CapabilityGate<'a> {
                     if let Err(message) = crate::core::mir::lower::validate_scalar_set_facade_mir(
                         function,
                         self.program.type_catalog(),
-                        operation,
+                        *operation,
                     ) {
                         self.error(format!(
                             "instance '{}' Set facade contract is unsupported: {message}",
@@ -94,10 +94,24 @@ impl<'a> CapabilityGate<'a> {
                     if let Err(message) = crate::core::mir::lower::validate_scalar_list_facade_mir(
                         function,
                         self.program.type_catalog(),
-                        operation,
+                        *operation,
                     ) {
                         self.error(format!(
                             "instance '{}' List facade contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
+                MirGenericInstanceContract::ScalarListConstruct { contract } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_list_construct_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' List construction contract is unsupported: {message}",
                             instance.id
                         ));
                     }
@@ -567,7 +581,11 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} aggregate rejected: {message}"));
                 }
             }
-            MirInstructionKind::ConstructList { result, elements } => {
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => {
                 let Some(result_ty) = value_type(function, result) else {
                     return;
                 };
@@ -577,10 +595,16 @@ impl<'a> CapabilityGate<'a> {
                     .collect::<Vec<_>>();
                 if element_types.len() != elements.len() {
                     self.error(format!("{subject} List element is absent"));
-                } else if let Err(message) =
-                    catalog.validate_list_construct(&result_ty, &element_types)
-                {
-                    self.error(format!("{subject} List construction rejected: {message}"));
+                } else if let Some(receipt) = list_construct_contract.as_ref() {
+                    if let Err(message) =
+                        catalog.validate_list_construct_receipt(&result_ty, &element_types, receipt)
+                    {
+                        self.error(format!("{subject} List construction rejected: {message}"));
+                    }
+                } else {
+                    self.error(format!(
+                        "{subject} List construction has no canonical receipt"
+                    ));
                 }
             }
             MirInstructionKind::ListOp {
@@ -942,7 +966,8 @@ impl<'a> CapabilityGate<'a> {
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. }
-                | MirGenericInstanceContract::ScalarListFacade { .. } => {}
+                | MirGenericInstanceContract::ScalarListFacade { .. }
+                | MirGenericInstanceContract::ScalarListConstruct { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

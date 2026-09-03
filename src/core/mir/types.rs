@@ -708,6 +708,18 @@ pub struct MirListOperationContract {
     pub operation: crate::core::mir::MirListOperation,
 }
 
+/// Backend-independent receipt for one canonical List construction. The
+/// result/element identities and element count are checker-owned facts; a
+/// consumer must not infer the List ABI or ownership boundary from a runtime
+/// vector length or handle representation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirListConstructContract {
+    pub list_ty: ResolvedTypeId,
+    pub element_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub element_count: usize,
+}
+
 /// Backend-independent receipt for a read-only Option/Result predicate.
 /// `variant` and `discriminant` are redundant by design: the checker-owned
 /// identity and the physical tag must agree at every consumer boundary.
@@ -1918,7 +1930,7 @@ impl MirTypeCatalog {
             )
         {
             return Err(format!(
-                "List '{}' element type '{}' is outside the canonical Copy scalar contract",
+                "List '{}' element type '{}' is outside the canonical Copy scalar contract (outside scalar contract)",
                 ty.as_str(),
                 element.as_str()
             ));
@@ -3437,6 +3449,106 @@ impl MirTypeCatalog {
                     element.as_str()
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete TypeDesc receipt for a canonical List
+    /// construction. This is the only constructor for the construction
+    /// receipt; consumers must receive the result from MIR rather than
+    /// rediscovering element layout or ownership from a backend container.
+    pub fn validated_list_construct_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        element_types: &[ResolvedTypeId],
+    ) -> Result<MirListConstructContract, String> {
+        self.validate_list_construct(result_ty, element_types)?;
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "List construction result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "List construction result type '{}' has no canonical List layout",
+                result_ty.as_str()
+            ));
+        };
+        Ok(MirListConstructContract {
+            list_ty: result_ty.clone(),
+            element_ty: element.clone(),
+            result_ty: result_ty.clone(),
+            element_count: element_types.len(),
+        })
+    }
+
+    /// Materialize the non-executable placeholder receipt used while lowering
+    /// a generic single-element `List<T>` construction. Concrete
+    /// specialization must regenerate the receipt after substituting `T`.
+    pub(crate) fn validated_generic_list_construct_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        element_ty: &ResolvedTypeId,
+    ) -> Result<MirListConstructContract, String> {
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic List construction result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "generic List construction result type '{}' has no canonical List layout",
+                result_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::List
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::List,
+                    clone: MirGlueKind::List,
+                    drop: MirGlueKind::List,
+                })
+        {
+            return Err(
+                "generic List construction result has an inconsistent List contract".into(),
+            );
+        }
+        let generic_element = self.get(element).ok_or_else(|| {
+            format!(
+                "generic List construction element type '{}' is absent",
+                element.as_str()
+            )
+        })?;
+        if generic_element.kind != MirTypeKind::GenericParameter || element != element_ty {
+            return Err(
+                "generic List construction placeholder requires one GenericParameter element"
+                    .into(),
+            );
+        }
+        Ok(MirListConstructContract {
+            list_ty: result_ty.clone(),
+            element_ty: element.clone(),
+            result_ty: result_ty.clone(),
+            element_count: 1,
+        })
+    }
+
+    /// Validate a materialized List construction receipt against the
+    /// checker-owned TypeDesc graph. A stale or forged receipt is invalid MIR
+    /// and must be rejected before any backend is invoked.
+    pub fn validate_list_construct_receipt(
+        &self,
+        result_ty: &ResolvedTypeId,
+        element_types: &[ResolvedTypeId],
+        receipt: &MirListConstructContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_list_construct_contract(result_ty, element_types)?;
+        if receipt != &expected {
+            return Err("List construction receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }

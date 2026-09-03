@@ -1590,7 +1590,11 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
-        MirInstructionKind::ConstructList { result, elements } => {
+        MirInstructionKind::ConstructList {
+            result,
+            elements,
+            list_construct_contract,
+        } => {
             let result_ty = function
                 .values
                 .get(result)
@@ -1607,7 +1611,10 @@ fn eval_instruction(
                         .ok_or_else(|| format!("MIR List element '{}' is absent", value))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            catalog.validate_list_construct(&result_ty, &element_types)?;
+            let receipt = list_construct_contract.as_ref().ok_or_else(|| {
+                "MIR verifier List construction has no canonical receipt".to_string()
+            })?;
+            catalog.validate_list_construct_receipt(&result_ty, &element_types, receipt)?;
             for value in elements {
                 if !state.values.contains_key(value) {
                     return Err(format!("MIR List element '{}' is not defined", value));
@@ -2370,7 +2377,7 @@ fn eval_materialized_call(
             target_owner.0
         ));
     }
-    match instance.contract {
+    match &instance.contract {
         crate::core::mir::MirGenericInstanceContract::ScalarIdentity
         | crate::core::mir::MirGenericInstanceContract::OwnedStringIdentity => {
             eval_materialized_identity_call(
@@ -2395,7 +2402,7 @@ fn eval_materialized_call(
                 target_owner,
                 type_arguments,
                 arguments,
-                operation,
+                *operation,
             )
         }
         crate::core::mir::MirGenericInstanceContract::ScalarListFacade { operation } => {
@@ -2408,7 +2415,20 @@ fn eval_materialized_call(
                 target_owner,
                 type_arguments,
                 arguments,
-                operation,
+                *operation,
+            )
+        }
+        crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { contract } => {
+            eval_materialized_list_construct_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                contract,
             )
         }
     }
@@ -3139,6 +3159,77 @@ fn eval_materialized_list_facade_call(
             state.values.remove(second_argument);
             SymbolicValue::List { length }
         }
+    };
+    ensure_result_shape(function, catalog, result, &output)?;
+    state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume a materialized one-element generic List construction.
+/// The callee body and its TypeDesc receipt are already validated by the MIR
+/// instance gate. The Copy scalar argument remains available to the caller;
+/// the fresh List result carries exactly the checker-proven element count.
+fn eval_materialized_list_construct_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirListConstructContract,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier List construction target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_list_construct_mir(target, catalog, contract)?;
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if arguments.len() != 1 || target.parameters.len() != 1 {
+        return Err("MIR verifier List construction call requires one argument".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier List construction call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(
+            "MIR verifier List construction call result disagrees with target TypeDesc".into(),
+        );
+    }
+    let argument = &arguments[0];
+    let argument_info = function.values.get(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier List construction argument '{}' is absent",
+            argument
+        )
+    })?;
+    let parameter = &target.parameters[0];
+    let parameter_info = target
+        .values
+        .get(parameter)
+        .ok_or_else(|| "MIR verifier List construction parameter TypeDesc is absent".to_string())?;
+    if argument_info.ty != parameter_info.ty || argument_info.ty != contract.element_ty {
+        return Err("MIR verifier List construction argument disagrees with TypeDesc".into());
+    }
+    catalog.validate_glue(&argument_info.ty, MirGlueOperation::Clone)?;
+    let value = state.values.get(argument).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier List construction argument '{}' is not defined",
+            argument
+        )
+    })?;
+    if !symbolic_matches_type(catalog, &argument_info.ty, &value) {
+        return Err("MIR verifier List construction argument has the wrong symbolic shape".into());
+    }
+    let output = SymbolicValue::List {
+        length: Int::from_i64(contract.element_count as i64),
     };
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
@@ -4580,6 +4671,40 @@ mod tests {
             .iter()
             .find(|result| result.func_name == "function:checked")
             .expect("List.concat checked verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_construct_call() {
+        let source = include_str!("../../tests/fixtures/mir_native_generic_list_construct.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic List construction MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List construction instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+        ));
+        let results = verify_program(&program, "generic-list-construct-source-hash".into())
+            .expect("verify generic List construction MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("List construction main verification result");
         assert_eq!(
             result.status,
             crate::verifier::VerifStatus::Proven,

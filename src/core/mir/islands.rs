@@ -367,7 +367,8 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 }
                 if concrete
                     && is_scalar_list_facade_call(self.program, call)
-                    && generic_list_operation_facade_body(self.program, call)
+                    && (generic_list_operation_facade_body(self.program, call)
+                        || generic_list_construction_facade_body(self.program, call))
                     && call.arguments.iter().any(|argument| {
                         !is_scalar_collection_type(
                             self.program,
@@ -650,10 +651,9 @@ fn is_scalar_list_facade_call(
 
 /// Distinguish the small generic List operation facades admitted by this
 /// island from unrelated generic functions that merely mention `List<T>`.
-/// Projection (`first<T>(List<T>)`), construction (`wrap<T>(T) -> List<T>`),
-/// and nested container helpers remain compatibility shapes; only a generic
-/// body containing a direct List `len`/`reverse`/`concat` builtin is subject
-/// to the migrated-candidate hard boundary below.
+/// Projection (`first<T>(List<T>)`) and nested container helpers remain
+/// compatibility shapes; direct List `len`/`reverse`/`concat` builtins and
+/// List construction now cross the migrated-candidate hard boundary below.
 fn generic_list_operation_facade_body(
     program: &CheckedProgram,
     call: &crate::core::ir::ResolvedCall,
@@ -810,6 +810,158 @@ fn generic_list_operation_facade_body(
                 .is_some_and(|value| expr_has_operation(value))
     }
     block_has_operation(&callable.body.root)
+}
+
+/// Return whether a generic List facade body constructs a List value. This is
+/// a checker-owned hard-boundary hint only; the exact one-element Copy-scalar
+/// shape is proven later by Canonical MIR materialization. Any other concrete
+/// element (for example `wrap<T>("managed")`) must therefore be rejected
+/// before a legacy backend can observe the call.
+fn generic_list_construction_facade_body(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    let ResolvedCallee::Function(template) = &call.callee else {
+        return false;
+    };
+    let Some(callable) = program.callable(template) else {
+        return false;
+    };
+    fn expr_has_construction(expression: &ResolvedExpr) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::List(_) => true,
+            ResolvedExprKind::Call(call) => call
+                .arguments
+                .iter()
+                .any(|argument| expr_has_construction(&argument.value)),
+            ResolvedExprKind::FString(parts) => parts.iter().any(|part| {
+                matches!(part, ResolvedFStringPart::Interpolation(value) if expr_has_construction(value))
+            }),
+            ResolvedExprKind::Project { value, projection } => {
+                expr_has_construction(value)
+                    || matches!(projection, ResolvedValueProjection::Index(index) if expr_has_construction(index))
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                expr_has_construction(left) || expr_has_construction(right)
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => expr_has_construction(operand),
+            ResolvedExprKind::Tuple(items) | ResolvedExprKind::Set(items) => {
+                items.iter().any(expr_has_construction)
+            }
+            ResolvedExprKind::Map(items) => items.iter().any(|(key, value)| {
+                expr_has_construction(key) || expr_has_construction(value)
+            }),
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                expr_has_construction(value)
+                    || expr_has_construction(iterable)
+                    || guard.as_ref().is_some_and(|guard| expr_has_construction(guard))
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => expr_has_construction(receiver),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                fields.iter().any(|field| expr_has_construction(&field.value))
+                    || rest.as_ref().is_some_and(|value| expr_has_construction(value))
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => block_has_construction(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                expr_has_construction(condition)
+                    || block_has_construction(then_block)
+                    || block_has_construction(else_block)
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                expr_has_construction(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(expr_has_construction)
+                            || expr_has_construction(&arm.body)
+                    })
+            }
+            ResolvedExprKind::Try { value, .. } => expr_has_construction(value),
+            ResolvedExprKind::Range { start, end } => {
+                expr_has_construction(start) || expr_has_construction(end)
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                expr_has_construction(target)
+                    || start.as_ref().is_some_and(|value| expr_has_construction(value))
+                    || end.as_ref().is_some_and(|value| expr_has_construction(value))
+            }
+            ResolvedExprKind::Cast { value, .. } => expr_has_construction(value),
+            ResolvedExprKind::Lambda(lambda) => block_has_construction(&lambda.body),
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Load(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => false,
+        }
+    }
+    fn statement_has_construction(statement: &crate::core::ir::ResolvedStmt) -> bool {
+        match &statement.kind {
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|value| expr_has_construction(value)),
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => expr_has_construction(value),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_some_and(|value| expr_has_construction(value)),
+            ResolvedStmtKind::While { condition, body } => {
+                expr_has_construction(condition) || block_has_construction(body)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => expr_has_construction(initializer) || block_has_construction(body),
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_has_construction(initializer)
+                    || block_has_construction(then_block)
+                    || else_block.as_ref().is_some_and(block_has_construction)
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                block_has_construction(body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                expr_has_construction(iterable) || block_has_construction(body)
+            }
+            ResolvedStmtKind::Math(expressions) => expressions.iter().any(expr_has_construction),
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                expr_has_construction(value) || block_has_construction(body)
+            }
+            ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::Continue
+            | ResolvedStmtKind::NestedCallable(_) => false,
+        }
+    }
+    fn block_has_construction(block: &crate::core::ir::ResolvedBlock) -> bool {
+        block.statements.iter().any(statement_has_construction)
+            || block
+                .result
+                .as_ref()
+                .is_some_and(|value| expr_has_construction(value))
+    }
+    block_has_construction(&callable.body.root)
 }
 
 fn mentions_generic_list(
@@ -1445,6 +1597,7 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
                 instance.contract,
                 MirGenericInstanceContract::ScalarSetFacade { .. }
                     | MirGenericInstanceContract::ScalarListFacade { .. }
+                    | MirGenericInstanceContract::ScalarListConstruct { .. }
             )
         })
 }
@@ -1589,7 +1742,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. }
-                | MirGenericInstanceContract::ScalarListFacade { .. } => {}
+                | MirGenericInstanceContract::ScalarListFacade { .. }
+                | MirGenericInstanceContract::ScalarListConstruct { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit
@@ -1611,6 +1765,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             if matches!(
                 instance.contract,
                 MirGenericInstanceContract::ScalarListFacade { .. }
+                    | MirGenericInstanceContract::ScalarListConstruct { .. }
             ) && !function
                 .values
                 .values()
@@ -1806,7 +1961,9 @@ impl<'a> ScalarCollectionValidator<'a> {
                     self.error(format!("{subject} Drop glue rejected: {message}"));
                 }
             }
-            MirInstructionKind::ConstructList { result, elements } => {
+            MirInstructionKind::ConstructList {
+                result, elements, ..
+            } => {
                 let Some(result_ty) = self.value_type(function, result, subject) else {
                     return;
                 };

@@ -631,6 +631,84 @@ fn materialize_generic_instance(
         };
         *list_operation_contract = Some(receipt);
     }
+    let list_constructions = function
+        .blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| match &instruction.kind {
+                    MirInstructionKind::ConstructList {
+                        result,
+                        elements,
+                        list_construct_contract: Some(_),
+                    } => Some((block_id.clone(), index, result.clone(), elements.clone())),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (block_id, instruction_index, result, elements) in list_constructions {
+        let result_ty = function
+            .values
+            .get(&result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List construction result has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let element_types = elements
+            .iter()
+            .map(|value| {
+                function
+                    .values
+                    .get(value)
+                    .map(|info| info.ty.clone())
+                    .ok_or_else(|| {
+                        vec![MirLoweringError {
+                            node_id: subject(),
+                            message:
+                                "generic List construction element has no specialized TypeDesc"
+                                    .into(),
+                        }]
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let receipt = type_catalog
+            .validated_list_construct_contract(&result_ty, &element_types)
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "generic List construction receipt specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = function
+            .blocks
+            .get_mut(&block_id)
+            .and_then(|block| block.instructions.get_mut(instruction_index))
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List construction disappeared during specialization".into(),
+                }]
+            })?;
+        let MirInstructionKind::ConstructList {
+            list_construct_contract,
+            ..
+        } = &mut instruction.kind
+        else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic List construction changed during specialization".into(),
+            }]);
+        };
+        *list_construct_contract = Some(receipt);
+    }
     if is_owned_string_identity {
         let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
             vec![MirLoweringError {
@@ -681,14 +759,27 @@ fn materialize_generic_instance(
         MirGenericInstanceContract::ScalarSetFacade { operation }
     } else if generic_list_facade
         || function.blocks.values().any(|block| {
-            block
-                .instructions
-                .iter()
-                .any(|instruction| matches!(instruction.kind, MirInstructionKind::ListOp { .. }))
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::ListOp { .. } | MirInstructionKind::ConstructList { .. }
+                )
+            })
         })
     {
-        let operation = detect_scalar_list_facade_operation(&function, type_catalog, &subject())?;
-        MirGenericInstanceContract::ScalarListFacade { operation }
+        if function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::ConstructList { .. })
+            })
+        }) {
+            let contract =
+                detect_scalar_list_construct_contract(&function, type_catalog, &subject())?;
+            MirGenericInstanceContract::ScalarListConstruct { contract }
+        } else {
+            let operation =
+                detect_scalar_list_facade_operation(&function, type_catalog, &subject())?;
+            MirGenericInstanceContract::ScalarListFacade { operation }
+        }
     } else {
         let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::ScalarSetFacade { operation }
@@ -1100,6 +1191,138 @@ fn detect_scalar_set_facade_operation(
         }]
     })?;
     Ok(*operation)
+}
+
+fn detect_scalar_list_construct_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::types::MirListConstructContract, Vec<MirLoweringError>> {
+    let contracts = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ConstructList {
+                list_construct_contract: Some(contract),
+                ..
+            } => Some(contract.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [contract] = contracts.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic List construction must lower to exactly one canonical ConstructList"
+                .into(),
+        }]);
+    };
+    validate_scalar_list_construct_mir(function, type_catalog, contract).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: format!("generic List construction contract is invalid: {message}"),
+        }]
+    })?;
+    Ok(contract.clone())
+}
+
+/// Validate the concrete body of the single-element generic List construction
+/// facade. The body is deliberately structural: one callable parameter is
+/// cloned exactly once, that clone is the sole element of one receipt-bearing
+/// ConstructList, and the fresh List is returned directly. This proves that a
+/// specialized generic List literal cannot hide arbitrary code or transfer
+/// ownership of an unknown `T` behind a container ABI.
+pub(crate) fn validate_scalar_list_construct_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirListConstructContract,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("scalar generic List construction must have exactly one parameter".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("scalar generic List construction must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "scalar generic List construction entry block is absent".to_string())?;
+    let mut construct = None;
+    let mut clones = Vec::new();
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::Clone { result, source } => {
+                clones.push((result.clone(), source.clone()));
+            }
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => {
+                if construct
+                    .replace((result.clone(), elements.clone(), list_construct_contract.clone()))
+                    .is_some()
+                {
+                    return Err("scalar generic List construction must contain exactly one ConstructList".into());
+                }
+            }
+            _ => {
+                return Err(
+                    "scalar generic List construction body may contain only one parameter Clone and ConstructList".into(),
+                )
+            }
+        }
+    }
+    let Some((construct_result, elements, receipt)) = construct else {
+        return Err(
+            "scalar generic List construction must contain exactly one ConstructList".into(),
+        );
+    };
+    if clones.len() != 1 || clones[0].1 != *parameter {
+        return Err(
+            "scalar generic List construction must clone its parameter exactly once".into(),
+        );
+    }
+    if elements.len() != 1 || elements[0] != clones[0].0 {
+        return Err(
+            "scalar generic List construction must place the parameter Clone as its sole element"
+                .into(),
+        );
+    }
+    let receipt = receipt
+        .ok_or_else(|| "scalar generic List construction has no canonical receipt".to_string())?;
+    if receipt != *contract {
+        return Err(
+            "scalar generic List construction receipt disagrees with its instance contract".into(),
+        );
+    }
+    let result_ty = function
+        .values
+        .get(&construct_result)
+        .ok_or_else(|| "scalar generic List construction result value is absent".to_string())?
+        .ty
+        .clone();
+    let element_ty = function
+        .values
+        .get(&elements[0])
+        .ok_or_else(|| "scalar generic List construction element value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_list_construct_receipt(&result_ty, &[element_ty], &receipt)?;
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(
+            "scalar generic List construction must directly return its ConstructList result".into(),
+        );
+    };
+    if returned != &construct_result || function.result != result_ty {
+        return Err(
+            "scalar generic List construction return identity disagrees with ConstructList".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Validate the concrete body of a generic Set facade. This is deliberately
@@ -1923,16 +2146,19 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::List(elements) => {
-                let elements = elements
+                let elements: Vec<MirValueId> = elements
                     .iter()
                     .map(|element| self.lower_expr(element))
                     .collect();
+                let list_construct_contract =
+                    self.list_construct_contract(&expression.node_id, &result, &elements);
                 self.emit(
                     &expression.node_id,
                     "construct_list",
                     MirInstructionKind::ConstructList {
                         result: result.clone(),
                         elements,
+                        list_construct_contract,
                     },
                 );
             }
@@ -3011,6 +3237,65 @@ impl<'a> Lowerer<'a> {
             }
             Err(message) => {
                 self.error(node_id, message);
+                None
+            }
+        }
+    }
+
+    fn list_construct_contract(
+        &mut self,
+        node_id: &NodeId,
+        result: &MirValueId,
+        elements: &[MirValueId],
+    ) -> Option<super::types::MirListConstructContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List construction result has no MIR type");
+            return None;
+        };
+        let Some(element_types) = elements
+            .iter()
+            .map(|element| self.values.get(element).map(|value| value.ty.clone()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            self.error(node_id, "List construction element has no MIR type");
+            return None;
+        };
+        match type_catalog.validated_list_construct_contract(&result_ty, &element_types) {
+            Ok(contract) => Some(contract),
+            Err(message)
+                if elements.len() == 1
+                    && type_catalog.get(&result_ty).is_some_and(|descriptor| {
+                        matches!(
+                            descriptor.layout,
+                            super::types::MirLayout::List { ref element }
+                                if type_catalog.get(element).is_some_and(|element| {
+                                    element.kind == super::types::MirTypeKind::GenericParameter
+                                })
+                        )
+                    }) =>
+            {
+                let element_ty = element_types
+                    .first()
+                    .expect("single-element List construction has an element type");
+                match type_catalog.validated_generic_list_construct_contract(&result_ty, element_ty)
+                {
+                    Ok(contract) => Some(contract),
+                    Err(generic_message) => {
+                        self.error(node_id, generic_message);
+                        None
+                    }
+                }
+            }
+            Err(message) => {
+                // Keep concrete non-Copy List literals in the canonical
+                // graph long enough for the shared TypeDesc validator to
+                // report its stable scalar-contract diagnostic. Generic
+                // placeholders are handled by the branch above; only those
+                // failures are lowering errors at this stage.
+                let _ = message;
                 None
             }
         }

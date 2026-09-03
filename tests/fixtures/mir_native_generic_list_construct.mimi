@@ -1,0 +1,12 @@
+// Canonical generic MIR: a one-element List<T> construction specialized to a Copy scalar.
+func singleton<T>(value: T) -> List<T> {
+    [value]
+}
+
+func main() -> i32 {
+    ensures: result == 1
+    let values = singleton(42)
+    let count = len(values)
+    drop(values)
+    count
+}

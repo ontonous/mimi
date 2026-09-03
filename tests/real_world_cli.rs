@@ -49,9 +49,11 @@ fn can_link() -> bool {
 /// Files that are expected to fail because they exercise known
 /// language or codegen gaps. Keep this list minimal and aligned with
 /// `tests/real_world/RESULTS.md`.
-/// Both former gaps (flow_order_system.mimi and flow_system_trace.mimi)
-/// now pass in interpreter and codegen, so the list is empty.
-const KNOWN_GAPS: &[&str] = &[];
+/// Generic List construction with managed or nested elements is intentionally
+/// fail-closed while the Canonical MIR construction island only proves the
+/// single Copy-scalar shape (S105). Keep this fixture visible as a known gap so
+/// the suite records the boundary instead of allowing a legacy fallback.
+const KNOWN_GAPS: &[&str] = &["core_generics_return_abi.mimi"];
 
 /// Programs whose feature contract is intentionally interpreter-only. Keep in
 /// lockstep with `tests/real_world/run_suite.py`.
@@ -3066,6 +3068,132 @@ fn canonical_mir_generic_list_concat_is_atomic_across_consumers_and_default_rout
         String::from_utf8_lossy(&default_verification.stderr),
         String::from_utf8_lossy(&default_verification.stdout)
     );
+}
+
+#[test]
+fn canonical_mir_generic_list_construct_is_atomic_across_consumers_and_default_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_list_construct.mimi");
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn canonical generic List construction MIR dump");
+    assert!(
+        mir.status.success(),
+        "canonical generic List construction MIR dump failed:\n{}",
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    let mir_text = String::from_utf8_lossy(&mir.stdout);
+    assert!(
+        mir_text.contains("construct_list"),
+        "MIR dump omitted ConstructList"
+    );
+    assert!(
+        mir_text.contains("list_construct_contract=MirListConstructContract"),
+        "MIR dump omitted the canonical construction TypeDesc receipt:\n{mir_text}"
+    );
+
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical generic List construction reference run");
+    assert_eq!(mir_run.status.code(), Some(1));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-generic-list-construct-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical generic List construction native build");
+    assert!(
+        build.status.success(),
+        "canonical generic List construction native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical generic List construction native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(1));
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical generic List construction verifier");
+    assert!(verification.status.success());
+    let verification_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(verification_text.contains("canonical MIR ensures contract proven"));
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic List construction run");
+    assert_eq!(default_run.status.code(), Some(1));
+    let default_ir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--emit-ir")
+        .output()
+        .expect("failed to spawn default generic List construction native emit-ir");
+    assert!(default_ir.status.success());
+    assert!(String::from_utf8_lossy(&default_ir.stdout).contains("mimi_mir_list_new_scalar"));
+}
+
+#[test]
+fn default_route_rejects_non_copy_generic_list_construct_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_list_construct_rejected.mimi");
+    let explicit = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected generic List construction explicit build");
+    assert!(!explicit.status.success());
+    assert!(String::from_utf8_lossy(&explicit.stderr).contains("canonical MIR"));
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected generic List construction default run");
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("default Canonical MIR route rejected"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("generic List facade"), "{stderr}");
+    assert!(!stderr.contains("bytecode runtime error"), "{stderr}");
 }
 
 #[test]

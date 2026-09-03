@@ -540,8 +540,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     self.emit_construct_variant(result, nominal, variant, fields, subject, true)?;
                 self.values.insert(result.clone(), value);
             }
-            MirInstructionKind::ConstructList { result, elements } => {
-                let value = self.emit_list_construct(result, elements, subject)?;
+            MirInstructionKind::ConstructList {
+                result,
+                elements,
+                list_construct_contract,
+            } => {
+                let value = self.emit_list_construct(
+                    result,
+                    elements,
+                    list_construct_contract.as_ref(),
+                    subject,
+                )?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::ListOp {
@@ -2023,6 +2032,49 @@ mod tests {
         assert!(generator
             .module
             .get_function("mimi_mir_list_concat_scalar")
+            .is_some());
+    }
+
+    #[test]
+    fn native_emitter_consumes_materialized_scalar_generic_list_construct() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_list_construct.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List construction instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+        ));
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("materialized List construction target");
+        assert!(target.canonical_text().contains("list_construct_contract"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic List construction execution");
+        assert_eq!(reference, MirRuntimeValue::Int(1));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_list_construct");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic List construction must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic List construction module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_new_scalar")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_push_scalar")
             .is_some());
     }
 
