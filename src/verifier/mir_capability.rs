@@ -116,6 +116,24 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarListProjection {
+                    contract,
+                    index_value,
+                } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_list_projection_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                            *index_value,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' List projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -967,7 +985,8 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. }
                 | MirGenericInstanceContract::ScalarListFacade { .. }
-                | MirGenericInstanceContract::ScalarListConstruct { .. } => {}
+                | MirGenericInstanceContract::ScalarListConstruct { .. }
+                | MirGenericInstanceContract::ScalarListProjection { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

@@ -4844,6 +4844,44 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_scalar_generic_list_projection_through_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_list_projection.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic List projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("generic List projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                index_value: 0,
+                ..
+            }
+        ));
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("materialized List projection target");
+        assert!(target.canonical_text().contains("list_index"));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference List projection execution");
+        let bytecode = compile_mir_program(&mir).expect("generic List projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic List projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_string_generic_identity_with_explicit_drop_through_mir_bytecode() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");

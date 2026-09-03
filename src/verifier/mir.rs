@@ -2431,6 +2431,21 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarListProjection {
+            contract,
+            index_value,
+        } => eval_materialized_list_projection_call(
+            function,
+            program,
+            catalog,
+            state,
+            result,
+            target_owner,
+            type_arguments,
+            arguments,
+            contract,
+            *index_value,
+        ),
     }
 }
 
@@ -3231,6 +3246,88 @@ fn eval_materialized_list_construct_call(
     let output = SymbolicValue::List {
         length: Int::from_i64(contract.element_count as i64),
     };
+    ensure_result_shape(function, catalog, result, &output)?;
+    state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume a materialized generic List constant-index projection.
+/// The List argument is borrowed (the caller remains responsible for its Drop)
+/// and the result is a fresh symbolic Copy element. The target body and
+/// receipt are revalidated so this helper cannot widen into arbitrary dynamic
+/// or managed-element projection semantics.
+fn eval_materialized_list_projection_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirListIndexProjectionContract,
+    index_value: i64,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier List projection target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_list_projection_mir(
+        target,
+        catalog,
+        contract,
+        index_value,
+    )?;
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if arguments.len() != 1 || target.parameters.len() != 1 {
+        return Err("MIR verifier List projection call requires one argument".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier List projection call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(
+            "MIR verifier List projection call result disagrees with target TypeDesc".into(),
+        );
+    }
+    let argument = &arguments[0];
+    let argument_info = function.values.get(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier List projection argument '{}' is absent",
+            argument
+        )
+    })?;
+    let parameter = &target.parameters[0];
+    let parameter_info = target
+        .values
+        .get(parameter)
+        .ok_or_else(|| "MIR verifier List projection parameter TypeDesc is absent".to_string())?;
+    if argument_info.ty != parameter_info.ty || argument_info.ty != contract.list_ty {
+        return Err("MIR verifier List projection argument disagrees with TypeDesc".into());
+    }
+    let SymbolicValue::List { length } = state.values.get(argument).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier List projection argument '{}' is not defined",
+            argument
+        )
+    })?
+    else {
+        return Err("MIR verifier List projection argument is not a symbolic List".into());
+    };
+    let zero = Int::from_i64(0);
+    add_definedness(state, zero.lt(&length), "E0803")?;
+    let (output, constraints) = symbolic_value_for_type(
+        catalog,
+        &contract.result_ty,
+        &format!("mir.list_projection.{}", result),
+    )?;
+    state.constraints.extend(constraints);
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
     Ok(())
@@ -4705,6 +4802,43 @@ mod tests {
             .iter()
             .find(|result| result.func_name == "function:main")
             .expect("List construction main verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_projection_call() {
+        let source = include_str!("../../tests/fixtures/mir_native_generic_list_projection.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic List projection MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                index_value: 0,
+                ..
+            }
+        ));
+        let results = verify_program(&program, "generic-list-projection-source-hash".into())
+            .expect("verify generic List projection MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("List projection main verification result");
         assert_eq!(
             result.status,
             crate::verifier::VerifStatus::Proven,

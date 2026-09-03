@@ -305,6 +305,15 @@ pub enum MirGenericInstanceContract {
     ScalarListConstruct {
         contract: types::MirListConstructContract,
     },
+    /// A generic `first<T>(List<T>) -> T` read-only constant-index projection
+    /// specialized to a concrete Copy scalar. The existing List-index receipt
+    /// carries TypeDesc identities; the instance contract also fixes the
+    /// checker-proven index literal so consumers cannot widen it to arbitrary
+    /// dynamic projection semantics.
+    ScalarListProjection {
+        contract: types::MirListIndexProjectionContract,
+        index_value: i64,
+    },
 }
 
 /// Operations with explicit value and ownership boundaries. The MIR validator

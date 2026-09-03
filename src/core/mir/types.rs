@@ -687,7 +687,7 @@ pub struct MirTupleProjectionContract {
 /// projection.  The source List, element, index operand, and result identity
 /// are checker-owned facts; consumers must not recover them from a runtime
 /// vector, handle, or backend ABI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirListIndexProjectionContract {
     pub list_ty: ResolvedTypeId,
     pub element_ty: ResolvedTypeId,
@@ -3627,6 +3627,60 @@ impl MirTypeCatalog {
             ));
         }
         Ok(())
+    }
+
+    /// Materialize the non-executable placeholder receipt used while lowering
+    /// a generic `first<T>(List<T>) -> T` projection.  The generic element is
+    /// opaque until specialization; only the List ABI/glue, signed Copy index
+    /// ABI, and element/result identity can be checked at this stage.
+    pub(crate) fn validated_generic_list_index_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        index_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirListIndexProjectionContract, String> {
+        let base = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "generic List projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        let MirLayout::List { element } = &base.layout else {
+            return Err(format!(
+                "generic List projection base type '{}' has no canonical List layout",
+                base_ty.as_str()
+            ));
+        };
+        if base.kind != MirTypeKind::List
+            || base.abi != MirAbiClass::OpaqueHandle
+            || base.ownership != MirOwnership::Move
+            || base.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::List,
+                    clone: MirGlueKind::List,
+                    drop: MirGlueKind::List,
+                })
+        {
+            return Err("generic List projection base has an inconsistent List contract".into());
+        }
+        let element_desc = self.get(element).ok_or_else(|| {
+            format!(
+                "generic List projection element type '{}' is absent",
+                element.as_str()
+            )
+        })?;
+        if element_desc.kind != MirTypeKind::GenericParameter || element != result_ty {
+            return Err(
+                "generic List projection placeholder requires a GenericParameter result equal to the List element".into(),
+            );
+        }
+        self.validate_copy_scalar(index_ty)?;
+        Ok(MirListIndexProjectionContract {
+            list_ty: base_ty.clone(),
+            element_ty: element.clone(),
+            index_ty: index_ty.clone(),
+            result_ty: result_ty.clone(),
+        })
     }
 
     /// Materialize the complete TypeDesc receipt for a read-only List index

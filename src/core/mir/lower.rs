@@ -26,8 +26,8 @@ use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
     MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary,
-    MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue, MirValueId,
-    MirVariantPredicate,
+    MirProjection, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue,
+    MirValueId, MirVariantPredicate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -709,6 +709,94 @@ fn materialize_generic_instance(
         };
         *list_construct_contract = Some(receipt);
     }
+    let list_projections = function
+        .blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| match &instruction.kind {
+                    MirInstructionKind::Project {
+                        result,
+                        base,
+                        projection: MirProjection::Index(index_value),
+                        list_index_contract: Some(_),
+                    } => Some((
+                        block_id.clone(),
+                        index,
+                        result.clone(),
+                        base.clone(),
+                        index_value.clone(),
+                    )),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (block_id, instruction_index, result, base, index_value) in list_projections {
+        let result_ty = function
+            .values
+            .get(&result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List projection result has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let base_ty = function
+            .values
+            .get(&base)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List projection base has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let index_ty = function
+            .values
+            .get(&index_value)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List projection index has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let receipt = type_catalog
+            .validated_list_index_projection_contract(&base_ty, &index_ty, &result_ty)
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "generic List projection receipt specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = function
+            .blocks
+            .get_mut(&block_id)
+            .and_then(|block| block.instructions.get_mut(instruction_index))
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic List projection disappeared during specialization".into(),
+                }]
+            })?;
+        let MirInstructionKind::Project {
+            list_index_contract,
+            ..
+        } = &mut instruction.kind
+        else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic List projection changed during specialization".into(),
+            }]);
+        };
+        list_index_contract.replace(receipt);
+    }
     if is_owned_string_identity {
         let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
             vec![MirLoweringError {
@@ -748,6 +836,18 @@ fn materialize_generic_instance(
             kind: MirInstructionKind::Drop { value: source },
         });
     }
+    let has_list_projection = function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::Project {
+                    projection: MirProjection::Index(_),
+                    list_index_contract: Some(_),
+                    ..
+                }
+            )
+        })
+    });
     let contract = if is_identity {
         if type_catalog.validate_owned_string(&concrete).is_ok() {
             MirGenericInstanceContract::OwnedStringIdentity
@@ -757,6 +857,13 @@ fn materialize_generic_instance(
     } else if generic_set_facade {
         let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::ScalarSetFacade { operation }
+    } else if has_list_projection {
+        let (contract, index_value) =
+            detect_scalar_list_projection_contract(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::ScalarListProjection {
+            contract,
+            index_value,
+        }
     } else if generic_list_facade
         || function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -1191,6 +1298,211 @@ fn detect_scalar_set_facade_operation(
         }]
     })?;
     Ok(*operation)
+}
+
+fn detect_scalar_list_projection_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<(super::types::MirListIndexProjectionContract, i64), Vec<MirLoweringError>> {
+    let projection = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Index(index),
+                list_index_contract: Some(contract),
+            } => Some((
+                result.clone(),
+                base.clone(),
+                index.clone(),
+                contract.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(_, _, _, contract)] = projection.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "generic List projection must lower to exactly one receipt-bearing index Project"
+                    .into(),
+        }]);
+    };
+    let index_value = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Const { result, literal } => {
+                matches!(literal, crate::core::ir::ResolvedLiteral::Int(0))
+                    .then_some((result.clone(), 0))
+            }
+            _ => None,
+        });
+    let Some((index_id, index_value)) = index_value else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic List projection requires a constant index literal 0".into(),
+        }]);
+    };
+    if projection[0].2 != index_id {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic List projection index must be the constant literal 0".into(),
+        }]);
+    }
+    validate_scalar_list_projection_mir(function, type_catalog, contract, index_value).map_err(
+        |message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!("generic List projection contract is invalid: {message}"),
+            }]
+        },
+    )?;
+    Ok((contract.clone(), index_value))
+}
+
+/// Validate the concrete body of the single-element generic List projection
+/// facade. The body is deliberately structural: one callable List parameter
+/// is cloned exactly once, one literal-zero index is projected through the
+/// receipt-bearing `Project`, and that Copy element is returned directly.
+pub(crate) fn validate_scalar_list_projection_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirListIndexProjectionContract,
+    index_value: i64,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("scalar generic List projection must have exactly one parameter".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("scalar generic List projection must have exactly one MIR block".into());
+    }
+    if index_value != 0 {
+        return Err("scalar generic List projection index must be the literal 0".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "scalar generic List projection entry block is absent".to_string())?;
+    let mut clone: Option<(MirValueId, MirValueId)> = None;
+    let mut constant: Option<(MirValueId, crate::core::ir::ResolvedLiteral)> = None;
+    let mut projection: Option<(
+        MirValueId,
+        MirValueId,
+        MirValueId,
+        Option<super::types::MirListIndexProjectionContract>,
+    )> = None;
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::Clone { result, source } => {
+                if clone.replace((result.clone(), source.clone())).is_some() {
+                    return Err("scalar generic List projection must contain exactly one Clone".into());
+                }
+            }
+            MirInstructionKind::Const { result, literal } => {
+                if constant
+                    .replace((result.clone(), literal.clone()))
+                    .is_some()
+                {
+                    return Err(
+                        "scalar generic List projection must contain exactly one constant index".into(),
+                    );
+                }
+            }
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Index(index),
+                list_index_contract,
+            } => {
+                if projection
+                    .replace((
+                        result.clone(),
+                        base.clone(),
+                        index.clone(),
+                        list_index_contract.clone(),
+                    ))
+                    .is_some()
+                {
+                    return Err(
+                        "scalar generic List projection must contain exactly one indexed Project".into(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "scalar generic List projection body may contain only Clone, Const(0), and indexed Project".into(),
+                )
+            }
+        }
+    }
+    let (clone_result, clone_source) =
+        clone.ok_or_else(|| "scalar generic List projection is missing its Clone".to_string())?;
+    if clone_source != *parameter {
+        return Err("scalar generic List projection must clone its List parameter".into());
+    }
+    let (constant_result, literal) = constant
+        .ok_or_else(|| "scalar generic List projection is missing index Const".to_string())?;
+    if !matches!(literal, crate::core::ir::ResolvedLiteral::Int(0)) {
+        return Err("scalar generic List projection index Const must be literal 0".into());
+    }
+    let (project_result, project_base, project_index, receipt) = projection
+        .ok_or_else(|| "scalar generic List projection is missing indexed Project".to_string())?;
+    if project_base != clone_result {
+        return Err("scalar generic List projection must project the cloned List parameter".into());
+    }
+    if project_index != constant_result {
+        return Err("scalar generic List projection must use its literal-zero index".into());
+    }
+    let receipt = receipt
+        .ok_or_else(|| "scalar generic List projection has no canonical receipt".to_string())?;
+    if receipt != *contract {
+        return Err(
+            "scalar generic List projection receipt disagrees with its instance contract".into(),
+        );
+    }
+    let base_ty = function
+        .values
+        .get(&project_base)
+        .ok_or_else(|| "scalar generic List projection base value is absent".to_string())?
+        .ty
+        .clone();
+    let index_ty = function
+        .values
+        .get(&project_index)
+        .ok_or_else(|| "scalar generic List projection index value is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(&project_result)
+        .ok_or_else(|| "scalar generic List projection result value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog
+        .validate_list_index_projection_receipt(&base_ty, &index_ty, &result_ty, &receipt)?;
+    if function.result != result_ty {
+        return Err(
+            "scalar generic List projection result TypeDesc disagrees with function result".into(),
+        );
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(
+            "scalar generic List projection must directly return its Project result".into(),
+        );
+    };
+    if returned != &project_result {
+        return Err("scalar generic List projection return value is not the Project result".into());
+    }
+    Ok(())
 }
 
 fn detect_scalar_list_construct_contract(
@@ -3159,8 +3471,15 @@ impl<'a> Lowerer<'a> {
         {
             Ok(contract) => Some(contract),
             Err(message) => {
-                self.error(node_id, message);
-                None
+                match type_catalog.validated_generic_list_index_projection_contract(
+                    &base_ty, &index_ty, &result_ty,
+                ) {
+                    Ok(contract) => Some(contract),
+                    Err(_) => {
+                        self.error(node_id, message);
+                        None
+                    }
+                }
             }
         }
     }

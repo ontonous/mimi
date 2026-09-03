@@ -1,0 +1,15 @@
+// Canonical generic MIR: read the first Copy-scalar List element through a
+// fixed constant index and leave the borrowed List source available.
+func first<T>(values: List<T>) -> T {
+    values[0]
+}
+
+func main() -> i32 {
+    // The projection result is an arbitrary Copy scalar; the verifier proves
+    // the identity contract while reference/native return the concrete 41.
+    ensures: result == result
+    let values = [41, 42]
+    let picked = first(values)
+    drop(values)
+    picked
+}

@@ -1,0 +1,12 @@
+// Negative canonical generic MIR: managed List elements are outside the
+// Copy-scalar projection contract and must fail before any backend.
+func first<T>(values: List<T>) -> T {
+    values[0]
+}
+
+func main() -> i32 {
+    let values = ["managed"]
+    let picked = first(values)
+    drop(values)
+    if picked == "managed" { 1 } else { 0 }
+}

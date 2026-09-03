@@ -239,6 +239,107 @@ fn rejects_generic_list_construct_for_non_copy_elements_at_the_mir_gate() {
 }
 
 #[test]
+fn materializes_generic_scalar_list_projection_with_a_constant_zero_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_projection.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List projection instance");
+    let MirGenericInstanceContract::ScalarListProjection {
+        contract,
+        index_value,
+    } = &instance.contract
+    else {
+        panic!("expected a ScalarListProjection instance contract");
+    };
+    assert_eq!(*index_value, 0);
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized List projection target");
+    let receipts = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                projection: MirProjection::Index(_),
+                list_index_contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0], contract);
+    assert_eq!(contract.element_ty, contract.result_ty);
+    assert!(target
+        .canonical_text()
+        .contains("list_index=MirListIndexProjectionContract"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List projection execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn rejects_generic_list_projection_for_managed_elements_at_the_mir_gate() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("managed generic List projection must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("outside scalar contract")
+            || message.contains("generic List facade candidate did not materialize"),
+        "unexpected managed generic List projection rejection: {message}"
+    );
+}
+
+#[test]
+fn rejects_generic_list_projection_for_nonzero_constant_index_at_the_mir_gate() {
+    let source = r#"
+        func first<T>(values: List<T>) -> T {
+            values[1]
+        }
+
+        func main() -> i32 {
+            let values = [41, 42]
+            let picked = first(values)
+            drop(values)
+            picked
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("nonzero generic List projection must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("constant index literal 0")
+            || message.contains("literal-zero")
+            || message.contains("constant zero"),
+        "unexpected nonzero generic List projection rejection: {message}"
+    );
+}
+
+#[test]
 fn rejects_generic_list_concat_for_non_copy_elements_at_the_mir_gate() {
     let source = r#"
         func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {

@@ -686,7 +686,8 @@ fn generic_list_operation_facade_body(
                 matches!(part, ResolvedFStringPart::Interpolation(value) if expr_has_operation(value))
             }),
             ResolvedExprKind::Project { value, projection } => {
-                expr_has_operation(value)
+                matches!(projection, ResolvedValueProjection::Index(_))
+                    || expr_has_operation(value)
                     || matches!(projection, ResolvedValueProjection::Index(index) if expr_has_operation(index))
             }
             ResolvedExprKind::Binary { left, right, .. } => {
@@ -1598,6 +1599,7 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
                 MirGenericInstanceContract::ScalarSetFacade { .. }
                     | MirGenericInstanceContract::ScalarListFacade { .. }
                     | MirGenericInstanceContract::ScalarListConstruct { .. }
+                    | MirGenericInstanceContract::ScalarListProjection { .. }
             )
         })
 }
@@ -1743,7 +1745,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::OwnedStringIdentity
                 | MirGenericInstanceContract::ScalarSetFacade { .. }
                 | MirGenericInstanceContract::ScalarListFacade { .. }
-                | MirGenericInstanceContract::ScalarListConstruct { .. } => {}
+                | MirGenericInstanceContract::ScalarListConstruct { .. }
+                | MirGenericInstanceContract::ScalarListProjection { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit
@@ -1766,6 +1769,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 instance.contract,
                 MirGenericInstanceContract::ScalarListFacade { .. }
                     | MirGenericInstanceContract::ScalarListConstruct { .. }
+                    | MirGenericInstanceContract::ScalarListProjection { .. }
             ) && !function
                 .values
                 .values()
@@ -2025,6 +2029,37 @@ impl<'a> ScalarCollectionValidator<'a> {
                     self.error(format!("{subject} List operation rejected: {message}"));
                 }
             }
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: super::MirProjection::Index(index),
+                list_index_contract,
+            } => {
+                let (Some(result_ty), Some(base_ty), Some(index_ty)) = (
+                    self.value_type(function, result, subject),
+                    self.value_type(function, base, subject),
+                    self.value_type(function, index, subject),
+                ) else {
+                    return;
+                };
+                let Some(receipt) = list_index_contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} List index projection has no canonical receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_list_index_projection_receipt(
+                        &base_ty, &index_ty, &result_ty, receipt,
+                    )
+                {
+                    self.error(format!(
+                        "{subject} List index projection rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::ConstructSet { result, elements } => {
                 let Some(result_ty) = self.value_type(function, result, subject) else {
                     return;
@@ -2071,6 +2106,9 @@ impl<'a> ScalarCollectionValidator<'a> {
                     self.error(format!("{subject} Set operation rejected: {message}"));
                 }
             }
+            MirInstructionKind::Project { .. } => self.error(format!(
+                "{subject} non-index projection is outside {SCALAR_COLLECTION_ISLAND}"
+            )),
             MirInstructionKind::Binary {
                 result,
                 op,
@@ -2220,7 +2258,6 @@ impl<'a> ScalarCollectionValidator<'a> {
             MirInstructionKind::Nop => {}
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }
-            | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
             | MirInstructionKind::MoveProjectDrop { .. }
             | MirInstructionKind::VariantProject { .. }

@@ -1339,6 +1339,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarListConstruct { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarListProjection { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1427,6 +1430,24 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR List construction contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarListProjection {
+                ref contract,
+                index_value,
+            } => {
+                if let Err(message) = super::lower::validate_scalar_list_projection_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                    index_value,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR List projection contract is invalid: {message}"
                         ),
                     });
                 }

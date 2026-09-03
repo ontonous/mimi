@@ -731,6 +731,29 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_generic_list_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_projection.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Copy-scalar generic List projection must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarListProjection {
+                    index_value: 0,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
     fn unsupported_generic_list_facade_cannot_reenter_legacy_route() {
         let source = r#"
             func list_concat<T>(left: List<T>, right: List<T>) -> List<T> {
@@ -768,6 +791,22 @@ mod tests {
         assert!(mimi::core::mir::has_unsupported_generic_list_facade_candidate(&checked));
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("managed generic List construction must fail closed instead of using legacy");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("generic List facade"), "{reason}");
+    }
+
+    #[test]
+    fn unsupported_generic_list_projection_cannot_reenter_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi"
+        ));
+        assert!(mimi::core::mir::has_unsupported_generic_list_facade_candidate(&checked));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("managed generic List projection must fail closed instead of using legacy");
         };
         assert!(
             reason.contains("S11 scalar collection candidate"),
