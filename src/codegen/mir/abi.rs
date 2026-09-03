@@ -200,7 +200,7 @@ pub(super) fn native_list_kind(
     }
 }
 
-/// Return the one native payload type shared by a bounded built-in variant.
+/// Return the one native payload type shared by a bounded Copy built-in variant.
 ///
 /// The physical representation is deliberately narrower than the general MIR
 /// variant contract: `{ i8 discriminant, scalar payload }`.  The payload slot
@@ -216,56 +216,157 @@ pub(super) fn native_copy_variant_payload_type(
         .map_err(|message| NativeMirError::new(ty.as_str(), message))
 }
 
-/// Return the payload type for the first native move-owned variant contract.
+/// Return the first active payload type for the native move-owned variant
+/// contract. Result has a second physical payload slot; callers that need the
+/// complete ABI must use `native_variant_abi` below.
 ///
-/// This slice intentionally admits exactly `Option<string>`: the canonical
-/// TypeDesc/drop plan proves the active payload is an owned String, while the
-/// physical ABI remains `{ i8 discriminant, StringHandle payload }`.  Result,
-/// nested, mixed, unit-payload, and user-defined variants remain fail-closed
-/// until their own MIR glue/effect contracts are promoted.
+/// The admitted native move-owned profiles are exactly `Option<string>` and
+/// `Result<string, i32>`. Their canonical TypeDesc/drop plans prove the active
+/// payload glue; the physical ABI is `{ i8 discriminant, StringHandle payload }`
+/// for Option and `{ i8 discriminant, StringHandle ok_payload, i32 err_payload }`
+/// for Result. Nested, mixed, unit-payload, and user-defined variants remain
+/// fail-closed until their own contracts are promoted.
 pub(super) fn native_non_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
+    let contract_name = catalog
+        .get(ty)
+        .map(|descriptor| match descriptor.layout {
+            MirLayout::Result { .. } => "Result<string, i32>",
+            _ => "Option<string>",
+        })
+        .unwrap_or("Option/Result");
     catalog
-        .validate_option_string_variant(ty)
+        .validate_non_copy_variant_contract(ty)
         .map_err(|message| {
             NativeMirError::new(
                 ty.as_str(),
-                format!("native non-Copy Option<string> variant contract: {message}"),
+                format!("native non-Copy {contract_name} variant contract: {message}"),
             )
-        })
+        })?;
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
+    match &descriptor.layout {
+        MirLayout::Option { inner, .. } => Ok(inner.clone()),
+        MirLayout::Result { ok, .. } => Ok(ok.clone()),
+        layout => Err(NativeMirError::new(
+            ty.as_str(),
+            format!("native non-Copy variant layout {layout:?} is outside contract"),
+        )),
+    }
 }
 
-/// Physical field positions for the narrow native variant ABI.  The semantic
+/// Physical field positions for the native variant ABI.  The semantic
 /// variant identity, discriminant, payload type, and glue remain TypeDesc
 /// facts; this adapter owns only the target struct slots used after those
 /// facts have been validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativeVariantPayloadSlot {
+    pub(super) variant: crate::core::NodeId,
+    pub(super) field: crate::core::NodeId,
+    pub(super) physical_field: u32,
+    pub(super) ty: crate::core::ResolvedTypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NativeVariantAbi {
     pub(super) tag_field: u32,
+    /// Kept as the first payload position for the existing flat/Option tests;
+    /// Result uses `payload_fields` to route Ok and Err to separate slots.
     pub(super) payload_field: u32,
+    pub(super) payload_types: Vec<crate::core::ResolvedTypeId>,
+    pub(super) payload_fields: Vec<NativeVariantPayloadSlot>,
+}
+
+impl NativeVariantAbi {
+    pub(super) fn payload_slot(
+        &self,
+        variant: &crate::core::NodeId,
+    ) -> Option<&NativeVariantPayloadSlot> {
+        self.payload_fields
+            .iter()
+            .find(|slot| slot.variant == *variant)
+    }
 }
 
 /// Materialize the target-facing field contract for a native variant value.
-/// `moving` selects the already-promoted Copy or Option<string> TypeDesc
-/// contract; it never widens the set of admitted shapes.
+/// `moving` selects the already-promoted Copy or non-Copy TypeDesc contract;
+/// it never widens the set of admitted shapes. Result receives one physical
+/// slot per alternative payload so a String is never reinterpreted as an i64.
 pub(super) fn native_variant_abi(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
     moving: bool,
 ) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
-    let payload_ty = if moving {
-        native_non_copy_variant_payload_type(catalog, ty)?
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
+    let payload_types = if moving {
+        native_non_copy_variant_payload_type(catalog, ty)?;
+        match &descriptor.layout {
+            MirLayout::Option { inner, .. } => vec![inner.clone()],
+            MirLayout::Result { ok, error, .. } => vec![ok.clone(), error.clone()],
+            layout => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("native non-Copy variant layout {layout:?} is outside contract"),
+                ))
+            }
+        }
     } else {
-        native_copy_variant_payload_type(catalog, ty)?
+        vec![native_copy_variant_payload_type(catalog, ty)?]
     };
+    let variants = match &descriptor.layout {
+        MirLayout::Option { variants, .. } | MirLayout::Result { variants, .. } => variants,
+        layout => {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                format!("native variant layout {layout:?} is outside contract"),
+            ))
+        }
+    };
+    let mut payload_fields = Vec::new();
+    for variant in variants {
+        for field in &variant.fields {
+            let physical_field = if moving && descriptor.kind == MirTypeKind::Result {
+                match variant.id.0.as_str() {
+                    "builtin:variant:Result::Ok" => 1,
+                    "builtin:variant:Result::Err" => 2,
+                    _ => {
+                        return Err(NativeMirError::new(
+                            ty.as_str(),
+                            format!(
+                                "variant '{}' is outside the native Result<string, i32> ABI",
+                                variant.id.0
+                            ),
+                        ))
+                    }
+                }
+            } else {
+                1
+            };
+            payload_fields.push(NativeVariantPayloadSlot {
+                variant: variant.id.clone(),
+                field: field.id.clone(),
+                physical_field,
+                ty: field.ty.clone(),
+            });
+        }
+    }
+    let first_payload_type = payload_types
+        .first()
+        .cloned()
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant payload type is absent"))?;
     Ok((
         NativeVariantAbi {
             tag_field: 0,
             payload_field: 1,
+            payload_types,
+            payload_fields,
         },
-        payload_ty,
+        first_payload_type,
     ))
 }
 
@@ -368,12 +469,17 @@ pub(super) fn native_basic_type<'ctx>(
                 Ok(context.struct_type(&field_types, false).into())
             }
             MirLayout::Option { .. } | MirLayout::Result { .. } => {
-                let (_, payload_ty) =
+                let (variant_abi, _) =
                     native_variant_abi(catalog, ty, desc.ownership != MirOwnership::Copy)?;
-                let payload = native_basic_type(context, catalog, &payload_ty)?;
-                Ok(context
-                    .struct_type(&[context.i8_type().into(), payload], false)
-                    .into())
+                let mut fields = vec![context.i8_type().into()];
+                fields.extend(
+                    variant_abi
+                        .payload_types
+                        .iter()
+                        .map(|payload_ty| native_basic_type(context, catalog, payload_ty))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                Ok(context.struct_type(&fields, false).into())
             }
             layout => Err(NativeMirError::new(
                 ty.as_str(),

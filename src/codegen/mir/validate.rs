@@ -272,6 +272,8 @@ impl<'a> NativeMirValidator<'a> {
             } else if is_variant {
                 if desc.ownership == MirOwnership::Copy {
                     "flat Copy variant contract"
+                } else if matches!(desc.layout, MirLayout::Result { .. }) {
+                    "native non-Copy Result<string, i32> variant contract"
                 } else {
                     "native non-Copy Option<string> variant contract"
                 }
@@ -1350,25 +1352,29 @@ impl<'a> NativeMirValidator<'a> {
             return;
         }
 
-        let (none_variant, some_variant, _) = match self
+        let variants = match self
             .program
             .type_catalog()
-            .validated_option_string_variants(&scrutinee_value.ty)
+            .variant_layout(&scrutinee_value.ty)
         {
-            Ok(variants) => variants,
-            Err(message) => {
-                self.errors.push(NativeMirError::new(subject, message));
+            Some((_, variants)) => variants,
+            None => {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "native non-Copy SwitchMove has no canonical variant layout",
+                ));
                 return;
             }
         };
-        let required = [none_variant.id.clone(), some_variant.id.clone()]
-            .into_iter()
+        let required = variants
+            .iter()
+            .map(|variant| variant.id.clone())
             .collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::new();
         if arms.len() != required.len() {
             self.errors.push(NativeMirError::new(
                 subject,
-                "native Option<string> SwitchMove requires exactly one explicit arm for each TypeDesc variant",
+                "native non-Copy SwitchMove requires exactly one explicit arm for each TypeDesc variant",
             ));
         }
 
@@ -1376,16 +1382,16 @@ impl<'a> NativeMirValidator<'a> {
             let MirSwitchCase::Variant(variant_id) = &arm.case else {
                 self.errors.push(NativeMirError::new(
                     subject,
-                    "native Option<string> SwitchMove requires explicit variant arms; default/literal cases are not covered",
+                    "native non-Copy SwitchMove requires explicit variant arms; default/literal cases are not covered",
                 ));
                 continue;
             };
             let variant = match self
                 .program
                 .type_catalog()
-                .validated_option_string_variant(&scrutinee_value.ty, variant_id)
+                .validated_variant_switch_case(&scrutinee_value.ty, variant_id)
             {
-                Ok(variant) => variant,
+                Ok((_, variant)) => variant,
                 Err(message) => {
                     self.errors.push(NativeMirError::new(subject, message));
                     continue;
@@ -1430,14 +1436,13 @@ impl<'a> NativeMirValidator<'a> {
                     "switch-move edge arguments and payload bindings disagree with block parameter arity",
                 ));
             }
-            // `native_non_copy_variant_payload_type` above has already
-            // proved the complete Option<string> shape, including the
-            // canonical zero/one payload field.  Only the MIR edge's own
-            // target-binding arity remains to be checked here.
+            // The native non-Copy TypeDesc gate has already proved the
+            // complete admitted variant shape. Only this edge's own
+            // single-binding physical shape remains to be checked here.
             if arm.bindings.len() > 1 {
                 self.errors.push(NativeMirError::new(
                     subject,
-                    "native Option<string> SwitchMove supports at most one payload field and one binding",
+                    "native non-Copy SwitchMove supports at most one payload field and one binding",
                 ));
             }
             let mut binding_fields = BTreeSet::new();
@@ -1481,7 +1486,7 @@ impl<'a> NativeMirValidator<'a> {
         if seen != required {
             self.errors.push(NativeMirError::new(
                 subject,
-                "native Option<string> SwitchMove does not cover exactly the canonical None/Some variants",
+                "native non-Copy SwitchMove does not cover exactly the canonical TypeDesc variants",
             ));
         }
     }

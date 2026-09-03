@@ -190,11 +190,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), ty, true)?;
-        let (empty_variant, payload_variant, _payload_field) = self
+        let variants = self
             .program
             .type_catalog()
-            .validated_option_string_payload(ty)
-            .map_err(|message| NativeMirError::new(subject, message))?;
+            .variant_layout(ty)
+            .map(|(_, variants)| variants.to_vec())
+            .ok_or_else(|| NativeMirError::new(subject, "variant TypeDesc layout is absent"))?;
         let aggregate = value.into_struct_value();
         let tag = self
             .generator
@@ -202,34 +203,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_extract_value(aggregate, variant_abi.tag_field, "mir_variant_clone_tag")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_int_value();
-        let payload_tag = self
-            .generator
-            .context
-            .i8_type()
-            .const_int(u64::from(payload_variant.discriminant), false);
-        let empty_tag = self
-            .generator
-            .context
-            .i8_type()
-            .const_int(u64::from(empty_variant.discriminant), false);
-        let is_payload = self
-            .generator
-            .builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                tag,
-                payload_tag,
-                "mir_variant_clone_payload",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let clone_payload = self
-            .generator
-            .context
-            .append_basic_block(self.llvm_function, "mir_variant_clone_payload");
-        let check_empty = self
-            .generator
-            .context
-            .append_basic_block(self.llvm_function, "mir_variant_clone_empty");
         let merge = self
             .generator
             .context
@@ -238,58 +211,76 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .generator
             .context
             .append_basic_block(self.llvm_function, "mir_variant_clone_invalid");
-        self.generator
-            .builder
-            .build_conditional_branch(is_payload, clone_payload, check_empty)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
-        self.generator.builder.position_at_end(clone_payload);
-        let payload = self
-            .generator
-            .builder
-            .build_extract_value(
-                aggregate,
-                variant_abi.payload_field,
-                "mir_variant_clone_value",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let cloned_payload = self.emit_owned_string_clone_value(payload, subject)?;
-        let cloned_aggregate = self
-            .generator
-            .builder
-            .build_insert_value(
-                aggregate,
-                cloned_payload,
-                variant_abi.payload_field,
-                "mir_variant_clone_insert",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
-            .into_struct_value();
-        let payload_block =
-            self.generator.builder.get_insert_block().ok_or_else(|| {
-                NativeMirError::new(subject, "variant clone payload has no block")
-            })?;
-        self.generator
-            .builder
-            .build_unconditional_branch(merge)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
-        self.generator.builder.position_at_end(check_empty);
-        let is_empty = self
-            .generator
-            .builder
-            .build_int_compare(IntPredicate::EQ, tag, empty_tag, "mir_variant_clone_empty")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let empty_block = self
+        let mut check = self
             .generator
             .builder
             .get_insert_block()
-            .ok_or_else(|| NativeMirError::new(subject, "variant clone empty has no block"))?;
-        self.generator
-            .builder
-            .build_conditional_branch(is_empty, merge, invalid)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
+            .ok_or_else(|| NativeMirError::new(subject, "variant clone has no LLVM block"))?;
+        let mut incoming = Vec::with_capacity(variants.len());
+        for (index, variant) in variants.iter().enumerate() {
+            self.generator.builder.position_at_end(check);
+            let condition = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(variant.discriminant), false),
+                    "mir_variant_clone_case",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let active = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_clone_active");
+            let next = if index + 1 == variants.len() {
+                invalid
+            } else {
+                self.generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_variant_clone_next")
+            };
+            self.generator
+                .builder
+                .build_conditional_branch(condition, active, next)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator.builder.position_at_end(active);
+            let mut cloned_aggregate = aggregate;
+            if let Some(payload_slot) = variant_abi.payload_slot(&variant.id) {
+                let physical_field = payload_slot.physical_field;
+                let payload_ty = payload_slot.ty.clone();
+                let payload = self
+                    .generator
+                    .builder
+                    .build_extract_value(aggregate, physical_field, "mir_variant_clone_value")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let cloned_payload = self.emit_clone_value(payload, &payload_ty, subject)?;
+                cloned_aggregate = self
+                    .generator
+                    .builder
+                    .build_insert_value(
+                        cloned_aggregate,
+                        cloned_payload,
+                        physical_field,
+                        "mir_variant_clone_insert",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    .into_struct_value();
+            }
+            let active =
+                self.generator.builder.get_insert_block().ok_or_else(|| {
+                    NativeMirError::new(subject, "variant clone active has no block")
+                })?;
+            self.generator
+                .builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            incoming.push((cloned_aggregate, active));
+            check = next;
+        }
         self.generator.builder.position_at_end(invalid);
         self.emit_abort_with_message("[E0800] canonical MIR variant tag is invalid", subject)?;
         self.generator.builder.position_at_end(merge);
@@ -298,10 +289,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_phi(aggregate.get_type(), "mir_variant_clone_result")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        cloned.add_incoming(&[
-            (&cloned_aggregate, payload_block),
-            (&aggregate, empty_block),
-        ]);
+        for (value, block) in incoming {
+            cloned.add_incoming(&[(&value, block)]);
+        }
         Ok(cloned.as_basic_value())
     }
 

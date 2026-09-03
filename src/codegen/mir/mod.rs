@@ -1047,6 +1047,125 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_result_string_i32_switch_and_matches_oracles() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result<string, i32> SwitchMove execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Result<string, i32> MIR bytecode"),
+        )
+        .run_value()
+        .expect("Result<string, i32> MIR-bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let result_ty = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                matches!(
+                    descriptor.layout,
+                    crate::core::mir::types::MirLayout::Result { .. }
+                )
+                .then_some(id.clone())
+            })
+            .expect("canonical Result TypeDesc");
+        program
+            .type_catalog()
+            .validate_result_string_i32_variant(&result_ty)
+            .expect("Result native TypeDesc contract");
+        let (variant_abi, first_payload) =
+            super::native_variant_abi(program.type_catalog(), &result_ty, true)
+                .expect("Result native ABI contract");
+        assert_eq!(variant_abi.tag_field, 0);
+        assert_eq!(variant_abi.payload_types.len(), 2);
+        assert_eq!(variant_abi.payload_field, 1);
+        assert_eq!(first_payload, variant_abi.payload_types[0]);
+        assert_eq!(variant_abi.payload_fields.len(), 2);
+        assert_eq!(
+            variant_abi
+                .payload_slot(&crate::core::NodeId("builtin:variant:Result::Ok".into()))
+                .expect("Result Ok payload slot")
+                .physical_field,
+            1
+        );
+        assert_eq!(
+            variant_abi
+                .payload_slot(&crate::core::NodeId("builtin:variant:Result::Err".into()))
+                .expect("Result Err payload slot")
+                .physical_field,
+            2
+        );
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_result_string_i32_switch_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Result<string, i32> SwitchMove should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Result<string, i32> module verifies");
+        assert!(generator.module.get_function("consume").is_some());
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_result_string_i32_clone_and_drop_glue() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_result_string_i32_glue.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result<string, i32> glue execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Result<string, i32> glue MIR bytecode"),
+        )
+        .run_value()
+        .expect("Result<string, i32> glue MIR-bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(bytecode, Value::Int(42)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_result_string_i32_glue_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Result<string, i32> clone/drop should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Result<string, i32> glue module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_validator_rejects_result_string_string_before_llvm_declarations() {
+        let program = canonical_program(
+            "func main() -> i32 { let value: Result<string, string> = Ok(\"owned\"); drop(value); 42 }",
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_result_string_string_test");
+        let diagnostics = generator
+            .compile_mir_native(&program)
+            .expect_err("unsupported Result payload must remain fail-closed");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("native non-Copy Result<string, i32> variant contract")
+        }));
+        assert!(
+            generator.module.get_function("main").is_none(),
+            "unsupported Result must be rejected before LLVM declarations"
+        );
+    }
+
+    #[test]
     fn native_validator_rejects_non_copy_variant_outside_promoted_contract_before_llvm_declarations(
     ) {
         let program = canonical_program(

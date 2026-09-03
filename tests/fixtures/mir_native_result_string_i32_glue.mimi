@@ -1,0 +1,11 @@
+func main() -> i32 {
+    let ok_value: Result<string, i32> = Ok("owned")
+    let ok_clone = ok_value
+    drop(ok_clone)
+    drop(ok_value)
+    let err_value: Result<string, i32> = Err(-1)
+    let err_clone = err_value
+    drop(err_clone)
+    drop(err_value)
+    42
+}

@@ -342,11 +342,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), ty, true)?;
-        let (empty_variant, payload_variant, _payload_plan, _empty_plan) = self
+        let variants = self
             .program
             .type_catalog()
-            .validated_option_string_drop_contract(ty)
-            .map_err(|message| NativeMirError::new(subject, message))?;
+            .variant_layout(ty)
+            .map(|(_, variants)| variants.to_vec())
+            .ok_or_else(|| NativeMirError::new(subject, "variant TypeDesc layout is absent"))?;
         let aggregate = value.into_struct_value();
         let tag = self
             .generator
@@ -354,34 +355,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_extract_value(aggregate, variant_abi.tag_field, "mir_variant_drop_tag")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_int_value();
-        let payload_tag = self
-            .generator
-            .context
-            .i8_type()
-            .const_int(u64::from(payload_variant.discriminant), false);
-        let empty_tag = self
-            .generator
-            .context
-            .i8_type()
-            .const_int(u64::from(empty_variant.discriminant), false);
-        let is_payload = self
-            .generator
-            .builder
-            .build_int_compare(
-                IntPredicate::EQ,
-                tag,
-                payload_tag,
-                "mir_variant_drop_payload",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let drop_payload = self
-            .generator
-            .context
-            .append_basic_block(self.llvm_function, "mir_variant_drop_payload");
-        let check_empty = self
-            .generator
-            .context
-            .append_basic_block(self.llvm_function, "mir_variant_drop_empty");
         let done = self
             .generator
             .context
@@ -390,38 +363,58 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .generator
             .context
             .append_basic_block(self.llvm_function, "mir_variant_drop_invalid");
-        self.generator
-            .builder
-            .build_conditional_branch(is_payload, drop_payload, check_empty)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
-        self.generator.builder.position_at_end(drop_payload);
-        let payload = self
+        let mut check = self
             .generator
             .builder
-            .build_extract_value(
-                aggregate,
-                variant_abi.payload_field,
-                "mir_variant_drop_value",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.emit_owned_string_drop_value(payload, subject)?;
-        self.generator
-            .builder
-            .build_unconditional_branch(done)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
-        self.generator.builder.position_at_end(check_empty);
-        let is_empty = self
-            .generator
-            .builder
-            .build_int_compare(IntPredicate::EQ, tag, empty_tag, "mir_variant_drop_empty")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_conditional_branch(is_empty, done, invalid)
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-
+            .get_insert_block()
+            .ok_or_else(|| NativeMirError::new(subject, "variant drop has no LLVM block"))?;
+        for (index, variant) in variants.iter().enumerate() {
+            self.generator.builder.position_at_end(check);
+            let condition = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(variant.discriminant), false),
+                    "mir_variant_drop_case",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let active = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_drop_active");
+            let next = if index + 1 == variants.len() {
+                invalid
+            } else {
+                self.generator
+                    .context
+                    .append_basic_block(self.llvm_function, "mir_variant_drop_next")
+            };
+            self.generator
+                .builder
+                .build_conditional_branch(condition, active, next)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator.builder.position_at_end(active);
+            if let Some(payload_slot) = variant_abi.payload_slot(&variant.id) {
+                let physical_field = payload_slot.physical_field;
+                let payload_ty = payload_slot.ty.clone();
+                let payload = self
+                    .generator
+                    .builder
+                    .build_extract_value(aggregate, physical_field, "mir_variant_drop_value")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.emit_drop_value(payload, &payload_ty, subject)?;
+            }
+            self.generator
+                .builder
+                .build_unconditional_branch(done)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            check = next;
+        }
         self.generator.builder.position_at_end(invalid);
         self.emit_abort_with_message("[E0800] canonical MIR variant tag is invalid", subject)?;
         self.generator.builder.position_at_end(done);

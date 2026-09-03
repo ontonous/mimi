@@ -236,19 +236,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .iter()
             .map(|(_, value)| self.value_type(value, subject))
             .collect::<Result<Vec<_>, _>>()?;
-        let (variant_desc, payload_field) = self
+        let variant_desc = self
             .program
             .type_catalog()
-            .validated_single_payload_variant_construct(
-                &result_ty,
-                nominal,
-                variant,
-                &field_ids,
-                &field_types,
-            )
+            .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let (variant_abi, payload_ty) =
-            native_variant_abi(self.program.type_catalog(), &result_ty, moving)?;
+        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &result_ty, moving)?;
         let struct_ty = native_basic_type(
             self.generator.context,
             self.program.type_catalog(),
@@ -256,6 +249,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         )?
         .into_struct_type();
         let mut aggregate = struct_ty.get_undef();
+        for (index, payload_ty) in variant_abi.payload_types.iter().enumerate() {
+            let zero = native_basic_type(
+                self.generator.context,
+                self.program.type_catalog(),
+                payload_ty,
+            )?
+            .const_zero();
+            aggregate = self
+                .generator
+                .builder
+                .build_insert_value(
+                    aggregate,
+                    zero,
+                    index as u32 + 1,
+                    "mir_variant_zero_payload",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+        }
         aggregate = self
             .generator
             .builder
@@ -270,30 +282,30 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_struct_value();
-        let payload = if let Some(_payload_field) = payload_field {
+        if let Some(payload_slot) = variant_abi.payload_slot(variant) {
             let (_, value) = fields
-                .first()
+                .iter()
+                .find(|(field, _)| field == &payload_slot.field)
                 .ok_or_else(|| NativeMirError::new(subject, "variant payload value is absent"))?;
-            self.value(value, subject)?
-        } else {
-            native_basic_type(
-                self.generator.context,
-                self.program.type_catalog(),
-                &payload_ty,
-            )?
-            .const_zero()
-        };
-        aggregate = self
-            .generator
-            .builder
-            .build_insert_value(
-                aggregate,
-                payload,
-                variant_abi.payload_field,
-                "mir_variant_payload",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
-            .into_struct_value();
+            let value_ty = self.value_type(value, subject)?;
+            if value_ty != payload_slot.ty {
+                return Err(NativeMirError::new(
+                    subject,
+                    "variant payload value disagrees with the native ABI receipt",
+                ));
+            }
+            aggregate = self
+                .generator
+                .builder
+                .build_insert_value(
+                    aggregate,
+                    self.value(value, subject)?,
+                    payload_slot.physical_field,
+                    "mir_variant_payload",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+        }
         Ok(aggregate.into())
     }
 

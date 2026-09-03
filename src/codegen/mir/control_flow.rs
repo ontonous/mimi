@@ -94,11 +94,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
         let (variant_abi, _) =
             native_variant_abi(self.program.type_catalog(), &scrutinee_ty, true)?;
-        let (_, payload_variant, _) = self
-            .program
-            .type_catalog()
-            .validated_option_string_payload(&scrutinee_ty)
-            .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
         let tag = self
             .generator
             .builder
@@ -114,15 +109,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let MirSwitchCase::Variant(variant_id) = &arm.case else {
                 return Err(NativeMirError::new(
                     subject.to_string(),
-                    "native Option<string> SwitchMove requires explicit variant arms",
+                    "native non-Copy SwitchMove requires explicit variant arms",
                 ));
             };
             let variant = self
                 .program
                 .type_catalog()
-                .validated_option_string_variant(&scrutinee_ty, variant_id)
-                .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
-            let has_payload = variant.id == payload_variant.id;
+                .validated_variant_switch_case(&scrutinee_ty, variant_id)
+                .map_err(|message| NativeMirError::new(subject.to_string(), message))?
+                .1
+                .clone();
+            let payload_slot = variant_abi.payload_slot(&variant.id);
+            let has_payload = payload_slot.is_some();
             let condition = self
                 .generator
                 .builder
@@ -172,11 +170,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_extract_value(
                         scrutinee_value.into_struct_value(),
-                        variant_abi.payload_field,
+                        payload_slot
+                            .as_ref()
+                            .expect("payload slot exists for a payload variant")
+                            .physical_field,
                         "mir_variant_move_drop_payload",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
-                self.emit_owned_string_drop_value(payload, &subject.to_string())?;
+                self.emit_drop_value(
+                    payload,
+                    &payload_slot
+                        .as_ref()
+                        .expect("payload slot exists for a payload variant")
+                        .ty,
+                    &subject.to_string(),
+                )?;
                 let drop_predecessor =
                     self.generator.builder.get_insert_block().ok_or_else(|| {
                         NativeMirError::new(
@@ -189,8 +197,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.arguments,
                     &arm.bindings,
                     &scrutinee_ty,
-                    variant,
-                    variant_abi,
+                    &variant,
+                    &variant_abi,
                     false,
                     scrutinee_value,
                     drop_predecessor,
@@ -215,8 +223,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &arm.arguments,
                     &arm.bindings,
                     &scrutinee_ty,
-                    variant,
-                    variant_abi,
+                    &variant,
+                    &variant_abi,
                     false,
                     scrutinee_value,
                     current,
@@ -333,7 +341,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &arm.bindings,
                 &scrutinee_ty,
                 &variant,
-                variant_abi,
+                &variant_abi,
                 true,
                 scrutinee_value,
                 current,
@@ -419,7 +427,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         bindings: &[crate::core::mir::MirSwitchBinding],
         scrutinee_ty: &crate::core::ResolvedTypeId,
         variant: &crate::core::mir::types::MirVariantDesc,
-        variant_abi: NativeVariantAbi,
+        variant_abi: &NativeVariantAbi,
         flat_copy: bool,
         scrutinee: BasicValueEnum<'ctx>,
         predecessor: BasicBlock<'ctx>,
@@ -477,22 +485,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             };
-            // The flat-copy projection helper proves field zero/single-field;
-            // the non-Copy caller has already passed the complete
-            // Option<string> TypeDesc gate.  Keep only the edge's own
-            // binding arity check here.
+            // The projection helper proves the field receipt; the caller has
+            // already passed the complete TypeDesc ABI gate. Keep only the
+            // edge's own single-binding physical-shape check here.
             if bindings.len() != 1 {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "variant payload binding is outside the single-payload native contract",
                 ));
             }
+            let payload_slot = variant_abi.payload_slot(&variant.id).ok_or_else(|| {
+                NativeMirError::new(
+                    subject.to_string(),
+                    "variant payload binding has no native ABI payload slot",
+                )
+            })?;
             Some(
                 self.generator
                     .builder
                     .build_extract_value(
                         scrutinee.into_struct_value(),
-                        variant_abi.payload_field,
+                        payload_slot.physical_field,
                         "mir_variant_payload_load",
                     )
                     .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?,
