@@ -870,6 +870,17 @@ pub enum Op {
         variant_tag: ConstIdx,
         shapes: ConstIdx,
     },
+    /// rd = variant_move_get(ra, idx) — validate the active canonical
+    /// variant, consume the source register, and move out one owned payload.
+    /// The shape table and expected tag are TypeDesc receipts, not inferred
+    /// from the VM value.
+    VariantMoveGet {
+        rd: Reg,
+        ra: Reg,
+        idx: u16,
+        variant_tag: ConstIdx,
+        shapes: ConstIdx,
+    },
     /// v0.34.15: extract a pattern field by NAME. Flow states are
     /// Record(Some(name), HashMap) — multi-target match arms name fields
     /// (`Small { v }`), so index-based VariantGet cannot extract them. VM:
@@ -1132,6 +1143,7 @@ impl Op {
             | VariantTag { rd, .. }
             | VariantPayload { rd, .. }
             | VariantGet { rd, .. }
+            | VariantMoveGet { rd, .. }
             | MapGet { rd, .. }
             | MapContains { rd, .. }
             | SetContains { rd, .. }
@@ -1230,6 +1242,7 @@ impl Op {
             | Op::VariantTag { rd, .. }
             | Op::VariantPayload { rd, .. }
             | Op::VariantGet { rd, .. }
+            | Op::VariantMoveGet { rd, .. }
             | Op::MapGet { rd, .. }
             | Op::MapContains { rd, .. }
             | Op::SetContains { rd, .. }
@@ -1360,6 +1373,7 @@ impl Op {
             | VariantTag { ra, .. }
             | VariantPayload { ra, .. }
             | VariantGet { ra, .. }
+            | VariantMoveGet { ra, .. }
             | TupleGet { ra, .. }
             | RecordGet { ra, .. }
             | RecordMoveGet { ra, .. }

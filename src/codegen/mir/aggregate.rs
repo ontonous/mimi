@@ -627,4 +627,101 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
+
+    /// Consume a non-Copy variant and move its owned payload field out.  The
+    /// `moving=true` ABI is mandatory here: the source aggregate is consumed
+    /// by the canonical MIR ownership ledger, so a Copy-layout projection
+    /// would silently alias the payload.
+    pub(super) fn emit_variant_project_move(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirVariantProjectionTrapContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let base_ty = self.value_type(base, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        let receipt = contract.ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "consuming direct variant projection has no canonical move receipt",
+            )
+        })?;
+        self.program
+            .type_catalog()
+            .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &base_ty, true)?;
+        let payload_slot = variant_abi
+            .payload_slot(&receipt.projection.variant)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "consuming direct variant projection has no native payload slot",
+                )
+            })?;
+        if payload_slot.field != receipt.projection.field
+            || payload_slot.ty != result_ty
+            || receipt.projection.field_index != 0
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "consuming direct variant projection receipt disagrees with native payload ABI",
+            ));
+        }
+
+        let aggregate = self.value(base, subject)?.into_struct_value();
+        let tag = self
+            .generator
+            .builder
+            .build_extract_value(
+                aggregate,
+                variant_abi.tag_field,
+                "mir_variant_move_project_tag",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let active = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.generator
+                    .context
+                    .i8_type()
+                    .const_int(u64::from(receipt.discriminant), false),
+                "mir_variant_move_project_active",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let trap = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_variant_move_project_trap");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_variant_move_project_ok");
+        self.generator
+            .builder
+            .build_conditional_branch(active, ok, trap)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(trap);
+        self.emit_abort_with_message(
+            &format!(
+                "[{}] canonical MIR consuming direct variant projection expected active variant '{}'",
+                receipt.trap_code, receipt.variant_name
+            ),
+            subject,
+        )?;
+        self.generator.builder.position_at_end(ok);
+        self.generator
+            .builder
+            .build_extract_value(
+                aggregate,
+                payload_slot.physical_field,
+                "mir_variant_move_project_payload",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
 }

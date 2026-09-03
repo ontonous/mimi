@@ -114,6 +114,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
         Op::IsVariant { .. } => "IS_VARIANT",
         Op::VariantGet { .. } => "VARIANT_GET",
+        Op::VariantMoveGet { .. } => "VARIANT_MOVE_GET",
         Op::PatternField { .. } => "PATTERN_FIELD",
         Op::Some { .. } => "SOME",
         Op::None { .. } => "NONE",
@@ -881,6 +882,18 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         } => {
             format!(
                 "{:04}  {:<16} r{} = r{}[{}] [tag const {}, shapes const {}]",
+                pc, name, rd, ra, idx, variant_tag, shapes
+            )
+        }
+        Op::VariantMoveGet {
+            rd,
+            ra,
+            idx,
+            variant_tag,
+            shapes,
+        } => {
+            format!(
+                "{:04}  {:<16} r{} = move r{}[{}] [tag const {}, shapes const {}]",
                 pc, name, rd, ra, idx, variant_tag, shapes
             )
         }

@@ -355,6 +355,15 @@ pub enum MirInstructionKind {
         base: MirValueId,
         contract: Option<types::MirVariantProjectionTrapContract>,
     },
+    /// Consume a non-Copy variant and move its single owned payload field
+    /// out.  The TypeDesc receipt proves the active discriminant trap and
+    /// Move/OwnedString glue; this is intentionally distinct from the
+    /// read-only `VariantProject` node so consumers cannot clone by default.
+    VariantProjectMove {
+        result: MirValueId,
+        base: MirValueId,
+        contract: Option<types::MirVariantProjectionTrapContract>,
+    },
     Construct {
         result: MirValueId,
         kind: MirAggregateKind,
@@ -1500,6 +1509,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Project { result, .. }
         | MirInstructionKind::MoveProject { result, .. }
         | MirInstructionKind::VariantProject { result, .. }
+        | MirInstructionKind::VariantProjectMove { result, .. }
         | MirInstructionKind::Construct { result, .. }
         | MirInstructionKind::ConstructList { result, .. }
         | MirInstructionKind::ListOp { result, .. }
@@ -1550,6 +1560,7 @@ fn instruction_consumes_owned_string(
             variant: source, ..
         }
         | MirInstructionKind::EndBorrow { borrow: source } => sources.push(source.clone()),
+        MirInstructionKind::VariantProjectMove { base: source, .. } => sources.push(source.clone()),
         MirInstructionKind::Call { arguments, .. }
         | MirInstructionKind::FlowTransition { arguments, .. }
         | MirInstructionKind::BuiltinCall { arguments, .. }
@@ -1658,6 +1669,17 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             contract
                 .as_ref()
                 .map(|contract| format!(" [variant_projection={contract:?}]"))
+                .unwrap_or_default()
+        ),
+        MirInstructionKind::VariantProjectMove {
+            result,
+            base,
+            contract,
+        } => format!(
+            "variant_project_move {result} <- {base}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [variant_move_projection={contract:?}]"))
                 .unwrap_or_default()
         ),
         MirInstructionKind::Construct {
@@ -2166,6 +2188,20 @@ impl<'a> MirValidator<'a> {
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
+            VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => {
+                self.use_value(base);
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "consuming direct variant projection has no canonical move receipt",
+                    );
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             Construct { result, fields, .. } => {
                 self.values(fields);
                 self.result_at(result, &instruction.id, block, index);
@@ -2650,6 +2686,7 @@ impl<'a> MirValidator<'a> {
                 }
             }
             MirInstructionKind::VariantProject { base, .. } => uses.push(base.clone()),
+            MirInstructionKind::VariantProjectMove { base, .. } => uses.push(base.clone()),
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
             }

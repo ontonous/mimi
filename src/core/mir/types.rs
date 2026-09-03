@@ -1543,6 +1543,81 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Materialize the consuming direct-projection contract for the currently
+    /// admitted non-Copy Option/Result families.  The selected field must be
+    /// the single owned String payload; consuming the complete variant leaves
+    /// no residual field that would need a separate partial-move node.
+    pub fn validated_variant_move_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        self.validate_non_copy_variant_contract(source_ty)?;
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.field_index != 0 || projection.arity != 1 {
+            return Err(
+                "consuming direct variant projection requires one payload field at index 0".into(),
+            );
+        }
+        if projection.ownership != MirOwnership::Move
+            || projection.move_out_glue != MirGlueKind::OwnedString
+        {
+            return Err(
+                "consuming direct variant projection requires Move + OwnedString payload glue"
+                    .into(),
+            );
+        }
+        self.validate_owned_string(result_ty)?;
+        self.validate_glue(source_ty, MirGlueOperation::MoveOut)?;
+        self.validate_glue(source_ty, MirGlueOperation::Drop)?;
+        let variant = self.validated_variant_switch_case(source_ty, variant_id)?.1;
+        Ok(MirVariantProjectionTrapContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection,
+            variant_name: variant.name.clone(),
+            discriminant: variant.discriminant,
+            trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
+    /// Validate a consuming direct-projection receipt already carried by MIR.
+    /// This is separate from the read-only validator so a backend cannot
+    /// accidentally clone an owned payload or accept Copy glue as a move.
+    pub fn validate_variant_move_projection_trap_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantProjectionTrapContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty || receipt.result_ty != *result_ty {
+            return Err(
+                "variant move projection trap receipt disagrees with MIR value types".into(),
+            );
+        }
+        validate_trap_code(&receipt.trap_code)?;
+        if receipt.trap_code != MIR_VARIANT_PROJECTION_TRAP_CODE {
+            return Err(format!(
+                "consuming direct variant projection trap code '{}' is not the canonical {}",
+                receipt.trap_code, MIR_VARIANT_PROJECTION_TRAP_CODE
+            ));
+        }
+        let expected = self.validated_variant_move_projection_trap_contract(
+            source_ty,
+            &receipt.projection.variant,
+            &receipt.projection.field,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err("variant move projection trap receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
     /// Validate the argument side of the first concrete generic MIR
     /// instance contract.  This is deliberately narrower than the complete
     /// scalar universe: native and MIR verifier must agree on signed i32/i64
@@ -5410,7 +5485,7 @@ mod tests {
             .expect("Result<string, i32>");
         let rejected_id = table
             .intern_resolved(ResolvedType::Result {
-                ok: string_id,
+                ok: string_id.clone(),
                 error: second_string_id,
             })
             .expect("Result<string, string>");
@@ -5422,6 +5497,29 @@ mod tests {
         catalog
             .validate_non_copy_variant_contract(&result_id)
             .expect("shared non-Copy variant boundary");
+        let result_variants = match &catalog.get(&result_id).expect("Result TypeDesc").layout {
+            MirLayout::Result { variants, .. } => variants,
+            _ => unreachable!(),
+        };
+        let ok = result_variants
+            .iter()
+            .find(|variant| variant.name == "Ok")
+            .expect("Result Ok variant");
+        let ok_field = ok.fields.first().expect("Result Ok payload");
+        let move_receipt = catalog
+            .validated_variant_move_projection_trap_contract(
+                &result_id,
+                &ok.id,
+                &ok_field.id,
+                &string_id,
+            )
+            .expect("Result Ok owned string move projection");
+        assert_eq!(move_receipt.discriminant, 0);
+        assert_eq!(move_receipt.projection.ownership, MirOwnership::Move);
+        assert_eq!(
+            move_receipt.projection.move_out_glue,
+            MirGlueKind::OwnedString
+        );
         let error = catalog
             .validate_result_string_i32_variant(&rejected_id)
             .expect_err("Result<string, string> must remain fail-closed");
@@ -6153,5 +6251,62 @@ mod tests {
             .expect("catalog")
             .canonical_text();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn consuming_variant_projection_requires_owned_string_move_glue() {
+        let source = r#"
+            func main() -> i32 {
+                let value: Option<string> = Some("owned")
+                drop(value)
+                0
+            }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let string_id = catalog
+            .iter()
+            .find_map(|(id, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(PrimitiveType::String))
+                    .then(|| id.clone())
+            })
+            .expect("string TypeDesc");
+        let (option_id, variants) = catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Option { inner, variants } if inner == &string_id => {
+                    Some((id.clone(), variants.clone()))
+                }
+                _ => None,
+            })
+            .expect("Option<string> TypeDesc");
+        let some = variants
+            .iter()
+            .find(|variant| variant.name == "Some")
+            .expect("Some");
+        let field = some.fields.first().expect("Some payload");
+        let receipt = catalog
+            .validated_variant_move_projection_trap_contract(
+                &option_id, &some.id, &field.id, &string_id,
+            )
+            .expect("owned string move projection receipt");
+        assert_eq!(receipt.projection.ownership, MirOwnership::Move);
+        assert_eq!(receipt.projection.move_out_glue, MirGlueKind::OwnedString);
+        assert_eq!(receipt.projection.field_index, 0);
+        assert_eq!(receipt.projection.arity, 1);
+        catalog
+            .validate_variant_move_projection_trap_receipt(&option_id, &string_id, &receipt)
+            .expect("receipt round trip");
+
+        let mut forged = receipt.clone();
+        forged.projection.ownership = MirOwnership::Copy;
+        let error = catalog
+            .validate_variant_move_projection_trap_receipt(&option_id, &string_id, &forged)
+            .expect_err("Copy projection receipt must not enter consuming move projection");
+        assert!(error.contains("disagrees with TypeDesc"), "{error}");
     }
 }

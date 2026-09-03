@@ -506,6 +506,30 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
             }
+            MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => {
+                let (Some(base_ty), Some(result_ty)) =
+                    (value_type(function, base), value_type(function, result))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} consuming direct variant projection has no canonical move receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog
+                    .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                {
+                    self.error(format!(
+                        "{subject} consuming direct variant projection rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::Construct {
                 result,
                 kind,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+use crate::core::mir::types::MirOwnership;
 
 fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
     table.intern_resolved(ty).expect("test type must intern")
@@ -167,6 +168,120 @@ fn direct_variant_projection_receipt_is_checked_before_consumers() {
             .message
             .contains("variant projection trap receipt disagrees with TypeDesc")
     }));
+}
+
+#[test]
+fn consuming_variant_projection_moves_owned_payload_and_traps_on_wrong_tag() {
+    let fixture = crate::core::mir::test_support::direct_variant_move_projection_fixture();
+    assert_eq!(fixture.receipt.source_ty, fixture.source_ty);
+    assert_eq!(fixture.receipt.result_ty, fixture.result_ty);
+    let nominal =
+        crate::core::ir::NominalTypeId::new("builtin:type:Option").expect("Option nominal");
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&fixture.program);
+    let value = reference
+        .execute(
+            &fixture.function,
+            &[crate::core::mir::reference::MirRuntimeValue::Variant {
+                nominal: nominal.clone(),
+                variant: fixture.some.clone(),
+                payload: vec![crate::core::mir::reference::MirRuntimeValue::String(
+                    "owned".into(),
+                )],
+            }],
+        )
+        .expect("consuming Some projection");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::String("owned".into())
+    );
+
+    let error = reference
+        .execute(
+            &fixture.function,
+            &[crate::core::mir::reference::MirRuntimeValue::Variant {
+                nominal,
+                variant: fixture.none.clone(),
+                payload: Vec::new(),
+            }],
+        )
+        .expect_err("wrong active variant must trap before payload extraction");
+    assert!(error.message.contains("E0800"), "{error}");
+}
+
+#[test]
+fn consuming_variant_projection_receipt_is_move_owned_and_fail_closed() {
+    let fixture = crate::core::mir::test_support::direct_variant_move_projection_fixture();
+    assert_eq!(fixture.receipt.projection.ownership, MirOwnership::Move);
+    assert_eq!(
+        fixture.receipt.projection.move_out_glue,
+        crate::core::mir::types::MirGlueKind::OwnedString
+    );
+    assert_eq!(fixture.receipt.projection.variant, fixture.some);
+    assert_eq!(fixture.receipt.projection.field, fixture.field);
+    assert_eq!(fixture.receipt.discriminant, 1);
+
+    let mut function = fixture
+        .program
+        .functions()
+        .get(&fixture.function)
+        .expect("project function")
+        .clone();
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::VariantProjectMove { .. }
+            )
+        })
+        .expect("variant move projection instruction");
+    let MirInstructionKind::VariantProjectMove {
+        contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    receipt.projection.ownership = MirOwnership::Copy;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(fixture.function.clone(), function)]),
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("forged Copy move receipt must fail before consumers");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant move projection trap receipt disagrees with TypeDesc")
+    }));
+
+    let mut double_use = fixture
+        .program
+        .functions()
+        .get(&fixture.function)
+        .expect("project function")
+        .clone();
+    double_use
+        .blocks
+        .values_mut()
+        .next()
+        .expect("entry block")
+        .instructions
+        .push(MirInstruction {
+            id: MirInstructionId::new("i.after-variant-project-move").expect("instruction id"),
+            kind: MirInstructionKind::Drop {
+                value: MirValueId::new("v.input").expect("input value id"),
+            },
+        });
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(fixture.function.clone(), double_use)]),
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("consumed variant source must not be used again");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("use after consuming non-Copy value")));
 }
 
 #[test]

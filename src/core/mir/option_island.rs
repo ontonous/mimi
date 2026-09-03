@@ -724,6 +724,7 @@ impl<'a> OptionStringVariantValidator<'a> {
             | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
             | MirInstructionKind::VariantProject { .. }
+            | MirInstructionKind::VariantProjectMove { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructList { .. }
             | MirInstructionKind::ListOp { .. }

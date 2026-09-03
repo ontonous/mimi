@@ -418,6 +418,39 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::VariantProjectMove {
+                            result,
+                            base,
+                            contract,
+                        } => {
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "consuming direct variant projection has no canonical move receipt"
+                                            .into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog
+                                .validate_variant_move_projection_trap_receipt(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    receipt,
+                                )
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::Load { result, place } => {
                             let local_id =
                                 match MirValueId::new(format!("local:{}", place.base.0 .0)) {
@@ -2102,7 +2135,10 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
     match kind {
         super::MirInstructionKind::Move { source, .. }
         | super::MirInstructionKind::Drop { value: source }
-        | super::MirInstructionKind::MoveProject { base: source, .. } => vec![source.clone()],
+        | super::MirInstructionKind::MoveProject { base: source, .. }
+        | super::MirInstructionKind::VariantProjectMove { base: source, .. } => {
+            vec![source.clone()]
+        }
         super::MirInstructionKind::Call { arguments, .. }
         | super::MirInstructionKind::FlowTransition { arguments, .. }
         | super::MirInstructionKind::BuiltinCall { arguments, .. }
@@ -2264,7 +2300,8 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
             base == needle
                 || matches!(projection, super::MirProjection::Index(index) if index == needle)
         }
-        super::MirInstructionKind::VariantProject { base, .. } => base == needle,
+        super::MirInstructionKind::VariantProject { base, .. }
+        | super::MirInstructionKind::VariantProjectMove { base, .. } => base == needle,
         super::MirInstructionKind::Construct { fields, .. } => fields.iter().any(|v| v == needle),
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
@@ -2334,6 +2371,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Project { result, .. }
         | super::MirInstructionKind::MoveProject { result, .. }
         | super::MirInstructionKind::VariantProject { result, .. }
+        | super::MirInstructionKind::VariantProjectMove { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
         | super::MirInstructionKind::ListOp { result, .. }
@@ -2811,6 +2849,49 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .map_err(|message| self.error(&function.owner, message))?;
                 let value = self.read_value(function, values, base)?;
                 let projected = project_variant_value(
+                    &function.owner,
+                    value,
+                    &base_ty,
+                    &result_ty,
+                    receipt,
+                    self.program.type_catalog(),
+                )?;
+                values.insert(result.clone(), projected);
+            }
+            MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "variant move projection base has no type")
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "variant move projection result has no type",
+                        )
+                    })?;
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "consuming direct variant projection has no canonical move receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let value = self.take_transfer_value(function, values, base)?;
+                let projected = move_project_variant_value(
                     &function.owner,
                     value,
                     &base_ty,
@@ -4268,6 +4349,60 @@ fn project_variant_value(
         .get(receipt.projection.field_index)
         .cloned()
         .ok_or_else(|| execution_error(function, "direct variant projection field is absent"))
+}
+
+fn move_project_variant_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirVariantProjectionTrapContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    type_catalog
+        .validate_variant_move_projection_trap_receipt(base_ty, result_ty, receipt)
+        .map_err(|message| execution_error(function, message))?;
+    let MirRuntimeValue::Variant {
+        nominal,
+        variant,
+        mut payload,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "consuming direct variant projection base is not a canonical Variant",
+        ));
+    };
+    if nominal != receipt.projection.nominal {
+        return Err(execution_error(
+            function,
+            "consuming direct variant projection runtime nominal disagrees with TypeDesc",
+        ));
+    }
+    if variant != receipt.projection.variant {
+        return Err(execution_error(
+            function,
+            format!(
+                "{}: canonical MIR consuming direct variant projection expected active variant '{}'",
+                receipt.trap_code, receipt.variant_name
+            ),
+        ));
+    }
+    if payload.len() != receipt.projection.arity {
+        return Err(execution_error(
+            function,
+            "consuming direct variant projection runtime arity disagrees with TypeDesc",
+        ));
+    }
+    payload
+        .get_mut(receipt.projection.field_index)
+        .map(|value| std::mem::replace(value, MirRuntimeValue::Unit))
+        .ok_or_else(|| {
+            execution_error(
+                function,
+                "consuming direct variant projection field is absent",
+            )
+        })
 }
 
 fn project_value(

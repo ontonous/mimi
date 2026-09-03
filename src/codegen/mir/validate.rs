@@ -512,6 +512,17 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 contract,
             } => self.validate_variant_project(function, result, base, contract.as_ref(), subject),
+            MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => self.validate_variant_project_move(
+                function,
+                result,
+                base,
+                contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::Borrow {
                 result,
                 source,
@@ -1922,6 +1933,41 @@ impl<'a> NativeMirValidator<'a> {
                     "fault/unreachable terminator has no native scalar contract",
                 ));
             }
+        }
+    }
+
+    fn validate_variant_project_move(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirVariantProjectionTrapContract>,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "variant move projection result");
+        self.validate_value(function, base, "variant move projection base");
+        let (Some(base_value), Some(result_value)) =
+            (function.values.get(base), function.values.get(result))
+        else {
+            return;
+        };
+        let Some(contract) = contract else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "consuming direct variant projection has no canonical move receipt",
+            ));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_move_projection_trap_receipt(
+                &base_value.ty,
+                &result_value.ty,
+                contract,
+            )
+        {
+            self.errors.push(NativeMirError::new(subject, message));
         }
     }
 

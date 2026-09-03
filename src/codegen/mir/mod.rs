@@ -447,6 +447,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_variant_project(result, base, contract.as_ref(), subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => {
+                let value =
+                    self.emit_variant_project_move(result, base, contract.as_ref(), subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::Borrow {
                 result,
                 source,
@@ -2003,6 +2012,25 @@ mod tests {
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("mir_variant_project_active"));
         assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+        assert!(generator.module.get_function("project").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_consuming_variant_project_active_tag_guard() {
+        let fixture = crate::core::mir::test_support::direct_variant_move_projection_fixture();
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_move_project_test");
+        generator
+            .compile_mir_native(&fixture.program)
+            .expect("native consuming variant projection lowering");
+        generator
+            .module
+            .verify()
+            .expect("native consuming variant projection module verifies");
+
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_variant_move_project_active"));
+        assert!(ir.contains("[E0800] canonical MIR consuming direct variant projection"));
         assert!(generator.module.get_function("project").is_some());
     }
 

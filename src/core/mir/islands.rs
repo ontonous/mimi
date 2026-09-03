@@ -1770,6 +1770,7 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
             | MirInstructionKind::VariantProject { .. }
+            | MirInstructionKind::VariantProjectMove { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructVariant { .. }
             | MirInstructionKind::ConstructVariantMove { .. }
