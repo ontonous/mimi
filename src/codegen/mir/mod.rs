@@ -2221,6 +2221,38 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_mixed_generic_record_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_mixed.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("mixed generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 2 && contract.name == "value"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference mixed generic record projection execution");
+        assert_eq!(reference, MirRuntimeValue::Bool(true));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_projection_mixed");
+        generator
+            .compile_mir_native(&program)
+            .expect("native mixed generic record projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native mixed generic record projection module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_scalar_generic_record_projection_rvalue() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"

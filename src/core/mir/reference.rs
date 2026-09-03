@@ -6062,6 +6062,52 @@ mod tests {
     }
 
     #[test]
+    fn concrete_mixed_generic_record_projection_executes_with_fixed_copy_sibling() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection_mixed.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("mixed generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("mixed generic record projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("mixed generic record projection must carry a record receipt");
+        };
+        assert_eq!(contract.arity, 2);
+        assert_eq!(contract.name, "value");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("mixed generic record projection target");
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("mixed record projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("mixed record projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 2
+                    && fields[0].ty == contract.field_ty
+                    && fields[1].ty != contract.field_ty
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference mixed generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Bool(true));
+    }
+
+    #[test]
     fn three_field_generic_record_projection_fails_closed() {
         let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: 41, second: 7, third: 9 }; get(triple) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -6077,6 +6123,25 @@ mod tests {
                 "unexpected errors: {errors:?}"
             ),
             other => panic!("unsupported generic record shape crossed MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_managed_generic_record_projection_fails_closed() {
+        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: 41, tag: \"managed\" }; let picked = get(tagged); picked }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("mixed managed generic record projection must fail closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| { error.message.contains("generic record projection") }),
+                "unexpected errors: {errors:?}"
+            ),
+            other => panic!("mixed managed generic record crossed MIR gate: {other:?}"),
         }
     }
 

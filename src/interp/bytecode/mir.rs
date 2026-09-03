@@ -4979,6 +4979,38 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_mixed_generic_record_projection_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection_mixed.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("mixed generic record projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("mixed generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 2 && contract.name == "value"
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference mixed generic record projection execution");
+        let bytecode = compile_mir_program(&mir).expect("mixed generic record projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("mixed generic record projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Bool(true));
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
     fn executes_scalar_generic_record_projection_rvalue_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_rvalue.mimi"

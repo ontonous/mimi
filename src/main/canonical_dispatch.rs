@@ -647,11 +647,37 @@ mod tests {
     }
 
     #[test]
+    fn mixed_generic_record_projection_enters_canonical_default_route() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_record_projection_mixed.mimi");
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("mixed generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 2 && contract.name == "value"
+        )));
+    }
+
+    #[test]
     fn three_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: 41, second: 7, third: 9 }; get(triple) }";
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("three-field generic record projection must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
+    }
+
+    #[test]
+    fn mixed_managed_generic_record_projection_is_rejected_before_legacy_route() {
+        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: 41, tag: \"managed\" }; let picked = get(tagged); picked }";
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("mixed managed generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
     }

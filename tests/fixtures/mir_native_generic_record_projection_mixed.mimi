@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: project a generic Copy field while a
+// fixed Copy-scalar sibling remains part of the record layout.
+type Tagged<T> { value: T, tag: i32 }
+
+func get_value<T>(tagged: Tagged<T>) -> T {
+    tagged.value
+}
+
+func main() -> bool {
+    ensures: result == result
+    let tagged = Tagged { value: true, tag: 7 }
+    let picked = get_value(tagged)
+    picked
+}

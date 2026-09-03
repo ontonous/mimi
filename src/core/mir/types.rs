@@ -3802,7 +3802,8 @@ impl MirTypeCatalog {
 
     /// Build the non-executable placeholder receipt for the generic record
     /// projection shapes currently admitted: a one- or two-field `Record<T>`
-    /// whose every field and result are the same GenericParameter. Concrete
+    /// whose selected field and result are the same GenericParameter; any
+    /// sibling is either that binder or a concrete Copy scalar. Concrete
     /// specialization must call `validated_record_field_projection_contract`
     /// again so the backend never consumes a generic TypeDesc.
     pub(crate) fn validated_generic_record_field_projection_contract(
@@ -3852,15 +3853,21 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
+        let siblings_valid = fields
+            .iter()
+            .filter(|candidate| candidate.id != field.id)
+            .all(|candidate| {
+                candidate.ty == *result_ty || self.validate_copy_scalar(&candidate.ty).is_ok()
+            });
         if result.kind != MirTypeKind::GenericParameter
             || field.ty != *result_ty
             || self
                 .get(&field.ty)
                 .is_none_or(|field_ty| field_ty.kind != MirTypeKind::GenericParameter)
-            || fields.iter().any(|candidate| candidate.ty != *result_ty)
+            || !siblings_valid
         {
             return Err(
-                "generic record projection placeholder requires every field and result to share a GenericParameter identity".into(),
+                "generic record projection placeholder requires selected field/result GenericParameter identity and Copy-scalar siblings".into(),
             );
         }
         Ok(MirRecordProjectionContract {
