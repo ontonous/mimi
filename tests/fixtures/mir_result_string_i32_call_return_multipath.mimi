@@ -2,11 +2,16 @@ func choose(flag: bool) -> Result<string, i32> {
     if flag { Ok("owned-ok") } else { Err(7) }
 }
 
+func consume_text(text: string) -> i32 {
+    drop(text)
+    41
+}
+
 func checked(flag: bool) -> i32 {
     ensures: result >= 0
     let value = choose(flag)
     match value {
-        Ok(_) => 41,
+        Ok(text) => consume_text(text),
         Err(code) => code
     }
 }

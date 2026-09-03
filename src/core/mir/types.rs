@@ -611,6 +611,14 @@ pub struct MirVariantProjectionContract {
     pub field_index: usize,
     pub arity: usize,
     pub field_ty: ResolvedTypeId,
+    /// Ownership of the transported payload field, derived from its TypeDesc.
+    /// `Copy` is valid for read-only `Switch`; `Move` requires consuming
+    /// `SwitchMove` and the corresponding MoveOut glue.
+    pub ownership: MirOwnership,
+    /// The field-level MoveOut implementation proven by TypeDesc.  Keeping it
+    /// on the receipt prevents a consumer from treating an owned payload as a
+    /// scalar merely because its physical slot is scalar-shaped.
+    pub move_out_glue: MirGlueKind,
 }
 
 /// Backend-independent receipt for one canonical record field projection.
@@ -4283,6 +4291,12 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             ));
         }
+        let field_desc = self.get(&field.ty).ok_or_else(|| {
+            format!(
+                "variant payload projection field type '{}' is absent from TypeDesc",
+                field.ty.as_str()
+            )
+        })?;
         Ok(MirVariantProjectionContract {
             nominal,
             variant: variant.id.clone(),
@@ -4290,6 +4304,8 @@ impl MirTypeCatalog {
             field_index,
             arity: variant.fields.len(),
             field_ty: field.ty.clone(),
+            ownership: field_desc.ownership,
+            move_out_glue: field_desc.glue.move_out,
         })
     }
 
@@ -4346,6 +4362,19 @@ impl MirTypeCatalog {
         scrutinee_ty: &ResolvedTypeId,
         arms: &[crate::core::mir::MirSwitchArm],
     ) -> Result<(), String> {
+        self.validate_variant_switch_cases(scrutinee_ty, arms, false)
+    }
+
+    /// Validate the structural variant-switch contract while making the
+    /// payload transport mode explicit. Read-only `Switch` may bind only
+    /// Copy fields; consuming `SwitchMove` opts into the field MoveOut mode.
+    /// The physical payload index and glue remain facts of the receipt.
+    fn validate_variant_switch_cases(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        arms: &[crate::core::mir::MirSwitchArm],
+        allow_move_owned_payload: bool,
+    ) -> Result<(), String> {
         let Some((_, variants)) = self.variant_layout(scrutinee_ty) else {
             if arms
                 .iter()
@@ -4373,6 +4402,22 @@ impl MirTypeCatalog {
                         .map(|_| ())?;
                     if !seen.insert(variant) {
                         return Err(format!("variant switch case '{}' is repeated", variant.0));
+                    }
+                    for binding in &arm.bindings {
+                        self.validate_variant_payload_projection_receipt(
+                            scrutinee_ty,
+                            variant,
+                            &binding.projection.field_ty,
+                            &binding.projection,
+                        )?;
+                        if !allow_move_owned_payload
+                            && binding.projection.ownership != MirOwnership::Copy
+                        {
+                            return Err(format!(
+                                "read-only variant payload projection field '{}' requires Copy TypeDesc ownership",
+                                binding.projection.field.0
+                            ));
+                        }
                     }
                 }
                 crate::core::mir::MirSwitchCase::Default => {
@@ -4438,7 +4483,7 @@ impl MirTypeCatalog {
         }
         self.validate_glue(scrutinee_ty, MirGlueOperation::MoveOut)?;
         self.validate_glue(scrutinee_ty, MirGlueOperation::Drop)?;
-        self.validate_switch(scrutinee_ty, arms)?;
+        self.validate_variant_switch_cases(scrutinee_ty, arms, true)?;
         for arm in arms {
             let crate::core::mir::MirSwitchCase::Variant(variant_id) = &arm.case else {
                 continue;

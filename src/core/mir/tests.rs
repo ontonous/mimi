@@ -1695,6 +1695,141 @@ fn move_owned_result_return_merge_rejects_switch_before_consumers() {
 }
 
 #[test]
+fn result_switch_move_projection_receipt_carries_field_ownership_and_glue() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let checked_fn = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:checked".into()))
+        .expect("checked MIR");
+    let arms = checked_fn
+        .blocks
+        .values()
+        .find_map(|block| match &block.terminator {
+            crate::core::mir::MirTerminator::SwitchMove { arms, .. } => Some(arms),
+            _ => None,
+        })
+        .expect("Result SwitchMove");
+    let mut projections = arms
+        .iter()
+        .filter_map(|arm| {
+            let variant = match &arm.case {
+                crate::core::mir::MirSwitchCase::Variant(variant) => variant,
+                _ => return None,
+            };
+            Some((variant.clone(), arm.bindings.first()?.projection.clone()))
+        })
+        .collect::<Vec<_>>();
+    projections.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(projections.len(), 2);
+    let ok = projections
+        .iter()
+        .find(|(variant, _)| variant.0.ends_with("Result::Ok"))
+        .expect("Ok projection");
+    assert_eq!(ok.1.ownership, crate::core::mir::types::MirOwnership::Move);
+    assert_eq!(
+        ok.1.move_out_glue,
+        crate::core::mir::types::MirGlueKind::OwnedString
+    );
+    let err = projections
+        .iter()
+        .find(|(variant, _)| variant.0.ends_with("Result::Err"))
+        .expect("Err projection");
+    assert_eq!(err.1.ownership, crate::core::mir::types::MirOwnership::Copy);
+    assert_eq!(
+        err.1.move_out_glue,
+        crate::core::mir::types::MirGlueKind::Noop
+    );
+}
+
+#[test]
+fn result_switch_move_projection_receipt_drift_is_rejected_before_consumers() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let mut forged = canonical.functions().clone();
+    let checked_fn = forged
+        .get_mut(&crate::core::NodeId("function:checked".into()))
+        .expect("checked MIR");
+    let binding = checked_fn
+        .blocks
+        .values_mut()
+        .flat_map(|block| match &mut block.terminator {
+            crate::core::mir::MirTerminator::SwitchMove { arms, .. } => arms
+                .iter_mut()
+                .flat_map(|arm| arm.bindings.iter_mut())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .find(|binding| binding.projection.variant.0.ends_with("Result::Ok"))
+        .expect("Ok projection binding");
+    binding.projection.move_out_glue = crate::core::mir::types::MirGlueKind::Noop;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("forged projection glue must fail before a consumer");
+    assert!(errors
+        .iter()
+        .any(|error| { error.message.contains("variant payload projection receipt") }));
+}
+
+#[test]
+fn result_read_only_switch_rejects_move_owned_payload_projection() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let mut forged = canonical.functions().clone();
+    let checked_fn = forged
+        .get_mut(&crate::core::NodeId("function:checked".into()))
+        .expect("checked MIR");
+    let block = checked_fn
+        .blocks
+        .values_mut()
+        .find(|block| {
+            matches!(
+                block.terminator,
+                crate::core::mir::MirTerminator::SwitchMove { .. }
+            )
+        })
+        .expect("Result SwitchMove");
+    let crate::core::mir::MirTerminator::SwitchMove { scrutinee, arms } = block.terminator.clone()
+    else {
+        unreachable!("Result SwitchMove selected above");
+    };
+    block.terminator = crate::core::mir::MirTerminator::Switch { scrutinee, arms };
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged,
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("read-only Switch cannot transport an owned Result payload");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("read-only variant payload projection field")
+    }));
+}
+
+#[test]
 fn variant_call_abi_receipt_drift_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_variant_call.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
