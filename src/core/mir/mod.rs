@@ -308,6 +308,10 @@ pub enum MirInstructionKind {
         result: MirValueId,
         base: MirValueId,
         projection: MirProjection,
+        /// TypeDesc receipt required for canonical List index projections.
+        /// Other projection kinds must leave this absent until their own
+        /// canonical MIR receipt is materialized.
+        list_index_contract: Option<types::MirListIndexProjectionContract>,
     },
     /// Consume a non-Copy record product and move one non-Copy field out.
     /// The TypeDesc contract requires every sibling field to be Copy, so the
@@ -741,7 +745,14 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             result,
             base,
             projection,
-        } => format!("project {result} <- {base}.{projection:?}"),
+            list_index_contract,
+        } => format!(
+            "project {result} <- {base}.{projection:?}{}",
+            list_index_contract
+                .as_ref()
+                .map(|contract| format!(" [list_index={contract:?}]"))
+                .unwrap_or_default()
+        ),
         MirInstructionKind::MoveProject {
             result,
             base,
@@ -1163,10 +1174,23 @@ impl<'a> MirValidator<'a> {
                 result,
                 base,
                 projection,
+                list_index_contract,
             } => {
                 self.use_value(base);
                 if let MirProjection::Index(index) = projection {
                     self.use_value(index);
+                }
+                if matches!(projection, MirProjection::Index(_)) && list_index_contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "List index projection has no canonical receipt",
+                    );
+                }
+                if !matches!(projection, MirProjection::Index(_)) && list_index_contract.is_some() {
+                    self.error(
+                        result.to_string(),
+                        "List index receipt is attached to a non-index projection",
+                    );
                 }
                 if let MirProjection::Field(field) = projection {
                     if field.0.trim().is_empty() {

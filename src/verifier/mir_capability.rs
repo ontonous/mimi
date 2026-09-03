@@ -409,6 +409,7 @@ impl<'a> CapabilityGate<'a> {
                 result,
                 base,
                 projection,
+                list_index_contract,
             } => {
                 let (Some(base_ty), Some(result_ty)) =
                     (value_type(function, base), value_type(function, result))
@@ -416,15 +417,34 @@ impl<'a> CapabilityGate<'a> {
                     return;
                 };
                 match projection {
-                    MirProjection::Index(_) => self.error(format!(
-                        "{subject} indexed projection is outside the verifier capability"
-                    )),
+                    MirProjection::Index(index) => {
+                        let Some(index_ty) = value_type(function, index) else {
+                            return;
+                        };
+                        let Some(receipt) = list_index_contract else {
+                            self.error(format!(
+                                "{subject} List index projection has no canonical receipt"
+                            ));
+                            return;
+                        };
+                        if let Err(message) = catalog.validate_list_index_projection_receipt(
+                            &base_ty, &index_ty, &result_ty, receipt,
+                        ) {
+                            self.error(format!("{subject} indexed projection rejected: {message}"));
+                        }
+                    }
                     MirProjection::Dereference => {
                         if let Err(message) = catalog.validate_dereference(&base_ty, &result_ty) {
                             self.error(format!("{subject} dereference rejected: {message}"));
                         }
                     }
                     MirProjection::Field(_) | MirProjection::Tuple(_) => {
+                        if list_index_contract.is_some() {
+                            self.error(format!(
+                                "{subject} List index receipt is attached to a non-index projection"
+                            ));
+                            return;
+                        }
                         if let Err(message) =
                             catalog.validate_projection(&base_ty, &result_ty, projection)
                         {
@@ -1293,13 +1313,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_indexed_list_projection_until_verifier_contract_exists() {
+    fn accepts_indexed_list_projection_with_materialized_receipt() {
         let program = canonical(include_str!(
             "../../tests/fixtures/mir_native_list_index.mimi"
         ));
-        let errors = validate_mir_capabilities(&program).expect_err("List index must be gated");
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("indexed projection") || error.contains("indexed Load")));
+        validate_mir_capabilities(&program)
+            .expect("List index receipt must satisfy verifier capability gate");
     }
 }

@@ -14,8 +14,9 @@ use std::sync::Arc;
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
-    MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout, MirOwnership,
-    MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
+    MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
+    MirListIndexProjectionContract, MirOwnership, MirRecordProjectionContract, MirTypeDesc,
+    MirTypeKind,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -24,8 +25,8 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, Op, RecordProjectionShape, Reg,
-    TupleProjectionShape, VariantShape,
+    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListProjectionShape, Op,
+    RecordProjectionShape, Reg, TupleProjectionShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -491,8 +492,9 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 base,
                 projection,
+                list_index_contract,
             } => {
-                self.emit_project(result, base, projection);
+                self.emit_project(result, base, projection, list_index_contract.as_ref());
             }
             MirInstructionKind::MoveProject {
                 result,
@@ -1280,7 +1282,13 @@ impl<'a> FunctionEmitter<'a> {
         self.proto.emit(Op::Nop);
     }
 
-    fn emit_project(&mut self, result: &MirValueId, base: &MirValueId, projection: &MirProjection) {
+    fn emit_project(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        list_index_contract: Option<&MirListIndexProjectionContract>,
+    ) {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
         };
@@ -1355,12 +1363,21 @@ impl<'a> FunctionEmitter<'a> {
                     self.error("List index is absent from MIR value catalog");
                     return;
                 };
-                if let Err(message) = self.program.type_catalog().validate_list_index(
-                    &base_desc.id,
-                    &result_desc.id,
-                    &index_value.ty,
-                ) {
-                    self.error(format!("List index is unsupported: {message}"));
+                let Some(receipt) = list_index_contract else {
+                    self.error("List index projection has no canonical receipt");
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_list_index_projection_receipt(
+                        &base_desc.id,
+                        &index_value.ty,
+                        &result_desc.id,
+                        receipt,
+                    )
+                {
+                    self.error(format!("List index receipt is unsupported: {message}"));
                     return;
                 }
                 if element != &result_desc.id {
@@ -1372,12 +1389,24 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
                 let Some(rb) = self.reg(index) else { return };
-                self.proto.emit(Op::ListGet { rd, ra, rb });
+                let Some(contract) = self.add_list_projection_contract(receipt) else {
+                    return;
+                };
+                self.proto.emit(Op::ListGet {
+                    rd,
+                    ra,
+                    rb,
+                    contract: Some(contract),
+                });
             }
             (_, MirProjection::Index(_)) => {
                 self.error("indexed projection requires a canonical List layout");
             }
             (_, MirProjection::Dereference) => {
+                if list_index_contract.is_some() {
+                    self.error("List index receipt is attached to a non-index projection");
+                    return;
+                }
                 if let Err(message) = self
                     .program
                     .type_catalog()
@@ -1393,6 +1422,21 @@ impl<'a> FunctionEmitter<'a> {
                 projection, layout
             )),
         }
+    }
+
+    fn add_list_projection_contract(
+        &mut self,
+        receipt: &MirListIndexProjectionContract,
+    ) -> Option<ConstIdx> {
+        Some(
+            self.proto
+                .add_const(ConstValue::ListProjection(ListProjectionShape {
+                    list_ty: receipt.list_ty.clone(),
+                    element_ty: receipt.element_ty.clone(),
+                    index_ty: receipt.index_ty.clone(),
+                    result_ty: receipt.result_ty.clone(),
+                })),
+        )
     }
 
     fn emit_move_project(
@@ -3445,6 +3489,61 @@ mod tests {
             report.reference.outcome,
             DifferentialOutcome::Return(MirRuntimeValue::Int(20))
         );
+    }
+
+    #[test]
+    fn canonical_list_index_emits_a_materialized_bytecode_receipt() {
+        let program = compile("func main() -> i32 { let values = [10, 20, 30]; values[1] }");
+        let main = &program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::ListGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List index contract");
+        let ConstValue::ListProjection(shape) = &main.constants[contract as usize] else {
+            panic!("canonical List index must carry a ListProjection shape");
+        };
+        assert!(!shape.list_ty.as_str().is_empty());
+        assert_eq!(shape.element_ty, shape.result_ty);
+        assert!(!shape.index_ty.as_str().is_empty());
+        let value = BytecodeVM::new(program)
+            .run_value()
+            .expect("canonical ListGet");
+        assert!(matches!(value, Value::Int(20)));
+    }
+
+    #[test]
+    fn canonical_list_index_receipt_rejects_forged_element_before_read() {
+        let mut program =
+            (*compile("func main() -> i32 { let values = [10, 20, 30]; values[1] }")).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::ListGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List index contract");
+        let ConstValue::ListProjection(shape) = &mut main.constants[contract as usize] else {
+            panic!("canonical List index must carry a ListProjection shape");
+        };
+        shape.element_ty = shape.list_ty.clone();
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("forged List index receipt must trap before read");
+        assert!(error
+            .message()
+            .contains("receipt element and result types disagree"));
     }
 
     #[test]

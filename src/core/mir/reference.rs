@@ -300,6 +300,7 @@ impl MirProgram {
                             result,
                             base,
                             projection,
+                            list_index_contract,
                         } => {
                             let Some(base_value) = function.values.get(base) else {
                                 continue;
@@ -317,17 +318,33 @@ impl MirProgram {
                                         });
                                         continue;
                                     };
-                                    type_catalog.validate_list_index(
+                                    let Some(receipt) = list_index_contract.as_ref() else {
+                                        errors.push(super::MirValidationError {
+                                            subject: instruction.id.to_string(),
+                                            message:
+                                                "List index projection has no canonical receipt"
+                                                    .into(),
+                                        });
+                                        continue;
+                                    };
+                                    type_catalog.validate_list_index_projection_receipt(
                                         &base_value.ty,
-                                        &result_value.ty,
                                         &index_value.ty,
+                                        &result_value.ty,
+                                        receipt,
                                     )
                                 }
-                                _ => type_catalog.validate_projection(
-                                    &base_value.ty,
-                                    &result_value.ty,
-                                    projection,
-                                ),
+                                _ => {
+                                    if list_index_contract.is_some() {
+                                        Err("List index receipt is attached to a non-index projection".into())
+                                    } else {
+                                        type_catalog.validate_projection(
+                                            &base_value.ty,
+                                            &result_value.ty,
+                                            projection,
+                                        )
+                                    }
+                                }
                             };
                             if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
@@ -2540,12 +2557,19 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 base,
                 projection,
+                list_index_contract,
             } => {
                 let value = self.read_value(function, values, base)?;
                 let base_ty = function.values.get(base).map(|value| &value.ty);
                 let result_ty = function.values.get(result).map(|value| &value.ty);
                 let index_value = match projection {
                     MirProjection::Index(index) => Some(self.read_value(function, values, index)?),
+                    _ => None,
+                };
+                let index_ty = match projection {
+                    MirProjection::Index(index) => {
+                        function.values.get(index).map(|value| &value.ty)
+                    }
                     _ => None,
                 };
                 let projected = project_value(
@@ -2555,6 +2579,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                     result_ty,
                     projection,
                     index_value.as_ref(),
+                    index_ty,
+                    list_index_contract.as_ref(),
                     self.program.type_catalog(),
                 )?;
                 values.insert(result.clone(), projected);
@@ -3115,6 +3141,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                 Some(&current_ty),
                 Some(projection.ty()),
                 &mir_projection,
+                None,
+                None,
                 None,
                 self.program.type_catalog(),
             )?;
@@ -3809,6 +3837,8 @@ fn project_value(
     result_ty: Option<&crate::core::ResolvedTypeId>,
     projection: &MirProjection,
     index_value: Option<&MirRuntimeValue>,
+    index_ty: Option<&crate::core::ResolvedTypeId>,
+    list_index_contract: Option<&super::types::MirListIndexProjectionContract>,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     match (value, projection) {
@@ -3880,6 +3910,40 @@ fn project_value(
         }
         (value, MirProjection::Dereference) => Ok(value),
         (MirRuntimeValue::List(values), MirProjection::Index(_)) => {
+            let Some(base_ty) = base_ty else {
+                return Err(execution_error(
+                    function,
+                    "List index projection has no base type",
+                ));
+            };
+            let Some(result_ty) = result_ty else {
+                return Err(execution_error(
+                    function,
+                    "List index projection has no result type",
+                ));
+            };
+            let Some(receipt) = list_index_contract else {
+                return Err(execution_error(
+                    function,
+                    "List index projection has no canonical receipt",
+                ));
+            };
+            let Some(index_ty) = index_ty else {
+                return Err(execution_error(
+                    function,
+                    "List index projection has no index type",
+                ));
+            };
+            if receipt.list_ty != *base_ty
+                || receipt.element_ty != *result_ty
+                || receipt.result_ty != *result_ty
+                || receipt.index_ty != *index_ty
+            {
+                return Err(execution_error(
+                    function,
+                    "List index projection receipt disagrees with MIR value types",
+                ));
+            }
             let raw = match (projection, index_value) {
                 (MirProjection::Index(_), Some(MirRuntimeValue::Int(index))) => *index,
                 _ => {

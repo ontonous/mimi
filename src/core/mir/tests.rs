@@ -383,6 +383,139 @@ fn list_index_contract_rejects_non_integer_operand_before_backend() {
 }
 
 #[test]
+fn list_index_projection_materializes_type_desc_receipt() {
+    let source = "func main() -> i32 { let values = [10, 20, 30]; values[1] }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                projection: MirProjection::Index(index),
+                list_index_contract: Some(receipt),
+                ..
+            } => Some((index.clone(), receipt.clone())),
+            _ => None,
+        })
+        .expect("canonical List index receipt");
+    let index_ty = &function.values.get(&receipt.0).expect("index value").ty;
+    let result_ty = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Project {
+                result,
+                projection: MirProjection::Index(_),
+                ..
+            } => Some(&function.values.get(result).expect("result value").ty),
+            _ => None,
+        })
+        .expect("List result type");
+    assert_eq!(&receipt.1.index_ty, index_ty);
+    assert_eq!(&receipt.1.result_ty, result_ty);
+    assert_eq!(&receipt.1.element_ty, result_ty);
+    assert!(canonical.functions().values().any(|function| function
+        .canonical_text()
+        .contains("list_index=MirListIndexProjectionContract")));
+}
+
+#[test]
+fn canonical_program_gate_rejects_missing_or_stale_list_index_receipt() {
+    let source = "func main() -> i32 { let values = [10, 20]; values[0] }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+
+    let mut missing = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = missing
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::Project {
+                    projection: MirProjection::Index(_),
+                    ..
+                }
+            )
+        })
+        .expect("List projection");
+    let MirInstructionKind::Project {
+        list_index_contract,
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    list_index_contract.take();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner.clone(), missing)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("missing List index receipt must fail before backend");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("no canonical receipt")));
+
+    let bool_ty = canonical
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi == crate::core::mir::types::MirAbiClass::Bool).then(|| id.clone())
+        })
+        .expect("bool TypeDesc");
+    let mut stale = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = stale
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::Project {
+                    projection: MirProjection::Index(_),
+                    ..
+                }
+            )
+        })
+        .expect("List projection");
+    let MirInstructionKind::Project {
+        list_index_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    receipt.element_ty = bool_ty;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, stale)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("stale List index receipt must fail before backend");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("List index projection receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
 fn non_copy_record_projection_lowers_to_explicit_move_project() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

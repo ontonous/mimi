@@ -193,6 +193,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+                ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -379,6 +380,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+                ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -467,7 +469,22 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         }
         Op::ListPush { ra, rb } => format!("{:04}  {:<16} r{}.push(r{})", pc, name, ra, rb),
         Op::ListPop { rd, ra } => format!("{:04}  {:<16} r{} = r{}.pop()", pc, name, rd, ra),
-        Op::ListGet { rd, ra, rb } => format!("{:04}  {:<16} r{} = r{}[r{}]", pc, name, rd, ra, rb),
+        Op::ListGet {
+            rd,
+            ra,
+            rb,
+            contract,
+        } => format!(
+            "{:04}  {:<16} r{} = r{}[r{}]{}",
+            pc,
+            name,
+            rd,
+            ra,
+            rb,
+            contract
+                .map(|contract| format!(" contract={contract}"))
+                .unwrap_or_default()
+        ),
         Op::ListSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
         Op::Len { rd, ra } => format!("{:04}  {:<16} r{} = len(r{})", pc, name, rd, ra),
         Op::NewTuple { rd, base, arity } => format!(
@@ -976,6 +993,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
             ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
             ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+            ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

@@ -396,8 +396,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 base,
                 projection,
+                list_index_contract,
             } => {
-                let value = self.emit_project(result, base, projection, subject)?;
+                let value = self.emit_project(
+                    result,
+                    base,
+                    projection,
+                    list_index_contract.as_ref(),
+                    subject,
+                )?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::MoveProject {

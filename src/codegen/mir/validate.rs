@@ -483,7 +483,15 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 base,
                 projection,
-            } => self.validate_project(function, result, base, projection, subject),
+                list_index_contract,
+            } => self.validate_project(
+                function,
+                result,
+                base,
+                projection,
+                list_index_contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::MoveProject {
                 result,
                 base,
@@ -819,6 +827,7 @@ impl<'a> NativeMirValidator<'a> {
         result: &MirValueId,
         base: &MirValueId,
         projection: &MirProjection,
+        list_index_contract: Option<&crate::core::mir::types::MirListIndexProjectionContract>,
         subject: &str,
     ) {
         self.validate_value(function, result, "projection result");
@@ -852,15 +861,34 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                     return;
                 };
-                if let Err(message) = self.program.type_catalog().validate_list_index(
-                    &base_value.ty,
-                    &result_value.ty,
-                    &index_value.ty,
-                ) {
+                let Some(receipt) = list_index_contract else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List index projection has no canonical receipt",
+                    ));
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_list_index_projection_receipt(
+                        &base_value.ty,
+                        &index_value.ty,
+                        &result_value.ty,
+                        receipt,
+                    )
+                {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
             MirProjection::Field(_) => {
+                if list_index_contract.is_some() {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List index receipt is attached to a non-index projection",
+                    ));
+                    return;
+                }
                 if let Err(message) = self.program.type_catalog().validate_projection(
                     &base_value.ty,
                     &result_value.ty,

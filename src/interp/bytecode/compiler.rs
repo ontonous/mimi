@@ -2049,6 +2049,7 @@ impl BytecodeCompiler {
                     rd: r_var,
                     ra: r_iter,
                     rb: r_idx,
+                    contract: None,
                 });
 
                 // Guard check.
@@ -4516,6 +4517,7 @@ impl BytecodeCompiler {
                         rd: r_elem,
                         ra: r_subject,
                         rb: r_idx,
+                        contract: None,
                     });
                     let (sub_test, sub_bindings) =
                         self.compile_pattern_test(fc, sub_pat, r_elem)?;
@@ -4617,6 +4619,7 @@ impl BytecodeCompiler {
                         rd: r_elem,
                         ra: r_subject,
                         rb: r_idx,
+                        contract: None,
                     });
                     let (sub_test, sub_bindings) =
                         self.compile_pattern_test(fc, sub_pat, r_elem)?;
@@ -5039,6 +5042,7 @@ impl BytecodeCompiler {
             rd: r_elem,
             ra: r_iter,
             rb: r_idx,
+            contract: None,
         });
         self.bind_pattern(fc, var, r_elem);
         // §6-#57 (audit-2026-08-05) VM parity: register the loop variable's
@@ -5422,6 +5426,7 @@ impl BytecodeCompiler {
                     rd: r_elem,
                     ra: r_list,
                     rb: r_idx,
+                    contract: None,
                 });
                 (r_elem, Root::ListElem { r_list, r_idx })
             }
@@ -5548,6 +5553,7 @@ impl BytecodeCompiler {
             rd,
             ra: r_obj,
             rb: r_idx,
+            contract: None,
         });
         Ok(rd)
     }

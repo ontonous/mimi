@@ -595,6 +595,9 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
         rb: Reg,
+        /// `Some` is mandatory for canonical MIR List projections. `None`
+        /// remains the explicit legacy bytecode compatibility path.
+        contract: Option<ConstIdx>,
     },
     /// ra[rb] = rc (list set)
     ListSet {
@@ -1467,6 +1470,9 @@ pub enum ConstValue {
     /// Canonical tuple projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     TupleProjection(TupleProjectionShape),
+    /// Canonical List index projection receipts encoded for the bytecode
+    /// physical ABI. Legacy ListGet has no receipt and remains separate.
+    ListProjection(ListProjectionShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1508,6 +1514,17 @@ pub struct TupleProjectionShape {
     pub tuple_ty: crate::core::ResolvedTypeId,
     pub index: FieldIdx,
     pub arity: u16,
+}
+
+/// One canonical read-only List index projection in the bytecode physical
+/// contract. The type identities remain attached so the VM cannot treat a
+/// generic list/string/set index as a canonical MIR List operation.
+#[derive(Debug, Clone)]
+pub struct ListProjectionShape {
+    pub list_ty: crate::core::ResolvedTypeId,
+    pub element_ty: crate::core::ResolvedTypeId,
+    pub index_ty: crate::core::ResolvedTypeId,
+    pub result_ty: crate::core::ResolvedTypeId,
 }
 
 impl FunctionProto {

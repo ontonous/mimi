@@ -302,6 +302,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         base: &MirValueId,
         projection: &MirProjection,
+        list_index_contract: Option<&crate::core::mir::types::MirListIndexProjectionContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         if matches!(projection, MirProjection::Dereference) {
@@ -326,10 +327,32 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if let MirProjection::Index(index) = projection {
             let base_ty = self.value_type(base, subject)?;
             let result_ty = self.value_type(result, subject)?;
-            let index_ty = self.value_type(index, subject)?;
             let catalog = self.program.type_catalog();
+            let receipt = list_index_contract.ok_or_else(|| {
+                NativeMirError::new(subject, "List index projection has no canonical receipt")
+            })?;
+            let index_ty = self.value_type(index, subject)?;
+            if receipt.list_ty != base_ty
+                || receipt.element_ty != result_ty
+                || receipt.result_ty != result_ty
+                || receipt.index_ty != index_ty
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "List index projection receipt disagrees with MIR value types",
+                ));
+            }
+            catalog.get(&receipt.index_ty).ok_or_else(|| {
+                NativeMirError::new(subject, "List index receipt TypeDesc is absent")
+            })?;
+            catalog.get(&receipt.element_ty).ok_or_else(|| {
+                NativeMirError::new(subject, "List element receipt TypeDesc is absent")
+            })?;
+            catalog.get(&receipt.list_ty).ok_or_else(|| {
+                NativeMirError::new(subject, "List source receipt TypeDesc is absent")
+            })?;
             catalog
-                .validate_list_index(&base_ty, &result_ty, &index_ty)
+                .validate_list_index_projection_receipt(&base_ty, &index_ty, &result_ty, receipt)
                 .map_err(|message| NativeMirError::new(subject, message))?;
             let kind = native_list_kind(catalog, &base_ty)?;
             let index_desc = catalog

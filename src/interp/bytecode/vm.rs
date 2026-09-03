@@ -1674,6 +1674,7 @@ impl BytecodeVM {
                         | Some(ConstValue::VariantShapes(_))
                         | Some(ConstValue::RecordProjection(_))
                         | Some(ConstValue::TupleProjection(_))
+                        | Some(ConstValue::ListProjection(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2042,7 +2043,19 @@ impl BytecodeVM {
                     };
                     self.set_reg(rd, popped);
                 }
-                Op::ListGet { rd, ra, rb } => {
+                Op::ListGet {
+                    rd,
+                    ra,
+                    rb,
+                    contract,
+                } => {
+                    if let Some(shape) = self.list_projection_contract(contract)? {
+                        Self::validate_canonical_list_projection(
+                            self.get_reg(ra),
+                            &shape,
+                            "list get",
+                        )?;
+                    }
                     let idx_raw = self.get_int(rb)?;
                     // Borrow the collection, extract only the element (avoid cloning entire list).
                     // B-2 (Wave-2): index-out-of-bounds is constructed as
@@ -4543,6 +4556,59 @@ impl BytecodeVM {
         Ok(Some(shape))
     }
 
+    /// Decode the optional canonical List projection receipt. `None` is the
+    /// explicit legacy ListGet compatibility path; canonical MIR always
+    /// supplies the receipt before VM dispatch.
+    fn list_projection_contract(
+        &self,
+        contract: Option<ConstIdx>,
+    ) -> Result<Option<crate::interp::bytecode::instr::ListProjectionShape>, InterpError> {
+        let Some(contract_idx) = contract else {
+            return Ok(None);
+        };
+        match self.program.functions[self.cur_frame().proto_idx as usize]
+            .constants
+            .get(contract_idx as usize)
+        {
+            Some(ConstValue::ListProjection(shape)) => Ok(Some(shape.clone())),
+            Some(_) => Err(InterpError::new(format!(
+                "list projection: contract constant {} is not a ListProjection",
+                contract_idx
+            ))),
+            None => Err(InterpError::new(format!(
+                "list projection: contract constant {} is absent",
+                contract_idx
+            ))),
+        }
+    }
+
+    fn validate_canonical_list_projection(
+        value: &Value,
+        shape: &crate::interp::bytecode::instr::ListProjectionShape,
+        operation: &str,
+    ) -> Result<(), InterpError> {
+        if !matches!(value, Value::List(_)) {
+            return Err(InterpError::new(format!(
+                "{operation}: canonical projection requires a List source"
+            )));
+        }
+        if shape.list_ty.as_str().is_empty()
+            || shape.element_ty.as_str().is_empty()
+            || shape.index_ty.as_str().is_empty()
+            || shape.result_ty.as_str().is_empty()
+        {
+            return Err(InterpError::new(
+                "list projection: canonical receipt contains an empty type identity",
+            ));
+        }
+        if shape.element_ty != shape.result_ty {
+            return Err(InterpError::new(
+                "list projection: receipt element and result types disagree",
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate a canonical tuple source before the VM reads it. The runtime
     /// tuple remains a physical vector, but its arity and selected slot come
     /// from the MIR receipt rather than from inferred vector shape.
@@ -4837,6 +4903,7 @@ impl BytecodeVM {
             ConstValue::VariantShapes(_) => Value::Unit,
             ConstValue::RecordProjection(_) => Value::Unit,
             ConstValue::TupleProjection(_) => Value::Unit,
+            ConstValue::ListProjection(_) => Value::Unit,
         }
     }
 

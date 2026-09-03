@@ -1334,13 +1334,70 @@ fn eval_instruction(
             result,
             base,
             projection,
+            list_index_contract,
         } => {
             let value = state
                 .values
                 .get(base)
                 .cloned()
                 .ok_or_else(|| format!("MIR projection base '{}' is not defined", base))?;
-            let value = if matches!(projection, MirProjection::Dereference) {
+            let value = if let MirProjection::Index(index) = projection {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .ok_or_else(|| format!("MIR List projection base '{}' is absent", base))?
+                    .ty
+                    .clone();
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| format!("MIR List projection result '{}' is absent", result))?
+                    .ty
+                    .clone();
+                let index_ty = function
+                    .values
+                    .get(index)
+                    .ok_or_else(|| format!("MIR List index '{}' is absent", index))?
+                    .ty
+                    .clone();
+                let receipt = list_index_contract.as_ref().ok_or_else(|| {
+                    "MIR List index projection has no canonical receipt".to_string()
+                })?;
+                catalog.validate_list_index_projection_receipt(
+                    &base_ty, &index_ty, &result_ty, receipt,
+                )?;
+                let SymbolicValue::List { length } =
+                    state.values.get(base).cloned().ok_or_else(|| {
+                        format!("MIR List projection base '{}' is not defined", base)
+                    })?
+                else {
+                    return Err("MIR List projection base is not a symbolic List".into());
+                };
+                let index_value = state
+                    .values
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("MIR List index '{}' is not defined", index))?;
+                let raw = match index_value {
+                    SymbolicValue::Int(raw) => raw,
+                    _ => return Err("MIR List index is not a symbolic signed integer".into()),
+                };
+                let zero = Int::from_i64(0);
+                let length_as_int = length.clone();
+                let non_negative = raw.ge(&zero);
+                let forward = Bool::and(&[&non_negative, &raw.lt(&length_as_int)]);
+                let negative = raw.lt(&zero);
+                let backward = Bool::and(&[&negative, &raw.ge(&length_as_int.unary_minus())]);
+                let in_bounds = Bool::or(&[&forward, &backward]);
+                add_definedness(state, in_bounds, "E0803")?;
+                let (projected, constraints) = symbolic_value_for_type(
+                    catalog,
+                    &result_ty,
+                    &format!("mir.project.{}", result),
+                )?;
+                state.constraints.extend(constraints);
+                projected
+            } else if matches!(projection, MirProjection::Dereference) {
                 let base_ty = function
                     .values
                     .get(base)
@@ -1363,6 +1420,11 @@ fn eval_instruction(
                 }
                 value
             } else {
+                if list_index_contract.is_some() {
+                    return Err(
+                        "MIR List index receipt is attached to a non-index projection".into(),
+                    );
+                }
                 symbolic_project(value, projection)?
             };
             ensure_result_shape(function, catalog, result, &value)?;

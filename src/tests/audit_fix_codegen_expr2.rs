@@ -1210,7 +1210,10 @@ fn audit1j_set_function_form_receipt() {
 /// while canonical MIR keeps the concrete tuple/list instance outside the
 /// current scalar generic contract until unified monomorphization and aggregate
 /// ABI/glue are explicit. Its aggregate `println` also makes the whole graph
-/// an explicit mixed compatibility input.
+/// an explicit mixed compatibility input. The list projection admission now
+/// reports the more precise Copy-scalar TypeDesc boundary before generic
+/// instance materialization; keep that category stable instead of matching
+/// backend-specific type identities.
 #[test]
 fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
     if !can_link() {
@@ -1235,7 +1238,7 @@ fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
         }
     "#,
         "7\n9\n[[(1, 2), (3, 4)]]",
-        Some("generic MIR instance argument is outside scalar contract"),
+        Some("outside the canonical Copy scalar contract"),
     );
 }
 

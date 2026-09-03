@@ -643,6 +643,18 @@ pub struct MirTupleProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for one canonical read-only List index
+/// projection.  The source List, element, index operand, and result identity
+/// are checker-owned facts; consumers must not recover them from a runtime
+/// vector, handle, or backend ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirListIndexProjectionContract {
+    pub list_ty: ResolvedTypeId,
+    pub element_ty: ResolvedTypeId,
+    pub index_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -2820,6 +2832,52 @@ impl MirTypeCatalog {
                 "List index operand type '{}' is outside the signed Copy scalar contract",
                 index_ty.as_str()
             ));
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete TypeDesc receipt for a read-only List index
+    /// projection.  This is the only constructor for the canonical index
+    /// receipt; bytecode/native/verifier consumers must receive its result
+    /// from the MIR instruction rather than reconstructing it.
+    pub fn validated_list_index_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        index_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirListIndexProjectionContract, String> {
+        self.validate_list_index(base_ty, result_ty, index_ty)?;
+        let base = self
+            .get(base_ty)
+            .ok_or_else(|| format!("List index base type '{}' is absent", base_ty.as_str()))?;
+        let MirLayout::List { element } = &base.layout else {
+            return Err(format!(
+                "List index base type '{}' has no canonical List layout",
+                base_ty.as_str()
+            ));
+        };
+        Ok(MirListIndexProjectionContract {
+            list_ty: base_ty.clone(),
+            element_ty: element.clone(),
+            index_ty: index_ty.clone(),
+            result_ty: result_ty.clone(),
+        })
+    }
+
+    /// Validate a materialized List index receipt against the checker-owned
+    /// TypeDesc graph.  A stale or forged receipt is an invalid MIR shape and
+    /// must be rejected before any backend is invoked.
+    pub fn validate_list_index_projection_receipt(
+        &self,
+        base_ty: &ResolvedTypeId,
+        index_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirListIndexProjectionContract,
+    ) -> Result<(), String> {
+        let expected =
+            self.validated_list_index_projection_contract(base_ty, index_ty, result_ty)?;
+        if receipt != &expected {
+            return Err("List index projection receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }

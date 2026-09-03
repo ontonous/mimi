@@ -1193,6 +1193,7 @@ impl<'a> Lowerer<'a> {
                                 result: result.clone(),
                                 base: local,
                                 projection: super::MirProjection::Dereference,
+                                list_index_contract: None,
                             },
                         );
                     } else if place.projections.is_empty() {
@@ -1226,6 +1227,7 @@ impl<'a> Lowerer<'a> {
                                 result: result.clone(),
                                 base: local,
                                 projection,
+                                list_index_contract: None,
                             },
                         );
                     } else {
@@ -1303,6 +1305,15 @@ impl<'a> Lowerer<'a> {
                         super::MirProjection::Dereference
                     }
                 };
+                let list_index_contract = match &projection {
+                    super::MirProjection::Index(index) => self.list_index_projection_contract(
+                        &expression.node_id,
+                        &base,
+                        index,
+                        &result,
+                    ),
+                    _ => None,
+                };
                 if self.can_move_project(&base, &result, &projection) {
                     self.emit(
                         &expression.node_id,
@@ -1321,6 +1332,7 @@ impl<'a> Lowerer<'a> {
                             result: result.clone(),
                             base,
                             projection,
+                            list_index_contract,
                         },
                     );
                 }
@@ -2194,6 +2206,42 @@ impl<'a> Lowerer<'a> {
         type_catalog
             .validate_move_projection(&base_value.ty, &result_value.ty, projection)
             .is_ok()
+    }
+
+    fn list_index_projection_contract(
+        &mut self,
+        node_id: &NodeId,
+        base: &MirValueId,
+        index: &MirValueId,
+        result: &MirValueId,
+    ) -> Option<super::types::MirListIndexProjectionContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "List index projection requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some(base_ty) = self.values.get(base).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List index projection base has no MIR type");
+            return None;
+        };
+        let Some(index_ty) = self.values.get(index).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List index projection operand has no MIR type");
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List index projection result has no MIR type");
+            return None;
+        };
+        match type_catalog.validated_list_index_projection_contract(&base_ty, &index_ty, &result_ty)
+        {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                self.error(node_id, message);
+                None
+            }
+        }
     }
 
     fn move_projection_for_place(
