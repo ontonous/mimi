@@ -346,6 +346,15 @@ pub enum MirInstructionKind {
         base: MirValueId,
         projection: MirProjection,
     },
+    /// Consume a non-Copy record, move one owned String field out, and drop
+    /// every residual sibling according to the attached TypeDesc receipt.
+    /// This is distinct from `MoveProject`, which admits only Copy siblings.
+    MoveProjectDrop {
+        result: MirValueId,
+        base: MirValueId,
+        projection: MirProjection,
+        contract: Option<types::MirRecordMoveProjectionDropContract>,
+    },
     /// Read one payload field from the checker-selected active variant.
     /// Unlike a switch binding, this node has no arm-level tag proof, so the
     /// TypeDesc receipt carries the discriminant and explicit active-variant
@@ -1508,6 +1517,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Borrow { result, .. }
         | MirInstructionKind::Project { result, .. }
         | MirInstructionKind::MoveProject { result, .. }
+        | MirInstructionKind::MoveProjectDrop { result, .. }
         | MirInstructionKind::VariantProject { result, .. }
         | MirInstructionKind::VariantProjectMove { result, .. }
         | MirInstructionKind::Construct { result, .. }
@@ -1556,6 +1566,7 @@ fn instruction_consumes_owned_string(
         | MirInstructionKind::Borrow { source, .. }
         | MirInstructionKind::Project { base: source, .. }
         | MirInstructionKind::MoveProject { base: source, .. }
+        | MirInstructionKind::MoveProjectDrop { base: source, .. }
         | MirInstructionKind::VariantPredicate {
             variant: source, ..
         }
@@ -1660,6 +1671,18 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             base,
             projection,
         } => format!("move_project {result} <- {base}.{projection:?}"),
+        MirInstructionKind::MoveProjectDrop {
+            result,
+            base,
+            projection,
+            contract,
+        } => format!(
+            "move_project_drop {result} <- {base}.{projection:?}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [record_move_drop={contract:?}]"))
+                .unwrap_or_default()
+        ),
         MirInstructionKind::VariantProject {
             result,
             base,
@@ -2171,6 +2194,30 @@ impl<'a> MirValidator<'a> {
                             "record move projection field identity is empty",
                         );
                     }
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
+            MoveProjectDrop {
+                result,
+                base,
+                projection,
+                contract,
+            } => {
+                self.use_value(base);
+                if let MirProjection::Index(index) = projection {
+                    self.use_value(index);
+                }
+                if !matches!(projection, MirProjection::Field(_)) {
+                    self.error(
+                        result.to_string(),
+                        "record move/drop projection requires a direct field projection",
+                    );
+                }
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "record move/drop projection has no canonical residual receipt",
+                    );
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
@@ -2687,6 +2734,14 @@ impl<'a> MirValidator<'a> {
             }
             MirInstructionKind::VariantProject { base, .. } => uses.push(base.clone()),
             MirInstructionKind::VariantProjectMove { base, .. } => uses.push(base.clone()),
+            MirInstructionKind::MoveProjectDrop {
+                base, projection, ..
+            } => {
+                uses.push(base.clone());
+                if let MirProjection::Index(index) = projection {
+                    uses.push(index.clone());
+                }
+            }
             MirInstructionKind::Construct { fields, .. } => {
                 uses.extend(fields.iter().cloned());
             }

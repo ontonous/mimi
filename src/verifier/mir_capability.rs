@@ -482,6 +482,11 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} MoveProject is outside the verifier capability"
                 ));
             }
+            MirInstructionKind::MoveProjectDrop { .. } => {
+                self.error(format!(
+                    "{subject} MoveProjectDrop is outside the verifier capability"
+                ));
+            }
             MirInstructionKind::VariantProject {
                 result,
                 base,

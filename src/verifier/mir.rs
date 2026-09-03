@@ -383,8 +383,10 @@ fn symbolic_value_for_type(
             vec![length.ge(Int::from_i64(0))],
         ));
     }
-    let linear_record = descriptor.ownership == MirOwnership::Linear
-        && matches!(&descriptor.layout, MirLayout::Record { .. })
+    let non_copy_record = matches!(
+        descriptor.ownership,
+        MirOwnership::Move | MirOwnership::Linear
+    ) && matches!(&descriptor.layout, MirLayout::Record { .. })
         && descriptor.abi == MirAbiClass::Aggregate
         && descriptor.glue.move_out == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.glue.clone == crate::core::mir::types::MirGlueKind::Aggregate
@@ -394,10 +396,10 @@ fn symbolic_value_for_type(
     let move_owned_tuple = matches!(descriptor.layout, MirLayout::Tuple(_))
         && catalog.validate_recursive_tuple_abi(ty).is_ok();
     if (descriptor.ownership != MirOwnership::Copy
-        && !linear_record
+        && !non_copy_record
         && !move_owned_variant
         && !move_owned_tuple)
-        || (!linear_record
+        || (!non_copy_record
             && !move_owned_variant
             && !move_owned_tuple
             && (descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
@@ -1881,6 +1883,60 @@ fn eval_instruction(
                 return Err("MIR move projection base disagrees with TypeDesc".into());
             }
             let projected = symbolic_project(base_value, &MirProjection::Field(receipt.field))?;
+            ensure_result_shape(function, catalog, result, &projected)?;
+            state.values.insert(result.clone(), projected);
+        }
+        MirInstructionKind::MoveProjectDrop {
+            result,
+            base,
+            projection,
+            contract,
+        } => {
+            let base_ty = instruction_value_type(function, base, "move/drop projection base")?;
+            let result_ty =
+                instruction_value_type(function, result, "move/drop projection result")?;
+            let MirProjection::Field(field) = projection else {
+                return Err("MIR move/drop projection requires a direct record field".into());
+            };
+            let Some(receipt) = contract.as_ref() else {
+                return Err("MIR move/drop projection has no canonical residual receipt".into());
+            };
+            catalog.validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)?;
+            if receipt.projection.field != *field {
+                return Err("MIR move/drop projection field disagrees with its receipt".into());
+            }
+            let base_value = state.values.remove(base).ok_or_else(|| {
+                format!("MIR move/drop projection base '{}' is not defined", base)
+            })?;
+            let SymbolicValue::Record {
+                nominal,
+                mut fields,
+            } = base_value
+            else {
+                return Err("MIR move/drop projection base is not a symbolic record".into());
+            };
+            if nominal != receipt.projection.nominal {
+                return Err("MIR move/drop projection nominal disagrees with TypeDesc".into());
+            }
+            if fields.len() != receipt.projection.arity {
+                return Err("MIR move/drop projection record arity disagrees with TypeDesc".into());
+            }
+            let projected = fields
+                .remove(&receipt.projection.field)
+                .ok_or_else(|| "MIR move/drop projection selected field is absent".to_string())?;
+            for residual in &receipt.residual {
+                fields.remove(&residual.id).ok_or_else(|| {
+                    format!(
+                        "MIR move/drop projection residual field '{}' is absent",
+                        residual.name
+                    )
+                })?;
+            }
+            if !fields.is_empty() {
+                return Err(
+                    "MIR move/drop projection has fields outside its TypeDesc receipt".into(),
+                );
+            }
             ensure_result_shape(function, catalog, result, &projected)?;
             state.values.insert(result.clone(), projected);
         }
@@ -3642,6 +3698,25 @@ mod tests {
             .expect("project verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
         assert!(result.message.contains("trap 'E0800'"), "{result:?}");
+    }
+
+    #[test]
+    fn verifier_proves_record_move_drop_projection_from_canonical_mir() {
+        let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+        let results = verify_program(&fixture.program, "record-move-drop-project".into())
+            .expect("record move/drop projection verification");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == fixture.function.0)
+            .expect("project verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{result:?}"
+        );
+        assert!(result
+            .message
+            .contains("canonical MIR ensures contract proven"));
     }
 
     #[test]

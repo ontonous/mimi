@@ -771,6 +771,31 @@ pub struct MirVariantCallVariant {
     pub payload_arity: usize,
 }
 
+/// One canonical residual field that is consumed by a record projection with
+/// explicit drop.  The field name/identity and declaration index come from
+/// TypeDesc; `glue` is copied from the child descriptor so a consumer cannot
+/// silently discard a non-Copy sibling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirRecordResidualDrop {
+    pub id: NodeId,
+    pub name: String,
+    pub index: usize,
+    pub ty: ResolvedTypeId,
+    pub glue: MirGlueKind,
+}
+
+/// Complete receipt for consuming one owned record field while dropping every
+/// sibling.  Unlike the older `MoveProject` contract, this is an explicit
+/// full-consumption shape: the selected field moves out and `residual` is the
+/// canonical drop schedule for the remainder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirRecordMoveProjectionDropContract {
+    pub source_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub projection: MirRecordProjectionContract,
+    pub residual: Vec<MirRecordResidualDrop>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -3552,6 +3577,129 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Materialize a full-consumption record projection that moves one owned
+    /// String field and explicitly drops all sibling fields.  This opens only
+    /// the residual proof; it does not weaken the older `MoveProject` node,
+    /// whose no-residual contract still requires Copy siblings.
+    pub fn validated_record_move_projection_drop_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirRecordMoveProjectionDropContract, String> {
+        let source = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "record move/drop projection source type '{}' is absent",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { fields, .. } = &source.layout else {
+            return Err("record move/drop projection requires a record product base".into());
+        };
+        if fields.len() < 2 {
+            return Err(
+                "record move/drop projection requires at least one residual sibling field".into(),
+            );
+        }
+        if source.ownership == MirOwnership::Copy {
+            return Err("record move/drop projection base must be non-Copy".into());
+        }
+        self.validate_glue(source_ty, MirGlueOperation::MoveOut)?;
+        self.validate_aggregate_glue(source_ty, MirGlueOperation::Drop)?;
+        let projection = self
+            .validated_record_field_projection_contract(source_ty, field_id, result_ty)
+            .map_err(|message| {
+                message.replacen("record projection", "record move/drop projection", 1)
+            })?;
+        let selected = fields
+            .iter()
+            .position(|field| field.id == projection.field)
+            .ok_or_else(|| {
+                "record move/drop projection field is absent from TypeDesc".to_string()
+            })?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "record move/drop projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if result.ownership != MirOwnership::Move
+            || result.glue.move_out != MirGlueKind::OwnedString
+            || result.glue.clone != MirGlueKind::OwnedString
+            || result.glue.drop != MirGlueKind::OwnedString
+        {
+            return Err(
+                "record move/drop projection result requires owned String Move/Clone/Drop glue"
+                    .into(),
+            );
+        }
+        let drop_plan = self
+            .get(source_ty)
+            .and_then(|descriptor| descriptor.drop_plan.as_ref())
+            .ok_or_else(|| "record move/drop projection has no canonical drop plan".to_string())?;
+        let residual = drop_plan
+            .fields
+            .iter()
+            .filter(|field| field.index != selected)
+            .map(|field| {
+                let descriptor = fields.get(field.index).ok_or_else(|| {
+                    "record move/drop projection residual index is outside TypeDesc fields"
+                        .to_string()
+                })?;
+                if descriptor.ty != field.ty {
+                    return Err(
+                        "record move/drop projection residual type disagrees with drop plan".into(),
+                    );
+                }
+                Ok(MirRecordResidualDrop {
+                    id: descriptor.id.clone(),
+                    name: descriptor.name.clone(),
+                    index: field.index,
+                    ty: field.ty.clone(),
+                    glue: field.glue,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if residual.is_empty() {
+            return Err("record move/drop projection has no residual drop fields".into());
+        }
+        if !residual.iter().any(|field| field.glue != MirGlueKind::Noop) {
+            return Err(
+                "record move/drop projection residual has no non-Copy drop obligation".into(),
+            );
+        }
+        Ok(MirRecordMoveProjectionDropContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection,
+            residual,
+        })
+    }
+
+    /// Validate a record move/drop receipt against the complete TypeDesc
+    /// residual schedule before any execution backend sees it.
+    pub fn validate_record_move_projection_drop_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirRecordMoveProjectionDropContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty || receipt.result_ty != *result_ty {
+            return Err(
+                "record move/drop projection receipt disagrees with MIR value types".into(),
+            );
+        }
+        let expected = self.validated_record_move_projection_drop_contract(
+            source_ty,
+            &receipt.projection.field,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err("record move/drop projection receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
     /// Validate a place load one projection at a time.  This keeps lvalue
     /// projection type facts in MIR's TypeDesc contract instead of asking a
     /// backend to rediscover them from `ResolvedPlace` names.
@@ -6307,6 +6455,46 @@ mod tests {
         let error = catalog
             .validate_variant_move_projection_trap_receipt(&option_id, &string_id, &forged)
             .expect_err("Copy projection receipt must not enter consuming move projection");
+        assert!(error.contains("disagrees with TypeDesc"), "{error}");
+    }
+
+    #[test]
+    fn record_move_drop_receipt_carries_complete_residual_drop_plan() {
+        let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+        let catalog = fixture.program.type_catalog();
+        let receipt = catalog
+            .validated_record_move_projection_drop_contract(
+                &fixture.source_ty,
+                &fixture.selected_field,
+                &fixture.result_ty,
+            )
+            .expect("record move/drop receipt");
+        assert_eq!(receipt, fixture.receipt);
+        let result_desc = catalog.get(&receipt.result_ty).expect("result TypeDesc");
+        assert_eq!(result_desc.ownership, MirOwnership::Move);
+        assert_eq!(result_desc.glue.move_out, MirGlueKind::OwnedString);
+        assert_eq!(receipt.projection.field_index, 0);
+        assert_eq!(receipt.residual.len(), 1);
+        assert_eq!(receipt.residual[0].index, 1);
+        assert_eq!(receipt.residual[0].name, "right");
+        assert_eq!(receipt.residual[0].glue, MirGlueKind::OwnedString);
+        catalog
+            .validate_record_move_projection_drop_receipt(
+                &fixture.source_ty,
+                &fixture.result_ty,
+                &receipt,
+            )
+            .expect("receipt round trip");
+
+        let mut forged = receipt.clone();
+        forged.residual[0].glue = MirGlueKind::Noop;
+        let error = catalog
+            .validate_record_move_projection_drop_receipt(
+                &fixture.source_ty,
+                &fixture.result_ty,
+                &forged,
+            )
+            .expect_err("forged residual glue must fail before a backend");
         assert!(error.contains("disagrees with TypeDesc"), "{error}");
     }
 }

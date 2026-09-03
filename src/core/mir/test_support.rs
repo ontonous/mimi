@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use crate::core::ir::{PrimitiveType, ResolvedTypeId};
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::types::{MirLayout, MirTypeKind, MirVariantProjectionTrapContract};
+use crate::core::mir::types::{
+    MirLayout, MirRecordMoveProjectionDropContract, MirTypeKind, MirVariantProjectionTrapContract,
+};
 use crate::core::mir::{
     MirBlock, MirBlockId, MirFunction, MirInstruction, MirInstructionId, MirInstructionKind,
     MirOwnershipSummary, MirTerminator, MirValue, MirValueId,
@@ -278,6 +280,121 @@ pub(crate) fn direct_variant_move_projection_fixture() -> DirectVariantMoveProje
         some,
         none,
         field,
+        receipt,
+    }
+}
+
+/// Canonical fixture for full-consumption record projection.  A `Pair` has two
+/// owned String fields, so moving `left` is only valid when the residual `right`
+/// field is explicitly dropped by the MIR node's TypeDesc receipt.
+#[derive(Debug, Clone)]
+pub(crate) struct DirectRecordMoveDropFixture {
+    pub(crate) program: MirProgram,
+    pub(crate) function: NodeId,
+    pub(crate) source_ty: ResolvedTypeId,
+    pub(crate) result_ty: ResolvedTypeId,
+    pub(crate) selected_field: NodeId,
+    pub(crate) receipt: MirRecordMoveProjectionDropContract,
+}
+
+pub(crate) fn direct_record_move_drop_fixture() -> DirectRecordMoveDropFixture {
+    let source = "type Pair { left: string, right: string }\nfunc project(value: Pair) -> string {\n    ensures: true\n    \"seed\"\n}\nfunc main() -> i32 { 0 }";
+    let tokens = Lexer::new(source).tokenize().expect("record move/drop lex");
+    let file = Parser::new(tokens)
+        .parse_file()
+        .expect("record move/drop parse");
+    let checked = crate::core::check_program(&file).expect("record move/drop check");
+    let canonical = MirProgram::from_checked_program(&checked).expect("record move/drop MIR");
+    let catalog = canonical.type_catalog().clone();
+    let result_ty = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::Primitive(PrimitiveType::String)).then(|| id.clone())
+        })
+        .expect("String TypeDesc");
+    let (source_ty, selected_field) = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            let MirLayout::Record { fields, .. } = &descriptor.layout else {
+                return None;
+            };
+            let selected = fields
+                .iter()
+                .find(|field| field.name == "left" && field.ty == result_ty)?;
+            (fields.len() == 2).then(|| (id.clone(), selected.id.clone()))
+        })
+        .expect("Pair record TypeDesc");
+    let receipt = catalog
+        .validated_record_move_projection_drop_contract(&source_ty, &selected_field, &result_ty)
+        .expect("record move/drop projection receipt");
+    let contracts = canonical
+        .functions()
+        .get(&NodeId("function:project".into()))
+        .expect("project source function")
+        .contracts
+        .clone();
+
+    let input = MirValueId::new("v.input").expect("input value id");
+    let result = MirValueId::new("v.result").expect("result value id");
+    let entry = MirBlockId::new("bb.entry").expect("entry block id");
+    let mut functions = canonical.functions().clone();
+    functions.insert(
+        NodeId("function:project".into()),
+        MirFunction {
+            owner: NodeId("function:project".into()),
+            parameters: vec![input.clone()],
+            result: result_ty.clone(),
+            entry: entry.clone(),
+            values: BTreeMap::from([
+                (
+                    input.clone(),
+                    MirValue {
+                        id: input.clone(),
+                        ty: source_ty.clone(),
+                    },
+                ),
+                (
+                    result.clone(),
+                    MirValue {
+                        id: result.clone(),
+                        ty: result_ty.clone(),
+                    },
+                ),
+            ]),
+            blocks: BTreeMap::from([(
+                entry.clone(),
+                MirBlock {
+                    id: entry,
+                    parameters: Vec::new(),
+                    instructions: vec![MirInstruction {
+                        id: MirInstructionId::new("i.record-move-drop")
+                            .expect("record move/drop instruction id"),
+                        kind: MirInstructionKind::MoveProjectDrop {
+                            result: result.clone(),
+                            base: input,
+                            projection: crate::core::mir::MirProjection::Field(
+                                selected_field.clone(),
+                            ),
+                            contract: Some(receipt.clone()),
+                        },
+                    }],
+                    terminator: MirTerminator::Return {
+                        value: Some(result),
+                    },
+                },
+            )]),
+            contracts,
+            ownership: MirOwnershipSummary::default(),
+        },
+    );
+    let program = MirProgram::with_type_catalog(functions, catalog)
+        .expect("record move/drop program validation");
+    DirectRecordMoveDropFixture {
+        program,
+        function: NodeId("function:project".into()),
+        source_ty,
+        result_ty,
+        selected_field,
         receipt,
     }
 }

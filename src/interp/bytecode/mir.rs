@@ -16,8 +16,8 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
     MirListIndexProjectionContract, MirListOperationContract, MirOwnership,
-    MirRecordProjectionContract, MirTypeDesc, MirTypeKind, MirVariantPredicateContract,
-    MirVariantProjectionTrapContract,
+    MirRecordMoveProjectionDropContract, MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
+    MirVariantPredicateContract, MirVariantProjectionTrapContract,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -27,8 +27,8 @@ use crate::core::NodeId;
 
 use super::instr::{
     BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
-    ListProjectionShape, Op, RecordProjectionShape, Reg, TupleProjectionShape,
-    VariantPredicateShape, VariantShape,
+    ListProjectionShape, Op, RecordMoveDropProjectionShape, RecordProjectionShape,
+    RecordResidualDropShape, Reg, TupleProjectionShape, VariantPredicateShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -505,6 +505,12 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.emit_move_project(result, base, projection);
             }
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection,
+                contract,
+            } => self.emit_move_project_drop(result, base, projection, contract.as_ref()),
             MirInstructionKind::VariantProject {
                 result,
                 base,
@@ -1608,6 +1614,106 @@ impl<'a> FunctionEmitter<'a> {
             ra,
             field: field_idx,
             contract: Some(contract),
+        });
+    }
+
+    fn emit_move_project_drop(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        contract: Option<&MirRecordMoveProjectionDropContract>,
+    ) {
+        let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
+            return;
+        };
+        for value in [result, base] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "record move/drop projection value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let MirProjection::Field(field) = projection else {
+            self.error("record move/drop projection requires a direct field");
+            return;
+        };
+        let Some(receipt) = contract else {
+            self.error("record move/drop projection has no canonical residual receipt");
+            return;
+        };
+        let Some(base_info) = self.function.values.get(base) else {
+            self.error(format!(
+                "record move/drop projection base '{}' is absent",
+                base
+            ));
+            return;
+        };
+        let Some(result_info) = self.function.values.get(result) else {
+            self.error(format!(
+                "record move/drop projection result '{}' is absent",
+                result
+            ));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_record_move_projection_drop_receipt(&base_info.ty, &result_info.ty, receipt)
+        {
+            self.error(format!(
+                "record move/drop projection has no canonical receipt: {message}"
+            ));
+            return;
+        }
+        if field != &receipt.projection.field {
+            self.error("record move/drop projection field disagrees with receipt");
+            return;
+        }
+        let Ok(index) = u16::try_from(receipt.projection.field_index) else {
+            self.error("record move/drop projection field index exceeds bytecode ABI");
+            return;
+        };
+        let Ok(arity) = u16::try_from(receipt.projection.arity) else {
+            self.error("record move/drop projection arity exceeds bytecode ABI");
+            return;
+        };
+        let mut residual = Vec::with_capacity(receipt.residual.len());
+        for field in &receipt.residual {
+            let Ok(index) = u16::try_from(field.index) else {
+                self.error("record move/drop residual field index exceeds bytecode ABI");
+                return;
+            };
+            residual.push(RecordResidualDropShape {
+                field: field.id.clone(),
+                name: field.name.clone(),
+                index,
+                ty: field.ty.clone(),
+                glue: field.glue,
+            });
+        }
+        let contract_idx = self.proto.add_const(ConstValue::RecordMoveDropProjection(
+            RecordMoveDropProjectionShape {
+                base: RecordProjectionShape {
+                    nominal: receipt.projection.nominal.clone(),
+                    field: receipt.projection.field.clone(),
+                    name: receipt.projection.name.clone(),
+                    index,
+                    arity,
+                },
+                residual,
+            },
+        ));
+        let field_idx = self
+            .proto
+            .add_const(ConstValue::Str(receipt.projection.name.clone()));
+        self.proto.emit(Op::RecordMoveDropGet {
+            rd,
+            ra,
+            field: field_idx,
+            contract: contract_idx,
         });
     }
 
@@ -3664,6 +3770,58 @@ mod tests {
             )
             .expect_err("bytecode wrong active variant must trap");
         assert_eq!(error.code(), "E0800");
+    }
+
+    #[test]
+    fn canonical_mir_record_move_drop_project_consumes_and_drops_residual() {
+        let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+        let bytecode = compile_mir_program(&fixture.program).expect("MIR bytecode");
+        let project_proto = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name == fixture.function.0.as_str())
+            .expect("project bytecode function");
+        let contract = project_proto
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::RecordMoveDropGet { contract, .. } => Some(*contract),
+                _ => None,
+            })
+            .expect("record move/drop opcode");
+        let ConstValue::RecordMoveDropProjection(shape) =
+            &project_proto.constants[contract as usize]
+        else {
+            panic!("record move/drop opcode must carry its canonical receipt");
+        };
+        assert_eq!(shape.base.name, "left");
+        assert_eq!(shape.base.index, 0);
+        assert_eq!(shape.base.arity, 2);
+        assert_eq!(shape.residual.len(), 1);
+        assert_eq!(shape.residual[0].name, "right");
+
+        let value = BytecodeVM::new(bytecode)
+            .call_named(
+                fixture.function.0.as_str(),
+                vec![Value::Record(
+                    Some(fixture.receipt.projection.nominal.as_str().to_string()),
+                    std::collections::HashMap::from([
+                        (
+                            "left".into(),
+                            Value::String(std::sync::Arc::new("left".into())),
+                        ),
+                        (
+                            "right".into(),
+                            Value::String(std::sync::Arc::new("right".into())),
+                        ),
+                    ]),
+                )],
+            )
+            .expect("bytecode record move/drop projection");
+        assert!(matches!(
+            value,
+            Value::String(value) if value.as_str() == "left"
+        ));
     }
 
     #[test]

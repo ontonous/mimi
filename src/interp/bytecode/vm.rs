@@ -1673,6 +1673,7 @@ impl BytecodeVM {
                         | Some(ConstValue::StrVec(_))
                         | Some(ConstValue::VariantShapes(_))
                         | Some(ConstValue::RecordProjection(_))
+                        | Some(ConstValue::RecordMoveDropProjection(_))
                         | Some(ConstValue::TupleProjection(_))
                         | Some(ConstValue::ListProjection(_))
                         | Some(ConstValue::ListOperation(_))
@@ -2509,6 +2510,57 @@ impl BytecodeVM {
                         other => {
                             return Err(InterpError::new(format!(
                                 "record move get: expected Record, got {}",
+                                other
+                            )))
+                        }
+                    };
+                    self.set_reg(rd, value);
+                }
+                Op::RecordMoveDropGet {
+                    rd,
+                    ra,
+                    field,
+                    contract,
+                } => {
+                    let (field_name, shape) =
+                        Self::record_move_drop_projection_contract(proto, field, contract)?;
+                    Self::validate_canonical_record_move_drop_projection(
+                        self.get_reg(ra),
+                        &field_name,
+                        &shape,
+                    )?;
+                    let source =
+                        std::mem::replace(&mut self.cur_frame_mut().regs[ra as usize], Value::Unit);
+                    let value = match source {
+                        Value::Record(_, mut fields) => {
+                            let projected = fields.remove(&field_name).ok_or_else(|| {
+                                InterpError::new(format!(
+                                    "record move/drop get: record has no field '{}'",
+                                    field_name
+                                ))
+                            })?;
+                            for residual in &shape.residual {
+                                // Removing the residual transfers it into this
+                                // scope; dropping the local Value performs the
+                                // physical child release without a second type
+                                // lookup in the VM.
+                                fields.remove(&residual.name).ok_or_else(|| {
+                                    InterpError::new(format!(
+                                        "record move/drop get: record has no residual field '{}'",
+                                        residual.name
+                                    ))
+                                })?;
+                            }
+                            if !fields.is_empty() {
+                                return Err(InterpError::new(
+                                    "record move/drop get: record has fields outside its canonical receipt",
+                                ));
+                            }
+                            projected
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "record move/drop get: expected Record, got {}",
                                 other
                             )))
                         }
@@ -5016,6 +5068,72 @@ impl BytecodeVM {
         Ok((field_name, Some(shape)))
     }
 
+    fn record_move_drop_projection_contract(
+        proto: &FunctionProto,
+        field: ConstIdx,
+        contract: ConstIdx,
+    ) -> Result<(String, RecordMoveDropProjectionShape), InterpError> {
+        let field_name = match proto.constants.get(field as usize) {
+            Some(ConstValue::Str(name)) => name.clone(),
+            Some(_) => {
+                return Err(InterpError::new(
+                    "record move/drop projection: field constant is not a string",
+                ))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "record move/drop projection: field constant {} is absent",
+                    field
+                )))
+            }
+        };
+        let shape = match proto.constants.get(contract as usize) {
+            Some(ConstValue::RecordMoveDropProjection(shape)) => shape.clone(),
+            Some(_) => {
+                return Err(InterpError::new(format!(
+                    "record move/drop projection: contract constant {} is not a RecordMoveDropProjection",
+                    contract
+                )))
+            }
+            None => {
+                return Err(InterpError::new(format!(
+                    "record move/drop projection: contract constant {} is absent",
+                    contract
+                )))
+            }
+        };
+        if shape.base.name != field_name {
+            return Err(InterpError::new(
+                "record move/drop projection: opcode field disagrees with canonical receipt",
+            ));
+        }
+        if shape.base.index >= shape.base.arity
+            || shape.residual.len() != shape.base.arity.saturating_sub(1) as usize
+        {
+            return Err(InterpError::new(
+                "record move/drop projection: residual receipt does not cover record arity",
+            ));
+        }
+        let mut indices = std::collections::BTreeSet::new();
+        for residual in &shape.residual {
+            if residual.index >= shape.base.arity
+                || residual.index == shape.base.index
+                || !indices.insert(residual.index)
+            {
+                return Err(InterpError::new(
+                    "record move/drop projection: residual receipt has duplicate or selected field",
+                ));
+            }
+        }
+        if (0..shape.base.arity).any(|index| index != shape.base.index && !indices.contains(&index))
+        {
+            return Err(InterpError::new(
+                "record move/drop projection: residual receipt leaves a record field unaccounted",
+            ));
+        }
+        Ok((field_name, shape))
+    }
+
     /// Validate a canonical record source before a backend reads or consumes
     /// it. The runtime representation is still a map, but nominal identity,
     /// declaration-order index, arity, and field presence come from the MIR
@@ -5056,6 +5174,28 @@ impl BytecodeVM {
             )));
         }
         Ok(fields)
+    }
+
+    fn validate_canonical_record_move_drop_projection(
+        value: &Value,
+        field_name: &str,
+        shape: &RecordMoveDropProjectionShape,
+    ) -> Result<(), InterpError> {
+        let fields = Self::validate_canonical_record_projection(
+            value,
+            field_name,
+            &shape.base,
+            "record move/drop get",
+        )?;
+        for residual in &shape.residual {
+            if !fields.contains_key(&residual.name) {
+                return Err(InterpError::new(format!(
+                    "record move/drop get: record has no canonical residual field '{}'",
+                    residual.name
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Resolve the runtime shape for a variant construction and, for
@@ -5230,6 +5370,7 @@ impl BytecodeVM {
             ConstValue::StrVec(_) => Value::Unit,
             ConstValue::VariantShapes(_) => Value::Unit,
             ConstValue::RecordProjection(_) => Value::Unit,
+            ConstValue::RecordMoveDropProjection(_) => Value::Unit,
             ConstValue::TupleProjection(_) => Value::Unit,
             ConstValue::ListProjection(_) => Value::Unit,
             ConstValue::ListOperation(_) => Value::Unit,

@@ -507,6 +507,19 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 projection,
             } => self.validate_move_project(function, result, base, projection, subject),
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection,
+                contract,
+            } => self.validate_move_project_drop(
+                function,
+                result,
+                base,
+                projection,
+                contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::VariantProject {
                 result,
                 base,
@@ -1037,6 +1050,52 @@ impl<'a> NativeMirValidator<'a> {
             projection,
         ) {
             self.errors.push(NativeMirError::new(subject, message));
+            return;
+        }
+        if let Err(message) =
+            validate_native_non_copy_record_type(self.program.type_catalog(), &base_value.ty)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_move_project_drop(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        contract: Option<&crate::core::mir::types::MirRecordMoveProjectionDropContract>,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "record move/drop projection result");
+        self.validate_value(function, base, "record move/drop projection base");
+        let (Some(base_value), Some(result_value)) =
+            (function.values.get(base), function.values.get(result))
+        else {
+            return;
+        };
+        let Some(receipt) = contract else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "record move/drop projection has no canonical residual receipt",
+            ));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_record_move_projection_drop_receipt(&base_value.ty, &result_value.ty, receipt)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+            return;
+        }
+        if !matches!(projection, MirProjection::Field(field) if field == &receipt.projection.field)
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "record move/drop projection requires the receipt's direct record field",
+            ));
             return;
         }
         if let Err(message) =

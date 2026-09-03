@@ -439,6 +439,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_move_project(result, base, projection, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection,
+                contract,
+            } => {
+                let value = self.emit_move_project_drop(
+                    result,
+                    base,
+                    projection,
+                    contract.as_ref(),
+                    subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::VariantProject {
                 result,
                 base,
@@ -2031,6 +2046,25 @@ mod tests {
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("mir_variant_move_project_active"));
         assert!(ir.contains("[E0800] canonical MIR consuming direct variant projection"));
+        assert!(generator.module.get_function("project").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_record_move_drop_residual_glue() {
+        let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_record_move_drop_test");
+        generator
+            .compile_mir_native(&fixture.program)
+            .expect("native record move/drop projection lowering");
+        generator
+            .module
+            .verify()
+            .expect("native record move/drop projection module verifies");
+
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_record_move_drop_residual"));
+        assert!(ir.contains("mir_record_move_drop_project"));
         assert!(generator.module.get_function("project").is_some());
     }
 

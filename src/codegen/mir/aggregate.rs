@@ -535,6 +535,68 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
+    /// Consume a non-Copy record, explicitly dropping every residual field
+    /// described by the TypeDesc receipt, then transfer the selected field.
+    /// The aggregate itself is an immutable SSA value; ownership is expressed
+    /// by the MIR ledger and the child drop glue, never by re-reading LLVM
+    /// layout or silently cloning a sibling.
+    pub(super) fn emit_move_project_drop(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        projection: &MirProjection,
+        contract: Option<&crate::core::mir::types::MirRecordMoveProjectionDropContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let base_ty = self.value_type(base, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        let receipt = contract.ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "record move/drop projection has no canonical residual receipt",
+            )
+        })?;
+        self.program
+            .type_catalog()
+            .validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let MirProjection::Field(field_id) = projection else {
+            return Err(NativeMirError::new(
+                subject,
+                "native MoveProjectDrop requires a direct record field",
+            ));
+        };
+        if field_id != &receipt.projection.field {
+            return Err(NativeMirError::new(
+                subject,
+                "native MoveProjectDrop field disagrees with its receipt",
+            ));
+        }
+        validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let aggregate = self.value(base, subject)?.into_struct_value();
+        for residual in &receipt.residual {
+            let child = self
+                .generator
+                .builder
+                .build_extract_value(
+                    aggregate,
+                    residual.index as u32,
+                    "mir_record_move_drop_residual",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_drop_value(child, &residual.ty, subject)?;
+        }
+        self.generator
+            .builder
+            .build_extract_value(
+                aggregate,
+                receipt.projection.field_index as u32,
+                "mir_record_move_drop_project",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
     /// Read a Copy payload from a direct variant projection.  The canonical
     /// receipt supplies the discriminant, physical tag identity, and trap
     /// classification; the native emitter only materializes the checked

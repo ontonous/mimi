@@ -682,6 +682,14 @@ pub enum Op {
         /// for legacy bytecode only; canonical MIR emission must populate it.
         contract: Option<ConstIdx>,
     },
+    /// rd = consume ra, move one record field out, and drop every residual
+    /// field named by the TypeDesc-derived receipt constant.
+    RecordMoveDropGet {
+        rd: Reg,
+        ra: Reg,
+        field: ConstIdx,
+        contract: ConstIdx,
+    },
     /// ra.field[field_name] = rb — field name is a string constant
     RecordSet {
         ra: Reg,
@@ -1140,6 +1148,7 @@ impl Op {
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
+            | RecordMoveDropGet { rd, .. }
             | VariantTag { rd, .. }
             | VariantPayload { rd, .. }
             | VariantGet { rd, .. }
@@ -1239,6 +1248,7 @@ impl Op {
             | Op::TupleGet { rd, .. }
             | Op::RecordGet { rd, .. }
             | Op::RecordMoveGet { rd, .. }
+            | Op::RecordMoveDropGet { rd, .. }
             | Op::VariantTag { rd, .. }
             | Op::VariantPayload { rd, .. }
             | Op::VariantGet { rd, .. }
@@ -1377,6 +1387,7 @@ impl Op {
             | TupleGet { ra, .. }
             | RecordGet { ra, .. }
             | RecordMoveGet { ra, .. }
+            | RecordMoveDropGet { ra, .. }
             | Len { ra, .. }
             | ListPop { ra, .. }
             | MirSetSize { ra, .. }
@@ -1517,6 +1528,8 @@ pub enum ConstValue {
     /// Canonical record projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     RecordProjection(RecordProjectionShape),
+    /// Canonical record move projection with an explicit residual drop plan.
+    RecordMoveDropProjection(RecordMoveDropProjectionShape),
     /// Canonical tuple projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     TupleProjection(TupleProjectionShape),
@@ -1573,6 +1586,21 @@ pub struct RecordProjectionShape {
     pub name: String,
     pub index: FieldIdx,
     pub arity: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordMoveDropProjectionShape {
+    pub base: RecordProjectionShape,
+    pub residual: Vec<RecordResidualDropShape>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordResidualDropShape {
+    pub field: crate::core::NodeId,
+    pub name: String,
+    pub index: FieldIdx,
+    pub ty: crate::core::ResolvedTypeId,
+    pub glue: crate::core::mir::types::MirGlueKind,
 }
 
 /// One canonical tuple field projection in the bytecode physical contract.

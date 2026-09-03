@@ -385,6 +385,48 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::MoveProjectDrop {
+                            result,
+                            base,
+                            projection,
+                            contract,
+                        } => {
+                            let Some(base_value) = function.values.get(base) else {
+                                continue;
+                            };
+                            let Some(result_value) = function.values.get(result) else {
+                                continue;
+                            };
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "record move/drop projection has no canonical residual receipt"
+                                            .into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog
+                                .validate_record_move_projection_drop_receipt(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    receipt,
+                                )
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                            if !matches!(projection, super::MirProjection::Field(_)) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message:
+                                        "record move/drop projection requires a direct record field"
+                                            .into(),
+                                });
+                            }
+                        }
                         super::MirInstructionKind::VariantProject {
                             result,
                             base,
@@ -2136,6 +2178,7 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         super::MirInstructionKind::Move { source, .. }
         | super::MirInstructionKind::Drop { value: source }
         | super::MirInstructionKind::MoveProject { base: source, .. }
+        | super::MirInstructionKind::MoveProjectDrop { base: source, .. }
         | super::MirInstructionKind::VariantProjectMove { base: source, .. } => {
             vec![source.clone()]
         }
@@ -2300,6 +2343,12 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
             base == needle
                 || matches!(projection, super::MirProjection::Index(index) if index == needle)
         }
+        super::MirInstructionKind::MoveProjectDrop {
+            base, projection, ..
+        } => {
+            base == needle
+                || matches!(projection, super::MirProjection::Index(index) if index == needle)
+        }
         super::MirInstructionKind::VariantProject { base, .. }
         | super::MirInstructionKind::VariantProjectMove { base, .. } => base == needle,
         super::MirInstructionKind::Construct { fields, .. } => fields.iter().any(|v| v == needle),
@@ -2370,6 +2419,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Borrow { result, .. }
         | super::MirInstructionKind::Project { result, .. }
         | super::MirInstructionKind::MoveProject { result, .. }
+        | super::MirInstructionKind::MoveProjectDrop { result, .. }
         | super::MirInstructionKind::VariantProject { result, .. }
         | super::MirInstructionKind::VariantProjectMove { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
@@ -2816,6 +2866,56 @@ impl<'a> MirReferenceInterpreter<'a> {
                     projection,
                     self.program.type_catalog(),
                 )?;
+                values.insert(result.clone(), projected);
+            }
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                contract,
+                ..
+            } => {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "record move/drop projection base has no type",
+                        )
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "record move/drop projection result has no type",
+                        )
+                    })?;
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "record move/drop projection has no canonical residual receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let value = self.take_transfer_value(function, values, base)?;
+                let (projected, residual) = move_project_record_drop_value(
+                    &function.owner,
+                    value,
+                    &base_ty,
+                    &result_ty,
+                    receipt,
+                    self.program.type_catalog(),
+                )?;
+                for (residual_ty, residual_value) in residual {
+                    self.drop_runtime_value(function, &residual_ty, residual_value)?;
+                }
                 values.insert(result.clone(), projected);
             }
             MirInstructionKind::VariantProject {
@@ -4613,6 +4713,81 @@ fn move_project_value(
             .ok_or_else(|| execution_error(function, "move projection field is out of bounds"))?,
         MirRuntimeValue::Unit,
     ))
+}
+
+fn move_project_record_drop_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirRecordMoveProjectionDropContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<
+    (
+        MirRuntimeValue,
+        Vec<(crate::core::ResolvedTypeId, MirRuntimeValue)>,
+    ),
+    MirExecutionError,
+> {
+    type_catalog
+        .validate_record_move_projection_drop_receipt(base_ty, result_ty, receipt)
+        .map_err(|message| execution_error(function, message))?;
+    let MirRuntimeValue::Record {
+        nominal,
+        mut fields,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "record move/drop projection base is not a record",
+        ));
+    };
+    if nominal != receipt.projection.nominal {
+        return Err(execution_error(
+            function,
+            "record move/drop projection nominal disagrees with TypeDesc",
+        ));
+    }
+    if fields.len() != receipt.projection.arity {
+        return Err(execution_error(
+            function,
+            "record move/drop projection runtime arity disagrees with TypeDesc",
+        ));
+    }
+    if receipt.projection.field_index >= fields.len() {
+        return Err(execution_error(
+            function,
+            "record move/drop projection field is out of bounds",
+        ));
+    }
+    let projected = std::mem::replace(
+        &mut fields[receipt.projection.field_index],
+        MirRuntimeValue::Unit,
+    );
+    let mut residual = Vec::with_capacity(receipt.residual.len());
+    for field in &receipt.residual {
+        if field.index >= fields.len() {
+            return Err(execution_error(
+                function,
+                format!(
+                    "record move/drop projection residual field '{}' is out of bounds",
+                    field.name
+                ),
+            ));
+        }
+        let value = std::mem::replace(&mut fields[field.index], MirRuntimeValue::Unit);
+        residual.push((field.ty.clone(), value));
+    }
+    if fields
+        .iter()
+        .any(|field| !matches!(field, MirRuntimeValue::Unit))
+    {
+        return Err(execution_error(
+            function,
+            "record move/drop projection has runtime fields outside its TypeDesc receipt",
+        ));
+    }
+    Ok((projected, residual))
 }
 
 fn evaluate_unary(

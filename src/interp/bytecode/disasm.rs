@@ -87,6 +87,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::UpdateRecord { .. } => "UPDATE_RECORD",
         Op::RecordGet { .. } => "RECORD_GET",
         Op::RecordMoveGet { .. } => "RECORD_MOVE_GET",
+        Op::RecordMoveDropGet { .. } => "RECORD_MOVE_DROP_GET",
         Op::RecordSet { .. } => "RECORD_SET",
         Op::TupleSet { .. } => "TUPLE_SET",
         Op::NewMap { .. } => "NEW_MAP",
@@ -196,6 +197,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+                ConstValue::RecordMoveDropProjection(v) => {
+                    format!("record_move_drop_projection {:?}", v)
+                }
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
@@ -385,6 +389,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+                ConstValue::RecordMoveDropProjection(v) => {
+                    format!("record_move_drop_projection {:?}", v)
+                }
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
@@ -657,6 +664,25 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 contract
                     .map(|idx| format!(" [contract {}]", idx))
                     .unwrap_or_default()
+            )
+        }
+        Op::RecordMoveDropGet {
+            rd,
+            ra,
+            field,
+            contract,
+        } => {
+            let fname = proto
+                .constants
+                .get(*field as usize)
+                .map(|c| match c {
+                    ConstValue::Str(s) => s.as_str(),
+                    _ => "?",
+                })
+                .unwrap_or("?");
+            format!(
+                "{:04}  {:<16} r{} = move/drop r{}.{} [contract {}]",
+                pc, name, rd, ra, fname, contract
             )
         }
         Op::RecordSet { ra, field, rb } => {
@@ -1067,6 +1093,9 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::StrVec(v) => format!("strvec {:?}", v),
             ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
             ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
+            ConstValue::RecordMoveDropProjection(v) => {
+                format!("record_move_drop_projection {:?}", v)
+            }
             ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
             ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             ConstValue::ListOperation(v) => format!("list_operation {:?}", v),

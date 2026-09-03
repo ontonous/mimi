@@ -285,6 +285,98 @@ fn consuming_variant_projection_receipt_is_move_owned_and_fail_closed() {
 }
 
 #[test]
+fn record_move_drop_projection_moves_selected_string_and_drops_residual() {
+    let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+    assert_eq!(fixture.receipt.source_ty, fixture.source_ty);
+    assert_eq!(fixture.receipt.result_ty, fixture.result_ty);
+    assert_eq!(fixture.receipt.projection.field, fixture.selected_field);
+    assert_eq!(fixture.receipt.projection.field_index, 0);
+    assert_eq!(fixture.receipt.residual.len(), 1);
+    assert_eq!(fixture.receipt.residual[0].name, "right");
+    assert_eq!(
+        fixture.receipt.residual[0].glue,
+        crate::core::mir::types::MirGlueKind::OwnedString
+    );
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&fixture.program)
+        .execute(
+            &fixture.function,
+            &[crate::core::mir::reference::MirRuntimeValue::Record {
+                nominal: fixture.receipt.projection.nominal.clone(),
+                fields: vec![
+                    crate::core::mir::reference::MirRuntimeValue::String("left".into()),
+                    crate::core::mir::reference::MirRuntimeValue::String("right".into()),
+                ],
+            }],
+        )
+        .expect("record move/drop projection");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::String("left".into())
+    );
+}
+
+#[test]
+fn record_move_drop_projection_receipt_and_source_use_fail_closed() {
+    let fixture = crate::core::mir::test_support::direct_record_move_drop_fixture();
+    let mut function = fixture
+        .program
+        .functions()
+        .get(&fixture.function)
+        .expect("project function")
+        .clone();
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::MoveProjectDrop { .. }))
+        .expect("record move/drop instruction");
+    let MirInstructionKind::MoveProjectDrop {
+        contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    receipt.residual.clear();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(fixture.function.clone(), function)]),
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("incomplete residual receipt must fail before consumers");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("record move/drop projection receipt disagrees")));
+
+    let mut double_use = fixture
+        .program
+        .functions()
+        .get(&fixture.function)
+        .expect("project function")
+        .clone();
+    double_use
+        .blocks
+        .values_mut()
+        .next()
+        .expect("entry block")
+        .instructions
+        .push(MirInstruction {
+            id: MirInstructionId::new("i.after-record-move-drop").expect("instruction id"),
+            kind: MirInstructionKind::Drop {
+                value: MirValueId::new("v.input").expect("input value id"),
+            },
+        });
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(fixture.function.clone(), double_use)]),
+        fixture.program.type_catalog().clone(),
+    )
+    .expect_err("consumed record source must not be used again");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("use after consuming non-Copy value")));
+}
+
+#[test]
 fn canonical_text_is_deterministic_and_contains_contract_shapes() {
     let function = fixture();
     let first = function.canonical_text();
