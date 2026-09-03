@@ -1525,6 +1525,7 @@ fn eval_instruction(
             result,
             operation,
             list,
+            list_operation_contract,
         } => {
             let result_ty = function
                 .values
@@ -1538,7 +1539,10 @@ fn eval_instruction(
                 .ok_or_else(|| format!("MIR List operation receiver '{}' is absent", list))?
                 .ty
                 .clone();
-            catalog.validate_list_operation(&result_ty, &list_ty, *operation)?;
+            let receipt = list_operation_contract
+                .as_ref()
+                .ok_or_else(|| "MIR List operation has no canonical receipt".to_string())?;
+            catalog.validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)?;
             let SymbolicValue::List { length } = state
                 .values
                 .get(list)

@@ -655,6 +655,17 @@ pub struct MirListIndexProjectionContract {
     pub result_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for one canonical read-only List operation.
+/// The operation, receiver identity, and result identity are checker-owned
+/// facts; consumers must not rediscover them from a List handle or scalar ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirListOperationContract {
+    pub list_ty: ResolvedTypeId,
+    pub element_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub operation: crate::core::mir::MirListOperation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
@@ -1584,6 +1595,53 @@ impl MirTypeCatalog {
             || result.ownership != MirOwnership::Copy
         {
             return Err("List.len result must be a Copy i32 scalar".into());
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete TypeDesc receipt for a canonical List
+    /// operation. This is the only constructor for the operation receipt;
+    /// bytecode/native/verifier consumers must receive its result from MIR.
+    pub fn validated_list_operation_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        operation: crate::core::mir::MirListOperation,
+    ) -> Result<MirListOperationContract, String> {
+        self.validate_list_operation(result_ty, list_ty, operation)?;
+        let descriptor = self.get(list_ty).ok_or_else(|| {
+            format!(
+                "List operation receiver type '{}' is absent",
+                list_ty.as_str()
+            )
+        })?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "List operation receiver type '{}' has no canonical List layout",
+                list_ty.as_str()
+            ));
+        };
+        Ok(MirListOperationContract {
+            list_ty: list_ty.clone(),
+            element_ty: element.clone(),
+            result_ty: result_ty.clone(),
+            operation,
+        })
+    }
+
+    /// Validate a materialized List operation receipt against the checker
+    /// TypeDesc graph. A stale operation/receiver/result tuple is invalid MIR
+    /// and must be rejected before any consumer executes it.
+    pub fn validate_list_operation_receipt(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+        operation: crate::core::mir::MirListOperation,
+        receipt: &MirListOperationContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_list_operation_contract(result_ty, list_ty, operation)?;
+        if receipt != &expected {
+            return Err("List operation receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }

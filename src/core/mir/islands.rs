@@ -1457,6 +1457,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 result,
                 operation,
                 list,
+                list_operation_contract,
             } => {
                 let (Some(result_ty), Some(list_ty)) = (
                     self.value_type(function, result, subject),
@@ -1469,10 +1470,14 @@ impl<'a> ScalarCollectionValidator<'a> {
                         "{subject} List operation {operation:?} is outside {SCALAR_COLLECTION_ISLAND}"
                     ));
                 }
+                let Some(receipt) = list_operation_contract.as_ref() else {
+                    self.error(format!("{subject} List operation has no canonical receipt"));
+                    return;
+                };
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validate_list_operation(&result_ty, &list_ty, *operation)
+                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
                 {
                     self.error(format!("{subject} List operation rejected: {message}"));
                 }

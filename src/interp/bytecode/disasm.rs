@@ -194,6 +194,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
+                ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -381,6 +382,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
+                ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -711,8 +713,17 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::MirSetToList { rd, ra } => {
             format!("{:04}  {:<16} r{} = mir_set_to_list(r{})", pc, name, rd, ra)
         }
-        Op::MirListLen { rd, ra } => {
-            format!("{:04}  {:<16} r{} = mir_list_len(r{})", pc, name, rd, ra)
+        Op::MirListLen { rd, ra, contract } => {
+            format!(
+                "{:04}  {:<16} r{} = mir_list_len(r{}){}",
+                pc,
+                name,
+                rd,
+                ra,
+                contract
+                    .map(|contract| format!(" contract={contract}"))
+                    .unwrap_or_default()
+            )
         }
         Op::NewVariant {
             rd,
@@ -994,6 +1005,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
             ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
             ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
+            ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

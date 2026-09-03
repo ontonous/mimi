@@ -610,6 +610,7 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 operation,
                 list,
+                list_operation_contract,
             } => {
                 self.validate_value(function, result, "List operation result");
                 self.validate_value(function, list, "List operation receiver");
@@ -618,10 +619,18 @@ impl<'a> NativeMirValidator<'a> {
                 else {
                     return;
                 };
-                if let Err(message) = self.program.type_catalog().validate_list_operation(
+                let Some(receipt) = list_operation_contract.as_ref() else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List operation has no canonical receipt",
+                    ));
+                    return;
+                };
+                if let Err(message) = self.program.type_catalog().validate_list_operation_receipt(
                     &result_value.ty,
                     &list_value.ty,
                     *operation,
+                    receipt,
                 ) {
                     self.errors.push(NativeMirError::new(subject, message));
                 }

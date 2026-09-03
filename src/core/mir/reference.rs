@@ -475,6 +475,7 @@ impl MirProgram {
                             result,
                             operation,
                             list,
+                            list_operation_contract,
                         } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
@@ -488,10 +489,18 @@ impl MirProgram {
                                 });
                                 continue;
                             };
-                            if let Err(message) = type_catalog.validate_list_operation(
+                            let Some(receipt) = list_operation_contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "List operation has no canonical receipt".into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_list_operation_receipt(
                                 &result_value.ty,
                                 &list_value.ty,
                                 *operation,
+                                receipt,
                             ) {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
@@ -2659,6 +2668,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 operation,
                 list,
+                list_operation_contract,
             } => {
                 let result_ty = function
                     .values
@@ -2674,9 +2684,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .ok_or_else(|| {
                         self.error(&function.owner, "List operation receiver has no MIR type")
                     })?;
+                let receipt = list_operation_contract.as_ref().ok_or_else(|| {
+                    self.error(&function.owner, "List operation has no canonical receipt")
+                })?;
                 self.program
                     .type_catalog()
-                    .validate_list_operation(&result_ty, &list_ty, *operation)
+                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
                     .map_err(|message| self.error(&function.owner, message))?;
                 let MirRuntimeValue::List(elements) = self.read_value(function, values, list)?
                 else {

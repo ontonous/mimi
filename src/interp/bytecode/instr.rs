@@ -773,6 +773,9 @@ pub enum Op {
     MirListLen {
         rd: Reg,
         ra: Reg,
+        /// `Some` is mandatory for canonical MIR List operations. `None`
+        /// remains the explicit legacy bytecode compatibility path.
+        contract: Option<ConstIdx>,
     },
 
     // ═══════════════════════════════════════════════════════════
@@ -1473,6 +1476,9 @@ pub enum ConstValue {
     /// Canonical List index projection receipts encoded for the bytecode
     /// physical ABI. Legacy ListGet has no receipt and remains separate.
     ListProjection(ListProjectionShape),
+    /// Canonical List operation receipts encoded for the bytecode physical
+    /// ABI. Legacy MirListLen has no receipt and remains separate.
+    ListOperation(ListOperationShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1525,6 +1531,17 @@ pub struct ListProjectionShape {
     pub element_ty: crate::core::ResolvedTypeId,
     pub index_ty: crate::core::ResolvedTypeId,
     pub result_ty: crate::core::ResolvedTypeId,
+}
+
+/// One canonical read-only List operation in the bytecode physical contract.
+/// The operation and type identities remain attached so the VM cannot treat a
+/// generic handle operation as canonical MIR List.len.
+#[derive(Debug, Clone)]
+pub struct ListOperationShape {
+    pub list_ty: crate::core::ResolvedTypeId,
+    pub element_ty: crate::core::ResolvedTypeId,
+    pub result_ty: crate::core::ResolvedTypeId,
+    pub operation: crate::core::mir::MirListOperation,
 }
 
 impl FunctionProto {

@@ -8,13 +8,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         operation: MirListOperation,
         list: &MirValueId,
+        list_operation_contract: Option<&crate::core::mir::types::MirListOperationContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let result_ty = self.value_type(result, subject)?;
         let list_ty = self.value_type(list, subject)?;
+        let receipt = list_operation_contract.ok_or_else(|| {
+            NativeMirError::new(subject, "List operation has no canonical receipt")
+        })?;
         self.program
             .type_catalog()
-            .validate_list_operation(&result_ty, &list_ty, operation)
+            .validate_list_operation_receipt(&result_ty, &list_ty, operation, receipt)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let list_desc = self
             .program
@@ -28,7 +32,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ));
         };
         let list_handle = self.value(list, subject)?.into_pointer_value();
-        let kind = native_list_kind(self.program.type_catalog(), &list_ty)?;
+        let kind = native_list_kind(self.program.type_catalog(), &receipt.list_ty)?;
         let kind_value = self
             .generator
             .context

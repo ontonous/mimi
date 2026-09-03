@@ -1487,6 +1487,12 @@ impl<'a> Lowerer<'a> {
                     }
                 } else if is_list_len_builtin(call, self.type_catalog) {
                     if let Some(list) = arguments.first() {
+                        let list_operation_contract = self.list_operation_contract(
+                            &expression.node_id,
+                            &result,
+                            list,
+                            super::MirListOperation::Len,
+                        );
                         self.emit(
                             &expression.node_id,
                             "list_op",
@@ -1494,6 +1500,7 @@ impl<'a> Lowerer<'a> {
                                 result: result.clone(),
                                 operation: super::MirListOperation::Len,
                                 list: list.clone(),
+                                list_operation_contract,
                             },
                         );
                     } else {
@@ -2236,6 +2243,37 @@ impl<'a> Lowerer<'a> {
         };
         match type_catalog.validated_list_index_projection_contract(&base_ty, &index_ty, &result_ty)
         {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                self.error(node_id, message);
+                None
+            }
+        }
+    }
+
+    fn list_operation_contract(
+        &mut self,
+        node_id: &NodeId,
+        result: &MirValueId,
+        list: &MirValueId,
+        operation: super::MirListOperation,
+    ) -> Option<super::types::MirListOperationContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "List operation requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List operation result has no MIR type");
+            return None;
+        };
+        let Some(list_ty) = self.values.get(list).map(|value| value.ty.clone()) else {
+            self.error(node_id, "List operation receiver has no MIR type");
+            return None;
+        };
+        match type_catalog.validated_list_operation_contract(&result_ty, &list_ty, operation) {
             Ok(contract) => Some(contract),
             Err(message) => {
                 self.error(node_id, message);

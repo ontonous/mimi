@@ -15,8 +15,8 @@ use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, Resolve
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
-    MirListIndexProjectionContract, MirOwnership, MirRecordProjectionContract, MirTypeDesc,
-    MirTypeKind,
+    MirListIndexProjectionContract, MirListOperationContract, MirOwnership,
+    MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -25,8 +25,8 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListProjectionShape, Op,
-    RecordProjectionShape, Reg, TupleProjectionShape, VariantShape,
+    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
+    ListProjectionShape, Op, RecordProjectionShape, Reg, TupleProjectionShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -515,7 +515,8 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 operation,
                 list,
-            } => self.emit_list_op(result, *operation, list),
+                list_operation_contract,
+            } => self.emit_list_op(result, *operation, list, list_operation_contract.as_ref()),
             MirInstructionKind::ConstructSet { result, elements } => {
                 self.emit_set_construct(result, elements)
             }
@@ -1756,6 +1757,7 @@ impl<'a> FunctionEmitter<'a> {
         result: &MirValueId,
         operation: MirListOperation,
         list: &MirValueId,
+        list_operation_contract: Option<&MirListOperationContract>,
     ) {
         let Some(rd) = self.reg(result) else { return };
         let Some(ra) = self.reg(list) else { return };
@@ -1767,19 +1769,39 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("List operation receiver '{}' is absent", list));
             return;
         };
-        if let Err(message) = self.program.type_catalog().validate_list_operation(
+        let Some(receipt) = list_operation_contract else {
+            self.error("List operation has no canonical receipt");
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_list_operation_receipt(
             &result_info.ty,
             &list_info.ty,
             operation,
+            receipt,
         ) {
             self.error(format!("List operation is unsupported: {message}"));
             return;
         }
         match operation {
             MirListOperation::Len => {
-                self.proto.emit(Op::MirListLen { rd, ra });
+                let contract = self.add_list_operation_contract(receipt);
+                self.proto.emit(Op::MirListLen {
+                    rd,
+                    ra,
+                    contract: Some(contract),
+                });
             }
         }
+    }
+
+    fn add_list_operation_contract(&mut self, receipt: &MirListOperationContract) -> ConstIdx {
+        self.proto
+            .add_const(ConstValue::ListOperation(ListOperationShape {
+                list_ty: receipt.list_ty.clone(),
+                element_ty: receipt.element_ty.clone(),
+                result_ty: receipt.result_ty.clone(),
+                operation: receipt.operation,
+            }))
     }
 
     fn emit_tuple_construct(&mut self, result: &MirValueId, fields: &[MirValueId]) {
@@ -3360,12 +3382,8 @@ mod tests {
         let (_, checked) = parse_and_check(source).expect("source type check");
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("List.len must reject unsupported element ownership before a backend");
-        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
-            panic!("unexpected canonical List.len rejection: {error:?}");
-        };
-        assert!(errors.iter().any(|error| {
-            error.message.contains("Copy scalar") || error.message.contains("List construction")
-        }));
+        let error = format!("{error:?}");
+        assert!(error.contains("Copy scalar") || error.contains("List construction"));
     }
 
     #[test]
@@ -3544,6 +3562,64 @@ mod tests {
         assert!(error
             .message()
             .contains("receipt element and result types disagree"));
+    }
+
+    #[test]
+    fn canonical_list_len_emits_a_materialized_bytecode_receipt() {
+        let program = compile(
+            "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }",
+        );
+        let main = &program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirListLen {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List.len contract");
+        let ConstValue::ListOperation(shape) = &main.constants[contract as usize] else {
+            panic!("canonical List.len must carry a ListOperation shape");
+        };
+        assert!(!shape.list_ty.as_str().is_empty());
+        assert!(!shape.element_ty.as_str().is_empty());
+        assert!(!shape.result_ty.as_str().is_empty());
+        assert_eq!(shape.operation, crate::core::mir::MirListOperation::Len);
+        let value = BytecodeVM::new(program)
+            .run_value()
+            .expect("canonical List.len");
+        assert!(matches!(value, Value::Int(3)));
+    }
+
+    #[test]
+    fn canonical_list_len_receipt_rejects_wrong_constant_before_read() {
+        let mut program = (*compile(
+            "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }",
+        ))
+        .clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirListLen {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List.len contract");
+        main.constants[contract as usize] = ConstValue::Unit;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("wrong List.len receipt constant must trap before read");
+        assert!(
+            error.message().contains("contract constant")
+                && error.message().contains("ListOperation")
+        );
     }
 
     #[test]

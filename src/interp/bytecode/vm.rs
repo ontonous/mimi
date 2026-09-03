@@ -1675,6 +1675,7 @@ impl BytecodeVM {
                         | Some(ConstValue::RecordProjection(_))
                         | Some(ConstValue::TupleProjection(_))
                         | Some(ConstValue::ListProjection(_))
+                        | Some(ConstValue::ListOperation(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2688,7 +2689,14 @@ impl BytecodeVM {
                     });
                     self.set_reg(rd, Value::List(std::sync::Arc::new(values)));
                 }
-                Op::MirListLen { rd, ra } => {
+                Op::MirListLen { rd, ra, contract } => {
+                    if let Some(shape) = self.list_operation_contract(contract)? {
+                        Self::validate_canonical_list_operation(
+                            self.get_reg(ra),
+                            &shape,
+                            "List.len",
+                        )?;
+                    }
                     let len = match self.get_reg(ra) {
                         Value::List(values) => values.len(),
                         other => {
@@ -4609,6 +4617,58 @@ impl BytecodeVM {
         Ok(())
     }
 
+    /// Decode the optional canonical List operation receipt. `None` is the
+    /// explicit legacy MirListLen compatibility path; canonical MIR always
+    /// supplies the receipt before VM dispatch.
+    fn list_operation_contract(
+        &self,
+        contract: Option<ConstIdx>,
+    ) -> Result<Option<crate::interp::bytecode::instr::ListOperationShape>, InterpError> {
+        let Some(contract_idx) = contract else {
+            return Ok(None);
+        };
+        match self.program.functions[self.cur_frame().proto_idx as usize]
+            .constants
+            .get(contract_idx as usize)
+        {
+            Some(ConstValue::ListOperation(shape)) => Ok(Some(shape.clone())),
+            Some(_) => Err(InterpError::new(format!(
+                "List.len: contract constant {} is not a ListOperation",
+                contract_idx
+            ))),
+            None => Err(InterpError::new(format!(
+                "List.len: contract constant {} is absent",
+                contract_idx
+            ))),
+        }
+    }
+
+    fn validate_canonical_list_operation(
+        value: &Value,
+        shape: &crate::interp::bytecode::instr::ListOperationShape,
+        operation: &str,
+    ) -> Result<(), InterpError> {
+        if !matches!(value, Value::List(_)) {
+            return Err(InterpError::new(format!(
+                "{operation}: canonical operation requires a List source"
+            )));
+        }
+        if shape.list_ty.as_str().is_empty()
+            || shape.element_ty.as_str().is_empty()
+            || shape.result_ty.as_str().is_empty()
+        {
+            return Err(InterpError::new(
+                "List.len: canonical receipt contains an empty type identity",
+            ));
+        }
+        if shape.operation != crate::core::mir::MirListOperation::Len {
+            return Err(InterpError::new(
+                "List.len: receipt operation is outside the canonical List contract",
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate a canonical tuple source before the VM reads it. The runtime
     /// tuple remains a physical vector, but its arity and selected slot come
     /// from the MIR receipt rather than from inferred vector shape.
@@ -4904,6 +4964,7 @@ impl BytecodeVM {
             ConstValue::RecordProjection(_) => Value::Unit,
             ConstValue::TupleProjection(_) => Value::Unit,
             ConstValue::ListProjection(_) => Value::Unit,
+            ConstValue::ListOperation(_) => Value::Unit,
         }
     }
 

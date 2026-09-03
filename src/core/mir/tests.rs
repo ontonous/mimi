@@ -516,6 +516,109 @@ fn canonical_program_gate_rejects_missing_or_stale_list_index_receipt() {
 }
 
 #[test]
+fn list_len_operation_materializes_type_desc_receipt() {
+    let source =
+        "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    let (list_ty, result_ty, receipt) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                result,
+                list,
+                operation: MirListOperation::Len,
+                list_operation_contract: Some(receipt),
+            } => Some((
+                function.values.get(list).expect("List value").ty.clone(),
+                function.values.get(result).expect("count value").ty.clone(),
+                receipt.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical List.len receipt");
+    assert_eq!(receipt.list_ty, list_ty);
+    assert!(!receipt.element_ty.as_str().is_empty());
+    assert_eq!(receipt.result_ty, result_ty);
+    assert_eq!(receipt.operation, MirListOperation::Len);
+    assert!(function
+        .canonical_text()
+        .contains("list_contract=MirListOperationContract"));
+}
+
+#[test]
+fn canonical_program_gate_rejects_missing_or_stale_list_operation_receipt() {
+    let source = "func main() -> i32 { let values = [10, 20]; len(values) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+
+    let mut missing = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = missing
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::ListOp { .. }))
+        .expect("List operation");
+    let MirInstructionKind::ListOp {
+        list_operation_contract,
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    list_operation_contract.take();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner.clone(), missing)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("missing List operation receipt must fail before backend");
+    assert!(errors.iter().any(|error| error
+        .message
+        .contains("List operation has no canonical receipt")));
+
+    let mut stale = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = stale
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::ListOp { .. }))
+        .expect("List operation");
+    let MirInstructionKind::ListOp {
+        list_operation_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    receipt.result_ty = receipt.list_ty.clone();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        BTreeMap::from([(owner, stale)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("stale List operation receipt must fail before backend");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("List operation receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
 fn non_copy_record_projection_lowers_to_explicit_move_project() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

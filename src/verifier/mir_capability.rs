@@ -498,14 +498,19 @@ impl<'a> CapabilityGate<'a> {
                 result,
                 operation,
                 list,
+                list_operation_contract,
             } => {
                 let (Some(result_ty), Some(list_ty)) =
                     (value_type(function, result), value_type(function, list))
                 else {
                     return;
                 };
-                if let Err(message) =
-                    catalog.validate_list_operation(&result_ty, &list_ty, *operation)
+                let Some(receipt) = list_operation_contract.as_ref() else {
+                    self.error(format!("{subject} List operation has no canonical receipt"));
+                    return;
+                };
+                if let Err(message) = catalog
+                    .validate_list_operation_receipt(&result_ty, &list_ty, *operation, receipt)
                 {
                     self.error(format!("{subject} List operation rejected: {message}"));
                 }
@@ -1319,5 +1324,14 @@ mod tests {
         ));
         validate_mir_capabilities(&program)
             .expect("List index receipt must satisfy verifier capability gate");
+    }
+
+    #[test]
+    fn accepts_list_operation_with_materialized_receipt() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_list_len.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("List operation receipt must satisfy verifier capability gate");
     }
 }

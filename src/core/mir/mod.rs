@@ -341,6 +341,9 @@ pub enum MirInstructionKind {
         result: MirValueId,
         operation: MirListOperation,
         list: MirValueId,
+        /// TypeDesc receipt required for canonical List operations.
+        /// Legacy/non-canonical constructors must not be presented as MIR.
+        list_operation_contract: Option<types::MirListOperationContract>,
     },
     /// Construct a move-owned Set from concrete Copy-scalar elements. The
     /// Set<T> layout, equality representation, and handle glue are supplied
@@ -770,7 +773,14 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             result,
             operation,
             list,
-        } => format!("list_op {result} = {operation:?} {list}"),
+            list_operation_contract,
+        } => format!(
+            "list_op {result} = {operation:?} {list}{}",
+            list_operation_contract
+                .as_ref()
+                .map(|contract| format!(" [list_contract={contract:?}]"))
+                .unwrap_or_default()
+        ),
         MirInstructionKind::ConstructSet { result, elements } => {
             format!("construct_set {result} = {{{}}}", format_values(elements))
         }
@@ -1229,8 +1239,28 @@ impl<'a> MirValidator<'a> {
                 self.values(elements);
                 self.result_at(result, &instruction.id, block, index);
             }
-            ListOp { result, list, .. } => {
+            ListOp {
+                result,
+                operation,
+                list,
+                list_operation_contract,
+            } => {
                 self.use_value(list);
+                if list_operation_contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "List operation has no canonical receipt",
+                    );
+                }
+                if list_operation_contract
+                    .as_ref()
+                    .is_some_and(|contract| contract.operation != *operation)
+                {
+                    self.error(
+                        result.to_string(),
+                        "List operation receipt disagrees with MIR operation",
+                    );
+                }
                 self.result_at(result, &instruction.id, block, index);
             }
             ConstructSet { result, elements } => {

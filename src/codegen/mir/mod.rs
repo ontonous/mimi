@@ -471,8 +471,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 operation,
                 list,
+                list_operation_contract,
             } => {
-                let value = self.emit_list_op(result, *operation, list, subject)?;
+                let value = self.emit_list_op(
+                    result,
+                    *operation,
+                    list,
+                    list_operation_contract.as_ref(),
+                    subject,
+                )?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::ConstructSet { result, elements } => {
@@ -1106,6 +1113,7 @@ mod tests {
                     instruction.kind,
                     crate::core::mir::MirInstructionKind::ListOp {
                         operation: crate::core::mir::MirListOperation::Len,
+                        list_operation_contract: Some(_),
                         ..
                     }
                 )
