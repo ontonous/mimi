@@ -1581,6 +1581,10 @@ impl<'a> Lowerer<'a> {
         } else {
             self.lower_expr(scrutinee)
         };
+        let Some(scrutinee_ty) = self.values.get(&scrutinee).map(|value| value.ty.clone()) else {
+            self.error(node, "match scrutinee has no canonical MIR type");
+            return;
+        };
         let Some(join_id) = self.block_id("match.join", node) else {
             return;
         };
@@ -1613,7 +1617,9 @@ impl<'a> Lowerer<'a> {
             let Some(join_edge) = self.edge_id("match.arm.join", &arm.node_id) else {
                 continue;
             };
-            let Some(bindings) = self.lower_switch_bindings(&arm.pattern, &arm.node_id) else {
+            let Some(bindings) =
+                self.lower_switch_bindings(&arm.pattern, &arm.node_id, &scrutinee_ty)
+            else {
                 continue;
             };
             self.add_block(
@@ -1698,8 +1704,12 @@ impl<'a> Lowerer<'a> {
         &mut self,
         pattern: &ResolvedPattern,
         node: &NodeId,
+        scrutinee_ty: &crate::core::ResolvedTypeId,
     ) -> Option<Vec<MirSwitchBinding>> {
-        let ResolvedPatternKind::Constructor { fields, .. } = &pattern.kind else {
+        let ResolvedPatternKind::Constructor {
+            variant, fields, ..
+        } = &pattern.kind
+        else {
             return Some(Vec::new());
         };
         let mut bindings = Vec::new();
@@ -1717,9 +1727,35 @@ impl<'a> Lowerer<'a> {
                             return None;
                         }
                     };
+                    let Some(parameter_ty) =
+                        self.values.get(&parameter).map(|value| value.ty.clone())
+                    else {
+                        self.error(node, "variant payload binding target has no MIR type");
+                        return None;
+                    };
+                    let Some(type_catalog) = self.type_catalog else {
+                        self.error(
+                            node,
+                            "variant payload binding requires a canonical TypeDesc catalog",
+                        );
+                        return None;
+                    };
+                    let projection = match type_catalog
+                        .validated_variant_payload_projection_contract(
+                            scrutinee_ty,
+                            variant,
+                            field,
+                            &parameter_ty,
+                        ) {
+                        Ok(projection) => projection,
+                        Err(message) => {
+                            self.error(node, message);
+                            return None;
+                        }
+                    };
                     bindings.push(MirSwitchBinding {
                         parameter,
-                        field: field.clone(),
+                        projection,
                     });
                 }
                 ResolvedPatternKind::Binding { .. } => {
@@ -2515,7 +2551,9 @@ mod tests {
             .values()
             .find(|callable| callable.owner.0.ends_with("main"))
             .expect("main callable");
-        let mir = lower_body(&callable.body).expect("Option MIR lowering");
+        let catalog = MirTypeCatalog::from_checked_program(&program).expect("Option TypeDesc");
+        let mir =
+            lower_body_with_type_catalog(&callable.body, &catalog).expect("Option MIR lowering");
         let text = mir.canonical_text();
         assert!(text.contains("construct_variant"));
         assert!(text.contains("Variant"));
@@ -2574,6 +2612,17 @@ mod tests {
             .expect("non-Copy match must use SwitchMove");
         assert_eq!(switch.len(), 2);
         assert_eq!(switch[0].bindings.len(), 1);
+        let projection = &switch[0].bindings[0].projection;
+        assert_eq!(projection.field_index, 0);
+        assert_eq!(projection.arity, 1);
+        assert!(catalog.get(&projection.field_ty).is_some_and(|descriptor| {
+            matches!(
+                descriptor.kind,
+                crate::core::mir::types::MirTypeKind::Primitive(
+                    crate::core::ir::PrimitiveType::String
+                )
+            )
+        }));
         assert!(mir
             .blocks
             .values()

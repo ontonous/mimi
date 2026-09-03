@@ -492,7 +492,10 @@ pub struct MirSwitchArm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirSwitchBinding {
     pub parameter: MirValueId,
-    pub field: NodeId,
+    /// TypeDesc-owned proof of the payload projection. Canonical consumers
+    /// must use this receipt; they may not reconstruct the variant field
+    /// index, arity, or field type from a runtime tag or payload vector.
+    pub projection: types::MirVariantProjectionContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,7 +941,16 @@ fn format_switch_terminator(name: &str, scrutinee: &MirValueId, arms: &[MirSwitc
                     format_values(&arm.arguments),
                     arm.bindings
                         .iter()
-                        .map(|binding| format!("{}<-{:?}", binding.parameter, binding.field))
+                        .map(|binding| {
+                            format!(
+                                "{}<-{:?}[index={},arity={},ty={}]",
+                                binding.parameter,
+                                binding.projection.field,
+                                binding.projection.field_index,
+                                binding.projection.arity,
+                                binding.projection.field_ty.as_str()
+                            )
+                        })
                         .collect::<Vec<_>>()
                 )
             })
@@ -1333,11 +1345,20 @@ impl<'a> MirValidator<'a> {
                     let mut binding_fields = BTreeSet::new();
                     for binding in &arm.bindings {
                         if binding.parameter.as_str().trim().is_empty()
-                            || binding.field.0.trim().is_empty()
+                            || binding.projection.nominal.as_str().trim().is_empty()
+                            || binding.projection.variant.0.trim().is_empty()
+                            || binding.projection.field.0.trim().is_empty()
+                            || binding.projection.field_ty.as_str().trim().is_empty()
                         {
                             self.error(arm.edge.to_string(), "switch binding identity is empty");
                         }
-                        if !binding_fields.insert(&binding.field) {
+                        if binding.projection.field_index >= binding.projection.arity {
+                            self.error(
+                                arm.edge.to_string(),
+                                "switch binding projection index is outside its payload arity",
+                            );
+                        }
+                        if !binding_fields.insert(&binding.projection.field) {
                             self.error(
                                 arm.edge.to_string(),
                                 "switch binding field identity is duplicated",

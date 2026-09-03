@@ -1087,10 +1087,10 @@ impl<'a> CapabilityGate<'a> {
                     }
                     let mut binding_fields = BTreeSet::new();
                     for (index, binding) in arm.bindings.iter().enumerate() {
-                        if !binding_fields.insert(binding.field.clone()) {
+                        if !binding_fields.insert(binding.projection.field.clone()) {
                             self.error(format!(
                                 "{subject} SwitchMove payload field '{}' is bound more than once",
-                                binding.field.0
+                                binding.projection.field.0
                             ));
                         }
                         let Some(target_parameter) =
@@ -1109,11 +1109,11 @@ impl<'a> CapabilityGate<'a> {
                         if let Err(message) = self
                             .program
                             .type_catalog()
-                            .validated_variant_payload_projection_contract(
+                            .validate_variant_payload_projection_receipt(
                                 &scrutinee_ty,
                                 variant_id,
-                                &binding.field,
                                 &parameter.ty,
+                                &binding.projection,
                             )
                         {
                             self.error(format!("{subject} SwitchMove rejected: {message}"));

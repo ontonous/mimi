@@ -2521,6 +2521,15 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant payload arity exceeds bytecode field ABI");
             return;
         }
+        let Some((expected_nominal, _)) = self
+            .program
+            .type_catalog()
+            .variant_layout(scrutinee_ty)
+            .map(|(nominal, variants)| (nominal.to_owned(), variants))
+        else {
+            self.error("variant payload projection has no canonical nominal");
+            return;
+        };
         let Some(shapes) = self.emit_variant_shape_table(scrutinee_ty) else {
             return;
         };
@@ -2537,7 +2546,10 @@ impl<'a> FunctionEmitter<'a> {
             shapes,
         });
         for (index, field) in variant.fields.iter().enumerate().rev() {
-            if !bindings.iter().any(|binding| binding.field == field.id) {
+            if !bindings
+                .iter()
+                .any(|binding| binding.projection.field == field.id)
+            {
                 self.emit_drop_register(payload_base + index as u16, &field.ty);
             }
         }
@@ -2550,22 +2562,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch-move binding target type is absent");
                 return;
             };
-            let projection = match self
-                .program
-                .type_catalog()
-                .validated_variant_payload_projection_contract(
-                    scrutinee_ty,
-                    &variant.id,
-                    &binding.field,
-                    &parameter.ty,
-                ) {
-                Ok(index) => index,
-                Err(message) => {
-                    self.error(message);
-                    return;
-                }
-            };
-            let index = projection.field_index;
+            if binding.projection.variant != variant.id
+                || binding.projection.nominal.as_str() != expected_nominal
+                || binding.projection.field_ty != parameter.ty
+                || binding.projection.arity != variant.fields.len()
+            {
+                self.error("switch-move payload projection receipt disagrees with TypeDesc");
+                return;
+            }
+            let index = binding.projection.field_index;
             if binding.parameter != block.parameters[arguments.len() + binding_index].value {
                 self.error("switch-move binding parameter disagrees with target block parameter");
                 return;
@@ -2729,6 +2734,15 @@ impl<'a> FunctionEmitter<'a> {
         let Some(shapes) = self.emit_variant_shape_table(scrutinee_ty) else {
             return;
         };
+        let Some((expected_nominal, _)) = self
+            .program
+            .type_catalog()
+            .variant_layout(scrutinee_ty)
+            .map(|(nominal, variants)| (nominal.to_owned(), variants))
+        else {
+            self.error("variant payload projection has no canonical nominal");
+            return;
+        };
         let variant_tag = self.proto.add_const(ConstValue::Str(variant.name.clone()));
         let mut sources = Vec::with_capacity(arguments.len() + bindings.len());
         for argument in arguments {
@@ -2754,22 +2768,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch binding target type is absent");
                 return;
             };
-            let projection = match self
-                .program
-                .type_catalog()
-                .validated_variant_payload_projection_contract(
-                    scrutinee_ty,
-                    &variant.id,
-                    &binding.field,
-                    &parameter.ty,
-                ) {
-                Ok(index) => index,
-                Err(message) => {
-                    self.error(message);
-                    return;
-                }
-            };
-            let index = projection.field_index;
+            if binding.projection.variant != variant.id
+                || binding.projection.nominal.as_str() != expected_nominal
+                || binding.projection.field_ty != parameter.ty
+                || binding.projection.arity != variant.fields.len()
+            {
+                self.error("variant payload projection receipt disagrees with TypeDesc");
+                return;
+            }
+            let index = binding.projection.field_index;
             if binding.parameter != block.parameters[arguments.len() + binding_index].value {
                 self.error("switch binding parameter disagrees with target block parameter");
                 return;

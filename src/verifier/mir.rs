@@ -985,17 +985,17 @@ fn explore_variant_switch(
                             binding.parameter
                         )
                     })?;
-                    let projection = catalog.validated_variant_payload_projection_contract(
+                    catalog.validate_variant_payload_projection_receipt(
                         &scrutinee_ty,
                         variant_id,
-                        &binding.field,
                         &parameter.ty,
+                        &binding.projection,
                     )?;
-                    let field_index = projection.field_index;
+                    let field_index = binding.projection.field_index;
                     let field = variant.fields.get(field_index).ok_or_else(|| {
                         format!(
                             "canonical MIR verifier switch payload field '{}' is absent",
-                            binding.field.0
+                            binding.projection.field.0
                         )
                     })?;
                     let value = payload.get(&field.id).cloned().ok_or_else(|| {

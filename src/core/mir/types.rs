@@ -1324,6 +1324,32 @@ impl MirTypeCatalog {
         Ok((variant, field_index))
     }
 
+    /// Validate a materialized receipt against the native flat-Copy
+    /// single-payload policy. The receipt is the input fact; this helper does
+    /// not expose a newly derived index to the native emitter.
+    pub fn validate_flat_copy_payload_projection_receipt(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantProjectionContract,
+    ) -> Result<(), String> {
+        self.validate_variant_payload_projection_receipt(
+            scrutinee_ty,
+            variant_id,
+            result_ty,
+            receipt,
+        )?;
+        let variant = self.validated_flat_copy_variant(scrutinee_ty, variant_id)?;
+        if receipt.field_index != 0 || receipt.arity != 1 || variant.fields.len() != 1 {
+            return Err(format!(
+                "variant '{}' payload projection is outside the single-payload flat Copy contract",
+                variant.name
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate the argument side of the first concrete generic MIR
     /// instance contract.  This is deliberately narrower than the complete
     /// scalar universe: native and MIR verifier must agree on signed i32/i64
@@ -3602,6 +3628,31 @@ impl MirTypeCatalog {
         .map(|contract| contract.field_index)
     }
 
+    /// Validate a payload receipt already materialized in canonical MIR.
+    /// This is the program-boundary check: consumers may carry the receipt
+    /// forward, but must not regenerate it from the TypeDesc independently.
+    pub fn validate_variant_payload_projection_receipt(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantProjectionContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_variant_payload_projection_contract(
+            scrutinee_ty,
+            variant_id,
+            &receipt.field,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err(format!(
+                "variant payload projection receipt for field '{}' disagrees with TypeDesc",
+                receipt.field.0
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate a switch over a canonical variant family.  Exhaustiveness is
     /// part of the MIR contract: either every discriminant is listed exactly
     /// once or the final arm is an explicit default.
@@ -3710,16 +3761,20 @@ impl MirTypeCatalog {
             let (_, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
             let mut bound_fields = BTreeSet::new();
             for binding in &arm.bindings {
-                if !bound_fields.insert(&binding.field) {
+                if !bound_fields.insert(&binding.projection.field) {
                     return Err(format!(
                         "switch-move binding field '{}' is repeated",
-                        binding.field.0
+                        binding.projection.field.0
                     ));
                 }
-                if !variant.fields.iter().any(|field| field.id == binding.field) {
+                if !variant
+                    .fields
+                    .iter()
+                    .any(|field| field.id == binding.projection.field)
+                {
                     return Err(format!(
                         "switch-move binding field '{}' is absent from variant '{}'",
-                        binding.field.0, variant.name
+                        binding.projection.field.0, variant.name
                     ));
                 }
             }

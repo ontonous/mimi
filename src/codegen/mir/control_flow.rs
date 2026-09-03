@@ -459,21 +459,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             if flat_copy {
                 self.program
                     .type_catalog()
-                    .validated_flat_copy_payload_projection(
+                    .validate_flat_copy_payload_projection_receipt(
                         scrutinee_ty,
                         &variant.id,
-                        &bindings[0].field,
                         &parameter.ty,
+                        &bindings[0].projection,
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             } else {
                 self.program
                     .type_catalog()
-                    .validated_variant_payload_projection_contract(
+                    .validate_variant_payload_projection_receipt(
                         scrutinee_ty,
                         &variant.id,
-                        &bindings[0].field,
                         &parameter.ty,
+                        &bindings[0].projection,
                     )
                     .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
             };

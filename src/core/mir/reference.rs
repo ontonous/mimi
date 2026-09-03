@@ -862,11 +862,11 @@ impl MirProgram {
                                     });
                                 }
                                 if let Err(message) = type_catalog
-                                    .validated_variant_payload_projection_contract(
+                                    .validate_variant_payload_projection_receipt(
                                         &scrutinee_value.ty,
                                         variant_id,
-                                        &binding.field,
                                         &parameter.ty,
+                                        &binding.projection,
                                     )
                                 {
                                     errors.push(super::MirValidationError {
@@ -3616,23 +3616,25 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "switch binding parameter disagrees with target block parameter",
                 ));
             }
-            let projection = self
-                .program
-                .type_catalog()
-                .validated_variant_payload_projection_contract(
-                    scrutinee_ty,
-                    actual_variant,
-                    &binding.field,
-                    &parameter.ty,
-                )
-                .map_err(|message| self.error(&function.owner, message))?;
-            let field_index = projection.field_index;
-            let field = payload.get(field_index).cloned().ok_or_else(|| {
-                self.error(
+            if binding.projection.variant != *actual_variant
+                || binding.projection.nominal.as_str() != actual_nominal.as_str()
+                || binding.projection.arity != payload.len()
+                || binding.projection.field_ty != parameter.ty
+            {
+                return Err(self.error(
                     &function.owner,
-                    "runtime variant payload is shorter than TypeDesc",
-                )
-            })?;
+                    "variant payload projection receipt disagrees with runtime value",
+                ));
+            }
+            let field = payload
+                .get(binding.projection.field_index)
+                .cloned()
+                .ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "runtime variant payload is shorter than TypeDesc",
+                    )
+                })?;
             incoming.push(field);
         }
         Ok(incoming)
@@ -3724,18 +3726,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "switch-move binding parameter disagrees with target block parameter",
                 ));
             }
-            let projection = self
-                .program
-                .type_catalog()
-                .validated_variant_payload_projection_contract(
-                    &scrutinee_ty,
-                    &actual_variant,
-                    &binding.field,
-                    &parameter.ty,
-                )
-                .map_err(|message| self.error(&function.owner, message))?;
-            let index = projection.field_index;
-            if bound_indices.insert(binding.field.clone(), index).is_some() {
+            if binding.projection.variant != actual_variant
+                || binding.projection.nominal.as_str() != actual_nominal.as_str()
+                || binding.projection.arity != payload.len()
+                || binding.projection.field_ty != parameter.ty
+            {
+                return Err(self.error(
+                    &function.owner,
+                    "switch-move payload projection receipt disagrees with runtime value",
+                ));
+            }
+            let index = binding.projection.field_index;
+            if bound_indices
+                .insert(binding.projection.field.clone(), index)
+                .is_some()
+            {
                 return Err(self.error(&function.owner, "switch-move binding field is repeated"));
             }
         }
@@ -3757,9 +3762,11 @@ impl<'a> MirReferenceInterpreter<'a> {
             }
         }
         for binding in &arm.bindings {
-            let index = *bound_indices.get(&binding.field).ok_or_else(|| {
-                self.error(&function.owner, "switch-move binding index is absent")
-            })?;
+            let index = *bound_indices
+                .get(&binding.projection.field)
+                .ok_or_else(|| {
+                    self.error(&function.owner, "switch-move binding index is absent")
+                })?;
             let value = bound_values.remove(&index).ok_or_else(|| {
                 self.error(&function.owner, "switch-move binding was consumed twice")
             })?;
@@ -4863,6 +4870,7 @@ mod tests {
             .bindings
             .first_mut()
             .expect("payload binding")
+            .projection
             .field = crate::core::NodeId("builtin:variant:Option::Some/missing".into());
         let errors = MirProgram::with_type_catalog(
             BTreeMap::from([(owner, function)]),
@@ -4873,6 +4881,38 @@ mod tests {
             errors
                 .iter()
                 .any(|error| error.message.contains("absent from variant")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_stale_variant_projection_receipt() {
+        let source =
+            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v, None => 0 } }";
+        let (_, program) = canonical_program_with_main(source);
+        let owner = crate::core::NodeId("function:main".into());
+        let mut function = program.functions().get(&owner).cloned().expect("main");
+        let binding = function
+            .blocks
+            .values_mut()
+            .find_map(|block| match &mut block.terminator {
+                crate::core::mir::MirTerminator::Switch { arms, .. } => {
+                    arms.first_mut().and_then(|arm| arm.bindings.first_mut())
+                }
+                _ => None,
+            })
+            .expect("Some payload binding");
+        binding.projection.nominal =
+            crate::core::ir::NominalTypeId::new("builtin:type:Result").expect("Result nominal");
+        let errors = MirProgram::with_type_catalog(
+            BTreeMap::from([(owner, function)]),
+            program.type_catalog().clone(),
+        )
+        .expect_err("stale projection receipt must fail before execution");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("disagrees with TypeDesc")),
             "{errors:?}"
         );
     }

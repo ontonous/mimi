@@ -1182,12 +1182,12 @@ impl<'a> NativeMirValidator<'a> {
                 MirSwitchCase::Default | MirSwitchCase::Literal(_) => None,
             };
             for (index, binding) in arm.bindings.iter().enumerate() {
-                if !binding_fields.insert(binding.field.clone()) {
+                if !binding_fields.insert(binding.projection.field.clone()) {
                     self.errors.push(NativeMirError::new(
                         subject,
                         format!(
                             "switch payload field '{}' is bound more than once",
-                            binding.field.0
+                            binding.projection.field.0
                         ),
                     ));
                 }
@@ -1210,11 +1210,11 @@ impl<'a> NativeMirValidator<'a> {
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validated_flat_copy_payload_projection(
+                    .validate_flat_copy_payload_projection_receipt(
                         &scrutinee_value.ty,
                         variant_id,
-                        &binding.field,
                         &parameter.ty,
+                        &binding.projection,
                     )
                 {
                     self.errors.push(NativeMirError::new(subject, message));
@@ -1343,12 +1343,12 @@ impl<'a> NativeMirValidator<'a> {
             }
             let mut binding_fields = BTreeSet::new();
             for (index, binding) in arm.bindings.iter().enumerate() {
-                if !binding_fields.insert(binding.field.clone()) {
+                if !binding_fields.insert(binding.projection.field.clone()) {
                     self.errors.push(NativeMirError::new(
                         subject,
                         format!(
                             "switch-move payload field '{}' is bound more than once",
-                            binding.field.0
+                            binding.projection.field.0
                         ),
                     ));
                 }
@@ -1368,11 +1368,11 @@ impl<'a> NativeMirValidator<'a> {
                 if let Err(message) = self
                     .program
                     .type_catalog()
-                    .validated_variant_payload_projection_contract(
+                    .validate_variant_payload_projection_receipt(
                         &scrutinee_value.ty,
                         variant_id,
-                        &binding.field,
                         &parameter.ty,
+                        &binding.projection,
                     )
                 {
                     self.errors.push(NativeMirError::new(subject, message));
