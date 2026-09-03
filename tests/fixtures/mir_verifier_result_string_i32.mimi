@@ -1,0 +1,4 @@
+func main() -> Result<string, i32> {
+    ensures: true
+    Ok("owned")
+}

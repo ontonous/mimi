@@ -1,0 +1,4 @@
+func main() -> Result<string, string> {
+    ensures: true
+    Err("rejected")
+}

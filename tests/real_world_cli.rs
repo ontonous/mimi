@@ -778,6 +778,67 @@ fn canonical_mir_verifier_proves_non_copy_record_move_projection_without_fallbac
 }
 
 #[test]
+fn canonical_mir_verifier_proves_non_copy_result_string_i32_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_result_string_i32.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn Result<string, i32> verifier");
+    assert!(
+        output.status.success(),
+        "Result<string, i32> must be proven by canonical MIR verifier:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(
+        stdout.contains("canonical MIR ensures contract proven"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
+fn canonical_mir_verifier_classifies_result_string_string_without_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_result_string_string_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn rejected Result verifier");
+    assert!(
+        output.status.success(),
+        "trusted-subset rejection must remain a verifier classification:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0/1 verified"), "{stdout}");
+    assert!(
+        stdout.contains("canonical non-Copy Result<string, i32> variant contract"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("flow_ast"),
+        "legacy verifier fallback leaked: {stdout}"
+    );
+}
+
+#[test]
 fn canonical_mir_native_recursive_tuple_glue_matches_mir_run() {
     let fixture = project_root()
         .join("tests")

@@ -3843,6 +3843,156 @@ impl MirTypeCatalog {
         Ok(inner.clone())
     }
 
+    /// Validate the first non-Copy Result variant contract.
+    ///
+    /// This deliberately admits exactly `Result<string, i32>`: the `Ok`
+    /// payload is an owned StringHandle and the `Err` payload is a Copy signed
+    /// i32.  The aggregate ABI, variant identities, discriminants, payload
+    /// identities, and complete recursive Move/Clone/Drop proof are all
+    /// TypeDesc facts.  Other Result payloads remain outside the verifier
+    /// move-variant island until their own consumer matrix is closed.
+    pub fn validate_result_string_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let variants = match &descriptor.layout {
+            MirLayout::Result { variants, .. } => variants,
+            layout => {
+                return Err(format!(
+                    "layout {layout:?} is outside the canonical non-Copy Result<string, i32> variant contract"
+                ));
+            }
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Move
+        {
+            return Err(format!(
+                "variant TypeDesc kind/ABI/ownership ({:?}/{:?}/{:?}) is outside the canonical non-Copy Result<string, i32> variant contract",
+                descriptor.kind, descriptor.abi, descriptor.ownership
+            ));
+        }
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::Aggregate,
+            clone: MirGlueKind::Aggregate,
+            drop: MirGlueKind::Aggregate,
+        };
+        if descriptor.glue != expected
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.variant_drop_plan.is_none()
+        {
+            return Err(
+                "variant TypeDesc aggregate glue/drop plan is incomplete for the canonical non-Copy Result<string, i32> variant contract".into(),
+            );
+        }
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_glue(ty, operation)?;
+        }
+        if variants.len() != 2 {
+            return Err(format!(
+                "Result TypeDesc has {} variants; the canonical non-Copy Result<string, i32> contract requires Ok and Err",
+                variants.len()
+            ));
+        }
+        let ok = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Result::Ok"
+                && variant.name == "Ok"
+                && variant.discriminant == 0
+                && variant.fields.len() == 1
+        });
+        let err = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Result::Err"
+                && variant.name == "Err"
+                && variant.discriminant == 1
+                && variant.fields.len() == 1
+        });
+        let (Some(ok), Some(err)) = (ok, err) else {
+            return Err(
+                "Result TypeDesc variants do not match the canonical Ok/Err non-Copy contract"
+                    .into(),
+            );
+        };
+        let ok_field = &ok.fields[0];
+        if ok_field.id.0 != "builtin:variant:Result::Ok/payload:0" {
+            return Err(
+                "Result Ok payload identity disagrees with the canonical non-Copy contract".into(),
+            );
+        }
+        self.validate_owned_string(&ok_field.ty)?;
+
+        let err_field = &err.fields[0];
+        if err_field.id.0 != "builtin:variant:Result::Err/payload:0" {
+            return Err(
+                "Result Err payload identity disagrees with the canonical non-Copy contract".into(),
+            );
+        }
+        let err_descriptor = self.get(&err_field.ty).ok_or_else(|| {
+            format!(
+                "Result Err payload type '{}' is absent from MIR type catalog",
+                err_field.ty.as_str()
+            )
+        })?;
+        if err_descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32)
+            || err_descriptor.abi
+                != (MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            || err_descriptor.layout != MirLayout::Scalar
+            || err_descriptor.ownership != MirOwnership::Copy
+        {
+            return Err("Result Err payload must be the canonical Copy signed i32 TypeDesc".into());
+        }
+        self.validate_copy_scalar(&err_field.ty)
+            .map_err(|message| {
+                format!(
+                "Result Err payload is outside the canonical Copy signed i32 contract: {message}"
+            )
+            })?;
+        Ok(())
+    }
+
+    /// Validate either currently admitted non-Copy built-in variant shape.
+    /// Consumers use this single TypeDesc boundary so they cannot silently
+    /// widen a verifier switch/constructor by accepting a new layout in one
+    /// backend only.
+    pub fn validate_non_copy_variant_contract(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let Some(descriptor) = self.get(ty) else {
+            return Err(format!(
+                "type '{}' is absent from MIR type catalog",
+                ty.as_str()
+            ));
+        };
+        match &descriptor.layout {
+            MirLayout::Option { .. } => self
+                .validate_option_string_variant(ty)
+                .map(|_| ())
+                .map_err(|message| {
+                    format!(
+                        "type '{}' is outside the canonical non-Copy Option<string> variant contract: {message}",
+                        ty.as_str()
+                    )
+                }),
+            MirLayout::Result { .. } => self
+                .validate_result_string_i32_variant(ty)
+                .map_err(|message| {
+                    format!(
+                        "type '{}' is outside the canonical non-Copy Result<string, i32> variant contract: {message}",
+                        ty.as_str()
+                    )
+                }),
+            _ => Err(format!(
+                "type '{}' has no canonical non-Copy Option/Result variant layout",
+                ty.as_str()
+            )),
+        }
+    }
+
     /// Return the canonical active/inactive variant descriptors for the
     /// materialized non-Copy Option<string> ABI.  The validator above proves
     /// the complete recursive MoveOut/Clone/Drop contract and exact
@@ -4958,6 +5108,48 @@ mod tests {
         assert!(catalog
             .validate_variant_glue(&result_id, MirGlueOperation::Drop)
             .is_ok());
+    }
+
+    #[test]
+    fn admits_only_result_string_i32_as_non_copy_variant_contract() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let second_string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("second string");
+        let result_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: string_id.clone(),
+                error: i32_id.clone(),
+            })
+            .expect("Result<string, i32>");
+        let rejected_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: string_id,
+                error: second_string_id,
+            })
+            .expect("Result<string, string>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        catalog
+            .validate_result_string_i32_variant(&result_id)
+            .expect("Result<string, i32> must satisfy the canonical contract");
+        catalog
+            .validate_non_copy_variant_contract(&result_id)
+            .expect("shared non-Copy variant boundary");
+        let error = catalog
+            .validate_result_string_i32_variant(&rejected_id)
+            .expect_err("Result<string, string> must remain fail-closed");
+        assert!(error.contains("Result Err payload must be the canonical Copy signed i32"));
+        let combined = catalog
+            .validate_non_copy_variant_contract(&rejected_id)
+            .expect_err("unsupported Result shape must remain outside the shared boundary");
+        assert!(combined.contains("Result<string, i32>"));
     }
 
     #[test]

@@ -390,15 +390,15 @@ fn symbolic_value_for_type(
         && descriptor.glue.clone == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.glue.drop == crate::core::mir::types::MirGlueKind::Aggregate
         && descriptor.drop_plan.is_some();
-    let move_owned_option_string = catalog.validate_option_string_variant(ty).is_ok();
+    let move_owned_variant = catalog.validate_non_copy_variant_contract(ty).is_ok();
     let move_owned_tuple = matches!(descriptor.layout, MirLayout::Tuple(_))
         && catalog.validate_recursive_tuple_abi(ty).is_ok();
     if (descriptor.ownership != MirOwnership::Copy
         && !linear_record
-        && !move_owned_option_string
+        && !move_owned_variant
         && !move_owned_tuple)
         || (!linear_record
-            && !move_owned_option_string
+            && !move_owned_variant
             && !move_owned_tuple
             && (descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
                 || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
@@ -927,7 +927,7 @@ fn explore_variant_switch(
         .map(|value| value.ty.clone())
         .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
     if consume_scrutinee {
-        catalog.validate_option_string_variant(&scrutinee_ty)?;
+        catalog.validate_non_copy_variant_contract(&scrutinee_ty)?;
         catalog.validate_switch_move(&scrutinee_ty, arms)?;
         validate_explicit_variant_switch_move(catalog, &scrutinee_ty, arms)?;
     } else {
@@ -1758,7 +1758,7 @@ fn eval_instruction(
                 .ok_or_else(|| format!("MIR variant result '{}' is absent", result))?
                 .ty
                 .clone();
-            catalog.validate_option_string_variant(&result_ty)?;
+            catalog.validate_non_copy_variant_contract(&result_ty)?;
             let mut values = Vec::with_capacity(fields.len());
             let mut field_types = Vec::with_capacity(fields.len());
             for (field, value) in fields {
@@ -3680,6 +3680,85 @@ mod tests {
             .expect_err("non-Copy sibling must fail before verifier exploration");
         let text = format!("{error:?}");
         assert!(text.contains("explicit move projection contract"), "{text}");
+    }
+
+    #[test]
+    fn verifier_proves_non_copy_result_string_i32_construction_from_canonical_mir() {
+        let source = include_str!("../../tests/fixtures/mir_verifier_result_string_i32.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Result<string, i32> construction must be canonical MIR");
+        program
+            .type_catalog()
+            .validate_result_string_i32_variant(
+                &program
+                    .functions()
+                    .get(&crate::core::NodeId("function:main".into()))
+                    .expect("main MIR")
+                    .result,
+            )
+            .expect("shared Result<string, i32> TypeDesc contract");
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("main MIR function");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::ConstructVariantMove { .. }
+                )
+            })
+        }));
+        let results = verify_program(&program, "result-string-i32-source-hash".into())
+            .expect("Result verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("main verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result execution");
+        assert_eq!(
+            value,
+            crate::core::mir::reference::MirRuntimeValue::Variant {
+                nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                    .expect("Result nominal"),
+                variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                payload: vec![crate::core::mir::reference::MirRuntimeValue::String(
+                    "owned".into(),
+                )],
+            }
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_non_copy_result_string_string_before_symbolic_execution() {
+        let source =
+            include_str!("../../tests/fixtures/mir_verifier_result_string_string_rejected.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let errors = crate::verifier::validate_mir_capabilities(&program)
+            .expect_err("unsupported Result payload must fail capability gate");
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("non-Copy variant TypeDesc")));
+        let results = verify_program(&program, "rejected-result-string-string-source-hash".into())
+            .expect("unsupported Result remains a classified verifier result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("main verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result.message.contains("Result<string, i32>"));
     }
 
     #[test]

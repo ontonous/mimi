@@ -5075,6 +5075,15 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let result_ty = mir
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("main MIR")
+            .result
+            .clone();
+        mir.type_catalog()
+            .validate_result_string_i32_variant(&result_ty)
+            .expect("shared Result<string, i32> TypeDesc contract");
         let owner = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&mir)
             .execute(&owner, &[])
