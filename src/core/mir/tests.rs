@@ -1422,6 +1422,44 @@ fn flat_copy_user_enum_construction_rejects_forged_field_before_consumers() {
 }
 
 #[test]
+fn surface_flat_copy_user_enum_constructor_materializes_construct_variant() {
+    let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("flat Copy user-enum constructor must materialize to MIR");
+    let function = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:make_signal".into()))
+        .expect("make_signal MIR");
+    assert!(function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::ConstructVariant { .. }
+            )
+        })
+    }));
+}
+
+#[test]
+fn surface_non_flat_user_enum_constructor_stays_outside_canonical_mir() {
+    let source = include_str!("../../../tests/real_world/custom_enum_string_payload.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("non-flat user-enum constructor must remain outside this MIR slice");
+    let text = format!("{error:?}");
+    assert!(text.contains("Constructor") && text.contains("not a materialized MIR function"));
+}
+
+#[test]
 fn non_copy_record_materializes_field_drop_schedule_before_backend() {
     let source = "type Named { name: string, count: i32 }\nfunc main() -> i32 { let p = Named { count: 41, name: \"owned\" }; drop(p); 42 }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

@@ -5529,6 +5529,32 @@ mod tests {
     }
 
     #[test]
+    fn surface_flat_copy_user_enum_constructor_matches_reference_and_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = crate::core::NodeId("function:make_signal".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference surface user-enum constructor");
+        let bytecode = BytecodeVM::new(compile_mir_program(&mir).expect("MIR bytecode"))
+            .call_named(owner.0.as_str(), Vec::new())
+            .expect("bytecode surface user-enum constructor");
+        assert!(matches!(
+            reference,
+            MirRuntimeValue::Variant { variant, payload, .. }
+                if variant.0.contains("variant") && payload == vec![MirRuntimeValue::Int(7)]
+        ));
+        assert!(matches!(
+            bytecode,
+            Value::CanonicalVariant { tag, payload, .. }
+                if tag == "Number" && payload == vec![Value::Int(7)]
+        ));
+    }
+
+    #[test]
     fn rejects_variant_construction_discriminant_drift_before_moving_payload() {
         let source = "func main() -> Option<string> { Some(\"owned\") }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

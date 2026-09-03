@@ -2188,6 +2188,22 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_surface_flat_copy_user_enum_constructor() {
+        let source = include_str!("../../../tests/fixtures/mir_custom_enum_flat_copy.mimi");
+        let program = canonical_program(source);
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_surface_flat_copy_enum");
+        generator
+            .compile_mir_native(&program)
+            .expect("surface flat Copy user-enum constructor should use canonical ABI");
+        generator
+            .module
+            .verify()
+            .expect("surface flat Copy user-enum constructor module verifies");
+        assert!(generator.module.get_function("make_signal").is_some());
+    }
+
+    #[test]
     fn native_validator_rejects_mixed_copy_user_enum_before_llvm() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_custom_enum_mixed_copy_rejected.mimi"

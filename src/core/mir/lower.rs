@@ -1460,7 +1460,9 @@ impl<'a> Lowerer<'a> {
                             arguments,
                         },
                     );
-                } else if let Some((nominal, variant, field_ids)) = builtin_variant(call) {
+                } else if let Some((nominal, variant, field_ids)) =
+                    builtin_variant(call).or_else(|| user_variant(call, self.type_catalog))
+                {
                     if field_ids.len() != arguments.len() {
                         self.error(
                             &expression.node_id,
@@ -2597,6 +2599,39 @@ fn builtin_variant(call: &ResolvedCall) -> Option<(NominalTypeId, NodeId, Vec<No
         NominalTypeId::new(nominal).expect("static builtin nominal"),
         NodeId(variant.into()),
         fields,
+    ))
+}
+
+/// Resolve a checker-owned user-enum constructor into the canonical variant
+/// instruction.  Constructor identity and field order come only from the
+/// materialized TypeDesc catalog; a constructor that is not a tagged variant
+/// remains a normal call and is rejected by the canonical call graph.
+fn user_variant(
+    call: &ResolvedCall,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> Option<(NominalTypeId, NodeId, Vec<NodeId>)> {
+    let ResolvedCallee::Constructor(variant) = &call.callee else {
+        return None;
+    };
+    let catalog = type_catalog?;
+    let descriptor = catalog.get(&call.result)?;
+    if descriptor.kind != super::types::MirTypeKind::Nominal
+        || descriptor.ownership != super::types::MirOwnership::Copy
+        || !matches!(descriptor.layout, super::types::MirLayout::Enum { .. })
+        || catalog.validate_flat_copy_variant(&call.result).is_err()
+    {
+        return None;
+    }
+    let (nominal, variants) = catalog.variant_layout(&call.result)?;
+    let descriptor = variants.iter().find(|candidate| candidate.id == *variant)?;
+    Some((
+        NominalTypeId::new(nominal).ok()?,
+        descriptor.id.clone(),
+        descriptor
+            .fields
+            .iter()
+            .map(|field| field.id.clone())
+            .collect(),
     ))
 }
 

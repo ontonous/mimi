@@ -3,6 +3,10 @@
 
 type Signal { Number(i32) | Empty }
 
+func make_signal() -> Signal {
+    Number(7)
+}
+
 func take_signal(signal: Signal) -> i32 {
     ensures: true
     0
