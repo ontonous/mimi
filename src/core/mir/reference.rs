@@ -2693,18 +2693,27 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .map_err(|message| self.error(&function.owner, message))?;
                 let MirRuntimeValue::List(elements) = self.read_value(function, values, list)?
                 else {
-                    return Err(
-                        self.error(&function.owner, "List.len receiver is not a canonical List")
-                    );
-                };
-                if elements.len() > i32::MAX as usize {
                     return Err(self.error(
                         &function.owner,
-                        "E0802: canonical List.len result overflows i32",
+                        "List operation receiver is not a canonical List",
                     ));
-                }
+                };
                 let output = match operation {
-                    super::MirListOperation::Len => MirRuntimeValue::Int(elements.len() as i64),
+                    super::MirListOperation::Len => {
+                        if elements.len() > i32::MAX as usize {
+                            return Err(self.error(
+                                &function.owner,
+                                "E0802: canonical List.len result overflows i32",
+                            ));
+                        }
+                        MirRuntimeValue::Int(elements.len() as i64)
+                    }
+                    super::MirListOperation::Reverse => {
+                        // Reverse is a cloning transform: the source List
+                        // remains available for its own Drop and the result
+                        // owns an independent element vector.
+                        MirRuntimeValue::List(elements.into_iter().rev().collect())
+                    }
                 };
                 values.insert(result.clone(), output);
             }

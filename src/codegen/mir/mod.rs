@@ -165,6 +165,30 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 Some(Linkage::External),
             );
         }
+
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_list_reverse_scalar")
+            .is_none()
+        {
+            let i8 = self.generator.context.i8_type();
+            let ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            self.generator.module.add_function(
+                "mimi_mir_list_reverse_scalar",
+                ptr.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(ptr),
+                        BasicMetadataTypeEnum::IntType(i8),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
     }
 
     fn declare_functions(&mut self) -> Result<(), NativeMirError> {
@@ -1133,6 +1157,44 @@ mod tests {
         assert!(generator
             .module
             .get_function("mimi_mir_list_len_scalar")
+            .is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_clone_based_scalar_list_reverse_adapter() {
+        let program = canonical_program(
+            "func main() -> i32 { let values = [1, 2, 3]; let reversed = reverse(values); let count = len(reversed); drop(reversed); drop(values); count }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let function = program
+            .functions()
+            .get(&owner)
+            .expect("List.reverse main MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Reverse,
+                        list_operation_contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_scalar_list_reverse_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("scalar List.reverse MIR should have a canonical ABI adapter");
+        generator
+            .module
+            .verify()
+            .expect("native List.reverse module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_reverse_scalar")
             .is_some());
     }
 

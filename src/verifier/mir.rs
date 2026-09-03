@@ -1555,6 +1555,9 @@ fn eval_instruction(
             add_definedness(state, fits_i32, "E0802")?;
             let value = match operation {
                 MirListOperation::Len => SymbolicValue::Int(length),
+                // Reverse clones the scalar List and therefore preserves its
+                // symbolic cardinality while leaving the source value live.
+                MirListOperation::Reverse => SymbolicValue::List { length },
             };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);

@@ -1525,6 +1525,55 @@ pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i
     })
 }
 
+/// Clone and reverse a scalar List for canonical native MIR.
+///
+/// The source handle remains owned by the caller.  Returning a fresh handle
+/// is part of the List operation contract: native code must not turn the
+/// surface `reverse(xs)` operation into an in-place mutation merely because
+/// the runtime stores scalar elements in a mutable buffer.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_reverse_scalar(
+    list: *const MimiList,
+    kind: i8,
+) -> *mut MimiList {
+    let Some(expected) = mir_list_kind(kind) else {
+        mir_list_abort(b"[E0800] canonical MIR List kind is invalid\0");
+    };
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List handle is null\0");
+    }
+    // SAFETY: the canonical emitter passes a live MimiList; null was checked.
+    let source = unsafe { &*list };
+    if source.element_kind != expected || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical MIR List kind disagrees\0");
+    }
+    if source.len > 0 && source.data.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List data is null\0");
+    }
+    // SAFETY: clone_scalar revalidates the same typed handle and allocates a
+    // distinct List object/data buffer. A null result means allocation or
+    // scalar copy failure and is a canonical contract trap here.
+    let clone = unsafe { mimi_mir_list_clone_scalar(list, kind) };
+    if clone.is_null() {
+        mir_list_abort(b"[E0800] canonical MIR List reverse clone failed\0");
+    }
+    // The canonical scalar List stores both I64 and Bool in i64-sized slots.
+    // SAFETY: clone is valid, non-null, and its data has `len` scalar slots as
+    // established by mimi_mir_list_clone_scalar.
+    unsafe {
+        let count = (*clone).len as usize;
+        if count > 1 {
+            let data = (*clone).data as *mut i64;
+            for left in 0..(count / 2) {
+                let right = count - 1 - left;
+                std::ptr::swap(data.add(left), data.add(right));
+            }
+        }
+        (*clone).element_kind = expected;
+    }
+    clone
+}
+
 /// Drop a scalar list allocated by canonical native MIR.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
@@ -1572,6 +1621,36 @@ mod canonical_mir_list_tests {
                 10
             );
             mimi_mir_list_drop_scalar(clone, ListElementKind::I64 as i8);
+            mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_scalar_list_reverse_clones_without_mutating_source() {
+        let list = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!list.is_null());
+        for value in [1, 2, 3] {
+            assert_eq!(
+                unsafe { mimi_mir_list_push_scalar(list, ListElementKind::I64 as i8, value) },
+                1
+            );
+        }
+        let reversed = unsafe { mimi_mir_list_reverse_scalar(list, ListElementKind::I64 as i8) };
+        assert!(!reversed.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_get_scalar(list, ListElementKind::I64 as i8, 0),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_get_scalar(reversed, ListElementKind::I64 as i8, 0),
+                3
+            );
+            assert_eq!(
+                mimi_mir_list_get_scalar(reversed, ListElementKind::I64 as i8, 2),
+                1
+            );
+            mimi_mir_list_drop_scalar(reversed, ListElementKind::I64 as i8);
             mimi_mir_list_drop_scalar(list, ListElementKind::I64 as i8);
         }
     }

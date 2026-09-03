@@ -38,9 +38,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .i8_type()
             .const_int(kind as u64, false);
+        let runtime_name = match operation {
+            MirListOperation::Len => "mimi_mir_list_len_scalar",
+            MirListOperation::Reverse => "mimi_mir_list_reverse_scalar",
+        };
         let function = self
             .generator
-            .get_runtime_fn("mimi_mir_list_len_scalar")
+            .get_runtime_fn(runtime_name)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let value = call_try_basic_value(
             &self
@@ -54,11 +58,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     ],
                     match operation {
                         MirListOperation::Len => "mir_list_len",
+                        MirListOperation::Reverse => "mir_list_reverse",
                     },
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
-        .ok_or_else(|| NativeMirError::new(subject, "List.len returned void"))?;
+        .ok_or_else(|| NativeMirError::new(subject, "List operation returned void"))?;
         Ok(value)
     }
 

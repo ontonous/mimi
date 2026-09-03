@@ -1791,6 +1791,14 @@ impl<'a> FunctionEmitter<'a> {
                     contract: Some(contract),
                 });
             }
+            MirListOperation::Reverse => {
+                let contract = self.add_list_operation_contract(receipt);
+                self.proto.emit(Op::MirListReverse {
+                    rd,
+                    ra,
+                    contract: Some(contract),
+                });
+            }
         }
     }
 
@@ -3377,11 +3385,38 @@ mod tests {
     }
 
     #[test]
+    fn canonical_mir_list_reverse_clones_and_preserves_source() {
+        let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = reverse(values); drop(values); reversed }";
+        let report =
+            run_canonical_differential(source).expect("canonical List.reverse differential");
+        assert!(report.mir_text.contains("= Reverse"));
+        assert!(report.type_desc_text.contains("layout=List"));
+        let expected = DifferentialOutcome::Return(MirRuntimeValue::List(vec![
+            MirRuntimeValue::Int(3),
+            MirRuntimeValue::Int(2),
+            MirRuntimeValue::Int(1),
+        ]));
+        assert_eq!(report.reference.outcome, expected);
+        assert_eq!(report.mir_bytecode.outcome, report.reference.outcome);
+        assert_eq!(report.legacy_bytecode.outcome, report.reference.outcome);
+    }
+
+    #[test]
     fn canonical_mir_rejects_list_len_for_non_copy_elements() {
         let source = "func main() -> i32 { let values = [\"owned\"]; len(values) }";
         let (_, checked) = parse_and_check(source).expect("source type check");
         let error = MirProgram::from_checked_program(&checked)
             .expect_err("List.len must reject unsupported element ownership before a backend");
+        let error = format!("{error:?}");
+        assert!(error.contains("Copy scalar") || error.contains("List construction"));
+    }
+
+    #[test]
+    fn canonical_mir_rejects_list_reverse_for_non_copy_elements() {
+        let source = "func main() -> i32 { let values = [\"owned\"]; let reversed = reverse(values); drop(reversed); 0 }";
+        let (_, checked) = parse_and_check(source).expect("source type check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("List.reverse must reject unsupported element ownership before a backend");
         let error = format!("{error:?}");
         assert!(error.contains("Copy scalar") || error.contains("List construction"));
     }
@@ -3620,6 +3655,60 @@ mod tests {
             error.message().contains("contract constant")
                 && error.message().contains("ListOperation")
         );
+    }
+
+    #[test]
+    fn canonical_list_reverse_emits_a_materialized_bytecode_receipt() {
+        let program = compile(
+            "func main() -> i32 { let values = [1, 2, 3]; let reversed = reverse(values); let count = len(reversed); drop(reversed); drop(values); count }",
+        );
+        let main = &program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirListReverse {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List.reverse contract");
+        let ConstValue::ListOperation(shape) = &main.constants[contract as usize] else {
+            panic!("canonical List.reverse must carry a ListOperation shape");
+        };
+        assert!(!shape.list_ty.as_str().is_empty());
+        assert_eq!(shape.list_ty, shape.result_ty);
+        assert_eq!(shape.operation, crate::core::mir::MirListOperation::Reverse);
+        let value = BytecodeVM::new(program)
+            .run_value()
+            .expect("canonical List.reverse");
+        assert!(matches!(value, Value::Int(3)));
+    }
+
+    #[test]
+    fn canonical_list_reverse_receipt_rejects_wrong_constant_before_read() {
+        let mut program = (*compile(
+            "func main() -> i32 { let values = [1, 2, 3]; let reversed = reverse(values); let count = len(reversed); drop(reversed); drop(values); count }",
+        ))
+        .clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::MirListReverse {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical List.reverse contract");
+        main.constants[contract as usize] = ConstValue::Unit;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("wrong List.reverse receipt constant must trap before read");
+        assert!(error.message().contains("contract constant"));
     }
 
     #[test]

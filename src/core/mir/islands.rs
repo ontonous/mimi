@@ -41,7 +41,7 @@ pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
 /// compatibility boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarCollectionAdmission {
-    /// No typed List.len, concrete scalar Set-facade call, or closed
+    /// No typed List operation, concrete scalar Set-facade call, or closed
     /// Copy-scalar stdout effect is present.
     OutsideProfile,
     /// A collection candidate exists, but the whole checked program contains
@@ -60,12 +60,36 @@ pub enum ScalarCollectionAdmission {
 /// the retained source file, invoke a backend, or infer a candidate from the
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
-/// identity/Set facade family or an exact Copy-scalar stdout effect can make
+/// identity/Set facade family, List len/reverse, or an exact Copy-scalar stdout effect can make
 /// them part of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
+    let scanner = scan_scalar_collection_admission(program);
+    if !scanner.has_candidate {
+        ScalarCollectionAdmission::OutsideProfile
+    } else if scanner.mixed {
+        ScalarCollectionAdmission::MixedCoverage
+    } else {
+        ScalarCollectionAdmission::CompleteCoverage
+    }
+}
+
+/// Return whether checker-owned resolved bodies contain a direct List
+/// `reverse` operation that is supposed to cross the scalar collection
+/// boundary.  This is kept separate from `ScalarCollectionAdmission`: a mixed
+/// graph may still be a compatibility input, but an unsupported S76 reverse
+/// shape must not silently reach the legacy emitter after MIR construction
+/// fails. List `len` retains the pre-existing compatibility policy here.
+pub fn has_unsupported_list_reverse_candidate(program: &CheckedProgram) -> bool {
+    scan_scalar_collection_admission(program).has_unsupported_list_reverse_candidate
+}
+
+fn scan_scalar_collection_admission(
+    program: &CheckedProgram,
+) -> ScalarCollectionAdmissionScanner<'_> {
     let mut scanner = ScalarCollectionAdmissionScanner {
         program,
         has_candidate: false,
+        has_unsupported_list_reverse_candidate: false,
         mixed: false,
         seen_types: BTreeSet::new(),
     };
@@ -126,18 +150,13 @@ pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarC
                 || !function.effects.is_empty()
         });
 
-    if !scanner.has_candidate {
-        ScalarCollectionAdmission::OutsideProfile
-    } else if scanner.mixed {
-        ScalarCollectionAdmission::MixedCoverage
-    } else {
-        ScalarCollectionAdmission::CompleteCoverage
-    }
+    scanner
 }
 
 struct ScalarCollectionAdmissionScanner<'a> {
     program: &'a CheckedProgram,
     has_candidate: bool,
+    has_unsupported_list_reverse_candidate: bool,
     mixed: bool,
     seen_types: BTreeSet<crate::core::ResolvedTypeId>,
 }
@@ -294,8 +313,23 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => self.visit_expr(operand, concrete),
             ResolvedExprKind::Call(call) => {
-                if is_list_len_call(self.program, call) {
+                if concrete
+                    && (is_list_len_call(self.program, call)
+                        || is_list_reverse_call(self.program, call))
+                {
                     self.has_candidate = true;
+                }
+                if concrete
+                    && is_list_reverse_call(self.program, call)
+                    && call.arguments.first().is_some_and(|argument| {
+                        !is_scalar_collection_type(
+                            self.program,
+                            &argument.value.ty,
+                            &mut BTreeSet::new(),
+                        )
+                    })
+                {
+                    self.has_unsupported_list_reverse_candidate = true;
                 }
                 if is_scalar_set_facade_call(self.program, call) {
                     self.has_candidate = true;
@@ -440,6 +474,15 @@ fn is_list_len_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCa
         return false;
     };
     matches!(builtin.as_str(), "len" | "builtin.method.list.len")
+        && call.arguments.len() == 1
+        && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
+}
+
+fn is_list_reverse_call(program: &CheckedProgram, call: &crate::core::ir::ResolvedCall) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    matches!(builtin.as_str(), "reverse" | "builtin.method.list.reverse")
         && call.arguments.len() == 1
         && is_resolved_list_type(program, &call.arguments[0].value.ty, &mut BTreeSet::new())
 }
@@ -1027,7 +1070,7 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
+/// `ListOp::Len`/`Reverse`, `SetOp::Contains`, checker-owned `ScalarSetFacade` instance,
 /// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
 /// S11 production boundary.
 /// Keeping this fact next to the island contract prevents the CLI and direct
@@ -1056,13 +1099,13 @@ pub fn contains_scalar_collection_candidate(program: &MirProgram) -> bool {
 /// accidentally become a collection-island candidate; a pure scalar stdout
 /// graph is admitted by its checker-side `CompleteCoverage` state instead.
 pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> bool {
-    let has_list_len = program.functions().values().any(|function| {
+    let has_list_operation = program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
                 matches!(
                     instruction.kind,
                     MirInstructionKind::ListOp {
-                        operation: MirListOperation::Len,
+                        operation: MirListOperation::Len | MirListOperation::Reverse,
                         ..
                     }
                 )
@@ -1082,7 +1125,7 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
             })
         })
     });
-    has_list_len
+    has_list_operation
         || has_set_contains
         || program.instances().values().any(|instance| {
             matches!(
@@ -1465,7 +1508,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 ) else {
                     return;
                 };
-                if *operation != MirListOperation::Len {
+                if !matches!(operation, MirListOperation::Len | MirListOperation::Reverse) {
                     self.error(format!(
                         "{subject} List operation {operation:?} is outside {SCALAR_COLLECTION_ISLAND}"
                     ));

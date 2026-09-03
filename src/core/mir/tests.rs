@@ -556,6 +556,60 @@ fn list_len_operation_materializes_type_desc_receipt() {
 }
 
 #[test]
+fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
+    let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = reverse(values); drop(values); reversed }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = canonical.functions().get(&owner).expect("main");
+    let (list_ty, result_ty, receipt) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                result,
+                list,
+                operation: MirListOperation::Reverse,
+                list_operation_contract: Some(receipt),
+            } => Some((
+                function.values.get(list).expect("List value").ty.clone(),
+                function
+                    .values
+                    .get(result)
+                    .expect("reversed value")
+                    .ty
+                    .clone(),
+                receipt.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical List.reverse receipt");
+    assert_eq!(receipt.list_ty, list_ty);
+    assert_eq!(receipt.result_ty, result_ty);
+    assert_eq!(receipt.result_ty, receipt.list_ty);
+    assert!(!receipt.element_ty.as_str().is_empty());
+    assert_eq!(receipt.operation, MirListOperation::Reverse);
+
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&owner, &[])
+        .expect("reference List.reverse execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::List(vec![
+            crate::core::mir::reference::MirRuntimeValue::Int(3),
+            crate::core::mir::reference::MirRuntimeValue::Int(2),
+            crate::core::mir::reference::MirRuntimeValue::Int(1),
+        ])
+    );
+}
+
+#[test]
 fn canonical_program_gate_rejects_missing_or_stale_list_operation_receipt() {
     let source = "func main() -> i32 { let values = [10, 20]; len(values) }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

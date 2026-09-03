@@ -34,8 +34,8 @@ pub use islands::{
     classify_flat_copy_record_admission, classify_scalar_collection_admission,
     contains_flat_copy_record_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    validate_scalar_collection_island, FlatCopyRecordAdmission, ScalarCollectionAdmission,
-    SCALAR_COLLECTION_ISLAND,
+    has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
+    FlatCopyRecordAdmission, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
@@ -196,12 +196,15 @@ pub enum MirSetOperation {
     ToList,
 }
 
-/// Closed read-only operations over the canonical scalar List production
-/// island.  The list remains borrowed for the duration of the operation;
-/// its Move/Clone/Drop obligations stay with the source value.
+/// Closed operations over the canonical scalar List production island.
+/// `Len` borrows the source and returns a Copy scalar; `Reverse` borrows the
+/// source while materializing a fresh List through the List Clone glue.  The
+/// operation identity is part of the MIR contract so a consumer cannot
+/// silently turn a cloning transform into an in-place move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirListOperation {
     Len,
+    Reverse,
 }
 
 /// Effect boundary carried by a materialized Flow transition contract.  The
@@ -334,9 +337,11 @@ pub enum MirInstructionKind {
         result: MirValueId,
         elements: Vec<MirValueId>,
     },
-    /// Read the length of a canonical Copy-scalar List without transferring
-    /// its ownership.  The TypeDesc contract fixes the input List ABI and
-    /// the i32 result ABI before any consumer is invoked.
+    /// Execute a canonical operation over a Copy-scalar List. `Len` returns a
+    /// Copy i32 without transferring the source; `Reverse` returns a fresh
+    /// move-owned List and leaves the source available for its own Drop.
+    /// TypeDesc fixes both List ABI/glue and result ABI before any consumer is
+    /// invoked.
     ListOp {
         result: MirValueId,
         operation: MirListOperation,

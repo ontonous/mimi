@@ -777,6 +777,15 @@ pub enum Op {
         /// remains the explicit legacy bytecode compatibility path.
         contract: Option<ConstIdx>,
     },
+    /// rd = an independent reversed scalar List copied from ra. The MIR
+    /// receipt proves that the source remains borrowed and the result owns a
+    /// complete List value; this is not an in-place mutation opcode.
+    MirListReverse {
+        rd: Reg,
+        ra: Reg,
+        /// Canonical MIR always supplies a ListOperationShape here.
+        contract: Option<ConstIdx>,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1096,6 +1105,7 @@ impl Op {
             | ListPop { rd, .. }
             | MirSetToList { rd, .. }
             | MirListLen { rd, .. }
+            | MirListReverse { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1339,6 +1349,7 @@ impl Op {
             | MirSetContains { ra, .. }
             | MirSetToList { ra, .. }
             | MirListLen { ra, .. }
+            | MirListReverse { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
             | Ret { ra, .. }

@@ -1,0 +1,10 @@
+// Canonical MIR S76: reverse clones a scalar List and leaves the source live.
+func main() -> i32 {
+    let values = [1, 2, 3]
+    let reversed = reverse(values)
+    let reversed_len = len(reversed)
+    let source_len = len(values)
+    drop(reversed)
+    drop(values)
+    reversed_len + source_len
+}

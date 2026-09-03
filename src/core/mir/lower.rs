@@ -4,9 +4,9 @@
 //! architectural boundary for scalar expressions, structured branch control
 //! flow, Copy record aggregates, and recursive Move-owned tuple/record product
 //! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
-//! The first container slice adds List construction and the read-only `Len`
-//! operation for concrete Copy scalar elements; all other List operations and
-//! element shapes remain fail-closed.
+//! The first container slice adds List construction and the `Len`/`Reverse`
+//! operations for concrete Copy scalar elements; all other List operations
+//! and element shapes remain fail-closed.
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
 
@@ -1509,6 +1509,30 @@ impl<'a> Lowerer<'a> {
                             "List.len canonical MIR operation requires one receiver",
                         );
                     }
+                } else if is_list_reverse_builtin(call, self.type_catalog) {
+                    if let Some(list) = arguments.first() {
+                        let list_operation_contract = self.list_operation_contract(
+                            &expression.node_id,
+                            &result,
+                            list,
+                            super::MirListOperation::Reverse,
+                        );
+                        self.emit(
+                            &expression.node_id,
+                            "list_op",
+                            MirInstructionKind::ListOp {
+                                result: result.clone(),
+                                operation: super::MirListOperation::Reverse,
+                                list: list.clone(),
+                                list_operation_contract,
+                            },
+                        );
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "List.reverse canonical MIR operation requires one receiver",
+                        );
+                    }
                 } else if let Some(contract) = call_builtin_contract(call, self.type_catalog) {
                     self.emit(
                         &expression.node_id,
@@ -2403,6 +2427,24 @@ fn is_list_len_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog
         return false;
     };
     if !matches!(builtin.as_str(), "len" | "builtin.method.list.len") || call.arguments.len() != 1 {
+        return false;
+    }
+    type_catalog.is_some_and(|catalog| {
+        catalog
+            .get(&call.arguments[0].value.ty)
+            .is_some_and(|descriptor| {
+                matches!(descriptor.layout, super::types::MirLayout::List { .. })
+            })
+    })
+}
+
+fn is_list_reverse_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) -> bool {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return false;
+    };
+    if !matches!(builtin.as_str(), "reverse" | "builtin.method.list.reverse")
+        || call.arguments.len() != 1
+    {
         return false;
     }
     type_catalog.is_some_and(|catalog| {

@@ -2713,6 +2713,31 @@ impl BytecodeVM {
                     }
                     self.set_reg(rd, Value::Int(len as i64));
                 }
+                Op::MirListReverse { rd, ra, contract } => {
+                    let shape = self.list_operation_contract(contract)?.ok_or_else(|| {
+                        InterpError::new("List.reverse: canonical operation has no receipt")
+                    })?;
+                    Self::validate_canonical_list_operation(
+                        self.get_reg(ra),
+                        &shape,
+                        "List.reverse",
+                    )?;
+                    if shape.operation != crate::core::mir::MirListOperation::Reverse {
+                        return Err(InterpError::new(
+                            "List.reverse: receipt operation disagrees with opcode",
+                        ));
+                    }
+                    let Value::List(values) = self.get_reg(ra) else {
+                        return Err(InterpError::new(
+                            "canonical List.reverse: expected List source",
+                        ));
+                    };
+                    // Construct a fresh Arc explicitly. This preserves the
+                    // source value and proves the bytecode operation is a
+                    // Clone-based transform rather than in-place mutation.
+                    let reversed = std::sync::Arc::new(values.iter().rev().cloned().collect());
+                    self.set_reg(rd, Value::List(reversed));
+                }
 
                 // ── Map / Set ────────────────────────────────
                 Op::NewMap { rd } => {
@@ -4633,11 +4658,11 @@ impl BytecodeVM {
         {
             Some(ConstValue::ListOperation(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
-                "List.len: contract constant {} is not a ListOperation",
+                "canonical List operation: contract constant {} is not a ListOperation",
                 contract_idx
             ))),
             None => Err(InterpError::new(format!(
-                "List.len: contract constant {} is absent",
+                "canonical List operation: contract constant {} is absent",
                 contract_idx
             ))),
         }
@@ -4661,9 +4686,19 @@ impl BytecodeVM {
                 "List.len: canonical receipt contains an empty type identity",
             ));
         }
-        if shape.operation != crate::core::mir::MirListOperation::Len {
+        if !matches!(
+            shape.operation,
+            crate::core::mir::MirListOperation::Len | crate::core::mir::MirListOperation::Reverse
+        ) {
             return Err(InterpError::new(
-                "List.len: receipt operation is outside the canonical List contract",
+                "canonical List operation: receipt operation is outside the canonical List contract",
+            ));
+        }
+        if shape.operation == crate::core::mir::MirListOperation::Reverse
+            && shape.result_ty != shape.list_ty
+        {
+            return Err(InterpError::new(
+                "List.reverse: receipt result and source types disagree",
             ));
         }
         Ok(())

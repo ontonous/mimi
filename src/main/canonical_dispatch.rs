@@ -117,7 +117,7 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, a concrete scalar `List.len` operation, an exact S8 Flow
+/// record value, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
 /// transition, or the concrete non-Copy `Option<string>` variant island. The
 /// candidate then has to pass every consumer preflight before any caller
 /// starts execution or LLVM emission. A `Legacy(reason)` result is an explicit
@@ -208,11 +208,23 @@ pub(crate) fn select_default_route(
             );
         }
         Err(mimi::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
-            // Mixed/Outside collection and record programs retain the
-            // explicit compatibility route when no canonical operation was
-            // materialized.  S8 keeps its existing candidate hard boundary:
-            // the front-end candidate predicate is intentionally stricter
-            // than collection/record compatibility and must not fall back.
+            // A mixed graph with no migrated operation retains the explicit
+            // compatibility route.  A checker-recognized List operation is
+            // different: its unsupported shape must fail closed even when
+            // canonical construction cannot produce a receipt, otherwise a
+            // List<T> contract hole would silently enter legacy.
+            if collection_hint && mimi::core::mir::has_unsupported_list_reverse_candidate(checked) {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    true,
+                    false,
+                    false,
+                    "canonical List.reverse candidate did not materialize a supported MIR shape",
+                );
+            }
+            // S8 keeps its existing candidate hard boundary: the front-end
+            // candidate predicate is intentionally stricter than
+            // collection/record compatibility and must not fall back.
             if flow_candidate {
                 return reject_migrated_candidates(
                     true,
@@ -306,7 +318,7 @@ pub(crate) fn select_default_route(
     // S11: the production unit is a complete scalar List/Set executable
     // graph, not an individual opcode.  The island validator consumes only
     // canonical MIR and TypeDesc facts and runs before any verifier/backend
-    // preflight.  A real materialized Set facade or List.len operation is
+    // preflight.  A real materialized Set facade or List operation is
     // therefore either inside this finite envelope or rejected; it cannot
     // re-enter the legacy route.
     if materialized_collection_candidate {
@@ -582,6 +594,78 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_reverse_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_list_reverse.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Copy-scalar List.reverse must select the canonical default route");
+        };
+        assert!(
+            mimi::core::mir::contains_scalar_collection_operation_candidate(&program),
+            "the route must retain a materialized List.reverse candidate"
+        );
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::ListOp {
+                            operation: mimi::core::mir::MirListOperation::Reverse,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
+    fn scalar_collection_reverse_with_auto_prelude_enters_canonical_default_route() {
+        let source = include_str!("../../tests/fixtures/mir_native_list_reverse.mimi");
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        mimi::loader::merge_prelude_into(&mut file);
+        let checked = mimi::core::check_program(&file).expect("check");
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::MixedCoverage
+        );
+        assert!(matches!(
+            select_default_route(&checked, &file),
+            DefaultMirRoute::Canonical(_)
+        ));
+    }
+
+    #[test]
+    fn unsupported_scalar_list_reverse_cannot_reenter_legacy_with_auto_prelude() {
+        let source = include_str!("../../tests/fixtures/mir_native_list_reverse_rejected.mimi");
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        mimi::loader::merge_prelude_into(&mut file);
+        let checked = mimi::core::check_program(&file).expect("check");
+        assert!(mimi::core::mir::has_unsupported_list_reverse_candidate(
+            &checked
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("unsupported List.reverse must fail closed instead of using legacy");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("did not materialize"), "{reason}");
+    }
+
+    #[test]
     fn uncalled_generic_set_template_stays_outside_collection_route() {
         let source = r#"
             func passthrough<T>(value: Set<T>) -> Set<T> { value }
@@ -701,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_compatibility_route_carries_non_materialized_disposition() {
+    fn unsupported_dynamic_list_len_stays_on_legacy_compatibility_route() {
         let source = r#"
             func main() -> i32 {
                 let values = [i for i in range(0, 3)]
@@ -710,15 +794,10 @@ mod tests {
         "#;
         let (checked, file) = checked(source);
         let route = select_default_route(&checked, &file);
-        assert!(
-            matches!(
-                &route,
-                DefaultMirRoute::Legacy(
-                    LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate
-                )
-            ),
-            "unexpected compatibility disposition: {route:?}"
-        );
+        assert!(matches!(
+            route,
+            DefaultMirRoute::Legacy(LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate)
+        ));
     }
 
     #[test]

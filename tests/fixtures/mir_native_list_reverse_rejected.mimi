@@ -1,0 +1,7 @@
+// Canonical MIR S76 negative shape: reverse requires Copy scalar List glue.
+func main() -> i32 {
+    let values = ["owned"]
+    let reversed = reverse(values)
+    drop(reversed)
+    0
+}

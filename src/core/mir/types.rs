@@ -1561,11 +1561,11 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate a read-only operation over the canonical scalar List island.
-    /// `Len` borrows the List handle, returns a Copy i32, and never transfers
-    /// or mutates the source.  The List's full Move/Clone/Drop glue is still
-    /// required so a later consumer cannot treat a view operation as proof
-    /// that the source ownership obligation disappeared.
+    /// Validate an operation over the canonical scalar List island.
+    /// `Len` borrows the List handle and returns a Copy i32. `Reverse` borrows
+    /// the source and returns a fresh move-owned List produced through Clone
+    /// glue. In both cases the source obligation remains with the source
+    /// value; a backend must not infer in-place mutation from its storage ABI.
     pub fn validate_list_operation(
         &self,
         result_ty: &ResolvedTypeId,
@@ -1579,22 +1579,35 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        if operation != crate::core::mir::MirListOperation::Len {
-            return Err(format!(
-                "List operation {:?} is outside the canonical List contract",
-                operation
-            ));
-        }
-        if result.kind != MirTypeKind::Primitive(PrimitiveType::I32)
-            || result.abi
-                != (MirAbiClass::Integer {
-                    bits: 32,
-                    signed: true,
-                })
-            || result.layout != MirLayout::Scalar
-            || result.ownership != MirOwnership::Copy
-        {
-            return Err("List.len result must be a Copy i32 scalar".into());
+        match operation {
+            crate::core::mir::MirListOperation::Len => {
+                if result.kind != MirTypeKind::Primitive(PrimitiveType::I32)
+                    || result.abi
+                        != (MirAbiClass::Integer {
+                            bits: 32,
+                            signed: true,
+                        })
+                    || result.layout != MirLayout::Scalar
+                    || result.ownership != MirOwnership::Copy
+                {
+                    return Err("List.len result must be a Copy i32 scalar".into());
+                }
+            }
+            crate::core::mir::MirListOperation::Reverse => {
+                if result_ty != list_ty {
+                    return Err(format!(
+                        "List.reverse result type '{}' disagrees with receiver type '{}'",
+                        result_ty.as_str(),
+                        list_ty.as_str()
+                    ));
+                }
+                // The operation is non-mutating: the source is borrowed for
+                // the read, then cloned. Validate both sides explicitly so a
+                // backend cannot erase the source Drop obligation or return
+                // a shallow alias as an owned result.
+                self.validate_list_glue(list_ty, MirGlueOperation::Clone)?;
+                self.validate_list_glue(result_ty, MirGlueOperation::MoveOut)?;
+            }
         }
         Ok(())
     }
@@ -4383,6 +4396,14 @@ mod tests {
             .validate_list_operation(&i32_id, &erased_list_id, MirListOperation::Len)
             .expect_err("erased List has no element ABI contract");
         assert!(erased.contains("List<T>") || erased.contains("canonical"));
+
+        assert!(catalog
+            .validate_list_operation(&list_id, &list_id, MirListOperation::Reverse)
+            .is_ok());
+        let wrong_reverse_result = catalog
+            .validate_list_operation(&i32_id, &list_id, MirListOperation::Reverse)
+            .expect_err("List.reverse must return the same owned List type");
+        assert!(wrong_reverse_result.contains("result type"));
     }
 
     #[test]
