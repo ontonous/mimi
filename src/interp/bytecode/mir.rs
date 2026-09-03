@@ -4985,6 +4985,42 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_generic_record_projection_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { .. }
+        ));
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic record projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic record projection execution");
+        let bytecode = compile_mir_program(&mir).expect("owned generic record projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("owned generic record projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_string_generic_identity_with_explicit_drop_through_mir_bytecode() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");

@@ -1741,7 +1741,12 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
 /// and the CLI make the same admission decision without re-reading surface
 /// record names or duplicating the TypeDesc rule.
 pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
-    program.functions().values().any(|function| {
+    program.instances().values().any(|instance| {
+        matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedRecordProjection { .. }
+        )
+    }) || program.functions().values().any(|function| {
         // The current flat-record native contract emits only simple function
         // symbols.  A qualified trait/impl method may carry an implicit
         // receiver whose type is a flat record, but that declaration is not a
@@ -1874,7 +1879,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarListFacade { .. }
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
-                | MirGenericInstanceContract::ScalarRecordProjection { .. } => {}
+                | MirGenericInstanceContract::ScalarRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjection { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit

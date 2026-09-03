@@ -148,6 +148,35 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::OwnedRecordProjection { contract } => {
+                    if let Some(concrete) = instance.arguments.first() {
+                        if let Err(message) =
+                            self.program.type_catalog().validate_owned_string(concrete)
+                        {
+                            self.error(format!(
+                                "instance '{}' owned record projection argument is unsupported: {message}",
+                                instance.id
+                            ));
+                        }
+                    } else {
+                        self.error(format!(
+                            "instance '{}' owned record projection has no concrete argument",
+                            instance.id
+                        ));
+                    }
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_owned_record_projection_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' owned record projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -293,10 +322,17 @@ impl<'a> CapabilityGate<'a> {
                 Ok(())
             }
             MirLayout::Record { fields, .. } => {
-                if descriptor.ownership == MirOwnership::Linear {
-                    self.require_linear_aggregate(ty, &descriptor)?;
-                } else {
-                    self.require_copy_aggregate(ty, &descriptor)?;
+                match descriptor.ownership {
+                    MirOwnership::Linear => self.require_linear_aggregate(ty, &descriptor)?,
+                    MirOwnership::Copy => self.require_copy_aggregate(ty, &descriptor)?,
+                    MirOwnership::Move => self.require_move_aggregate(ty, &descriptor)?,
+                    ownership => {
+                        return Err(format!(
+                            "record '{}' ownership {:?} is outside the verifier capability",
+                            ty.as_str(),
+                            ownership
+                        ))
+                    }
                 }
                 for field in fields {
                     self.validate_type(&field.ty, "record field");
@@ -357,6 +393,31 @@ impl<'a> CapabilityGate<'a> {
         {
             return Err(format!(
                 "linear aggregate '{}' lacks the canonical aggregate Move/Clone/Drop glue plan",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_move_aggregate(
+        &self,
+        ty: &crate::core::ResolvedTypeId,
+        descriptor: &crate::core::mir::types::MirTypeDesc,
+    ) -> Result<(), String> {
+        if descriptor.ownership != MirOwnership::Move
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.glue
+                != (crate::core::mir::types::MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.drop_plan.is_none()
+        {
+            return Err(format!(
+                "move record '{}' lacks canonical aggregate glue/drop plan",
                 ty.as_str()
             ));
         }
@@ -535,10 +596,23 @@ impl<'a> CapabilityGate<'a> {
                     }
                 }
             }
-            MirInstructionKind::MoveProject { .. } => {
-                self.error(format!(
-                    "{subject} MoveProject is outside the verifier capability"
-                ));
+            MirInstructionKind::MoveProject {
+                result,
+                base,
+                projection,
+            } => {
+                let (Some(base_ty), Some(result_ty)) =
+                    (value_type(function, base), value_type(function, result))
+                else {
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_move_projection(&base_ty, &result_ty, projection)
+                {
+                    self.error(format!("{subject} MoveProject rejected: {message}"));
+                }
             }
             MirInstructionKind::MoveProjectDrop { .. } => {
                 self.error(format!(
@@ -1001,7 +1075,8 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListFacade { .. }
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
-                | MirGenericInstanceContract::ScalarRecordProjection { .. } => {}
+                | MirGenericInstanceContract::ScalarRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjection { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

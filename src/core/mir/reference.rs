@@ -1345,6 +1345,16 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarRecordProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::OwnedRecordProjection { .. } => {
+                if instance.arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic record projection contract requires one type argument, got {}",
+                        instance.arguments.len()
+                    ))
+                } else {
+                    type_catalog.validate_owned_string(&instance.arguments[0])
+                }
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1465,6 +1475,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR record projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::OwnedRecordProjection { ref contract } => {
+                if let Err(message) = super::lower::validate_owned_record_projection_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR owned record projection contract is invalid: {message}"
                         ),
                     });
                 }
@@ -5591,6 +5615,49 @@ mod tests {
     }
 
     #[test]
+    fn concrete_owned_generic_record_projection_consumes_move_project() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record projection instance");
+        let MirGenericInstanceContract::OwnedRecordProjection { contract } = &instance.contract
+        else {
+            panic!("owned generic record projection must carry its consuming receipt");
+        };
+        assert_eq!(contract.arity, 1);
+        assert_eq!(contract.name, "value");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic record projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        assert!(target
+            .values
+            .get(&target.parameters[0])
+            .and_then(|value| program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.ownership == crate::core::mir::types::MirOwnership::Move
+            }));
+        assert!(program
+            .type_catalog()
+            .validate_owned_string(&instance.arguments[0])
+            .is_ok());
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn unsupported_generic_record_projection_shape_fails_closed() {
         let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: 41, right: 1 }; get(pair) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -5606,6 +5673,25 @@ mod tests {
                 "unexpected errors: {errors:?}"
             ),
             other => panic!("unsupported generic record shape crossed MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_owned_generic_record_projection_shape_fails_closed() {
+        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: \"owned\", right: \"keep\" }; let picked = get(pair); drop(picked); 41 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("multi-field owned generic record projection must remain fail-closed");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("generic record projection")),
+                "unexpected errors: {errors:?}"
+            ),
+            other => panic!("unsupported owned generic record shape crossed MIR gate: {other:?}"),
         }
     }
 

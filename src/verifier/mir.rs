@@ -2459,6 +2459,19 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { contract } => {
+            eval_materialized_owned_record_projection_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                contract,
+            )
+        }
     }
 }
 
@@ -3414,6 +3427,110 @@ fn eval_materialized_record_projection_call(
     let output = symbolic_project(value, &MirProjection::Field(contract.field.clone()))?;
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume a materialized generic one-field owned-record
+/// projection.  The caller argument is removed (a move boundary), then the
+/// specialized `MoveProject; Return` body is explored so the verifier uses
+/// exactly the same TypeDesc/glue semantics as the reference executor and
+/// native/bytecode consumers.
+fn eval_materialized_owned_record_projection_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirRecordProjectionContract,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record projection target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_owned_record_projection_mir(target, catalog, contract)?;
+    if type_arguments.len() != 1 || catalog.validate_owned_string(&type_arguments[0]).is_err() {
+        return Err("MIR verifier owned record projection argument is not canonical String".into());
+    }
+    if arguments.len() != 1 || target.parameters.len() != 1 {
+        return Err("MIR verifier owned record projection call requires one argument".into());
+    }
+    let result = result.as_ref().ok_or_else(|| {
+        "MIR verifier owned record projection call must produce a result".to_string()
+    })?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(
+            "MIR verifier owned record projection call result disagrees with target TypeDesc"
+                .into(),
+        );
+    }
+    if target.result != contract.field_ty {
+        return Err("MIR verifier owned record projection result disagrees with receipt".into());
+    }
+    let argument = &arguments[0];
+    let argument_info = function.values.get(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record projection argument '{}' is absent",
+            argument
+        )
+    })?;
+    let parameter = &target.parameters[0];
+    let parameter_info = target.values.get(parameter).ok_or_else(|| {
+        "MIR verifier owned record projection parameter TypeDesc is absent".to_string()
+    })?;
+    if argument_info.ty != parameter_info.ty {
+        return Err("MIR verifier owned record projection argument disagrees with TypeDesc".into());
+    }
+    let value = state.values.remove(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record projection argument '{}' is not defined",
+            argument
+        )
+    })?;
+    if !symbolic_matches_type(catalog, &argument_info.ty, &value) {
+        return Err(
+            "MIR verifier owned record projection argument has the wrong symbolic shape".into(),
+        );
+    }
+    let caller_constraints = state.constraints.clone();
+    let mut target_state = SymbolicState {
+        values: BTreeMap::from([(parameter.clone(), value)]),
+        constraints: caller_constraints,
+        traps: Vec::new(),
+    };
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if !traps.is_empty() {
+        return Err(
+            "MIR verifier owned record projection call has a trapping execution path".into(),
+        );
+    }
+    let [returned] = returns.as_slice() else {
+        return Err(
+            "MIR verifier owned record projection call must have exactly one return path".into(),
+        );
+    };
+    state.constraints = returned.constraints.clone();
+    ensure_result_shape(function, catalog, result, &returned.value)?;
+    state.values.insert(result.clone(), returned.value.clone());
     Ok(())
 }
 
