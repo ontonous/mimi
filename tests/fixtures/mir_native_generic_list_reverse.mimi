@@ -1,0 +1,13 @@
+// Canonical concrete generic MIR: a List<T> cloning transform specialized to i32.
+func list_reverse<T>(values: List<T>) -> List<T> {
+    values.reverse()
+}
+
+func main() -> i32 {
+    let values: List<i32> = [4, 5, 6]
+    let reversed = list_reverse(values)
+    let count = len(reversed)
+    drop(values)
+    drop(reversed)
+    count
+}

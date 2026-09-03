@@ -3088,11 +3088,16 @@ fn eval_materialized_list_facade_call(
     else {
         return Err("MIR verifier List facade receiver is not a symbolic List".into());
     };
-    if operation != crate::core::mir::MirListOperation::Len {
-        return Err("MIR verifier List facade only admits ListOp::Len".into());
-    }
-    add_definedness(state, length.le(Int::from_i64(i32::MAX as i64)), "E0802")?;
-    let output = SymbolicValue::Int(length);
+    let output = match operation {
+        crate::core::mir::MirListOperation::Len => {
+            add_definedness(state, length.le(Int::from_i64(i32::MAX as i64)), "E0802")?;
+            SymbolicValue::Int(length)
+        }
+        crate::core::mir::MirListOperation::Reverse => SymbolicValue::List { length },
+        crate::core::mir::MirListOperation::Concat => {
+            return Err("MIR verifier List facade does not admit ListOp::Concat".into())
+        }
+    };
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
     Ok(())
@@ -4443,6 +4448,52 @@ mod tests {
         assert!(result
             .message
             .contains("canonical MIR ensures contract proven"));
+    }
+
+    #[test]
+    fn verifier_consumes_materialized_scalar_generic_list_reverse_call() {
+        let source = r#"
+            func list_reverse<T>(values: List<T>) -> List<T> { values.reverse() }
+
+            func checked() -> i32 {
+                ensures: result == 3
+                let values: List<i32> = [4, 5, 6]
+                let reversed = list_reverse(values)
+                let count = len(reversed)
+                drop(values)
+                drop(reversed)
+                count
+            }
+
+            func main() -> i32 { checked() }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("generic List.reverse MIR");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic List.reverse instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                operation: crate::core::mir::MirListOperation::Reverse
+            }
+        ));
+        let results = verify_program(&program, "generic-list-reverse-source-hash".into())
+            .expect("verify generic List.reverse MIR");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:checked")
+            .expect("List.reverse checked verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::Proven,
+            "{}",
+            result.message
+        );
     }
 
     #[test]

@@ -61,6 +61,55 @@ fn materializes_generic_scalar_list_len_as_a_canonical_facade() {
 }
 
 #[test]
+fn materializes_generic_scalar_list_reverse_as_a_canonical_facade() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_reverse.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic List.reverse must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .next()
+        .expect("generic List.reverse instance");
+    assert!(matches!(
+        instance.contract,
+        MirGenericInstanceContract::ScalarListFacade {
+            operation: crate::core::mir::MirListOperation::Reverse
+        }
+    ));
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized List.reverse target");
+    let receipts = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                operation: crate::core::mir::MirListOperation::Reverse,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].list_ty, receipts[0].result_ty,
+        "List.reverse must preserve one canonical List TypeDesc"
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference List.reverse facade execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(3));
+}
+
+#[test]
 fn rejects_generic_list_facade_with_multiple_operations_before_backends() {
     let source = r#"
         func bad<T>(values: List<T>) -> i32 {
@@ -81,6 +130,29 @@ fn rejects_generic_list_facade_with_multiple_operations_before_backends() {
     let checked = crate::core::check_program(&file).expect("check");
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect_err("unsupported generic List body must fail closed");
+    let message = format!("{error:?}");
+    assert!(message.contains("generic List facade must lower to exactly one canonical ListOp"));
+}
+
+#[test]
+fn rejects_generic_list_reverse_body_without_a_canonical_operation() {
+    let source = r#"
+        func bad<T>(values: List<T>) -> List<T> { values }
+
+        func main() -> i32 {
+            let values: List<i32> = [1, 2]
+            let result = bad(values)
+            drop(result)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic List body without reverse operation must fail closed");
     let message = format!("{error:?}");
     assert!(message.contains("generic List facade must lower to exactly one canonical ListOp"));
 }

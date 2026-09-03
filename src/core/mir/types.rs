@@ -2073,6 +2073,61 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize the non-executable placeholder receipt used while lowering
+    /// a generic `List<T>.reverse()` facade. The concrete instance must still
+    /// regenerate and validate the full receipt after substituting `T`.
+    pub(crate) fn validated_generic_list_reverse_operation_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        list_ty: &ResolvedTypeId,
+    ) -> Result<MirListOperationContract, String> {
+        let descriptor = self.get(list_ty).ok_or_else(|| {
+            format!(
+                "generic List operation receiver type '{}' is absent",
+                list_ty.as_str()
+            )
+        })?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "generic List operation receiver type '{}' has no canonical List layout",
+                list_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::List
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::List,
+                    clone: MirGlueKind::List,
+                    drop: MirGlueKind::List,
+                })
+        {
+            return Err("generic List operation receiver has an inconsistent List contract".into());
+        }
+        let element_desc = self.get(element).ok_or_else(|| {
+            format!(
+                "generic List operation element type '{}' is absent",
+                element.as_str()
+            )
+        })?;
+        if element_desc.kind != MirTypeKind::GenericParameter {
+            return Err(
+                "generic List operation placeholder requires a GenericParameter element".into(),
+            );
+        }
+        if result_ty != list_ty {
+            return Err("generic List.reverse placeholder result must equal its receiver".into());
+        }
+        Ok(MirListOperationContract {
+            list_ty: list_ty.clone(),
+            element_ty: element.clone(),
+            result_ty: result_ty.clone(),
+            argument_ty: None,
+            operation: crate::core::mir::MirListOperation::Reverse,
+        })
+    }
+
     /// Materialize the complete TypeDesc receipt for a canonical List
     /// operation. This is the only constructor for the operation receipt;
     /// bytecode/native/verifier consumers must receive its result from MIR.

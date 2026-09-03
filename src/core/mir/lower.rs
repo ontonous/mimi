@@ -5,8 +5,8 @@
 //! flow, Copy record aggregates, and recursive Move-owned tuple/record product
 //! glue shapes (for example `(string, i32)` or `{ name: string, count: i32 }`).
 //! The first container slice adds List construction and the `Len`/`Reverse`
-//! operations for concrete Copy scalar elements; a narrow generic `Len`
-//! facade is materialized only after its specialized body is proven. All
+//! operations for concrete Copy scalar elements; narrow generic `Len` and
+//! `Reverse` facades are materialized only after their specialized bodies are proven. All
 //! other List operations and element shapes remain fail-closed.
 //! Unsupported shapes return a structured error and must not
 //! silently select the legacy emitter.
@@ -261,7 +261,7 @@ pub fn lower_program_with_type_catalog(
 /// the MIR `Call`, the instance table records the template/arguments proof,
 /// and the executable function is already specialized MIR. The admitted
 /// families are scalar/flat-variant identity, owned String identity, scalar
-/// Set facades, and the concrete Copy-scalar List `Len` facade. All other
+/// Set facades, and concrete Copy-scalar List `Len`/`Reverse` facades. All other
 /// generic bodies remain fail-closed.
 pub fn materialize_concrete_generic_instances(
     program: &CheckedProgram,
@@ -748,10 +748,14 @@ fn detect_scalar_list_facade_operation(
             message: "generic List facade must lower to exactly one canonical ListOp".into(),
         }]);
     };
-    if *operation != super::MirListOperation::Len {
+    if !matches!(
+        operation,
+        super::MirListOperation::Len | super::MirListOperation::Reverse
+    ) {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic List facade only admits canonical ListOp::Len".into(),
+            message: "generic List facade only admits canonical ListOp::Len or ListOp::Reverse"
+                .into(),
         }]);
     }
     validate_scalar_list_facade_mir(function, type_catalog, *operation).map_err(|message| {
@@ -763,18 +767,21 @@ fn detect_scalar_list_facade_operation(
     Ok(*operation)
 }
 
-/// Validate the concrete body of the generic List `Len` facade. The body is
-/// deliberately structural: one List parameter is cloned exactly once, the
-/// clone is the receiver of one receipt-bearing `ListOp::Len`, and that
-/// result is returned. This keeps a specialized generic function from hiding
-/// an arbitrary body behind a canonical-looking instance symbol.
+/// Validate the concrete body of the generic scalar List `Len`/`Reverse`
+/// facade. The body is deliberately structural: one List parameter is cloned
+/// exactly once, the clone is the receiver of one receipt-bearing ListOp, and
+/// that result is returned. This keeps a specialized generic function from
+/// hiding an arbitrary body behind a canonical-looking instance symbol.
 pub(crate) fn validate_scalar_list_facade_mir(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
     operation: super::MirListOperation,
 ) -> Result<(), String> {
-    if operation != super::MirListOperation::Len {
-        return Err("scalar List facade only admits ListOp::Len".into());
+    if !matches!(
+        operation,
+        super::MirListOperation::Len | super::MirListOperation::Reverse
+    ) {
+        return Err("scalar List facade only admits ListOp::Len or ListOp::Reverse".into());
     }
     let [list_parameter] = function.parameters.as_slice() else {
         return Err("scalar List facade must have exactly one List parameter".into());
@@ -2817,8 +2824,10 @@ impl<'a> Lowerer<'a> {
         ) {
             Ok(contract) => Some(contract),
             Err(message)
-                if operation == super::MirListOperation::Len
-                    && argument_ty.is_none()
+                if matches!(
+                    operation,
+                    super::MirListOperation::Len | super::MirListOperation::Reverse
+                ) && argument_ty.is_none()
                     && type_catalog.get(&list_ty).is_some_and(|descriptor| {
                         matches!(
                             descriptor.layout,
@@ -2829,9 +2838,16 @@ impl<'a> Lowerer<'a> {
                         )
                     }) =>
             {
-                match type_catalog
-                    .validated_generic_list_len_operation_contract(&result_ty, &list_ty)
-                {
+                let placeholder = match operation {
+                    super::MirListOperation::Len => type_catalog
+                        .validated_generic_list_len_operation_contract(&result_ty, &list_ty),
+                    super::MirListOperation::Reverse => type_catalog
+                        .validated_generic_list_reverse_operation_contract(&result_ty, &list_ty),
+                    super::MirListOperation::Concat => unreachable!(
+                        "List.concat cannot use the no-argument generic List placeholder"
+                    ),
+                };
+                match placeholder {
                     Ok(contract) => Some(contract),
                     Err(generic_message) => {
                         self.error(node_id, generic_message);

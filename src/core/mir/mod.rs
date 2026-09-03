@@ -290,11 +290,10 @@ pub enum MirGenericInstanceContract {
     ScalarSetFacade {
         operation: MirSetOperation,
     },
-    /// A generic `list_len<T>(List<T>) -> i32` facade specialized to a
-    /// concrete Copy scalar element.  The executable body remains a
-    /// canonical `Clone; ListOp::Len; Return` shape; this contract prevents
-    /// consumers from treating an arbitrary generic List body as a trusted
-    /// instance.
+    /// A generic scalar List facade (`Len` or `Reverse`) specialized to a
+    /// concrete Copy scalar element. The executable body remains a canonical
+    /// `Clone; ListOp; Return` shape; this contract prevents consumers from
+    /// treating an arbitrary generic List body as a trusted instance.
     ScalarListFacade {
         operation: MirListOperation,
     },

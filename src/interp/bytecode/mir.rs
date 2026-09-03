@@ -4736,6 +4736,37 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_scalar_generic_list_reverse_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_list_reverse.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic List.reverse MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("generic List.reverse instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                operation: crate::core::mir::MirListOperation::Reverse
+            }
+        ));
+
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference List.reverse execution");
+        let bytecode = compile_mir_program(&mir).expect("generic List.reverse MIR bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic List.reverse bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(3));
+        assert!(matches!(value, Value::Int(3)));
+    }
+
+    #[test]
     fn executes_owned_string_generic_identity_with_explicit_drop_through_mir_bytecode() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_owned_string_identity.mimi");

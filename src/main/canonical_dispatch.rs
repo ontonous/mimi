@@ -656,6 +656,28 @@ mod tests {
     }
 
     #[test]
+    fn scalar_collection_generic_list_reverse_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_reverse.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Copy-scalar generic List.reverse must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarListFacade {
+                    operation: mimi::core::mir::MirListOperation::Reverse
+                }
+            )
+        }));
+    }
+
+    #[test]
     fn scalar_collection_reverse_with_auto_prelude_enters_canonical_default_route() {
         let source = include_str!("../../tests/fixtures/mir_native_list_reverse.mimi");
         let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
