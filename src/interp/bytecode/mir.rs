@@ -4167,6 +4167,25 @@ mod tests {
     }
 
     #[test]
+    fn executes_total_direct_variant_call_paths_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_call_multipath.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference multipath direct variant execution");
+        let bytecode = compile_mir_program(&mir).expect("multipath direct variant bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("multipath direct variant bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+        assert!(matches!(value, Value::Int(4)));
+    }
+
+    #[test]
     fn immutable_scalar_borrow_and_dereference_agree_with_reference_oracle() {
         let source = "func main() -> i32 { let value = 41; *(&value) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

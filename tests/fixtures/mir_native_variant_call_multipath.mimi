@@ -1,0 +1,14 @@
+// Canonical direct flat Copy variant call with two total return paths.
+func choose(flag: bool) -> Option<i32> {
+    if flag { Some(7) } else { None }
+}
+
+func checked(flag: bool) -> i32 {
+    ensures: result >= 0
+    let value = choose(flag)
+    if value.is_some() { 4 } else { 0 }
+}
+
+func main() -> i32 {
+    checked(true)
+}

@@ -1613,6 +1613,27 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_total_direct_variant_call_paths() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_variant_call_multipath.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference multipath direct variant execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_variant_call_multipath");
+        generator
+            .compile_mir_native(&program)
+            .expect("native multipath direct variant call must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native multipath direct variant call module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_tuple_projection_receipt() {
         let program = canonical_program("func main() -> i32 { let pair = (40, 2); pair.0 }");
         let context = Context::create();

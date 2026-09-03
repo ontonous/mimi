@@ -4947,6 +4947,29 @@ mod tests {
     }
 
     #[test]
+    fn reference_executes_total_direct_variant_call_paths() {
+        let source = include_str!("../../../tests/fixtures/mir_native_variant_call_multipath.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let interpreter = MirReferenceInterpreter::new(&program);
+        let owner = NodeId("function:checked".into());
+        assert_eq!(
+            interpreter
+                .execute(&owner, &[MirRuntimeValue::Bool(true)])
+                .expect("reference true path"),
+            MirRuntimeValue::Int(4)
+        );
+        assert_eq!(
+            interpreter
+                .execute(&owner, &[MirRuntimeValue::Bool(false)])
+                .expect("reference false path"),
+            MirRuntimeValue::Int(0)
+        );
+    }
+
+    #[test]
     fn concrete_scalar_set_facade_instances_are_typed_and_executable() {
         let source = "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } if !set_contains(inserted, 2) { return 2 } let removed = set_remove(inserted, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");

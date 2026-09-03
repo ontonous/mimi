@@ -2235,10 +2235,12 @@ fn eval_direct_variant_call(
         &target.result,
         receipt,
     )?;
+    validate_direct_variant_return_coverage(target, &target.entry)?;
 
+    let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
         values: BTreeMap::new(),
-        constraints: state.constraints.clone(),
+        constraints: caller_constraints.clone(),
         traps: Vec::new(),
     };
     for ((argument, parameter), parameter_ty) in arguments
@@ -2283,15 +2285,257 @@ fn eval_direct_variant_call(
     if !traps.is_empty() {
         return Err("MIR verifier direct variant call has a trapping execution path".into());
     }
-    let [returned] = returns.as_slice() else {
+    let merged = merge_direct_variant_return_paths(catalog, &target.result, &returns)?;
+    // Callee branch conditions are embedded in the merged symbolic variant;
+    // only the caller's constraints remain at this program point.  Copying a
+    // single callee path here would unsoundly constrain the caller to one
+    // branch and make the proof depend on return-path enumeration order.
+    state.constraints = caller_constraints;
+    ensure_result_shape(function, catalog, result, &merged)?;
+    state.values.insert(result.clone(), merged);
+    Ok(())
+}
+
+/// Validate the structural coverage required before a direct variant call can
+/// merge return paths.  This is deliberately a small CFG contract: acyclic
+/// Goto/Branch graphs whose reachable terminal blocks all return a value.  It
+/// rejects Switch, Unreachable, Fault, and Trap terminals here so the merge
+/// helper cannot silently select a fallback value for an uncovered input.
+fn validate_direct_variant_return_coverage(
+    function: &MirFunction,
+    entry: &crate::core::mir::MirBlockId,
+) -> Result<(), String> {
+    fn visit(
+        function: &MirFunction,
+        block_id: &crate::core::mir::MirBlockId,
+        active: &mut BTreeSet<crate::core::mir::MirBlockId>,
+        visited: &mut BTreeSet<crate::core::mir::MirBlockId>,
+    ) -> Result<(), String> {
+        if !active.insert(block_id.clone()) {
+            return Err(
+                "MIR verifier direct variant call return merge does not admit cyclic CFG".into(),
+            );
+        }
+        if !visited.insert(block_id.clone()) {
+            active.remove(block_id);
+            return Ok(());
+        }
+        let block = function.blocks.get(block_id).ok_or_else(|| {
+            format!(
+                "MIR verifier direct variant call return block '{}' is absent",
+                block_id
+            )
+        })?;
+        match &block.terminator {
+            MirTerminator::Goto { target, .. } => visit(function, target, active, visited)?,
+            MirTerminator::Branch {
+                then_target,
+                else_target,
+                ..
+            } => {
+                visit(function, then_target, active, visited)?;
+                visit(function, else_target, active, visited)?;
+            }
+            MirTerminator::Return { value: Some(_) } => {}
+            MirTerminator::Return { value: None } => {
+                return Err(
+                    "MIR verifier direct variant call return merge requires value returns".into(),
+                )
+            }
+            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
+                return Err(
+                    "MIR verifier direct variant call return merge only admits Goto/Branch CFG"
+                        .into(),
+                )
+            }
+            MirTerminator::Trap { .. }
+            | MirTerminator::Unreachable
+            | MirTerminator::Fault { .. } => return Err(
+                "MIR verifier direct variant call return merge requires total non-trapping returns"
+                    .into(),
+            ),
+        }
+        active.remove(block_id);
+        Ok(())
+    }
+
+    visit(function, entry, &mut BTreeSet::new(), &mut BTreeSet::new())
+}
+
+/// Merge the complete return set of a direct flat Copy variant call into one
+/// symbolic value.  Every path is structurally covered before this function
+/// runs; the path condition selects the canonical tag and each scalar payload
+/// slot.  Missing payload fields on a zero-payload variant receive a typed
+/// dummy value because they are semantically inactive under that tag.
+fn merge_direct_variant_return_paths(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ResolvedTypeId,
+    returns: &[ReturnPath],
+) -> Result<SymbolicValue, String> {
+    if returns.is_empty() {
+        return Err("MIR verifier direct variant call has no return paths to merge".into());
+    }
+    catalog.validate_flat_copy_variant(result_ty)?;
+    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
+        return Err("MIR verifier direct variant call has no canonical variant layout".into());
+    };
+    let nominal =
+        crate::core::ir::NominalTypeId::new(expected_nominal).map_err(|error| error.to_string())?;
+    let all_fields = variants
+        .iter()
+        .flat_map(|variant| variant.fields.iter())
+        .map(|field| (field.id.clone(), field.ty.clone()))
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(returns.len());
+    for path in returns {
+        let value = normalize_direct_variant_return(
+            catalog,
+            result_ty,
+            &nominal,
+            &all_fields,
+            &path.value,
+        )?;
+        normalized.push((conjunction(&path.constraints), value));
+    }
+    let (_, last) = normalized
+        .pop()
+        .expect("validated non-empty direct variant return paths");
+    let mut merged = last;
+    for (condition, value) in normalized.into_iter().rev() {
+        merged = merge_symbolic_variants(&condition, value, merged)?;
+    }
+    Ok(merged)
+}
+
+fn normalize_direct_variant_return(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ResolvedTypeId,
+    expected_nominal: &crate::core::ir::NominalTypeId,
+    all_fields: &[(crate::core::NodeId, crate::core::ResolvedTypeId)],
+    value: &SymbolicValue,
+) -> Result<SymbolicValue, String> {
+    let SymbolicValue::Variant {
+        nominal,
+        tag,
+        payload,
+        ..
+    } = value
+    else {
         return Err(
-            "MIR verifier direct variant call requires exactly one non-trapping return path".into(),
+            "MIR verifier direct variant call returned a non-variant symbolic value".into(),
         );
     };
-    state.constraints = returned.constraints.clone();
-    ensure_result_shape(function, catalog, result, &returned.value)?;
-    state.values.insert(result.clone(), returned.value.clone());
-    Ok(())
+    if nominal != expected_nominal || !symbolic_matches_type(catalog, result_ty, value) {
+        return Err(
+            "MIR verifier direct variant call return disagrees with canonical TypeDesc".into(),
+        );
+    }
+    let mut normalized_payload = BTreeMap::new();
+    for (field, field_ty) in all_fields {
+        let field_value = payload
+            .get(field)
+            .cloned()
+            .unwrap_or(symbolic_zero_for_type(catalog, field_ty)?);
+        if !symbolic_matches_type(catalog, field_ty, &field_value) {
+            return Err(format!(
+                "MIR verifier direct variant call payload field '{}' disagrees with TypeDesc",
+                field.0
+            ));
+        }
+        normalized_payload.insert(field.clone(), field_value);
+    }
+    Ok(SymbolicValue::Variant {
+        nominal: expected_nominal.clone(),
+        tag: tag.clone(),
+        payload: normalized_payload,
+        active_variant: None,
+    })
+}
+
+fn symbolic_zero_for_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<SymbolicValue, String> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| format!("MIR verifier payload TypeDesc '{}' is absent", ty.as_str()))?;
+    match descriptor.abi {
+        MirAbiClass::Integer {
+            bits: 32 | 64,
+            signed: true,
+        } if descriptor.layout == MirLayout::Scalar => Ok(SymbolicValue::Int(Int::from_i64(0))),
+        MirAbiClass::Bool if descriptor.layout == MirLayout::Scalar => {
+            Ok(SymbolicValue::Bool(Bool::from_bool(false)))
+        }
+        _ => Err(format!(
+            "MIR verifier direct variant call payload TypeDesc '{}' has no scalar zero value",
+            ty.as_str()
+        )),
+    }
+}
+
+fn merge_symbolic_variants(
+    condition: &Bool,
+    when_true: SymbolicValue,
+    when_false: SymbolicValue,
+) -> Result<SymbolicValue, String> {
+    let (
+        SymbolicValue::Variant {
+            nominal: true_nominal,
+            tag: true_tag,
+            payload: true_payload,
+            ..
+        },
+        SymbolicValue::Variant {
+            nominal: false_nominal,
+            tag: false_tag,
+            payload: false_payload,
+            ..
+        },
+    ) = (when_true, when_false)
+    else {
+        return Err("MIR verifier direct variant call merge requires variant return paths".into());
+    };
+    if true_nominal != false_nominal || true_payload.len() != false_payload.len() {
+        return Err(
+            "MIR verifier direct variant call merge has incompatible nominal/payload".into(),
+        );
+    }
+    let mut payload = BTreeMap::new();
+    for (field, true_value) in true_payload {
+        let false_value = false_payload.get(&field).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier direct variant call merge is missing payload field '{}'",
+                field.0
+            )
+        })?;
+        payload.insert(
+            field,
+            merge_symbolic_scalars(condition, true_value, false_value)?,
+        );
+    }
+    Ok(SymbolicValue::Variant {
+        nominal: true_nominal,
+        tag: condition.ite(&true_tag, &false_tag),
+        payload,
+        active_variant: None,
+    })
+}
+
+fn merge_symbolic_scalars(
+    condition: &Bool,
+    when_true: SymbolicValue,
+    when_false: SymbolicValue,
+) -> Result<SymbolicValue, String> {
+    match (when_true, when_false) {
+        (SymbolicValue::Int(when_true), SymbolicValue::Int(when_false)) => {
+            Ok(SymbolicValue::Int(condition.ite(&when_true, &when_false)))
+        }
+        (SymbolicValue::Bool(when_true), SymbolicValue::Bool(when_false)) => {
+            Ok(SymbolicValue::Bool(condition.ite(&when_true, &when_false)))
+        }
+        _ => Err("MIR verifier direct variant call merge requires scalar payloads".into()),
+    }
 }
 
 /// Symbolically consume a materialized scalar Set facade call. The target
@@ -3277,6 +3521,74 @@ mod tests {
             .find(|result| result.func_name == owner.0)
             .expect("direct variant call verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_merges_total_direct_flat_copy_variant_call_paths() {
+        let source = include_str!("../../tests/fixtures/mir_native_variant_call_multipath.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[MirRuntimeValue::Bool(true)])
+            .expect("reference multipath call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(4));
+
+        let results = verify_program(&program, "direct-variant-multipath-source-hash".into())
+            .expect("verify total direct variant call");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("multipath direct variant verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_rejects_switch_direct_variant_call_path_merge() {
+        let source = r#"
+            func choose(code: i32) -> Option<i32> {
+                match code {
+                    0 => Some(7),
+                    _ => None
+                }
+            }
+
+            func checked(code: i32) -> i32 {
+                ensures: result >= 0
+                let value = choose(code)
+                if value.is_some() { 4 } else { 0 }
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("checked"))
+            .cloned()
+            .expect("checked MIR function");
+        let results = verify_program(&program, "direct-variant-switch-merge-source-hash".into())
+            .expect("verify should classify unsupported path merge");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("switch merge verification result");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(result.message.contains("only admits Goto/Branch CFG"));
     }
 
     #[test]
