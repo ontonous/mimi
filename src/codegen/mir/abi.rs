@@ -150,7 +150,8 @@ pub(super) fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
             MirAbiClass::Integer {
                 bits: 32 | 64,
                 signed: true,
-            } | MirAbiClass::Bool
+            } | MirAbiClass::Float { bits: 32 | 64 }
+                | MirAbiClass::Bool
         )
         && desc.ownership == MirOwnership::Copy
         && desc.glue
@@ -212,6 +213,35 @@ pub(super) fn native_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
+    // The general flat-Copy validator intentionally keeps its historical
+    // signed-integer/bool boundary.  A concrete builtin Option<f32/f64> is
+    // the one promoted floating variant island, so route it through the
+    // opt-in TypeDesc contract before returning its payload identity.
+    if let Some(expected) = catalog.get(ty).and_then(|descriptor| {
+        let MirLayout::Option { inner, .. } = &descriptor.layout else {
+            return None;
+        };
+        catalog.get(inner).and_then(|inner| match inner.kind {
+            MirTypeKind::Primitive(crate::core::PrimitiveType::F32) => {
+                Some(crate::core::PrimitiveType::F32)
+            }
+            MirTypeKind::Primitive(crate::core::PrimitiveType::F64) => {
+                Some(crate::core::PrimitiveType::F64)
+            }
+            _ => None,
+        })
+    }) {
+        catalog
+            .validate_copy_option_variant(ty, expected)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        if let MirLayout::Option { inner, .. } = &catalog
+            .get(ty)
+            .expect("validated Option TypeDesc remains present")
+            .layout
+        {
+            return Ok(inner.clone());
+        }
+    }
     catalog
         .validate_flat_copy_variant(ty)
         .map_err(|message| NativeMirError::new(ty.as_str(), message))
@@ -390,6 +420,8 @@ pub(super) fn native_basic_type<'ctx>(
             bits: 64,
             signed: true,
         } => Ok(context.i64_type().into()),
+        MirAbiClass::Float { bits: 32 } => Ok(context.f32_type().into()),
+        MirAbiClass::Float { bits: 64 } => Ok(context.f64_type().into()),
         MirAbiClass::Bool => Ok(context.bool_type().into()),
         MirAbiClass::StringHandle => {
             catalog

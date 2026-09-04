@@ -264,7 +264,8 @@ impl<'a> NativeMirValidator<'a> {
                 MirAbiClass::Integer {
                     bits: 32 | 64,
                     signed: true,
-                } | MirAbiClass::Bool
+                } | MirAbiClass::Float { bits: 32 | 64 }
+                    | MirAbiClass::Bool
             ) && desc.layout == MirLayout::Scalar)
                 || is_unit
                 || self.validate_flat_copy_record(ty, subject)
@@ -395,6 +396,7 @@ impl<'a> NativeMirValidator<'a> {
                             || i32::try_from(*value).is_ok()
                     }
                     (MirAbiClass::Bool, ResolvedLiteral::Bool(_)) => true,
+                    (MirAbiClass::Float { bits: 32 | 64 }, ResolvedLiteral::FloatBits(_)) => true,
                     (MirAbiClass::StringHandle, ResolvedLiteral::String(_)) => {
                         if let Err(message) = catalog.validate_owned_string(
                             &function.values.get(result).expect("validated result").ty,

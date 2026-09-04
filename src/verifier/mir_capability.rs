@@ -292,6 +292,7 @@ impl<'a> CapabilityGate<'a> {
             }
             MirLayout::Scalar => {
                 if catalog.validate_copy_scalar(ty).is_ok()
+                    || catalog.validate_copy_float_scalar(ty).is_ok()
                     || catalog.validate_owned_string(ty).is_ok()
                 {
                     Ok(())
@@ -456,7 +457,12 @@ impl<'a> CapabilityGate<'a> {
                         catalog.validate_copy_scalar(&ty).is_ok()
                     }
                     ResolvedLiteral::String(_) => catalog.validate_owned_string(&ty).is_ok(),
-                    ResolvedLiteral::FloatBits(_) | ResolvedLiteral::Unit => false,
+                    ResolvedLiteral::FloatBits(_) => catalog.get(&ty).is_some_and(|descriptor| {
+                        matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+                            && descriptor.layout == MirLayout::Scalar
+                            && descriptor.ownership == MirOwnership::Copy
+                    }),
+                    ResolvedLiteral::Unit => false,
                 };
                 if !supported {
                     self.error(format!(

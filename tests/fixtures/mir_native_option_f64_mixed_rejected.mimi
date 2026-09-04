@@ -1,0 +1,18 @@
+func unwrap_copy() -> f64 {
+    let value: Option<f64> = Some(41.5)
+    value.unwrap()
+}
+
+func unsupported() -> f64 {
+    let value: Option<f64> = Some(7.0)
+    if true {
+        value.unwrap()
+    } else {
+        0.0
+    }
+}
+
+func main() -> i64 {
+    let value = unwrap_copy()
+    42
+}

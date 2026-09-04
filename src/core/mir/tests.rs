@@ -342,6 +342,69 @@ fn lowers_option_i64_unwrap_to_copy_variant_projection() {
 }
 
 #[test]
+fn lowers_option_f64_unwrap_to_copy_variant_projection() {
+    let source = include_str!("../../../tests/fixtures/mir_native_option_f64_unwrap.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Option<f64>.unwrap must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:unwrap_copy".into()))
+        .expect("unwrap_copy MIR function");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("Copy f64 unwrap must carry a read-only variant projection receipt");
+    assert_eq!(receipt.variant_name, "Some");
+    assert_eq!(receipt.projection.field_index, 0);
+    assert_eq!(receipt.projection.arity, 1);
+    assert_eq!(receipt.projection.ownership, MirOwnership::Copy);
+    assert_eq!(receipt.projection.move_out_glue, MirGlueKind::Noop);
+    let option_desc = program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == crate::core::mir::types::MirTypeKind::Option)
+                .then_some((id, descriptor))
+        })
+        .expect("Option<f64> TypeDesc");
+    let crate::core::mir::types::MirLayout::Option { inner, .. } = &option_desc.1.layout else {
+        panic!("Option<f64> must retain its Option layout");
+    };
+    let inner_desc = program
+        .type_catalog()
+        .get(inner)
+        .expect("Option<f64> inner TypeDesc");
+    assert_eq!(
+        inner_desc.abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+    );
+    assert_eq!(
+        inner_desc.layout,
+        crate::core::mir::types::MirLayout::Scalar
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:unwrap_copy".into()), &[])
+        .expect("reference Option<f64>.unwrap execution");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::FloatBits(41.5f64.to_bits())
+    );
+}
+
+#[test]
 fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
     let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
         include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),
@@ -452,11 +515,11 @@ fn result_unwrap_remains_fail_closed_outside_option_projection_island() {
 }
 
 #[test]
-fn option_f64_unwrap_remains_fail_closed_outside_copy_projection_island() {
+fn option_f64_unwrap_or_remains_fail_closed_outside_copy_projection_island() {
     let source = r#"
         func main() -> f64 {
             let value: Option<f64> = Some(41.0)
-            value.unwrap()
+            value.unwrap_or(0.0)
         }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -465,9 +528,9 @@ fn option_f64_unwrap_remains_fail_closed_outside_copy_projection_island() {
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check");
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("Copy Option<f64>::unwrap must remain outside the copy projection island");
+        .expect_err("Copy Option<f64>::unwrap_or must remain outside the copy projection island");
     let crate::core::mir::reference::MirProgramBuildError::Lowering(errors) = error else {
-        panic!("Copy Option<f64>::unwrap must fail during MIR lowering");
+        panic!("Copy Option<f64>::unwrap_or must fail during MIR lowering");
     };
     assert!(
         errors.iter().any(|error| error.message.contains(

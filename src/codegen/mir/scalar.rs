@@ -29,6 +29,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .bool_type()
                 .const_int(u64::from(*value), false)
                 .into()),
+            (MirAbiClass::Float { bits: 32 | 64 }, ResolvedLiteral::FloatBits(value)) => {
+                let value = if matches!(desc.abi, MirAbiClass::Float { bits: 32 }) {
+                    f32::from_bits(*value as u32) as f64
+                } else {
+                    f64::from_bits(*value)
+                };
+                let float_ty = if matches!(desc.abi, MirAbiClass::Float { bits: 32 }) {
+                    self.generator.context.f32_type()
+                } else {
+                    self.generator.context.f64_type()
+                };
+                Ok(float_ty.const_float(value).into())
+            }
             (MirAbiClass::StringHandle, ResolvedLiteral::String(value)) => {
                 self.emit_owned_string_literal(result, value, subject)
             }

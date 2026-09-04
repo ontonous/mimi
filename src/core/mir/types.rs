@@ -1313,6 +1313,22 @@ impl MirTypeCatalog {
     /// consumers. A scalar leaf is a signed i32/i64 or bool with scalar
     /// layout and no-op glue; this is a TypeDesc fact, not a backend probe.
     pub fn validate_copy_scalar(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        self.validate_copy_scalar_with_float(ty, false)
+    }
+
+    /// Validate a Copy scalar leaf while explicitly admitting the native
+    /// floating-point ABI. This opt-in is used only by the concrete
+    /// `Option<f32/f64>` variant contract; generic scalar/list/record
+    /// contracts keep the historical signed-integer/bool boundary.
+    pub fn validate_copy_float_scalar(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        self.validate_copy_scalar_with_float(ty, true)
+    }
+
+    fn validate_copy_scalar_with_float(
+        &self,
+        ty: &ResolvedTypeId,
+        allow_float: bool,
+    ) -> Result<(), String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
@@ -1323,6 +1339,8 @@ impl MirTypeCatalog {
                 signed: true,
             } | MirAbiClass::Bool
         );
+        let supported_abi = supported_abi
+            || (allow_float && matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
         if !supported_abi
             || descriptor.kind == MirTypeKind::GenericParameter
             || descriptor.layout != MirLayout::Scalar
@@ -1334,8 +1352,13 @@ impl MirTypeCatalog {
                     drop: MirGlueKind::Noop,
                 })
         {
+            let scalar_kind = if allow_float {
+                "Copy scalar/bool"
+            } else {
+                "Copy signed scalar/bool"
+            };
             return Err(format!(
-                "type '{}' is not a Copy signed scalar/bool with no-op glue",
+                "type '{}' is not a {scalar_kind} with no-op glue",
                 ty.as_str()
             ));
         }
@@ -1410,6 +1433,14 @@ impl MirTypeCatalog {
     pub fn validate_flat_copy_variant(
         &self,
         ty: &ResolvedTypeId,
+    ) -> Result<ResolvedTypeId, String> {
+        self.validate_flat_copy_variant_with_float(ty, false)
+    }
+
+    fn validate_flat_copy_variant_with_float(
+        &self,
+        ty: &ResolvedTypeId,
+        allow_float: bool,
     ) -> Result<ResolvedTypeId, String> {
         let descriptor = self
             .get(ty)
@@ -1509,7 +1540,12 @@ impl MirTypeCatalog {
                     field.id.0
                 ));
             }
-            self.validate_copy_scalar(&field.ty).map_err(|message| {
+            let scalar_validation = if allow_float {
+                self.validate_copy_float_scalar(&field.ty)
+            } else {
+                self.validate_copy_scalar(&field.ty)
+            };
+            scalar_validation.map_err(|message| {
                 format!(
                     "variant '{}' payload is outside the flat Copy variant contract: {message}",
                     variant.name
@@ -1560,7 +1596,10 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         }
-        let inner = self.validate_flat_copy_variant(ty)?;
+        let inner = self.validate_flat_copy_variant_with_float(
+            ty,
+            matches!(expected, PrimitiveType::F32 | PrimitiveType::F64),
+        )?;
         let inner_descriptor = self
             .get(&inner)
             .ok_or_else(|| format!("Option inner type '{}' is absent", inner.as_str()))?;
@@ -1572,7 +1611,11 @@ impl MirTypeCatalog {
                 expected,
             ));
         }
-        self.validate_copy_scalar(&inner)
+        if matches!(expected, PrimitiveType::F32 | PrimitiveType::F64) {
+            self.validate_copy_float_scalar(&inner)
+        } else {
+            self.validate_copy_scalar(&inner)
+        }
     }
 
     /// Validate the flat Copy variant contract and return one stable variant
@@ -1583,7 +1626,16 @@ impl MirTypeCatalog {
         ty: &ResolvedTypeId,
         variant_id: &NodeId,
     ) -> Result<&MirVariantDesc, String> {
-        self.validate_flat_copy_variant(ty)?;
+        self.validated_flat_copy_variant_with_float(ty, variant_id, false)
+    }
+
+    fn validated_flat_copy_variant_with_float(
+        &self,
+        ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        allow_float: bool,
+    ) -> Result<&MirVariantDesc, String> {
+        self.validate_flat_copy_variant_with_float(ty, allow_float)?;
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
@@ -1615,7 +1667,22 @@ impl MirTypeCatalog {
         field_id: &NodeId,
         result_ty: &ResolvedTypeId,
     ) -> Result<(&MirVariantDesc, usize), String> {
-        let variant = self.validated_flat_copy_variant(scrutinee_ty, variant_id)?;
+        let allow_float = self.get(scrutinee_ty).is_some_and(|descriptor| {
+            if descriptor.kind != MirTypeKind::Option {
+                return false;
+            }
+            let MirLayout::Option { inner, .. } = &descriptor.layout else {
+                return false;
+            };
+            self.get(inner).is_some_and(|inner| {
+                matches!(
+                    inner.kind,
+                    MirTypeKind::Primitive(PrimitiveType::F32 | PrimitiveType::F64)
+                )
+            })
+        });
+        let variant =
+            self.validated_flat_copy_variant_with_float(scrutinee_ty, variant_id, allow_float)?;
         let projection = self.validated_variant_payload_projection_contract(
             scrutinee_ty,
             variant_id,
