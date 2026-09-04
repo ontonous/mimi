@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: move one owned String field while the
+// second generic String field is discharged by an explicit residual receipt.
+type Tagged<T> { value: T, note: T }
+
+func take_value<T>(tagged: Tagged<T>) -> T {
+    tagged.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let tagged = Tagged { value: "selected", note: "residual" }
+    let picked = take_value(tagged)
+    drop(picked)
+    41
+}

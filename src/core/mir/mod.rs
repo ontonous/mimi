@@ -364,6 +364,14 @@ pub enum MirGenericInstanceContract {
     OwnedRecordProjection {
         contract: types::MirRecordProjectionContract,
     },
+    /// A generic record projection that moves one owned field and explicitly
+    /// drops every non-Copy residual sibling.  This is deliberately separate
+    /// from `OwnedRecordProjection`: its residual schedule is part of the
+    /// canonical receipt, so consumers cannot silently discard an additional
+    /// owned field or infer a partial-move policy from an aggregate handle.
+    OwnedRecordProjectionDrop {
+        contract: types::MirRecordMoveProjectionDropContract,
+    },
     /// A generic `Option<T>.is_some()`/`is_none()` predicate specialized to a
     /// concrete Copy scalar payload. The predicate is read-only: the
     /// materialized body carries the same TypeDesc tag receipt consumed by

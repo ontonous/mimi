@@ -5847,6 +5847,47 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_generic_record_projection_with_residual_drop_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record residual projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record residual projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                ref contract
+            } if contract.projection.arity == 2
+                && contract.projection.name == "value"
+                && contract.residual.len() == 1
+                && contract.residual[0].name == "note"
+        ));
+        let target = mir
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic record residual target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic record residual execution");
+        let bytecode = compile_mir_program(&mir).expect("owned generic record residual bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode owned generic record residual execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_generic_record_projection_rvalue_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"

@@ -1390,6 +1390,16 @@ fn validate_instance_table(
                     type_catalog.validate_owned_string(&instance.arguments[0])
                 }
             }
+            MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => {
+                if instance.arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic record move/drop projection contract requires one type argument, got {}",
+                        instance.arguments.len()
+                    ))
+                } else {
+                    type_catalog.validate_owned_string(&instance.arguments[0])
+                }
+            }
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
@@ -1548,6 +1558,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR owned record projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::OwnedRecordProjectionDrop { ref contract } => {
+                if let Err(message) = super::lower::validate_owned_record_projection_drop_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR owned record move/drop projection contract is invalid: {message}"
                         ),
                     });
                 }
@@ -1813,9 +1837,11 @@ fn validate_call_graph(
                             ),
                         });
                     }
-                    if let MirGenericInstanceContract::OwnedRecordProjection { .. } =
-                        &instance.contract
-                    {
+                    if matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::OwnedRecordProjection { .. }
+                            | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                    ) {
                         let Some(target_parameter) = target.parameters.first() else {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
@@ -6339,6 +6365,101 @@ mod tests {
     }
 
     #[test]
+    fn concrete_owned_generic_record_projection_consumes_and_drops_residual() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record residual projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record residual projection instance");
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            panic!("generic owned record residual projection must carry a drop receipt");
+        };
+        assert_eq!(contract.projection.arity, 2);
+        assert_eq!(contract.projection.name, "value");
+        assert_eq!(contract.residual.len(), 1);
+        assert_eq!(contract.residual[0].name, "note");
+        assert_eq!(
+            contract.residual[0].glue,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic record residual target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic record residual execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn owned_generic_record_projection_rejects_forged_residual_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record residual projection must materialize");
+        let owner = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record residual instance")
+            .function
+            .clone();
+        let mut target = program
+            .functions()
+            .get(&owner)
+            .expect("owned generic record residual target")
+            .clone();
+        let instruction = target
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::MoveProjectDrop { .. })
+            })
+            .expect("MoveProjectDrop instruction");
+        let MirInstructionKind::MoveProjectDrop {
+            contract: Some(receipt),
+            ..
+        } = &mut instruction.kind
+        else {
+            unreachable!();
+        };
+        receipt.residual.clear();
+        let mut functions = program.functions().clone();
+        functions.insert(owner, target);
+        let errors = MirProgram::with_type_catalog_and_instances(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+        )
+        .expect_err("forged residual schedule must fail before execution");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("generic MIR owned record move/drop projection contract is invalid")
+                    && error.message.contains("receipt disagrees")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn owned_generic_record_projection_call_clone_cannot_cross_mir_gate() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
@@ -6614,12 +6735,12 @@ mod tests {
 
     #[test]
     fn unsupported_owned_generic_record_projection_shape_fails_closed() {
-        let source = "type Pair<T> { left: T, right: T }\nfunc get<T>(pair: Pair<T>) -> T { pair.left }\nfunc main() -> i32 { let pair = Pair { left: \"owned\", right: \"keep\" }; let picked = get(pair); drop(picked); 41 }";
+        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: \"owned\", second: \"keep\", third: \"also\" }; let picked = get(triple); drop(picked); 41 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("multi-field owned generic record projection must remain fail-closed");
+            .expect_err("three-field owned generic record projection must remain fail-closed");
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(
                 errors

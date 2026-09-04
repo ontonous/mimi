@@ -849,7 +849,7 @@ pub struct MirVariantCallVariant {
 /// explicit drop.  The field name/identity and declaration index come from
 /// TypeDesc; `glue` is copied from the child descriptor so a consumer cannot
 /// silently discard a non-Copy sibling.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirRecordResidualDrop {
     pub id: NodeId,
     pub name: String,
@@ -862,7 +862,7 @@ pub struct MirRecordResidualDrop {
 /// sibling.  Unlike the older `MoveProject` contract, this is an explicit
 /// full-consumption shape: the selected field moves out and `residual` is the
 /// canonical drop schedule for the remainder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirRecordMoveProjectionDropContract {
     pub source_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,

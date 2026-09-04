@@ -363,6 +363,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
         let owned_record_target_parameter = matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
         )
         .then(|| {
             function
@@ -400,6 +401,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
         if matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
         ) && owned_record_target_parameter.is_none()
         {
             return Err(vec![MirLoweringError {
@@ -1101,6 +1103,71 @@ pub(crate) fn validate_scalar_record_call_argument(
     )
 }
 
+/// Recognize the smallest generic record shape that needs an explicit
+/// residual-drop receipt: two fields, both bound to the callable's sole
+/// generic parameter, with one field projected and the other retained only so
+/// its ownership can be discharged by `MoveProjectDrop` after specialization.
+/// The declaration is intentionally checker-owned and surface-AST-free; the
+/// concrete String/Move/glue proof is replayed from TypeDesc below.
+fn is_owned_record_projection_drop_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ResolvedCallable,
+) -> bool {
+    if callable.signature.generic_parameters.len() != 1 || callable.signature.parameters.len() != 1
+    {
+        return false;
+    }
+    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(
+            ty,
+            ResolvedType::GenericParameter(candidate)
+                if candidate == &callable.signature.generic_parameters[0]
+        )
+        .then_some(id.clone())
+    }) else {
+        return false;
+    };
+    let Some(ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program
+        .resolved_types()
+        .get(&callable.signature.parameters[0].ty)
+    else {
+        return false;
+    };
+    if arguments.as_slice() != [generic_ty.clone()] {
+        return false;
+    }
+    let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    let Some(definition) = program.type_def(qualified_name) else {
+        return false;
+    };
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || definition.fields.len() != 2
+        || callable.signature.result != generic_ty
+    {
+        return false;
+    }
+    let binder = &definition.generic_parameters[0].1;
+    let all_generic_fields = definition.fields.iter().all(|(name, _)| {
+        definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_ty| program.resolved_types().get(field_ty))
+            .is_some_and(|field_ty| {
+                matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
+            })
+    });
+    all_generic_fields
+        && matches!(
+            callable.body.root.result.as_deref().map(|expr| &expr.kind),
+            Some(ResolvedExprKind::Load(place))
+                if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
+        )
+}
+
 fn materialize_generic_instance(
     callable: &crate::core::ResolvedCallable,
     template: &NodeId,
@@ -1210,14 +1277,21 @@ fn materialize_generic_instance(
     // executable parameter/result are the specialized record and String.
     // Keep the admission closed to exactly owned String; all other generic
     // record arguments remain on the scalar fail-closed path.
+    let is_owned_record_projection_drop =
+        is_owned_record_projection_drop_callable(program, callable)
+            && type_catalog.validate_owned_string(&concrete).is_ok();
     let is_owned_record_projection = generic_record_facade
         && !is_identity
+        && !is_owned_record_projection_drop
         && type_catalog.validate_owned_string(&concrete).is_ok();
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
                 catalog.validate_generic_identity_arguments(arguments)
-            } else if is_owned_record_projection || is_owned_option_projection {
+            } else if is_owned_record_projection_drop
+                || is_owned_record_projection
+                || is_owned_option_projection
+            {
                 if arguments.len() != 1 {
                     Err(format!(
                         "owned generic projection contract requires one type argument, got {}",
@@ -1291,7 +1365,84 @@ fn materialize_generic_instance(
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
     }
-    if is_owned_record_projection {
+    if is_owned_record_projection_drop {
+        let block = if function.blocks.len() == 1 {
+            function.blocks.get_mut(&function.entry)
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message:
+                    "owned generic record move/drop projection must have exactly one MIR block"
+                        .into(),
+            }]
+        })?;
+        let (project_result, project_base, field) = match block.instructions.as_slice() {
+            [MirInstruction {
+                kind:
+                    MirInstructionKind::Project {
+                        result,
+                        base,
+                        projection: MirProjection::Field(field),
+                        list_index_contract: None,
+                    },
+                ..
+            }] => (result.clone(), base.clone(), field.clone()),
+            [_] => {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "owned generic record move/drop projection must contain one direct field Project".into(),
+                }])
+            }
+            _ => {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "owned generic record move/drop projection body may contain only one field Project".into(),
+                }])
+            }
+        };
+        let base_ty = function
+            .values
+            .get(&project_base)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "owned generic record move/drop projection base value is absent"
+                        .into(),
+                }]
+            })?;
+        let result_ty = function
+            .values
+            .get(&project_result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "owned generic record move/drop projection result value is absent"
+                        .into(),
+                }]
+            })?;
+        let receipt = type_catalog
+            .validated_record_move_projection_drop_contract(&base_ty, &field, &result_ty)
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "owned generic record move/drop projection contract specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = block.instructions.first_mut().expect("one instruction");
+        instruction.kind = MirInstructionKind::MoveProjectDrop {
+            result: project_result,
+            base: project_base,
+            projection: MirProjection::Field(field),
+            contract: Some(receipt),
+        };
+    } else if is_owned_record_projection {
         let block = if function.blocks.len() == 1 {
             function.blocks.get_mut(&function.entry)
         } else {
@@ -2128,6 +2279,10 @@ fn materialize_generic_instance(
             contract,
             index_value,
         }
+    } else if is_owned_record_projection_drop {
+        let contract =
+            detect_owned_record_projection_drop_contract(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
     } else if is_owned_record_projection {
         let contract =
             detect_owned_record_projection_contract(&function, type_catalog, &subject())?;
@@ -3365,6 +3520,122 @@ fn detect_owned_record_projection_contract(
     Ok(receipt)
 }
 
+fn detect_owned_record_projection_drop_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::types::MirRecordMoveProjectionDropContract, Vec<MirLoweringError>> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection must have exactly one parameter"
+                .into(),
+        }]);
+    };
+    if function.blocks.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection must have exactly one MIR block"
+                .into(),
+        }]);
+    }
+    let block = function.blocks.get(&function.entry).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection entry block is absent".into(),
+        }]
+    })?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection: MirProjection::Field(field),
+                contract: Some(receipt),
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "owned generic record move/drop projection must contain exactly one field MoveProjectDrop"
+                    .into(),
+        }]);
+    };
+    if base != parameter {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection must consume its record parameter"
+                .into(),
+        }]);
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection base value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection result value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    type_catalog
+        .validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!(
+                    "owned generic record move/drop projection receipt is unsupported: {message}"
+                ),
+            }]
+        })?;
+    if function.result != result_ty {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection requires a direct result identity"
+                .into(),
+        }]);
+    }
+    if field != &receipt.projection.field {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "owned generic record move/drop projection field disagrees with receipt"
+                .into(),
+        }]);
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "owned generic record move/drop projection must directly return its MoveProjectDrop result"
+                    .into(),
+        }]);
+    };
+    if returned != result {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "owned generic record move/drop projection return value is not the MoveProjectDrop result"
+                    .into(),
+        }]);
+    }
+    Ok(receipt.clone())
+}
+
 /// Validate the materialized body behind a `ScalarRecordProjection` generic
 /// instance.  The receipt is already concrete, so this validator only accepts
 /// the one-block/one-field-project/direct-return shape and proves that every
@@ -3523,6 +3794,106 @@ pub(crate) fn validate_owned_record_projection_mir(
     if returned != result {
         return Err(
             "owned generic record projection return value is not the MoveProject result".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate the materialized body behind an `OwnedRecordProjectionDrop`
+/// generic instance. The selected owned field is returned while every
+/// non-Copy sibling is discharged by the receipt attached to
+/// `MoveProjectDrop`; no residual ownership is left implicit for consumers.
+pub(crate) fn validate_owned_record_projection_drop_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirRecordMoveProjectionDropContract,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(
+            "owned generic record move/drop projection must have exactly one parameter".into(),
+        );
+    };
+    if function.blocks.len() != 1 {
+        return Err(
+            "owned generic record move/drop projection must have exactly one MIR block".into(),
+        );
+    }
+    let block = function.blocks.get(&function.entry).ok_or_else(|| {
+        "owned generic record move/drop projection entry block is absent".to_string()
+    })?;
+    if block.instructions.len() != 1 {
+        return Err(
+            "owned generic record move/drop projection body may contain only one MoveProjectDrop"
+                .into(),
+        );
+    }
+    let MirInstruction {
+        kind:
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection: MirProjection::Field(field),
+                contract: Some(receipt),
+            },
+        ..
+    } = &block.instructions[0]
+    else {
+        return Err(
+            "owned generic record move/drop projection must contain exactly one field MoveProjectDrop"
+                .into(),
+        );
+    };
+    if base != parameter {
+        return Err(
+            "owned generic record move/drop projection must consume its record parameter".into(),
+        );
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| {
+            "owned generic record move/drop projection base value is absent".to_string()
+        })?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| {
+            "owned generic record move/drop projection result value is absent".to_string()
+        })?
+        .ty
+        .clone();
+    type_catalog.validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)?;
+    if receipt != contract {
+        return Err(
+            "owned generic record move/drop projection receipt disagrees with instance contract"
+                .into(),
+        );
+    }
+    if field != &receipt.projection.field {
+        return Err(
+            "owned generic record move/drop projection field disagrees with receipt".into(),
+        );
+    }
+    if function.result != result_ty {
+        return Err(
+            "owned generic record move/drop projection requires a direct result identity".into(),
+        );
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(
+            "owned generic record move/drop projection must directly return its MoveProjectDrop result"
+                .into(),
+        );
+    };
+    if returned != result {
+        return Err(
+            "owned generic record move/drop projection return value is not the MoveProjectDrop result"
+                .into(),
         );
     }
     Ok(())

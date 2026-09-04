@@ -2371,6 +2371,7 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
         matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
         )
     }) || program.functions().values().any(|function| {
         // The current flat-record native contract emits only simple function
@@ -2553,11 +2554,17 @@ impl<'a> ScalarCollectionValidator<'a> {
                     instance.id,
                     instance.arguments.len()
                 ));
-            } else if let Err(message) = self
-                .program
-                .type_catalog()
-                .validate_copy_scalar(&instance.arguments[0])
-            {
+            } else if let Err(message) = match instance.contract {
+                MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => self
+                    .program
+                    .type_catalog()
+                    .validate_owned_string(&instance.arguments[0]),
+                _ => self
+                    .program
+                    .type_catalog()
+                    .validate_copy_scalar(&instance.arguments[0]),
+            } {
                 self.error(format!(
                     "instance '{}' argument is outside the Copy scalar contract: {message}",
                     instance.id
@@ -2572,6 +2579,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}

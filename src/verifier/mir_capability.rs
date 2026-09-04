@@ -177,6 +177,35 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } => {
+                    if let Some(concrete) = instance.arguments.first() {
+                        if let Err(message) =
+                            self.program.type_catalog().validate_owned_string(concrete)
+                        {
+                            self.error(format!(
+                                "instance '{}' owned record move/drop projection argument is unsupported: {message}",
+                                instance.id
+                            ));
+                        }
+                    } else {
+                        self.error(format!(
+                            "instance '{}' owned record move/drop projection has no concrete argument",
+                            instance.id
+                        ));
+                    }
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_owned_record_projection_drop_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' owned record move/drop projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
                 MirGenericInstanceContract::ScalarVariantPredicate { contract } => {
                     if let Err(message) =
                         crate::core::mir::lower::validate_scalar_variant_predicate_mir(
@@ -684,10 +713,33 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} MoveProject rejected: {message}"));
                 }
             }
-            MirInstructionKind::MoveProjectDrop { .. } => {
-                self.error(format!(
-                    "{subject} MoveProjectDrop is outside the verifier capability"
-                ));
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                projection,
+                contract,
+            } => {
+                let (Some(base_ty), Some(result_ty)) =
+                    (value_type(function, base), value_type(function, result))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} MoveProjectDrop has no canonical residual receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog
+                    .validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)
+                {
+                    self.error(format!("{subject} MoveProjectDrop rejected: {message}"));
+                }
+                if !matches!(projection, MirProjection::Field(_)) {
+                    self.error(format!(
+                        "{subject} MoveProjectDrop requires a direct record field projection"
+                    ));
+                }
             }
             MirInstructionKind::VariantProject {
                 result,
@@ -1177,6 +1229,7 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}
