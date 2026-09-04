@@ -1092,6 +1092,51 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("unary result '{}' has no type descriptor", result));
             return;
         };
+        let Some(operand_desc) = self.type_of(operand) else {
+            self.error(format!(
+                "unary operand '{}' has no type descriptor",
+                operand
+            ));
+            return;
+        };
+        if matches!(desc.abi, MirAbiClass::Float { bits: 32 | 64 })
+            || matches!(operand_desc.abi, MirAbiClass::Float { bits: 32 | 64 })
+        {
+            let Some(result_ty) = self
+                .function
+                .values
+                .get(result)
+                .map(|value| value.ty.clone())
+            else {
+                self.error(format!(
+                    "unary result '{}' has no TypeDesc identity",
+                    result
+                ));
+                return;
+            };
+            let Some(operand_ty) = self
+                .function
+                .values
+                .get(operand)
+                .map(|value| value.ty.clone())
+            else {
+                self.error(format!(
+                    "unary operand '{}' has no TypeDesc identity",
+                    operand
+                ));
+                return;
+            };
+            if let Err(message) =
+                self.program
+                    .type_catalog()
+                    .validate_copy_float_unary(&result_ty, &operand_ty, op)
+            {
+                self.error(format!(
+                    "unary operator {op:?} is outside scalar bytecode slice: {message}"
+                ));
+                return;
+            }
+        }
         let opcode = match (desc.abi, op) {
             (MirAbiClass::Integer { bits, signed: true }, ResolvedUnaryOp::Negate)
                 if bits <= 64 =>
@@ -1101,9 +1146,7 @@ impl<'a> FunctionEmitter<'a> {
             (MirAbiClass::Integer { bits, signed: true }, ResolvedUnaryOp::Not) if bits <= 64 => {
                 Op::BitNot { rd, ra }
             }
-            (MirAbiClass::Float { bits: 32 | 64 }, ResolvedUnaryOp::Negate) => {
-                Op::NegFloat { rd, ra }
-            }
+            (MirAbiClass::Float { bits: 64 }, ResolvedUnaryOp::Negate) => Op::NegFloat { rd, ra },
             (MirAbiClass::Bool, ResolvedUnaryOp::Not) => Op::Not { rd, ra },
             (MirAbiClass::StringHandle | MirAbiClass::Unit, ResolvedUnaryOp::Dereference) => {
                 Op::Mov { rd, rs: ra }

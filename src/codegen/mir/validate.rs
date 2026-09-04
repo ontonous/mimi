@@ -1645,6 +1645,19 @@ impl<'a> NativeMirValidator<'a> {
         else {
             return;
         };
+        if op == ResolvedUnaryOp::Negate && desc.abi == (MirAbiClass::Float { bits: 64 }) {
+            let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
+                return;
+            };
+            if let Err(message) = self.program.type_catalog().validate_copy_float_unary(
+                result_ty,
+                &function.values[operand].ty,
+                op,
+            ) {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+            return;
+        }
         let valid = match op {
             ResolvedUnaryOp::Negate => matches!(
                 desc.abi,

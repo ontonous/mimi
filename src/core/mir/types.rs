@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
     BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
-    ResolvedTypeId, ResolvedTypeTable,
+    ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
@@ -1322,6 +1322,42 @@ impl MirTypeCatalog {
     /// contracts keep the historical signed-integer/bool boundary.
     pub fn validate_copy_float_scalar(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         self.validate_copy_scalar_with_float(ty, true)
+    }
+
+    /// Validate the closed f64 unary contract shared by canonical consumers.
+    /// The result and operand retain one checker-owned TypeDesc identity, the
+    /// ABI is a Copy f64 scalar with no-op glue, and the only admitted operation
+    /// is IEEE sign-bit negation. This is deliberately separate from
+    /// `validate_copy_float_scalar`: admitting a float leaf must never
+    /// implicitly admit float arithmetic or a different unary operator.
+    pub fn validate_copy_float_unary(
+        &self,
+        result_ty: &ResolvedTypeId,
+        operand_ty: &ResolvedTypeId,
+        op: ResolvedUnaryOp,
+    ) -> Result<(), String> {
+        if op != ResolvedUnaryOp::Negate {
+            return Err(format!(
+                "float unary operator {op:?} is outside the canonical Copy f64 contract"
+            ));
+        }
+        if result_ty != operand_ty {
+            return Err("float unary result and operand TypeDesc identities disagree".into());
+        }
+        self.validate_copy_float_scalar(operand_ty)?;
+        let descriptor = self.get(operand_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR TypeDesc catalog",
+                operand_ty.as_str()
+            )
+        })?;
+        if descriptor.abi != (MirAbiClass::Float { bits: 64 }) {
+            return Err(format!(
+                "type '{}' is not a Copy f64 scalar for float unary negation",
+                operand_ty.as_str()
+            ));
+        }
+        Ok(())
     }
 
     fn validate_copy_scalar_with_float(

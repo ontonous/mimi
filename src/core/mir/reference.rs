@@ -3641,6 +3641,35 @@ impl<'a> MirReferenceInterpreter<'a> {
                 op,
                 operand,
             } => {
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| self.error(&function.owner, "MIR unary result is absent"))?
+                    .ty
+                    .clone();
+                let operand_ty = function
+                    .values
+                    .get(operand)
+                    .ok_or_else(|| self.error(&function.owner, "MIR unary operand is absent"))?
+                    .ty
+                    .clone();
+                let is_float_shape = [result_ty.clone(), operand_ty.clone()].iter().any(|ty| {
+                    self.program
+                        .type_catalog()
+                        .get(ty)
+                        .is_some_and(|descriptor| {
+                            matches!(
+                                descriptor.abi,
+                                super::types::MirAbiClass::Float { bits: 32 | 64 }
+                            )
+                        })
+                });
+                if is_float_shape {
+                    self.program
+                        .type_catalog()
+                        .validate_copy_float_unary(&result_ty, &operand_ty, *op)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                }
                 let integer_width = self.integer_width(function, operand);
                 let operand = self.read_value(function, values, operand)?;
                 let output = evaluate_unary(&function.owner, *op, operand, integer_width)?;

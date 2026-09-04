@@ -95,6 +95,26 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         operand: &MirValueId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let operand_ty = self.value_type(operand, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(&operand_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "unary operand TypeDesc is absent"))?;
+        if matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }) {
+            self.program
+                .type_catalog()
+                .validate_copy_float_unary(&result_ty, &operand_ty, op)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let value = self.value(operand, subject)?.into_float_value();
+            return self
+                .generator
+                .builder
+                .build_float_neg(value, "mir_fneg")
+                .map(BasicValueEnum::from)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()));
+        }
         let value = self.value(operand, subject)?.into_int_value();
         match op {
             ResolvedUnaryOp::Not => self

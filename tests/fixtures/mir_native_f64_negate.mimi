@@ -1,0 +1,8 @@
+func negate(value: f64) -> f64 {
+    -value
+}
+
+func main() -> i64 {
+    let value = negate(2.5)
+    42
+}

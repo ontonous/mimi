@@ -405,6 +405,74 @@ fn lowers_option_f64_unwrap_to_copy_variant_projection() {
 }
 
 #[test]
+fn lowers_f64_unary_negate_with_explicit_copy_float_contract() {
+    let source = include_str!("../../../tests/fixtures/mir_native_f64_negate.mimi");
+    let program =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("f64 unary negate must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:negate".into()))
+        .expect("negate MIR function");
+    let (result_ty, operand_ty) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Unary {
+                result,
+                op: crate::core::ir::ResolvedUnaryOp::Negate,
+                operand,
+            } => Some((
+                function.values.get(result)?.ty.clone(),
+                function.values.get(operand)?.ty.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical f64 negate instruction");
+    assert_eq!(result_ty, operand_ty);
+    program
+        .type_catalog()
+        .validate_copy_float_unary(
+            &result_ty,
+            &operand_ty,
+            crate::core::ir::ResolvedUnaryOp::Negate,
+        )
+        .expect("f64 negate TypeDesc contract");
+    let descriptor = program
+        .type_catalog()
+        .get(&result_ty)
+        .expect("f64 negate TypeDesc");
+    assert_eq!(
+        descriptor.abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+    );
+    assert_eq!(descriptor.ownership, MirOwnership::Copy);
+    assert_eq!(descriptor.glue.move_out, MirGlueKind::Noop);
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &crate::core::NodeId("function:negate".into()),
+            &[crate::core::mir::reference::MirRuntimeValue::FloatBits(
+                2.5f64.to_bits(),
+            )],
+        )
+        .expect("reference f64 negate execution");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::FloatBits((-2.5f64).to_bits())
+    );
+    assert!(program
+        .type_catalog()
+        .validate_copy_float_unary(
+            &result_ty,
+            &operand_ty,
+            crate::core::ir::ResolvedUnaryOp::Not,
+        )
+        .is_err());
+}
+
+#[test]
 fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
     let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
         include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),

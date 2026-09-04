@@ -1160,6 +1160,36 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_f64_unary_negate_copy_contract() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_f64_negate.mimi"
+        ));
+        let negate = crate::core::NodeId("function:negate".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&negate, &[MirRuntimeValue::FloatBits(2.5f64.to_bits())])
+            .expect("reference f64 negate execution");
+        assert_eq!(reference, MirRuntimeValue::FloatBits((-2.5f64).to_bits()));
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("f64 negate MIR bytecode"))
+                .run_value()
+                .expect("bytecode f64 negate execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for f64 negate MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_f64_negate_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("f64 unary negate MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native f64 negate module verifies");
+        assert!(generator.module.get_function("negate").is_some());
+    }
+
+    #[test]
     fn bytecode_option_i32_unwrap_none_matches_reference_trap() {
         let program = canonical_program(
             "func main() -> i32 { let value: Option<i32> = None; value.unwrap() }",

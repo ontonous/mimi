@@ -1242,6 +1242,30 @@ impl<'a> CapabilityGate<'a> {
                         "{subject} negate result TypeDesc disagrees with operand"
                     ));
                 }
+                if op == ResolvedUnaryOp::Negate {
+                    let (Some(result_ty), Some(operand_ty)) =
+                        (value_type(function, result), value_type(function, operand))
+                    else {
+                        return;
+                    };
+                    let is_float =
+                        self.program
+                            .type_catalog()
+                            .get(&operand_ty)
+                            .is_some_and(|descriptor| {
+                                matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+                            });
+                    if is_float {
+                        if let Err(message) = self.program.type_catalog().validate_copy_float_unary(
+                            &result_ty,
+                            &operand_ty,
+                            op,
+                        ) {
+                            self.error(format!("{subject} float negate rejected: {message}"));
+                        }
+                        return;
+                    }
+                }
                 if op == ResolvedUnaryOp::Not
                     && !value_type(function, result)
                         .and_then(|ty| self.program.type_catalog().get(&ty))
