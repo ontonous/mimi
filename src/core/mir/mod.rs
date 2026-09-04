@@ -18,6 +18,7 @@ use crate::core::{NodeId, ResolvedPlace};
 
 mod contracts;
 mod copy_option_island;
+mod copy_result_island;
 mod eligibility;
 mod islands;
 pub mod lower;
@@ -38,6 +39,11 @@ pub use copy_option_island::{
     validate_copy_option_i64_variant_island, validate_copy_option_variant_island,
     CopyOptionI32VariantAdmission, CopyOptionVariantAdmission, COPY_OPTION_BOOL_VARIANT_ISLAND,
     COPY_OPTION_F64_VARIANT_ISLAND, COPY_OPTION_I32_VARIANT_ISLAND, COPY_OPTION_I64_VARIANT_ISLAND,
+};
+pub use copy_result_island::{
+    classify_copy_result_i32_variant_admission, contains_copy_result_i32_variant_candidate,
+    validate_copy_result_i32_variant_island, CopyResultI32VariantAdmission,
+    COPY_RESULT_I32_VARIANT_ISLAND,
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{

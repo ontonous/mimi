@@ -2026,6 +2026,113 @@ fn canonical_explicit_mir_rejects_result_i64_i32_unwrap_before_backend() {
 }
 
 #[test]
+fn canonical_default_result_i32_i32_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_result_i32_unwrap.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Result<i32, i32> reference run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Result<i32, i32> verifier");
+    assert!(
+        verify.status.success(),
+        "default Copy Result<i32, i32> verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-copy-result-i32-i32-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default Copy Result<i32, i32> native build");
+    assert!(
+        build.status.success(),
+        "default Copy Result<i32, i32> native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default Copy Result<i32, i32> native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
+fn canonical_default_rejects_result_i64_i32_unwrap_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_result_i64_i32_rejected.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default unsupported Copy Result run");
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("Copy Result<i32, i32> projection candidate is outside complete coverage"),
+        "unsupported Result projection must fail closed before legacy:\n{stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default unsupported Copy Result verifier");
+    assert!(!verify.status.success());
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        verify_stderr
+            .contains("Copy Result<i32, i32> projection candidate is outside complete coverage"),
+        "unsupported Result projection verifier must fail closed before legacy:\n{verify_stderr}"
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-copy-result-i64-i32-rejected-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default unsupported Copy Result native build");
+    let _ = fs::remove_file(&binary);
+    assert!(!build.status.success());
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build_stderr.contains("Copy Result<i32, i32> variant MIR island")
+            || build_stderr.contains("Copy Result<i32, i32> projection candidate"),
+        "unsupported Result projection native build must fail closed before LLVM:\n{build_stderr}"
+    );
+}
+
+#[test]
 fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")

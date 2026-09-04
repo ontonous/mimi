@@ -18,15 +18,16 @@ use crate::core::CheckedProgram;
 
 use super::{
     classify_copy_option_i32_variant_admission, classify_copy_option_variant_admission,
-    classify_flat_copy_record_admission, classify_generic_variant_predicate_admission,
-    classify_option_string_variant_admission, classify_scalar_collection_admission,
-    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
+    classify_copy_result_i32_variant_admission, classify_flat_copy_record_admission,
+    classify_generic_variant_predicate_admission, classify_option_string_variant_admission,
+    classify_scalar_collection_admission, contains_copy_option_i32_variant_candidate,
+    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
     contains_flat_copy_record_candidate, contains_generic_variant_predicate_candidate,
     contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
     is_exact_s8_flow_transition, is_s8_flow_transition_candidate, CopyOptionI32VariantAdmission,
-    FlatCopyRecordAdmission, GenericVariantPredicateAdmission, OptionStringVariantAdmission,
-    ScalarCollectionAdmission,
+    CopyResultI32VariantAdmission, FlatCopyRecordAdmission, GenericVariantPredicateAdmission,
+    OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ pub enum CanonicalMirRouteProfile {
     CopyOptionBoolVariant,
     CopyOptionI64Variant,
     CopyOptionF64Variant,
+    CopyResultI32Variant,
 }
 
 impl CanonicalMirRouteProfile {
@@ -72,6 +74,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionBoolVariant => super::COPY_OPTION_BOOL_VARIANT_ISLAND,
             Self::CopyOptionI64Variant => super::COPY_OPTION_I64_VARIANT_ISLAND,
             Self::CopyOptionF64Variant => super::COPY_OPTION_F64_VARIANT_ISLAND,
+            Self::CopyResultI32Variant => super::COPY_RESULT_I32_VARIANT_ISLAND,
         }
     }
 
@@ -91,6 +94,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionBoolVariant => admission.copy_option_bool_complete(),
             Self::CopyOptionI64Variant => admission.copy_option_i64_complete(),
             Self::CopyOptionF64Variant => admission.copy_option_f64_complete(),
+            Self::CopyResultI32Variant => admission.copy_result_i32_complete(),
         }
     }
 
@@ -107,6 +111,7 @@ impl CanonicalMirRouteProfile {
             Self::CopyOptionBoolVariant => route.materialized_copy_option_bool_candidate,
             Self::CopyOptionI64Variant => route.materialized_copy_option_i64_candidate,
             Self::CopyOptionF64Variant => route.materialized_copy_option_f64_candidate,
+            Self::CopyResultI32Variant => route.materialized_copy_result_i32_candidate,
         }
     }
 }
@@ -184,6 +189,7 @@ pub struct CanonicalMirRouteAdmission {
     pub copy_option_bool: CopyOptionI32VariantAdmission,
     pub copy_option_i64: CopyOptionI32VariantAdmission,
     pub copy_option_f64: CopyOptionI32VariantAdmission,
+    pub copy_result_i32: CopyResultI32VariantAdmission,
 }
 
 impl CanonicalMirRouteAdmission {
@@ -214,6 +220,10 @@ impl CanonicalMirRouteAdmission {
             || !matches!(
                 self.copy_option_f64,
                 CopyOptionI32VariantAdmission::OutsideProfile
+            )
+            || !matches!(
+                self.copy_result_i32,
+                CopyResultI32VariantAdmission::OutsideProfile
             )
     }
 
@@ -270,6 +280,13 @@ impl CanonicalMirRouteAdmission {
             CopyOptionI32VariantAdmission::CompleteCoverage
         )
     }
+
+    pub const fn copy_result_i32_complete(self) -> bool {
+        matches!(
+            self.copy_result_i32,
+            CopyResultI32VariantAdmission::CompleteCoverage
+        )
+    }
 }
 
 /// One immutable canonical graph plus the receipts needed by route owners.
@@ -289,6 +306,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_copy_option_bool_candidate: bool,
     pub materialized_copy_option_i64_candidate: bool,
     pub materialized_copy_option_f64_candidate: bool,
+    pub materialized_copy_result_i32_candidate: bool,
 }
 
 /// Classify route eligibility once from checker-owned typed facts.
@@ -314,6 +332,7 @@ pub fn classify_canonical_mir_route_admission(
             program,
             crate::core::PrimitiveType::F64,
         ),
+        copy_result_i32: classify_copy_result_i32_variant_admission(program),
     }
 }
 
@@ -372,6 +391,8 @@ pub fn materialize_canonical_mir_route(
         super::contains_copy_option_i64_variant_candidate(&canonical);
     let materialized_copy_option_f64_candidate =
         super::contains_copy_option_f64_variant_candidate(&canonical);
+    let materialized_copy_result_i32_candidate =
+        contains_copy_result_i32_variant_candidate(&canonical);
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -450,6 +471,15 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.copy_result_i32_complete() && !materialized_copy_result_i32_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::CopyResultI32Variant,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete Copy Result<i32, i32> admission did not materialize a VariantProject boundary"
+                    .into(),
+        });
+    }
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
@@ -463,6 +493,7 @@ pub fn materialize_canonical_mir_route(
         materialized_copy_option_bool_candidate,
         materialized_copy_option_i64_candidate,
         materialized_copy_option_f64_candidate,
+        materialized_copy_result_i32_candidate,
     })
 }
 
@@ -522,6 +553,12 @@ fn match_complete_or_compatibility(
     } else if admission.copy_option_f64_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::CopyOptionF64Variant,
+            stage,
+            message,
+        }
+    } else if admission.copy_result_i32_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::CopyResultI32Variant,
             stage,
             message,
         }
@@ -615,6 +652,7 @@ mod tests {
             copy_option_bool: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_i64: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_f64: CopyOptionI32VariantAdmission::OutsideProfile,
+            copy_result_i32: CopyResultI32VariantAdmission::OutsideProfile,
         };
         let error = match_complete_or_compatibility(
             admission,
@@ -719,6 +757,22 @@ mod tests {
     }
 
     #[test]
+    fn copy_result_i32_materialization_carries_one_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_result_i32_unwrap.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.copy_result_i32,
+            CopyResultI32VariantAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete Copy Result<i32, i32> route must materialize");
+        assert!(route.materialized_copy_result_i32_candidate);
+        assert!(crate::core::mir::validate_copy_result_i32_variant_island(&route.program).is_ok());
+    }
+
+    #[test]
     fn generic_option_predicate_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_predicate.mimi"
@@ -754,6 +808,8 @@ mod tests {
             CanonicalMirRouteProfile::CopyOptionI32Variant,
             CanonicalMirRouteProfile::CopyOptionBoolVariant,
             CanonicalMirRouteProfile::CopyOptionI64Variant,
+            CanonicalMirRouteProfile::CopyOptionF64Variant,
+            CanonicalMirRouteProfile::CopyResultI32Variant,
         ];
         for profile in profiles {
             assert_eq!(

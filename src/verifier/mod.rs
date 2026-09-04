@@ -250,6 +250,22 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    // Result projection candidates are checker-owned route admissions.  Once
+    // the front end recognizes an unsupported Result::unwrap shape, the
+    // verifier must not silently fall through to its retained AST/Flow
+    // compatibility engine: that would make verification disagree with the
+    // default run/build dispatch.  Complete admission proceeds through the
+    // canonical MIR profile below; mixed admission is a stable hard error.
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if matches!(
+        admission.copy_result_i32,
+        crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
+    ) {
+        return Err(
+            "MIR-COVERAGE-001: Copy Result<i32, i32> projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
     if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
     }
@@ -285,7 +301,7 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 9] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 10] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
@@ -295,6 +311,7 @@ fn verify_closed_mir_program(
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionF64Variant,
+        crate::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant,
     ];
     for profile in PROFILES {
         if let Some(results) = verify_closed_mir_profile(program, profile, source_hash.clone())? {
@@ -372,6 +389,15 @@ fn verify_closed_mir_profile(
                 |errors| {
                     format!(
                         "MIR-CAPABILITY-001: canonical verifier rejected the Copy Option<f64> variant island: {errors:?}"
+                    )
+                },
+            )?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant => {
+            crate::core::mir::validate_copy_result_i32_variant_island(&canonical).map_err(
+                |errors| {
+                    format!(
+                        "MIR-CAPABILITY-001: canonical verifier rejected the Copy Result<i32, i32> variant island: {errors:?}"
                     )
                 },
             )?;

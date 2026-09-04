@@ -326,7 +326,12 @@ fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
             let callee_allowed = match &call.callee {
                 ResolvedCallee::Builtin(name) => matches!(
                     name.as_str(),
-                    "Some" | "None" | "builtin.method.option.unwrap"
+                    "Some"
+                        | "None"
+                        | "Ok"
+                        | "Err"
+                        | "builtin.method.option.unwrap"
+                        | "builtin.method.result.unwrap"
                 ),
                 ResolvedCallee::Function(_) => {
                     call.type_arguments.is_empty()

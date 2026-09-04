@@ -564,17 +564,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         // island would force unrelated legacy prelude arithmetic through the
         // narrow native Float contract and poison the graph before emission.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-        let excluded_sources = if admission.copy_option_f64_complete() {
-            program
-                .source_registry()
-                .records()
-                .iter()
-                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-                .map(|record| record.id)
-                .collect::<HashSet<_>>()
-        } else {
-            HashSet::new()
-        };
+        let excluded_sources =
+            if admission.copy_option_f64_complete() || admission.copy_result_i32_complete() {
+                program
+                    .source_registry()
+                    .records()
+                    .iter()
+                    .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                    .map(|record| record.id)
+                    .collect::<HashSet<_>>()
+            } else {
+                HashSet::new()
+            };
         let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
         let route = match crate::core::mir::materialize_canonical_mir_route(
             program,
@@ -747,6 +748,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete Copy Option<f64> variant MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete Copy Result<i32, i32> variant MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::CopyResultI32Variant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete Copy Result<i32, i32> variant MIR island materialization failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,
@@ -824,6 +843,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
                     )]);
                 }
+                if !matches!(
+                    admission.copy_result_i32,
+                    crate::core::mir::CopyResultI32VariantAdmission::OutsideProfile
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized Copy Result<i32, i32> variant candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
                 return Ok(None);
             }
         };
@@ -836,6 +867,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
         let copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
+        let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
         if !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
@@ -844,6 +876,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !copy_option_bool_candidate
             && !copy_option_i64_candidate
             && !copy_option_f64_candidate
+            && !copy_result_i32_candidate
         {
             return Ok(None);
         }
@@ -867,6 +900,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "Copy Option<i64> variant island"
         } else if copy_option_f64_candidate {
             "Copy Option<f64> variant island"
+        } else if copy_result_i32_candidate {
+            "Copy Result<i32, i32> variant island"
         } else {
             "S8 Flow transition island"
         };
@@ -932,6 +967,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         if copy_option_f64_candidate {
             if let Err(errors) =
                 crate::core::mir::validate_copy_option_f64_variant_island(&canonical)
+            {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if copy_result_i32_candidate {
+            if let Err(errors) =
+                crate::core::mir::validate_copy_result_i32_variant_island(&canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,
