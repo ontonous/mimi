@@ -1081,7 +1081,10 @@ func main() -> i64 { 42 }
         .expect_err("f64 contracts must remain outside the canonical verifier domain");
     let message = format!("{error:?}");
     assert!(
-        message.contains("ABI Float") && message.contains("canonical scalar verifier contract"),
+        message.contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE)
+            && message.contains("ABI Float")
+            && message.contains("canonical scalar verifier contract")
+            && message.contains(crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE),
         "unexpected f64 contract boundary: {message}"
     );
 }

@@ -133,7 +133,7 @@ pub(crate) fn verify_program(
             Some(ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
                 integer_model: "checked_i32_i64".into(),
-                float_model: "f64_rejected".into(),
+                float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
                 solver_version: format!("z3 {}", z3::full_version()),
                 source_hash: source_hash.clone(),
                 resolved_ir_hash: String::new(),
@@ -1310,7 +1310,8 @@ fn eval_instruction(
             if float_shape {
                 catalog.validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)?;
                 return Err(format!(
-                    "MIR verifier finite-only f64 Add has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                    "{}: MIR verifier finite-only f64 Add has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                    crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
                     crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
                 ));
             }
@@ -4293,6 +4294,10 @@ mod tests {
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
         let artifact = result.artifact.as_ref().expect("MIR proof artifact");
         assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(
+            artifact.float_model,
+            crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL
+        );
         assert_eq!(artifact.mir_hash.len(), 64);
         assert!(program
             .functions()

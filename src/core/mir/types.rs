@@ -35,6 +35,29 @@ pub const MIR_VARIANT_PROJECTION_TRAP_CODE: &str = "E0800";
 /// operand or result in every production consumer.
 pub const MIR_FLOAT_NOT_FINITE_TRAP_CODE: &str = "E0813";
 
+/// Stable verifier admission identity for floating-point contract values.
+/// Finite-only runtime execution does not imply a sound SMT Float theory:
+/// until IEEE-754 rounding, NaN and definedness are modeled in canonical MIR,
+/// f64 contracts remain outside the trusted symbolic domain.
+pub const MIR_VERIFIER_FLOAT_BOUNDARY_CODE: &str = "MIR-VERIFIER-FLOAT-001";
+
+/// Proof-artifact model label for the intentionally rejected MIR float domain.
+/// Keep this separate from the runtime `E0813` trap identity: one describes
+/// verifier capability, the other describes execution definedness.
+pub const MIR_VERIFIER_FLOAT_MODEL: &str = "f64_rejected";
+
+/// Build the one stable diagnostic used when a canonical contract reaches a
+/// floating-point TypeDesc that the MIR verifier cannot soundly encode.
+pub fn verifier_float_boundary_message(ty: &ResolvedTypeId, abi: MirAbiClass) -> String {
+    format!(
+        "{}: contract type '{}' ABI {:?} is outside the canonical scalar verifier contract; finite-only runtime {} has no trusted IEEE-754 Float/definedness model",
+        MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
+        ty.as_str(),
+        abi,
+        MIR_FLOAT_NOT_FINITE_TRAP_CODE,
+    )
+}
+
 /// Validate the backend-independent contract for a canonical `Trap`.
 ///
 /// A trap has no value operand, layout, ABI, ownership transfer, or drop

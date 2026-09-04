@@ -10,7 +10,10 @@
 use crate::core::ir::{ResolvedBinaryOp, ResolvedProjection};
 use crate::core::NodeId;
 
-use super::types::{MirAbiClass, MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog};
+use super::types::{
+    verifier_float_boundary_message, MirAbiClass, MirGlueKind, MirLayout, MirOwnership,
+    MirTypeCatalog,
+};
 use super::{MirFunction, MirProjection, MirValidationError, MirValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -202,6 +205,7 @@ fn type_kind(
                 ty.as_str()
             ))
         }
+        MirAbiClass::Float { .. } => Err(verifier_float_boundary_message(ty, descriptor.abi)),
         abi => Err(format!(
             "contract type '{}' ABI {:?} is outside the canonical scalar verifier contract",
             ty.as_str(),
