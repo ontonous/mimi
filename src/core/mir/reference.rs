@@ -6828,6 +6828,81 @@ mod tests {
     }
 
     #[test]
+    fn concrete_generic_result_bool_error_slot_keeps_heterogeneous_copy_receipts() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_bool_error.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic Result<T,bool> projection must materialize");
+        let instances = program.instances().values().filter(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { .. }
+                    | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        });
+        assert!(instances.clone().count() >= 2);
+        for instance in instances {
+            let source_ty = match &instance.contract {
+                MirGenericInstanceContract::ScalarVariantProjection { contract } => {
+                    contract.source_ty.clone()
+                }
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } => {
+                    contract.source_ty.clone()
+                }
+                _ => unreachable!("filtered above"),
+            };
+            let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+                .type_catalog()
+                .get(&source_ty)
+                .expect("specialized Result TypeDesc")
+                .layout
+            else {
+                panic!("specialized source must retain a Result layout");
+            };
+            assert_ne!(ok, error);
+            assert_eq!(
+                program.type_catalog().get(error).map(|desc| &desc.kind),
+                Some(&crate::core::mir::types::MirTypeKind::Primitive(
+                    crate::core::PrimitiveType::Bool
+                ))
+            );
+        }
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference heterogeneous Result<bool-error> execution");
+        assert_eq!(value, MirRuntimeValue::Int(81));
+    }
+
+    #[test]
+    fn concrete_generic_result_bool_error_unwrap_preserves_trap_receipt() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_bool_error_trap.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("generic Result<T,bool> trap MIR");
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("reference Err(true).unwrap must trap");
+        assert!(error.to_string().contains("E0800"));
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::VariantProject { contract: Some(contract), .. }
+                            if contract.trap_code == "E0800"
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
     fn three_field_generic_record_projection_fails_closed() {
         let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: 41, second: 7, third: 9 }; get(triple) }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -6882,6 +6957,26 @@ mod tests {
                 "unexpected errors: {errors:?}"
             ),
             other => panic!("non-Copy sibling crossed the MIR gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_result_string_error_projection_fails_closed_before_backend() {
+        let source = "func unwrap<T>(value: Result<T, string>) -> T { value.unwrap() }\nfunc main() -> i32 { unwrap(Ok(41)) }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("Result<T,string> projection must remain outside canonical MIR");
+        match error {
+            MirProgramBuildError::Lowering(errors) => assert!(
+                errors.iter().any(|error| {
+                    error.message.contains("generic Result projection")
+                        || error.message.contains("Option/Result unwrap shape")
+                }),
+                "unexpected errors: {errors:?}"
+            ),
+            other => panic!("unsupported generic Result shape crossed MIR gate: {other:?}"),
         }
     }
 

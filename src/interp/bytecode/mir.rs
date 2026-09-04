@@ -5427,6 +5427,47 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_result_bool_error_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_bool_error.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic Result<T,bool> MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Result<bool-error> execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Result<T,bool> bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Result<bool-error> execution");
+        assert_eq!(reference, MirRuntimeValue::Int(81));
+        assert!(matches!(value, Value::Int(81)));
+    }
+
+    #[test]
+    fn generic_result_bool_error_unwrap_matches_reference_trap() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_bool_error_trap.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Result<T,bool> trap MIR");
+        let reference_error = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference Err(true).unwrap must trap");
+        let bytecode = compile_mir_program(&mir).expect("generic Result<T,bool> trap bytecode");
+        assert!(bytecode.ast.is_none());
+        let bytecode_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode Err(true).unwrap must trap");
+        assert!(reference_error.to_string().contains("E0800"));
+        assert_eq!(bytecode_error.code(), "E0800");
+    }
+
+    #[test]
     fn generic_result_unwrap_err_matches_reference_trap() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi");

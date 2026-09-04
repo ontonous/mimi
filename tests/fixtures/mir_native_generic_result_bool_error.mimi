@@ -1,0 +1,16 @@
+// Generic heterogeneous Result<T, bool> projection keeps the Err payload in
+// a distinct Copy slot while returning the selected T payload/fallback.
+func unwrap_bool<T>(value: Result<T, bool>) -> T {
+    value.unwrap()
+}
+
+func unwrap_or_bool<T>(value: Result<T, bool>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let ok: Result<i64, bool> = Ok(41 as i64)
+    let err: Result<i64, bool> = Err(true)
+    unwrap_bool(ok) + unwrap_or_bool(err, 40 as i64)
+}

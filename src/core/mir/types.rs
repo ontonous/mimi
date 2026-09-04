@@ -5948,10 +5948,11 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the non-executable placeholder receipt for the narrow
-    /// generic `Result<T, T>.unwrap()`/`Result<T, i32>.unwrap()` projection.
+    /// generic `Result<T, T>.unwrap()`/`Result<T, i32>.unwrap()`/
+    /// `Result<T, bool>.unwrap()` projection.
     /// The `Ok` slot is tied to the result generic parameter. The `Err` slot
-    /// is either the same `T` (the original island) or the fixed Copy `i32`
-    /// payload promoted by the distinct-payload slice. Concrete
+    /// is either the same `T` (the original island) or a fixed Copy `i32`/
+    /// `bool` payload promoted by the distinct-payload slices. Concrete
     /// specialization replaces this placeholder with a receipt that proves
     /// both payload TypeDesc/glue policies before execution.
     /// Concrete materialization must call
@@ -6009,13 +6010,16 @@ impl MirTypeCatalog {
             .get(result_ty)
             .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
         let error_is_same_generic = error == result_ty;
-        let error_is_i32 = self
-            .get(error)
-            .is_some_and(|payload| payload.kind == MirTypeKind::Primitive(PrimitiveType::I32));
+        let error_is_scalar = self.get(error).is_some_and(|payload| {
+            matches!(
+                payload.kind,
+                MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+            )
+        });
         if !generic_payload
             || result.kind != MirTypeKind::GenericParameter
             || ok != result_ty
-            || (!error_is_same_generic && !error_is_i32)
+            || (!error_is_same_generic && !error_is_scalar)
         {
             return Err("generic Result projection placeholder requires Result<T, T> or Result<T, i32> and result T identity".into());
         }
@@ -6048,7 +6052,7 @@ impl MirTypeCatalog {
         if selected.fields[0].id != *field_id
             || selected.fields[0].ty != *result_ty
             || (error_is_same_generic && alternate.fields[0].ty != *result_ty)
-            || (error_is_i32 && alternate.fields[0].ty != *error)
+            || (error_is_scalar && alternate.fields[0].ty != *error)
         {
             return Err(
                 "generic Result projection fields must be the canonical Ok/Err payloads".into(),
@@ -6177,7 +6181,7 @@ impl MirTypeCatalog {
     }
 
     /// Validate the complete heterogeneous Copy Result layout used by the
-    /// specialized `Result<T, i32>` projection island. This keeps native ABI
+    /// specialized `Result<T, i32>`/`Result<T, bool>` projection islands. This keeps native ABI
     /// callers from having to synthesize a projection receipt merely to prove
     /// that both payload slots are scalar and glue-free.
     pub(crate) fn validate_copy_result_scalar_variant(
@@ -6229,9 +6233,10 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the non-executable placeholder receipt for generic
-    /// `Result<T, T>.unwrap_or(T)` and `Result<T, i32>.unwrap_or(T)`. The Ok
-    /// payload and explicit fallback remain tied to opaque generic `T`; the
-    /// distinct shape keeps the Err payload fixed at i32. Specialization must
+    /// `Result<T, T>.unwrap_or(T)`, `Result<T, i32>.unwrap_or(T)` and
+    /// `Result<T, bool>.unwrap_or(T)`. The Ok payload and explicit fallback
+    /// remain tied to opaque generic `T`; the distinct shapes keep the Err
+    /// payload fixed at a Copy scalar. Specialization must
     /// replace the placeholder with a concrete scalar fallback receipt before
     /// execution.
     pub(crate) fn validated_generic_result_projection_fallback_contract(
@@ -6296,11 +6301,14 @@ impl MirTypeCatalog {
             && self
                 .get(error)
                 .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
-        let error_is_i32 = self
-            .get(error)
-            .is_some_and(|payload| payload.kind == MirTypeKind::Primitive(PrimitiveType::I32));
+        let error_is_scalar = self.get(error).is_some_and(|payload| {
+            matches!(
+                payload.kind,
+                MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+            )
+        });
         if !ok_is_generic
-            || (!error_is_same_generic && !error_is_i32)
+            || (!error_is_same_generic && !error_is_scalar)
             || result.kind != MirTypeKind::GenericParameter
             || fallback.kind != MirTypeKind::GenericParameter
             || ok != result_ty
@@ -6338,7 +6346,7 @@ impl MirTypeCatalog {
         if selected.fields[0].id != *field_id
             || selected.fields[0].ty != *result_ty
             || (error_is_same_generic && alternate.fields[0].ty != *result_ty)
-            || (error_is_i32 && alternate.fields[0].ty != *error)
+            || (error_is_scalar && alternate.fields[0].ty != *error)
         {
             return Err(
                 "generic Result fallback fields must be the canonical Ok/Err payloads".into(),

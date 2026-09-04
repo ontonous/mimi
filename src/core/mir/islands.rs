@@ -44,16 +44,17 @@ pub const GENERIC_OPTION_PROJECTION_ISLAND: &str = "generic-option-projection-v1
 /// separate from the trap-bearing projection because the fallback operand is
 /// an explicit second ABI value and the operation is total over both tags.
 pub const GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND: &str = "generic-option-projection-fallback-v1";
-/// Name of the generic `Result<T, T>.unwrap()` / `Result<T, i32>.unwrap()`
-/// projection island. It is separate from the Option projection profile
-/// because `Ok` is tag zero and both Result payload slots participate in the
-/// aggregate ABI proof. The distinct `Err i32` shape uses the same
-/// receipt-bearing MIR node but a two-slot native aggregate ABI.
+/// Name of the generic `Result<T, T>.unwrap()` / `Result<T, i32>.unwrap()` /
+/// `Result<T, bool>.unwrap()` projection island. It is separate from the
+/// Option projection profile because `Ok` is tag zero and both Result payload
+/// slots participate in the aggregate ABI proof. Distinct scalar `Err` shapes
+/// use the same receipt-bearing MIR node but a two-slot native aggregate ABI.
 pub const GENERIC_RESULT_PROJECTION_ISLAND: &str = "generic-result-projection-v1";
 /// Name of the generic `Result<T, T>.unwrap_or(T)` /
-/// `Result<T, i32>.unwrap_or(T)` total projection island. It remains distinct
-/// from trap-bearing Result projection because both payload slots and the
-/// explicit fallback operand participate in the ABI.
+/// `Result<T, i32>.unwrap_or(T)` / `Result<T, bool>.unwrap_or(T)` total
+/// projection island. It remains distinct from trap-bearing Result projection
+/// because both payload slots and the explicit fallback operand participate
+/// in the ABI.
 pub const GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND: &str = "generic-result-projection-fallback-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +190,8 @@ pub fn has_unsupported_generic_option_projection_fallback_candidate(
 }
 
 /// Classify the checker-owned generic `Result<T, T>.unwrap()` and
-/// `Result<T, i32>.unwrap()` envelopes before MIR materialization. Only one
+/// `Result<T, i32>.unwrap()`/`Result<T, bool>.unwrap()` envelopes before MIR
+/// materialization. Only one
 /// generic binder, one Result parameter, a `T` result, no statements, and the
 /// direct builtin unwrap call are admitted. Concrete scalar/layout checks
 /// remain in MIR specialization.
@@ -231,7 +233,7 @@ pub fn has_unsupported_generic_result_projection_candidate(program: &CheckedProg
 }
 
 /// Classify the checker-owned generic `Result<T, T>.unwrap_or(T)` and
-/// `Result<T, i32>.unwrap_or(T)` envelopes. Only one generic binder, one
+/// `Result<T, i32>.unwrap_or(T)`/`Result<T, bool>.unwrap_or(T)` envelopes. Only one generic binder, one
 /// Result receiver, one `T` fallback, a `T` result, an empty body and the
 /// direct builtin call are admitted.
 pub fn classify_generic_result_projection_fallback_admission(
@@ -459,11 +461,13 @@ pub(crate) fn is_generic_result_projection_callable(
         return false;
     };
     let error_is_same_generic = error == &generic_ty;
-    let error_is_i32 = matches!(
+    let error_is_scalar = matches!(
         program.resolved_types().get(error),
-        Some(ResolvedType::Primitive(PrimitiveType::I32))
+        Some(ResolvedType::Primitive(
+            PrimitiveType::I32 | PrimitiveType::Bool
+        ))
     );
-    if ok != &generic_ty || (!error_is_same_generic && !error_is_i32) {
+    if ok != &generic_ty || (!error_is_same_generic && !error_is_scalar) {
         return false;
     }
     let Some(ResolvedExpr {
@@ -501,12 +505,14 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
         return false;
     };
     let error_is_same_generic = error == &generic_ty;
-    let error_is_i32 = matches!(
+    let error_is_scalar = matches!(
         program.resolved_types().get(error),
-        Some(ResolvedType::Primitive(PrimitiveType::I32))
+        Some(ResolvedType::Primitive(
+            PrimitiveType::I32 | PrimitiveType::Bool
+        ))
     );
     if ok != &generic_ty
-        || (!error_is_same_generic && !error_is_i32)
+        || (!error_is_same_generic && !error_is_scalar)
         || callable.signature.parameters[1].ty != generic_ty
     {
         return false;

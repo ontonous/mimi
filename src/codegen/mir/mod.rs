@@ -3053,6 +3053,78 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_result_bool_error_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_error.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic Result<T,bool> projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized Result<T,bool> TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain Result layout");
+        };
+        assert_ne!(ok, error);
+        assert_eq!(
+            program.type_catalog().get(error).map(|desc| &desc.kind),
+            Some(&crate::core::mir::types::MirTypeKind::Primitive(
+                crate::core::PrimitiveType::Bool
+            ))
+        );
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Result<bool-error> execution");
+        assert_eq!(reference, MirRuntimeValue::Int(81));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_result_bool_error");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Result<T,bool> must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Result<T,bool> module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_generic_result_bool_error_unwrap_keeps_the_receipt_trap() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_error_trap.mimi"
+        ));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_result_bool_error_trap");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Result<T,bool> Err must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Result<T,bool> Err module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+    }
+
+    #[test]
     fn native_generic_result_distinct_unwrap_err_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_err.mimi"

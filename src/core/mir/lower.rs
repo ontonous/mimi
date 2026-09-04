@@ -6616,8 +6616,12 @@ impl<'a> Lowerer<'a> {
                             if type_catalog.get(ok).is_some_and(|payload| {
                                 payload.kind == super::types::MirTypeKind::GenericParameter
                             }) && (error == ok || type_catalog.get(error).is_some_and(|payload| {
-                                payload.kind
-                                    == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+                                matches!(
+                                    payload.kind,
+                                    super::types::MirTypeKind::Primitive(
+                                        PrimitiveType::I32 | PrimitiveType::Bool
+                                    )
+                                )
                             }))
                     )
                 }) =>
@@ -6964,7 +6968,8 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
 /// admitted source-driven projection shapes: move-owned `Option<string>`,
 /// Copy `Option<i32>`/`Option<i64>`/`Option<f64>`/`Option<bool>`, the first
 /// concrete Copy `Result<i32, i32>` island, and the generic
-/// `Result<T, i32>` projection placeholder. The receiver/result TypeDesc is
+/// `Result<T, i32>`/`Result<T, bool>` projection placeholder. The
+/// receiver/result TypeDesc is
 /// still validated by `variant_projection_contract`; this helper only maps
 /// the checker-owned builtin identity to the stable variant family.
 fn variant_projection_builtin(
@@ -7065,11 +7070,16 @@ fn variant_projection_builtin(
                 .is_some_and(|payload| payload.kind == super::types::MirTypeKind::GenericParameter);
             let generic_result = generic_ok && call.result == *ok;
             let same_generic_payload = generic_result && ok == error;
-            let distinct_i32_error = generic_result
+            let distinct_scalar_error = generic_result
                 && catalog.get(error).is_some_and(|payload| {
-                    payload.kind == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+                    matches!(
+                        payload.kind,
+                        super::types::MirTypeKind::Primitive(
+                            PrimitiveType::I32 | PrimitiveType::Bool
+                        )
+                    )
                 });
-            if same_generic_payload || distinct_i32_error {
+            if same_generic_payload || distinct_scalar_error {
                 if builtin.as_str() == "builtin.method.result.unwrap_or"
                     && (call.arguments.get(1)?.value.ty != *ok || call.result != *ok)
                 {

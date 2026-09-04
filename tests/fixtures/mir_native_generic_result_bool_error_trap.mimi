@@ -1,0 +1,8 @@
+func unwrap_bool<T>(value: Result<T, bool>) -> T {
+    value.unwrap()
+}
+
+func main() -> i64 {
+    let err: Result<i64, bool> = Err(true)
+    unwrap_bool(err)
+}
