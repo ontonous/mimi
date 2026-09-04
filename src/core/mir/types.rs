@@ -2058,6 +2058,113 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize a total Copy Result fallback receipt for an admitted scalar
+    /// payload. Generic specialization uses this helper after replacing `T`
+    /// with a concrete i32/i64/bool TypeDesc; the narrower concrete i32 island
+    /// above remains unchanged and keeps its own default-route boundary.
+    pub fn validated_copy_result_scalar_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Result {
+            variants,
+            ok,
+            error,
+            ..
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "type '{}' has no canonical Result layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "Result fallback source must be Aggregate/Copy with canonical no-op glue".into(),
+            );
+        }
+        if ok != result_ty || error != result_ty || result_ty != fallback_ty {
+            return Err(
+                "Result unwrap_or fallback, result and Ok/Err TypeDesc identities must agree"
+                    .into(),
+            );
+        }
+        self.validate_copy_scalar(result_ty)?;
+        if variants.len() != 2 {
+            return Err(
+                "Result fallback source must have exactly canonical Ok/Err variants".into(),
+            );
+        }
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Copy
+            || projection.move_out_glue != MirGlueKind::Noop
+            || projection.field_index != 0
+            || projection.arity != 1
+            || projection.variant.0 != "builtin:variant:Result::Ok"
+            || projection.field.0 != "builtin:variant:Result::Ok/payload:0"
+        {
+            return Err(
+                "Result unwrap_or projection requires the canonical single Copy Ok payload".into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| variant.id == projection.variant)
+            .ok_or_else(|| "Result fallback Ok variant is absent from TypeDesc".to_string())?;
+        if selected.name != "Ok"
+            || selected.discriminant != 0
+            || selected.fields.len() != 1
+            || selected.fields[0].ty != *result_ty
+        {
+            return Err("Result fallback Ok discriminant/payload disagrees with TypeDesc".into());
+        }
+        let fallback = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Result::Err"
+                    && variant.name == "Err"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+                    && variant.fields[0].ty == *result_ty
+            })
+            .ok_or_else(|| "Result fallback requires the canonical Err payload".to_string())?;
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection,
+            variant_name: selected.name.clone(),
+            discriminant: selected.discriminant,
+            fallback_variant: fallback.id.clone(),
+            fallback_variant_name: fallback.name.clone(),
+            fallback_discriminant: fallback.discriminant,
+            fallback_arity: fallback.fields.len(),
+        })
+    }
+
     /// Materialize the complete contract for a total Copy `Option<i32>`
     /// projection with an explicit fallback operand (`unwrap_or`). `Some`
     /// carries the selected payload and `None` is a zero-field alternate;
@@ -2235,8 +2342,32 @@ impl MirTypeCatalog {
                     result_ty,
                     fallback_ty,
                 )?,
+            Some(MirTypeKind::Result)
+                if self.get(source_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        MirLayout::Result { ok, error, .. }
+                            if ok == result_ty
+                                && error == result_ty
+                                && self.get(ok).is_some_and(|payload| {
+                                    payload.kind == MirTypeKind::GenericParameter
+                                })
+                                && self.get(error).is_some_and(|payload| {
+                                    payload.kind == MirTypeKind::GenericParameter
+                                })
+                    )
+                }) =>
+            {
+                self.validated_generic_result_projection_fallback_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                    fallback_ty,
+                )?
+            }
             Some(MirTypeKind::Result) => self
-                .validated_copy_result_i32_projection_fallback_contract(
+                .validated_copy_result_scalar_projection_fallback_contract(
                     source_ty,
                     &receipt.projection.variant,
                     &receipt.projection.field,
@@ -5586,6 +5717,138 @@ impl MirTypeCatalog {
             variant_name: "Ok".into(),
             discriminant: 0,
             trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
+    /// Materialize the non-executable placeholder receipt for generic
+    /// `Result<T, T>.unwrap_or(T)`. Both `Ok` and `Err` payload slots remain
+    /// tied to the opaque generic `T`; specialization must replace the
+    /// placeholder with the concrete scalar fallback receipt before execution.
+    pub(crate) fn validated_generic_result_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "generic Result fallback source type '{}' is absent from MIR TypeDesc catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Result {
+            variants,
+            ok,
+            error,
+            ..
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "generic Result fallback source '{}' has no canonical Result layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "generic Result fallback source must be Aggregate/Copy with canonical no-op glue"
+                    .into(),
+            );
+        }
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic Result fallback result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        let fallback = self.get(fallback_ty).ok_or_else(|| {
+            format!(
+                "generic Result fallback operand type '{}' is absent from MIR TypeDesc catalog",
+                fallback_ty.as_str()
+            )
+        })?;
+        let generic_payload = self
+            .get(ok)
+            .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter)
+            && self
+                .get(error)
+                .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
+        if !generic_payload
+            || result.kind != MirTypeKind::GenericParameter
+            || fallback.kind != MirTypeKind::GenericParameter
+            || ok != result_ty
+            || error != result_ty
+            || result_ty != fallback_ty
+        {
+            return Err(
+                "generic Result fallback placeholder requires Result<T, T>, result T and fallback T identity"
+                    .into(),
+            );
+        }
+        if variants.len() != 2 {
+            return Err(
+                "generic Result fallback source must have exactly canonical Ok/Err variants".into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| {
+                variant.id == *variant_id
+                    && variant.name == "Ok"
+                    && variant.discriminant == 0
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Result fallback target must be the canonical Ok variant".to_string()
+            })?;
+        let alternate = variants
+            .iter()
+            .find(|variant| {
+                variant.name == "Err" && variant.discriminant == 1 && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Result fallback source must contain the canonical Err variant".to_string()
+            })?;
+        if selected.fields[0].id != *field_id
+            || selected.fields[0].ty != *result_ty
+            || alternate.fields[0].ty != *result_ty
+        {
+            return Err(
+                "generic Result fallback fields must be the canonical Ok/Err payloads".into(),
+            );
+        }
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection: MirVariantProjectionContract {
+                nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
+                variant: selected.id.clone(),
+                field: selected.fields[0].id.clone(),
+                field_index: 0,
+                arity: 1,
+                field_ty: result_ty.clone(),
+                ownership: MirOwnership::Copy,
+                move_out_glue: MirGlueKind::Noop,
+            },
+            variant_name: "Ok".into(),
+            discriminant: 0,
+            fallback_variant: alternate.id.clone(),
+            fallback_variant_name: "Err".into(),
+            fallback_discriminant: 1,
+            fallback_arity: 1,
         })
     }
 

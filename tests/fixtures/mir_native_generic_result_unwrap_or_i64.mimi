@@ -1,0 +1,10 @@
+// Generic Result<T, T> unwrap_or with an admitted Copy i64 specialization.
+func unwrap_or<T>(value: Result<T, T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let fallback: i64 = 7
+    unwrap_or(Err(35 as i64), fallback)
+}

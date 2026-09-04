@@ -731,6 +731,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ),
                     ),
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::GenericResultProjectionFallback,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete generic Result fallback projection MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::GenericResultProjectionFallback,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete generic Result fallback projection MIR island materialization failed: {message}"
+                        ),
+                    ),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (

@@ -40,7 +40,9 @@ pub fn classify_copy_result_i32_variant_admission(
         // receipt. Do not let the generic template's builtin unwrap make the
         // concrete Result<i32, i32> island report mixed coverage before the
         // generic route can claim it.
-        if super::islands::is_generic_result_projection_callable(program, callable) {
+        if super::islands::is_generic_result_projection_callable(program, callable)
+            || super::islands::is_generic_result_projection_fallback_callable(program, callable)
+        {
             continue;
         }
         let body_is_closed = super::option_island::option_body_is_closed(&callable.body.root);

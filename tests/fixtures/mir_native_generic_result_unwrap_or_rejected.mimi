@@ -1,0 +1,9 @@
+// Unsupported generic Result fallback body: an extra local is not admitted.
+func unwrap_or<T>(value: Result<T, T>, fallback: T) -> T {
+    let copied = fallback
+    value.unwrap_or(copied)
+}
+
+func main() -> i32 {
+    unwrap_or(Ok(41), 7)
+}

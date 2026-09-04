@@ -334,6 +334,89 @@ fn generic_result_unwrap_err_preserves_the_canonical_trap() {
 }
 
 #[test]
+fn materializes_generic_result_unwrap_or_with_a_specialized_fallback_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("generic Result fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.projection.nominal.as_str(), "builtin:type:Result");
+    assert_eq!(contract.variant_name, "Ok");
+    assert_eq!(contract.discriminant, 0);
+    assert_eq!(contract.fallback_variant_name, "Err");
+    assert_eq!(contract.fallback_discriminant, 1);
+    assert_eq!(contract.fallback_arity, 1);
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Copy);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Result unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(48));
+}
+
+#[test]
+fn generic_result_unwrap_or_stale_receipt_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
+    let checked = checked_program(source);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result unwrap_or MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("generic Result fallback projection instance");
+    let mut functions = canonical.functions().clone();
+    let target = functions
+        .get_mut(&instance.function)
+        .expect("materialized generic Result fallback target");
+    let receipt = target
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::VariantProjectOr {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("fallback projection receipt");
+    receipt.fallback_discriminant = receipt.fallback_discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog_and_instances(
+        functions,
+        canonical.type_catalog().clone(),
+        canonical.instances().clone(),
+    )
+    .expect_err("stale generic Result fallback receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant projection fallback receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
 fn rejects_generic_option_unwrap_for_owned_payload_before_legacy() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi");

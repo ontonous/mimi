@@ -1,0 +1,9 @@
+// Generic Result<T, T> unwrap_or must select Ok or the explicit Err fallback.
+func unwrap_or<T>(value: Result<T, T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    unwrap_or(Ok(41), 7) + unwrap_or(Err(35), 7)
+}

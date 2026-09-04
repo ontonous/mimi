@@ -48,6 +48,10 @@ pub const GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND: &str = "generic-option-proj
 /// separate from the Option projection profile because `Ok` is tag zero and
 /// both Result payload slots participate in the aggregate ABI proof.
 pub const GENERIC_RESULT_PROJECTION_ISLAND: &str = "generic-result-projection-v1";
+/// Name of the generic `Result<T, T>.unwrap_or(T)` total projection island.
+/// It remains distinct from trap-bearing Result projection because both
+/// payload slots and the explicit fallback operand participate in the ABI.
+pub const GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND: &str = "generic-result-projection-fallback-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericVariantPredicateAdmission {
@@ -82,6 +86,16 @@ pub enum GenericOptionProjectionFallbackAdmission {
 /// projection because it carries the Result `Ok` tag/trap receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericResultProjectionAdmission {
+    OutsideProfile,
+    MixedCoverage,
+    CompleteCoverage,
+}
+
+/// Checker-owned admission for the narrow generic `Result<T, T>.unwrap_or(T)`
+/// shape. The complete case is independent from the trap-bearing Result
+/// projection and concrete `Result<i32, i32>` island.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericResultProjectionFallbackAdmission {
     OutsideProfile,
     MixedCoverage,
     CompleteCoverage,
@@ -185,6 +199,8 @@ pub fn classify_generic_result_projection_admission(
         || program.callables().values().any(|callable| {
             mentions_generic_result_callable(program, callable)
                 && !is_generic_result_projection_callable(program, callable)
+                && !is_generic_result_projection_fallback_callable(program, callable)
+                && !is_generic_result_projection_fallback_candidate(program, callable)
                 && !is_generic_variant_predicate_callable(program, callable)
         })
     {
@@ -200,7 +216,47 @@ pub fn has_unsupported_generic_result_projection_candidate(program: &CheckedProg
     program.callables().values().any(|callable| {
         mentions_generic_result_callable(program, callable)
             && !is_generic_result_projection_callable(program, callable)
+            && !is_generic_result_projection_fallback_callable(program, callable)
+            && !is_generic_result_projection_fallback_candidate(program, callable)
             && !is_generic_variant_predicate_callable(program, callable)
+    })
+}
+
+/// Classify the checker-owned generic `Result<T, T>.unwrap_or(T)` envelope.
+/// Only one generic binder, one `Result<T, T>` receiver, one `T` fallback, a
+/// `T` result, an empty body and the direct builtin call are admitted.
+pub fn classify_generic_result_projection_fallback_admission(
+    program: &CheckedProgram,
+) -> GenericResultProjectionFallbackAdmission {
+    let has_candidate = program
+        .callables()
+        .values()
+        .any(|callable| is_generic_result_projection_fallback_callable(program, callable));
+    if !has_candidate {
+        return GenericResultProjectionFallbackAdmission::OutsideProfile;
+    }
+    if has_mixed_coverage(program)
+        || program.callables().values().any(|callable| {
+            mentions_generic_result_callable(program, callable)
+                && !is_generic_result_projection_callable(program, callable)
+                && !is_generic_result_projection_fallback_callable(program, callable)
+                && !is_generic_variant_predicate_callable(program, callable)
+        })
+    {
+        GenericResultProjectionFallbackAdmission::MixedCoverage
+    } else {
+        GenericResultProjectionFallbackAdmission::CompleteCoverage
+    }
+}
+
+/// Stable candidate hint used by default dispatch when an unsupported generic
+/// Result fallback shape must be rejected before legacy consumers observe it.
+pub fn has_unsupported_generic_result_projection_fallback_candidate(
+    program: &CheckedProgram,
+) -> bool {
+    program.callables().values().any(|callable| {
+        is_generic_result_projection_fallback_candidate(program, callable)
+            && !is_generic_result_projection_fallback_callable(program, callable)
     })
 }
 
@@ -226,6 +282,7 @@ pub fn classify_generic_variant_predicate_admission(
                 || mentions_generic_result_callable(program, callable)
                     && !is_generic_variant_predicate_callable(program, callable)
                     && !is_generic_result_projection_callable(program, callable)
+                    && !is_generic_result_projection_fallback_callable(program, callable)
         })
     {
         GenericVariantPredicateAdmission::MixedCoverage
@@ -406,6 +463,77 @@ pub(crate) fn is_generic_result_projection_callable(
         &call.callee,
         ResolvedCallee::Builtin(name) if name.as_str() == "builtin.method.result.unwrap"
     ) && call.arguments.len() == 1
+}
+
+pub(crate) fn is_generic_result_projection_fallback_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+        return false;
+    };
+    if !mentions_generic_result_callable(program, callable)
+        || callable.signature.parameters.len() != 2
+        || callable.signature.generic_parameters.len() != 1
+        || callable.signature.result != generic_ty
+        || !callable.body.root.statements.is_empty()
+    {
+        return false;
+    }
+    let Some(ResolvedType::Result { ok, error }) = program
+        .resolved_types()
+        .get(&callable.signature.parameters[0].ty)
+    else {
+        return false;
+    };
+    if ok != &generic_ty
+        || error != &generic_ty
+        || callable.signature.parameters[1].ty != generic_ty
+    {
+        return false;
+    }
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name)
+            if name.as_str() == "builtin.method.result.unwrap_or"
+    ) && call.arguments.len() == 2
+        && call.arguments[0].value.ty == callable.signature.parameters[0].ty
+        && call.arguments[1].value.ty == generic_ty
+        && call.result == generic_ty
+}
+
+/// Broad checker-owned hint for the `Result<T,T>.unwrap_or(T)` family. This
+/// deliberately admits malformed bodies (for example an extra statement) so
+/// the fallback route can emit its stable fail-closed diagnostic instead of
+/// being misclassified as the trap-bearing `unwrap` projection family.
+fn is_generic_result_projection_fallback_candidate(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !mentions_generic_result_callable(program, callable)
+        || callable.signature.generic_parameters.len() != 1
+    {
+        return false;
+    }
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name)
+            if name.as_str() == "builtin.method.result.unwrap_or"
+    ) && call.arguments.len() == 2
 }
 
 fn mentions_generic_result_callable(
@@ -2007,6 +2135,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                             || is_generic_option_projection_callable(program, callable)
                             || is_generic_option_projection_fallback_callable(program, callable)
                             || is_generic_result_projection_callable(program, callable)
+                            || is_generic_result_projection_fallback_callable(program, callable)
                     });
                 ((!generic_record_callable && !generic_variant_callable)
                     && !function.generics.is_empty())
@@ -2027,6 +2156,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     && !is_generic_option_projection_callable(program, callable)
                     && !is_generic_option_projection_fallback_callable(program, callable)
                     && !is_generic_result_projection_callable(program, callable)
+                    && !is_generic_result_projection_fallback_callable(program, callable)
                     && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()
@@ -2304,6 +2434,19 @@ pub fn contains_generic_result_projection_candidate(program: &MirProgram) -> boo
         matches!(
             &instance.contract,
             MirGenericInstanceContract::ScalarVariantProjection { contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Result"
+        )
+    })
+}
+
+/// Return whether a canonical graph contains a materialized generic
+/// `Result<T, T>.unwrap_or(T)` projection instance. The specialized fallback
+/// receipt is the only source of this route fact for consumers.
+pub fn contains_generic_result_projection_fallback_candidate(program: &MirProgram) -> bool {
+    program.instances().values().any(|instance| {
+        matches!(
+            &instance.contract,
+            MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
                 if contract.projection.nominal.as_str() == "builtin:type:Result"
         )
     })

@@ -5329,6 +5329,87 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_result_unwrap_or_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic Result unwrap_or MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract: crate::core::mir::types::MirVariantProjectionFallbackContract {
+                            projection: crate::core::mir::types::MirVariantProjectionContract {
+                                nominal,
+                                ..
+                            },
+                            ..
+                        }
+                    } if nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic Result fallback projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.variant_name, "Ok");
+        assert_eq!(contract.fallback_variant_name, "Err");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Result unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Result unwrap_or bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(value, Value::Int(48)));
+    }
+
+    #[test]
+    fn generic_result_unwrap_or_i64_and_bool_match_reference_and_bytecode() {
+        for (source, expected) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_i64.mimi"
+                ),
+                7,
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_bool.mimi"
+                ),
+                0,
+            ),
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            let mir = MirProgram::from_checked_program(&checked)
+                .expect("generic Result scalar unwrap_or MIR");
+            let reference = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference generic Result scalar unwrap_or execution");
+            let bytecode =
+                compile_mir_program(&mir).expect("generic Result scalar unwrap_or bytecode");
+            assert!(bytecode.ast.is_none());
+            let value = BytecodeVM::new(bytecode)
+                .run_value()
+                .expect("bytecode generic Result scalar unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(expected));
+            assert!(matches!(value, Value::Int(actual) if actual == expected));
+        }
+    }
+
+    #[test]
     fn executes_copy_result_i32_i32_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

@@ -1509,22 +1509,40 @@ fn materialize_generic_instance(
                     message: "generic variant fallback operand has no specialized TypeDesc".into(),
                 }]
             })?;
-        let receipt = type_catalog
-            .validated_copy_option_scalar_projection_fallback_contract(
-                &base_ty,
-                &placeholder.projection.variant,
-                &placeholder.projection.field,
-                &result_ty,
-                &fallback_ty,
-            )
-            .map_err(|message| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: format!(
-                        "generic variant fallback projection receipt specialization failed: {message}"
-                    ),
-                }]
-            })?;
+        let receipt = match type_catalog
+            .get(&base_ty)
+            .map(|descriptor| &descriptor.kind)
+        {
+            Some(super::types::MirTypeKind::Option) => type_catalog
+                .validated_copy_option_scalar_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                ),
+            Some(super::types::MirTypeKind::Result) => type_catalog
+                .validated_copy_result_scalar_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                ),
+            Some(kind) => Err(format!(
+                "generic variant fallback projection source kind {:?} is outside Option/Result",
+                kind
+            )),
+            None => Err("generic variant fallback projection source TypeDesc is absent".into()),
+        }
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: format!(
+                    "generic variant fallback projection receipt specialization failed: {message}"
+                ),
+            }]
+        })?;
         let instruction = function
             .blocks
             .get_mut(&block_id)
@@ -2165,19 +2183,31 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
             "generic variant fallback projection return value is not the ProjectOr result".into(),
         );
     }
-    if receipt.projection.nominal.as_str() != "builtin:type:Option"
-        || receipt.variant_name != "Some"
-        || receipt.discriminant != 1
-        || receipt.fallback_variant_name != "None"
-        || receipt.fallback_discriminant != 0
-        || receipt.fallback_arity != 0
+    let valid_shape = match receipt.projection.nominal.as_str() {
+        "builtin:type:Option" => {
+            receipt.variant_name == "Some"
+                && receipt.discriminant == 1
+                && receipt.fallback_variant_name == "None"
+                && receipt.fallback_discriminant == 0
+                && receipt.fallback_arity == 0
+        }
+        "builtin:type:Result" => {
+            receipt.variant_name == "Ok"
+                && receipt.discriminant == 0
+                && receipt.fallback_variant_name == "Err"
+                && receipt.fallback_discriminant == 1
+                && receipt.fallback_arity == 1
+        }
+        _ => false,
+    };
+    if !valid_shape
         || receipt.projection.field_index != 0
         || receipt.projection.arity != 1
         || receipt.projection.ownership != super::types::MirOwnership::Copy
         || receipt.projection.move_out_glue != super::types::MirGlueKind::Noop
     {
         return Err(
-            "generic variant fallback projection receipt is outside the Copy Option<T> contract"
+            "generic variant fallback projection receipt is outside the Copy Option/Result contract"
                 .into(),
         );
     }
@@ -5749,6 +5779,27 @@ impl<'a> Lowerer<'a> {
                     &result_ty,
                     &fallback_ty,
                 ),
+            Some(super::types::MirTypeKind::Result)
+                if type_catalog.get(&base_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        super::types::MirLayout::Result { ok, error, .. }
+                            if type_catalog.get(ok).is_some_and(|payload| {
+                                payload.kind == super::types::MirTypeKind::GenericParameter
+                            }) && type_catalog.get(error).is_some_and(|payload| {
+                                payload.kind == super::types::MirTypeKind::GenericParameter
+                            })
+                    )
+                }) =>
+            {
+                type_catalog.validated_generic_result_projection_fallback_contract(
+                    &base_ty,
+                    variant,
+                    field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
             Some(super::types::MirTypeKind::Result) => type_catalog
                 .validated_copy_result_i32_projection_fallback_contract(
                     &base_ty,
@@ -6167,12 +6218,19 @@ fn variant_projection_builtin(
             },
             "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or",
         ) => {
-            if builtin.as_str() == "builtin.method.result.unwrap"
-                && ok == error
+            if matches!(
+                builtin.as_str(),
+                "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or"
+            ) && ok == error
                 && catalog.get(ok).is_some_and(|payload| {
                     payload.kind == super::types::MirTypeKind::GenericParameter
                 })
             {
+                if builtin.as_str() == "builtin.method.result.unwrap_or"
+                    && (call.arguments.get(1)?.value.ty != *ok || call.result != *ok)
+                {
+                    return None;
+                }
                 let variant = variants.iter().find(|variant| {
                     variant.name == "Ok"
                         && variant.discriminant == 0

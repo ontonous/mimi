@@ -1574,7 +1574,7 @@ fn validate_instance_table(
                     errors.push(super::MirValidationError {
                         subject: id.to_string(),
                         message: format!(
-                            "generic MIR Option fallback projection contract is invalid: {message}"
+                            "generic MIR variant fallback projection contract is invalid: {message}"
                         ),
                     });
                 }

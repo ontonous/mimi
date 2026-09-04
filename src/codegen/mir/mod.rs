@@ -2845,6 +2845,84 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_result_unwrap_or_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic Result fallback projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.variant_name, "Ok");
+        assert_eq!(contract.fallback_variant_name, "Err");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_result_unwrap_or");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Result unwrap_or must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Result unwrap_or module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_generic_result_unwrap_or_i64_and_bool_select_fallback() {
+        for (source, expected, module_name) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_i64.mimi"
+                ),
+                7,
+                "mir_native_generic_result_unwrap_or_i64",
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_bool.mimi"
+                ),
+                0,
+                "mir_native_generic_result_unwrap_or_bool",
+            ),
+        ] {
+            let program = canonical_program(source);
+            let owner = crate::core::NodeId("function:main".into());
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("reference generic Result scalar unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(expected));
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native(&program)
+                .expect("native generic Result scalar unwrap_or must consume MIR");
+            generator
+                .module
+                .verify()
+                .expect("native generic Result scalar unwrap_or module verifies");
+        }
+    }
+
+    #[test]
     fn native_generic_result_unwrap_err_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi"

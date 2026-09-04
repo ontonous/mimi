@@ -812,9 +812,9 @@ pub enum Op {
         predicate: crate::core::mir::MirVariantPredicate,
         contract: Option<ConstIdx>,
     },
-    /// rd = canonical Result.unwrap_or(ra, rb). The receipt carries both
-    /// active tag identities and the Copy payload ABI; no legacy tag lookup is
-    /// permitted for this MIR opcode.
+    /// rd = canonical Option/Result.unwrap_or(ra, rb). The receipt carries
+    /// both active tag identities and the Copy payload ABI; no legacy tag
+    /// lookup is permitted for this MIR opcode.
     MirVariantProjectOr {
         rd: Reg,
         ra: Reg,
