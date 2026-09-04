@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// three-field Record<T>; both fixed Copy siblings remain in the layout.
+type Triple<T> { value: T, tag: i32, enabled: bool }
+
+func get_value<T>(triple: Triple<T>) -> T {
+    triple.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let triple = Triple { value: 41, tag: 7, enabled: true }
+    let picked = get_value(triple)
+    picked
+}

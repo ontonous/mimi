@@ -1,0 +1,13 @@
+// Outside S142: generic Copy record projection with four fields must remain
+// rejected before any backend or legacy route.
+type Quad<T> { value: T, tag: i32, enabled: bool, extra: i64 }
+
+func get_value<T>(quad: Quad<T>) -> T {
+    quad.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let quad = Quad { value: 41, tag: 7, enabled: true, extra: 9 }
+    get_value(quad)
+}
