@@ -1389,10 +1389,10 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate the first finite-only f64 binary arithmetic contract shared by
+    /// Validate the finite-only f64 binary arithmetic contract shared by
     /// reference, bytecode, native, and verifier capability consumers.  The
     /// three values retain one checker-owned TypeDesc identity, the ABI is a
-    /// Copy f64 scalar with no-op glue, and only `Add` is admitted.  The
+    /// Copy f64 scalar with no-op glue, and only `Add`/`Subtract` are admitted.
     /// runtime definedness policy is explicit: a non-finite operand or result
     /// traps with [`MIR_FLOAT_NOT_FINITE_TRAP_CODE`].
     pub fn validate_copy_float_binary(
@@ -1402,7 +1402,7 @@ impl MirTypeCatalog {
         right_ty: &ResolvedTypeId,
         op: ResolvedBinaryOp,
     ) -> Result<(), String> {
-        if op != ResolvedBinaryOp::Add {
+        if !matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract) {
             return Err(format!(
                 "float binary operator {op:?} is outside the canonical finite-only Copy f64 contract"
             ));

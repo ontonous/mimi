@@ -1,0 +1,9 @@
+// Canonical MIR finite-only f64 subtraction: all consumers use the same
+// FloatBits ABI and reject NaN/Inf inputs or results with E0813.
+func subtract(left: f64, right: f64) -> f64 {
+    left - right
+}
+func main() -> i64 {
+    let value = subtract(5.5, 2.25)
+    42
+}

@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn native_validator_rejects_before_llvm_declarations() {
-        let program = canonical_program("func main() -> f64 { 1.0 - 2.0 }");
+        let program = canonical_program("func main() -> f64 { 1.0 * 2.0 }");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_validator_test");
 
@@ -1245,8 +1245,44 @@ mod tests {
     }
 
     #[test]
-    fn native_validator_rejects_f64_binary_shapes_outside_add_contract() {
-        for source in ["func main() -> f64 { 1.0 - 2.0 }"] {
+    fn native_emitter_materializes_f64_subtract_finite_only_contract() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_f64_subtract.mimi"
+        ));
+        let subtract = crate::core::NodeId("function:subtract".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(
+                &subtract,
+                &[
+                    MirRuntimeValue::FloatBits(5.5f64.to_bits()),
+                    MirRuntimeValue::FloatBits(2.25f64.to_bits()),
+                ],
+            )
+            .expect("reference f64 subtract execution");
+        assert_eq!(reference, MirRuntimeValue::FloatBits(3.25f64.to_bits()));
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("f64 subtract MIR bytecode"))
+                .run_value()
+                .expect("bytecode f64 subtract execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for f64 subtract MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_f64_subtract_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("f64 subtract MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native f64 subtract module verifies");
+        assert!(generator.module.get_function("subtract").is_some());
+    }
+
+    #[test]
+    fn native_validator_rejects_f64_binary_shapes_outside_finite_only_contract() {
+        for source in ["func main() -> f64 { 1.0 * 2.0 }"] {
             let program = canonical_program(source);
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "mir_native_f64_binary_rejected_test");

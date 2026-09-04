@@ -562,9 +562,84 @@ fn lowers_f64_add_with_finite_only_copy_float_contract() {
             &result_ty,
             &left_ty,
             &right_ty,
-            crate::core::ir::ResolvedBinaryOp::Subtract,
+            crate::core::ir::ResolvedBinaryOp::Multiply,
         )
         .is_err());
+}
+
+#[test]
+fn lowers_f64_subtract_with_finite_only_copy_float_contract() {
+    let source = include_str!("../../../tests/fixtures/mir_native_f64_subtract.mimi");
+    let program =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("f64 subtract must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:subtract".into()))
+        .expect("subtract MIR function");
+    let (result_ty, left_ty, right_ty) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Binary {
+                result,
+                op: crate::core::ir::ResolvedBinaryOp::Subtract,
+                left,
+                right,
+            } => Some((
+                function.values.get(result)?.ty.clone(),
+                function.values.get(left)?.ty.clone(),
+                function.values.get(right)?.ty.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical f64 subtract instruction");
+    program
+        .type_catalog()
+        .validate_copy_float_binary(
+            &result_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Subtract,
+        )
+        .expect("f64 subtract TypeDesc contract");
+    let owner = crate::core::NodeId("function:subtract".into());
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&program);
+    let value = reference
+        .execute(
+            &owner,
+            &[
+                crate::core::mir::reference::MirRuntimeValue::FloatBits(5.5f64.to_bits()),
+                crate::core::mir::reference::MirRuntimeValue::FloatBits(2.25f64.to_bits()),
+            ],
+        )
+        .expect("reference f64 subtract execution");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::FloatBits(3.25f64.to_bits())
+    );
+    for (left, right, label) in [
+        (f64::NAN, 1.0, "NaN operand"),
+        (f64::INFINITY, 1.0, "Inf operand"),
+        (f64::MAX, -f64::MAX, "non-finite result"),
+    ] {
+        let error = reference
+            .execute(
+                &owner,
+                &[
+                    crate::core::mir::reference::MirRuntimeValue::FloatBits(left.to_bits()),
+                    crate::core::mir::reference::MirRuntimeValue::FloatBits(right.to_bits()),
+                ],
+            )
+            .expect_err(label);
+        assert!(
+            error
+                .message
+                .contains(crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE),
+            "{label} must retain E0813 classification: {error}"
+        );
+    }
 }
 
 #[test]

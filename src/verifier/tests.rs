@@ -1044,16 +1044,24 @@ fn finite_f64_add_verifier_capability_is_closed_before_symbolic_execution() {
         .expect("canonical f64 add MIR");
     crate::verifier::validate_mir_capabilities(&canonical).expect("finite-only f64 Add capability");
 
-    let subtract = parse_memory_source(
-        "func main() -> f64 { 1.0 - 2.0 }",
-        "mir-f64-subtract-capability",
-    )
-    .expect("parse subtract");
-    let checked = crate::core::check_program(&subtract).expect("typecheck subtract");
+    let source = include_str!("../../tests/fixtures/mir_native_f64_subtract.mimi");
+    let file = parse_memory_source(source, "mir-f64-subtract-capability").expect("parse subtract");
+    let checked = crate::core::check_program(&file).expect("typecheck subtract");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical f64 subtract MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("finite-only f64 Subtract capability");
+
+    let subtract = parse_memory_source(
+        "func main() -> f64 { 1.0 * 2.0 }",
+        "mir-f64-multiply-capability",
+    )
+    .expect("parse multiply");
+    let checked = crate::core::check_program(&subtract).expect("typecheck multiply");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical f64 multiply MIR");
     let errors = crate::verifier::validate_mir_capabilities(&canonical)
-        .expect_err("f64 subtract must remain outside the closed Add capability");
+        .expect_err("f64 multiply must remain outside the closed Add/Subtract capability");
     let message = errors
         .iter()
         .map(ToString::to_string)

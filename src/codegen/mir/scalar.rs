@@ -186,12 +186,26 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .map_err(|message| NativeMirError::new(subject, message))?;
             let left_value = self.value(left, subject)?.into_float_value();
             let right_value = self.value(right, subject)?.into_float_value();
-            let result = self
-                .generator
-                .builder
-                .build_float_add(left_value, right_value, "mir_fadd")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            self.emit_float_finite_guard(result, "add", subject)?;
+            let operation = match op {
+                ResolvedBinaryOp::Add => "add",
+                ResolvedBinaryOp::Subtract => "subtract",
+                _ => unreachable!("finite-only float binary contract checked above"),
+            };
+            let result = match op {
+                ResolvedBinaryOp::Add => {
+                    self.generator
+                        .builder
+                        .build_float_add(left_value, right_value, "mir_fadd")
+                }
+                ResolvedBinaryOp::Subtract => {
+                    self.generator
+                        .builder
+                        .build_float_sub(left_value, right_value, "mir_fsub")
+                }
+                _ => unreachable!("finite-only float binary contract checked above"),
+            }
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_float_finite_guard(result, operation, subject)?;
             return Ok(result.into());
         }
         let left_value = self.value(left, subject)?.into_int_value();

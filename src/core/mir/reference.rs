@@ -5122,7 +5122,11 @@ fn evaluate_binary(
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     use MirRuntimeValue::{Bool, FloatBits, Int};
     match (op, left, right) {
-        (ResolvedBinaryOp::Add, FloatBits(left), FloatBits(right)) if float_width == Some(64) => {
+        (
+            op @ (ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract),
+            FloatBits(left),
+            FloatBits(right),
+        ) if float_width == Some(64) => {
             let left = f64::from_bits(left);
             let right = f64::from_bits(right);
             if !left.is_finite() || !right.is_finite() {
@@ -5134,12 +5138,16 @@ fn evaluate_binary(
                     ),
                 ));
             }
-            let value = left + right;
+            let value = match op {
+                ResolvedBinaryOp::Add => left + right,
+                ResolvedBinaryOp::Subtract => left - right,
+                _ => unreachable!("finite-only float binary contract checked above"),
+            };
             if !value.is_finite() {
                 return Err(execution_error(
                     function,
                     format!(
-                        "{}: non-finite floating-point result from add",
+                        "{}: non-finite floating-point result from {op:?}",
                         super::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
                     ),
                 ));

@@ -1310,7 +1310,7 @@ fn eval_instruction(
             if float_shape {
                 catalog.validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)?;
                 return Err(format!(
-                    "{}: MIR verifier finite-only f64 Add has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                    "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
                     crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
                     crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
                 ));

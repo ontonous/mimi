@@ -1913,6 +1913,51 @@ fn canonical_explicit_mir_f64_add_matches_reference_bytecode_native() {
 }
 
 #[test]
+fn canonical_explicit_mir_f64_subtract_matches_reference_bytecode_native() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_subtract.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn explicit MIR f64 subtract run");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "explicit MIR f64 subtract run failed:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-explicit-mir-f64-subtract-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn explicit MIR f64 subtract build");
+    assert!(
+        build.status.success(),
+        "explicit MIR f64 subtract native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute explicit MIR f64 subtract native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
 fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")

@@ -1054,6 +1054,7 @@ impl<'a> FunctionEmitter<'a> {
             },
             MirAbiClass::Float { bits: 64 } => match op {
                 ResolvedBinaryOp::Add => Op::AddFloat { rd, ra, rb },
+                ResolvedBinaryOp::Subtract => Op::SubFloat { rd, ra, rb },
                 _ => {
                     self.error(format!("operator {op:?} is outside scalar bytecode slice"));
                     return;

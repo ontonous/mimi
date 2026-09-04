@@ -941,6 +941,8 @@ impl BytecodeVM {
                         )
                     };
                     let r = a - b;
+                    self.check_float(a, "-")?;
+                    self.check_float(b, "-")?;
                     self.check_float(r, "-")?;
                     self.cur_frame_mut().regs[rd as usize] = Value::Float(r);
                 }
