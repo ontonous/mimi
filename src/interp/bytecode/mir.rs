@@ -5248,6 +5248,46 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_result_unwrap_owned_list_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_owned_list.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic owned Result<List> unwrap MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue
+                            == crate::core::mir::types::MirGlueKind::List
+                )
+            })
+            .expect("owned generic Result<List> projection instance");
+        assert_eq!(instance.arguments.len(), 1);
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic owned Result<List> unwrap execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("generic owned Result<List> unwrap bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic owned Result<List> unwrap bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_generic_option_unwrap_owned_list_i64_and_bool_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list_scalars.mimi"

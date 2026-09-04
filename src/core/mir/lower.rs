@@ -756,7 +756,7 @@ fn rewrite_owned_variant_projection_call_argument(
             .validate_option_move_variant(source_ty)
             .is_err()
             && type_catalog
-                .validate_result_string_i32_variant(source_ty)
+                .validate_result_move_variant(source_ty)
                 .is_err()
         {
             return Err(
@@ -909,7 +909,7 @@ pub(crate) fn validate_owned_variant_projection_call_argument(
         .validate_option_move_variant(&source_ty)
         .is_err()
         && type_catalog
-            .validate_result_string_i32_variant(&source_ty)
+            .validate_result_move_variant(&source_ty)
             .is_err()
     {
         return Err(
@@ -1303,7 +1303,7 @@ fn materialize_generic_instance(
     // Option island, but the fixed Err slot is part of the Result aggregate
     // ABI. Keep this as an explicit second envelope so generic Result<T, i32>
     // remains Copy-only unless the concrete TypeDesc proves the established
-    // Result<string, i32> move contract.
+    // Result managed-payload move contract (OwnedString or List<Copy scalar>).
     let is_owned_result_projection = callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
         && program

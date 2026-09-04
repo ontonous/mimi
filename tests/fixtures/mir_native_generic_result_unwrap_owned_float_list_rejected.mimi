@@ -1,0 +1,13 @@
+// Negative: Result<T, i32>.unwrap must reject a List<f64> payload because the
+// promoted managed List contract only admits Copy integer/bool scalar leaves.
+func unwrap<T>(value: Result<T, i32>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    let values: List<f64> = [1.0]
+    let value: Result<List<f64>, i32> = Ok(values)
+    let out = unwrap(value)
+    drop(out)
+    41
+}

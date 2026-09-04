@@ -6691,15 +6691,18 @@ impl MirTypeCatalog {
         Ok((inner.clone(), payload_glue))
     }
 
-    /// Validate the first non-Copy Result variant contract.
+    /// Validate the promoted non-Copy Result variant contract.
     ///
-    /// This deliberately admits exactly `Result<string, i32>`: the `Ok`
-    /// payload is an owned StringHandle and the `Err` payload is a Copy signed
-    /// i32.  The aggregate ABI, variant identities, discriminants, payload
-    /// identities, and complete recursive Move/Clone/Drop proof are all
-    /// TypeDesc facts.  Other Result payloads remain outside the verifier
-    /// move-variant island until their own consumer matrix is closed.
-    pub fn validate_result_string_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+    /// `Ok` is admitted only when its payload is one of the TypeDesc-proven
+    /// managed move payloads (`OwnedString` or `List<Copy scalar>`); `Err` is
+    /// fixed to Copy signed `i32`. The aggregate ABI, variant identities,
+    /// discriminants, payload identities, and complete recursive
+    /// Move/Clone/Drop proof remain canonical TypeDesc facts. Returning the
+    /// child glue family makes ownership explicit to every consumer.
+    pub fn validate_result_move_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
@@ -6707,7 +6710,7 @@ impl MirTypeCatalog {
             MirLayout::Result { variants, .. } => variants,
             layout => {
                 return Err(format!(
-                    "layout {layout:?} is outside the canonical non-Copy Result<string, i32> variant contract"
+                    "layout {layout:?} is outside the canonical non-Copy Result<managed, i32> variant contract"
                 ));
             }
         };
@@ -6716,7 +6719,7 @@ impl MirTypeCatalog {
             || descriptor.ownership != MirOwnership::Move
         {
             return Err(format!(
-                "variant TypeDesc kind/ABI/ownership ({:?}/{:?}/{:?}) is outside the canonical non-Copy Result<string, i32> variant contract",
+                "variant TypeDesc kind/ABI/ownership ({:?}/{:?}/{:?}) is outside the canonical non-Copy Result<managed, i32> variant contract",
                 descriptor.kind, descriptor.abi, descriptor.ownership
             ));
         }
@@ -6731,7 +6734,7 @@ impl MirTypeCatalog {
             || descriptor.variant_drop_plan.is_none()
         {
             return Err(
-                "variant TypeDesc aggregate glue/drop plan is incomplete for the canonical non-Copy Result<string, i32> variant contract".into(),
+                "variant TypeDesc aggregate glue/drop plan is incomplete for the canonical non-Copy Result<managed, i32> variant contract".into(),
             );
         }
         for operation in [
@@ -6743,7 +6746,7 @@ impl MirTypeCatalog {
         }
         if variants.len() != 2 {
             return Err(format!(
-                "Result TypeDesc has {} variants; the canonical non-Copy Result<string, i32> contract requires Ok and Err",
+                "Result TypeDesc has {} variants; the canonical non-Copy Result<managed, i32> contract requires Ok and Err",
                 variants.len()
             ));
         }
@@ -6771,7 +6774,13 @@ impl MirTypeCatalog {
                 "Result Ok payload identity disagrees with the canonical non-Copy contract".into(),
             );
         }
-        self.validate_owned_string(&ok_field.ty)?;
+        let payload_glue = self
+            .validate_move_owned_payload(&ok_field.ty)
+            .map_err(|message| {
+                format!(
+                    "Result Ok payload is outside the canonical managed move-owned contract: {message}"
+                )
+            })?;
 
         let err_field = &err.fields[0];
         if err_field.id.0 != "builtin:variant:Result::Err/payload:0" {
@@ -6802,6 +6811,21 @@ impl MirTypeCatalog {
                 "Result Err payload is outside the canonical Copy signed i32 contract: {message}"
             )
             })?;
+        Ok((ok_field.ty.clone(), payload_glue))
+    }
+
+    /// Validate the original narrow `Result<string, i32>` contract. Keep
+    /// this named boundary for direct-call ABI users; generic managed
+    /// projections use [`Self::validate_result_move_variant`] so List glue is
+    /// admitted only on that explicitly promoted path.
+    pub fn validate_result_string_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let (_, payload_glue) = self.validate_result_move_variant(ty)?;
+        if payload_glue != MirGlueKind::OwnedString {
+            return Err(
+                "Result Ok payload must be the canonical owned StringHandle for the Result<string, i32> contract"
+                    .into(),
+            );
+        }
         Ok(())
     }
 
@@ -6809,7 +6833,7 @@ impl MirTypeCatalog {
     /// Consumers use this single TypeDesc boundary so they cannot silently
     /// widen a verifier switch/constructor by accepting a new layout in one
     /// backend only. Option permits the exact owned String or scalar List
-    /// payload contracts; Result remains the established String/i32 shape.
+    /// payload contracts; Result admits the explicit managed/i32 shape.
     pub fn validate_non_copy_variant_contract(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         let Some(descriptor) = self.get(ty) else {
             return Err(format!(
@@ -6828,10 +6852,11 @@ impl MirTypeCatalog {
                     )
                 }),
             MirLayout::Result { .. } => self
-                .validate_result_string_i32_variant(ty)
+                .validate_result_move_variant(ty)
+                .map(|_| ())
                 .map_err(|message| {
                     format!(
-                        "type '{}' is outside the canonical non-Copy Result<string, i32> variant contract: {message}",
+                        "type '{}' is outside the canonical non-Copy Result<string, i32> variant contract (the managed Result<Copy/owned, i32> extension is equally TypeDesc-gated): {message}",
                         ty.as_str()
                     )
                 }),
@@ -8127,6 +8152,76 @@ mod tests {
             .validate_non_copy_variant_contract(&rejected_id)
             .expect_err("unsupported Result shape must remain outside the shared boundary");
         assert!(combined.contains("Result<string, i32>"));
+    }
+
+    #[test]
+    fn admits_result_list_i32_as_managed_move_variant_contract() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let result_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: list_id.clone(),
+                error: i32_id.clone(),
+            })
+            .expect("Result<List<i32>, i32>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        let (payload, glue) = catalog
+            .validate_result_move_variant(&result_id)
+            .expect("Result<List<i32>, i32> managed move contract");
+        assert_eq!(payload, list_id);
+        assert_eq!(glue, MirGlueKind::List);
+        catalog
+            .validate_non_copy_variant_contract(&result_id)
+            .expect("shared managed Result contract");
+        let variants = match &catalog.get(&result_id).expect("Result TypeDesc").layout {
+            MirLayout::Result { variants, .. } => variants,
+            _ => unreachable!("Result layout"),
+        };
+        let ok = variants
+            .iter()
+            .find(|variant| variant.name == "Ok")
+            .expect("Result Ok variant");
+        let field = ok.fields.first().expect("Result Ok payload");
+        let receipt = catalog
+            .validated_variant_move_projection_trap_contract(
+                &result_id, &ok.id, &field.id, &list_id,
+            )
+            .expect("Result<List<i32>, i32> move projection receipt");
+        assert_eq!(receipt.projection.move_out_glue, MirGlueKind::List);
+        assert_eq!(receipt.projection.field_index, 0);
+        assert_eq!(receipt.projection.arity, 1);
+
+        let f64_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::F64))
+            .expect("f64");
+        let rejected_list = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![f64_id],
+                is_linear: false,
+            })
+            .expect("List<f64>");
+        let rejected = table
+            .intern_resolved(ResolvedType::Result {
+                ok: rejected_list,
+                error: i32_id,
+            })
+            .expect("Result<List<f64>, i32>");
+        let rejected_catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let error = rejected_catalog
+            .validate_result_move_variant(&rejected)
+            .expect_err("List<f64> must remain outside managed Result contract");
+        assert!(error.contains("Copy scalar"), "{error}");
     }
 
     #[test]

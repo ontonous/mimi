@@ -6956,6 +6956,53 @@ mod tests {
     }
 
     #[test]
+    fn concrete_generic_result_owned_list_unwrap_preserves_move_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_owned_list.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic Result<T,i32> owned List projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Move
+                            && contract.projection.move_out_glue == MirGlueKind::List
+                )
+            })
+            .expect("owned generic Result<List> projection instance");
+        let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.projection.field_index, 0);
+        assert_eq!(contract.projection.arity, 1);
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic Result<List> projection target");
+        assert!(target.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::VariantProjectMove { .. }
+                )
+            })
+        }));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic Result<List> projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn concrete_three_field_generic_record_projection_executes_with_copy_residuals() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_three_field.mimi"

@@ -42,11 +42,11 @@ struct CapabilityGate<'a> {
     checked_types: HashSet<crate::core::ResolvedTypeId>,
     /// A move-owned Result constructor is admitted only when the same
     /// canonical graph contains the promoted generic Result projection
-    /// receipt.  This keeps the S144 extension local: an unrelated direct
-    /// Result<string, i32> helper cannot silently widen the older mixed
+    /// receipt. This keeps the generic managed-payload extension local: an
+    /// unrelated direct Result helper cannot silently widen the older mixed
     /// record/variant route before its own whole-program consumer matrix is
     /// closed.
-    allow_result_string_i32_variant: bool,
+    allow_result_move_variant: bool,
 }
 
 impl<'a> CapabilityGate<'a> {
@@ -55,13 +55,16 @@ impl<'a> CapabilityGate<'a> {
             program,
             errors: BTreeSet::new(),
             checked_types: HashSet::new(),
-            allow_result_string_i32_variant: program.instances().values().any(|instance| {
+            allow_result_move_variant: program.instances().values().any(|instance| {
                 matches!(
                     &instance.contract,
                     MirGenericInstanceContract::ScalarVariantProjection { contract }
                         if contract.projection.nominal.as_str() == "builtin:type:Result"
                             && contract.projection.ownership == MirOwnership::Move
-                            && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                            && matches!(
+                                contract.projection.move_out_glue,
+                                MirGlueKind::OwnedString | MirGlueKind::List
+                            )
                 )
             }),
         }
@@ -1005,8 +1008,8 @@ impl<'a> CapabilityGate<'a> {
                     .validate_option_move_variant(&result_ty)
                     .map(|_| ())
                     .or_else(|_| {
-                        if self.allow_result_string_i32_variant {
-                            catalog.validate_result_string_i32_variant(&result_ty)
+                        if self.allow_result_move_variant {
+                            catalog.validate_result_move_variant(&result_ty).map(|_| ())
                         } else {
                             Err("move-owned Result construction requires the promoted generic Result projection receipt".into())
                         }

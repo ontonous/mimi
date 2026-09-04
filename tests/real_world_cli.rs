@@ -2139,6 +2139,84 @@ fn canonical_default_generic_result_unwrap_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_result_owned_list_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_unwrap_owned_list.mimi");
+    for explicit in [true, false] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run").arg(&fixture);
+        if explicit {
+            command.arg("--mir");
+        }
+        let run = command
+            .output()
+            .expect("failed to spawn generic Result<List> projection run");
+        assert_eq!(run.status.code(), Some(41));
+    }
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Result<List> projection verifier");
+    assert!(
+        verify.status.success(),
+        "generic Result<List> projection verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-result-owned-list-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn generic Result<List> projection native build");
+    assert!(
+        build.status.success(),
+        "generic Result<List> projection native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute generic Result<List> projection native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
+fn canonical_default_generic_result_owned_float_list_rejects_before_legacy() {
+    let fixture = project_root()
+        .join("tests/fixtures/mir_native_generic_result_unwrap_owned_float_list_rejected.mimi");
+    for command in ["run", "build", "verify"] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn unsupported generic Result<List<f64>> command");
+        assert!(
+            !output.status.success(),
+            "default {command} must reject unsupported Result<List<f64>>"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("generic Result projection") && stderr.contains("Canonical MIR"),
+            "default {command} lost its stable fail-closed diagnostic:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn canonical_default_generic_result_unwrap_or_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")

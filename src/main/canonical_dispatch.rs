@@ -1699,6 +1699,35 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_owned_list_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_owned_list.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic owned Result<List> projection must select canonical MIR");
+        };
+        let instance = program.instances().values().find(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                    && contract.projection.ownership == mimi::core::mir::types::MirOwnership::Move
+                    && contract.projection.move_out_glue
+                        == mimi::core::mir::types::MirGlueKind::List
+            )
+        });
+        assert!(
+            instance.is_some(),
+            "owned generic Result<List> projection receipt is absent"
+        );
+    }
+
+    #[test]
     fn unsupported_generic_result_projection_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"
