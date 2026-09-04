@@ -191,6 +191,120 @@ fn materializes_generic_result_error_slot_predicate_receipt() {
 }
 
 #[test]
+fn lowers_option_string_unwrap_to_consuming_variant_projection() {
+    let source = include_str!("../../../tests/fixtures/mir_native_option_string_unwrap.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Option<string>.unwrap must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:unwrap_owned".into()))
+        .expect("unwrap_owned MIR function");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProjectMove {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("unwrap must carry a consuming variant projection receipt");
+    assert_eq!(receipt.variant_name, "Some");
+    assert_eq!(receipt.projection.field_index, 0);
+    assert_eq!(receipt.projection.arity, 1);
+    assert_eq!(receipt.projection.ownership, MirOwnership::Move);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Option<string>.unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn option_string_unwrap_none_preserves_canonical_trap_class() {
+    let source = r#"
+        func main() -> i32 {
+            let value: Option<string> = None
+            let text = value.unwrap()
+            drop(text)
+            41
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Option<string>.unwrap None must still be canonical MIR");
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("unwrap on None must trap");
+    assert!(
+        error.to_string().contains("E0800"),
+        "unexpected trap: {error}"
+    );
+}
+
+#[test]
+fn result_unwrap_remains_fail_closed_outside_option_projection_island() {
+    let source = r#"
+        func main() -> i32 {
+            let value: Result<i32, i32> = Ok(41)
+            value.unwrap()
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("Result::unwrap must remain outside the Option<string> projection island");
+    let crate::core::mir::reference::MirProgramBuildError::Lowering(errors) = error else {
+        panic!("Result::unwrap must fail during MIR lowering");
+    };
+    assert!(
+        errors.iter().any(|error| error.message.contains(
+            "Option/Result unwrap shape is outside the canonical variant projection contract"
+        )),
+        "unexpected fail-closed diagnostics: {errors:?}"
+    );
+}
+
+#[test]
+fn option_copy_unwrap_remains_fail_closed_outside_move_projection_island() {
+    let source = r#"
+        func main() -> i32 {
+            let value: Option<i32> = Some(41)
+            value.unwrap()
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("Copy Option::unwrap must remain outside the move projection island");
+    let crate::core::mir::reference::MirProgramBuildError::Lowering(errors) = error else {
+        panic!("Copy Option::unwrap must fail during MIR lowering");
+    };
+    assert!(
+        errors.iter().any(|error| error.message.contains(
+            "Option/Result unwrap shape is outside the canonical variant projection contract"
+        )),
+        "unexpected fail-closed diagnostics: {errors:?}"
+    );
+}
+
+#[test]
 fn materializes_generic_scalar_list_len_as_a_canonical_facade() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

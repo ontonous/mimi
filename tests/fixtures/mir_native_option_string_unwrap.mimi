@@ -1,0 +1,11 @@
+func unwrap_owned() -> i32 {
+    ensures: result >= 0
+    let value: Option<string> = Some("owned")
+    let text = value.unwrap()
+    drop(text)
+    41
+}
+
+func main() -> i32 {
+    unwrap_owned()
+}

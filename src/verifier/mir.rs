@@ -5935,6 +5935,38 @@ mod tests {
     }
 
     #[test]
+    fn verifier_proves_non_copy_option_string_unwrap_projection() {
+        let source = include_str!("../../tests/fixtures/mir_native_option_string_unwrap.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("canonical Option<string>.unwrap MIR");
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:unwrap_owned".into()))
+            .expect("unwrap_owned MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::VariantProjectMove {
+                        contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+        let results = verify_program(&program, "option-string-unwrap-source-hash".into())
+            .expect("verifier should prove the consuming projection");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("unwrap_owned"))
+            .expect("unwrap_owned verification result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
     fn verifier_rejects_non_copy_option_string_switch_move_default_directly() {
         let source = r#"
             func consume(value: Option<string>) -> i32 {

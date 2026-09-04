@@ -184,10 +184,13 @@ fn expr_has_option_string_switch(program: &CheckedProgram, expression: &Resolved
                         || expr_has_option_string_switch(program, &arm.body)
                 })
         }
-        ResolvedExprKind::Call(call) => call
-            .arguments
-            .iter()
-            .any(|argument| expr_has_option_string_switch(program, &argument.value)),
+        ResolvedExprKind::Call(call) => {
+            is_option_string_unwrap_call(program, call)
+                || call
+                    .arguments
+                    .iter()
+                    .any(|argument| expr_has_option_string_switch(program, &argument.value))
+        }
         ResolvedExprKind::Project { value, .. }
         | ResolvedExprKind::Unary { operand: value, .. }
         | ResolvedExprKind::Cast { value, .. }
@@ -259,6 +262,16 @@ fn expr_has_option_string_switch(program: &CheckedProgram, expression: &Resolved
     }
 }
 
+fn is_option_string_unwrap_call(
+    program: &CheckedProgram,
+    call: &crate::core::ir::ResolvedCall,
+) -> bool {
+    matches!(&call.callee, ResolvedCallee::Builtin(name)
+        if name.as_str() == "builtin.method.option.unwrap")
+        && call.arguments.len() == 1
+        && is_option_string_type_in_checked(program, &call.arguments[0].value.ty)
+}
+
 fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
     block.statements.iter().all(|statement| {
         if !statement.backend_requirements.is_empty() {
@@ -311,7 +324,10 @@ fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
         | ResolvedExprKind::Constant(_) => true,
         ResolvedExprKind::Call(call) => {
             let callee_allowed = match &call.callee {
-                ResolvedCallee::Builtin(name) => matches!(name.as_str(), "Some" | "None"),
+                ResolvedCallee::Builtin(name) => matches!(
+                    name.as_str(),
+                    "Some" | "None" | "builtin.method.option.unwrap"
+                ),
                 ResolvedCallee::Function(_) => {
                     call.type_arguments.is_empty()
                         && call.permission.is_none()
@@ -719,13 +735,42 @@ impl<'a> OptionStringVariantValidator<'a> {
                 }
             }
             MirInstructionKind::Nop => {}
+            MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            } => {
+                let Some(base_ty) = self.validate_value(function, base, "variant projection base")
+                else {
+                    return;
+                };
+                let Some(result_ty) =
+                    self.validate_value(function, result, "variant projection result")
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} consuming variant projection has no canonical move receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                {
+                    self.error(format!(
+                        "{subject} consuming variant projection rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }
             | MirInstructionKind::Project { .. }
             | MirInstructionKind::MoveProject { .. }
             | MirInstructionKind::MoveProjectDrop { .. }
             | MirInstructionKind::VariantProject { .. }
-            | MirInstructionKind::VariantProjectMove { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructList { .. }
             | MirInstructionKind::ListOp { .. }

@@ -1494,6 +1494,31 @@ mod tests {
     }
 
     #[test]
+    fn option_string_unwrap_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_option_string_unwrap.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_option_string_variant_admission(&checked),
+            mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
+        );
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Canonical(program) = route else {
+            panic!("Option<string>.unwrap route mismatch: {route:?}");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::VariantProjectMove { .. }
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
     fn option_string_variant_default_arm_is_rejected_without_legacy_fallback() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_option_string_default_rejected.mimi"

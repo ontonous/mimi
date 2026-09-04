@@ -18,7 +18,8 @@ use crate::core::ir::{
     ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedType, ResolvedUnaryOp,
 };
 use crate::core::{
-    CanonicalActionKind, CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResourceAnalysis,
+    CanonicalActionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBody, ResolvedLocalId,
+    ResourceAnalysis,
 };
 
 use super::types::MirTypeCatalog;
@@ -3932,11 +3933,14 @@ impl<'a> Lowerer<'a> {
                 // their normal lowering because their fresh result is already
                 // the owned operation input.
                 let consuming_list_concat = is_list_concat_builtin(call, self.type_catalog);
+                let consuming_variant_projection =
+                    variant_projection_is_consuming(call, self.type_catalog);
                 let arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
-                    .map(|argument| {
-                        if consuming_list_concat {
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        if consuming_list_concat || (consuming_variant_projection && index == 0) {
                             self.lower_consuming_expr(&argument.value)
                         } else {
                             self.lower_expr(&argument.value)
@@ -4085,6 +4089,45 @@ impl<'a> Lowerer<'a> {
                             "List.concat canonical MIR operation requires receiver and argument",
                         );
                     }
+                } else if let Some((variant, field)) =
+                    variant_projection_builtin(call, self.type_catalog)
+                {
+                    if let Some(base) = arguments.first() {
+                        let contract = self.variant_projection_contract(
+                            &expression.node_id,
+                            base,
+                            &result,
+                            &variant,
+                            &field,
+                            consuming_variant_projection,
+                        );
+                        if let Some(contract) = contract {
+                            let instruction = if consuming_variant_projection {
+                                MirInstructionKind::VariantProjectMove {
+                                    result: result.clone(),
+                                    base: base.clone(),
+                                    contract: Some(contract),
+                                }
+                            } else {
+                                MirInstructionKind::VariantProject {
+                                    result: result.clone(),
+                                    base: base.clone(),
+                                    contract: Some(contract),
+                                }
+                            };
+                            self.emit(&expression.node_id, "variant_project", instruction);
+                        }
+                    } else {
+                        self.error(
+                            &expression.node_id,
+                            "Option/Result unwrap requires one receiver",
+                        );
+                    }
+                } else if is_variant_projection_candidate(call) {
+                    self.error(
+                        &expression.node_id,
+                        "Option/Result unwrap shape is outside the canonical variant projection contract",
+                    );
                 } else if let Some(predicate) = variant_predicate_builtin(call) {
                     if let Some(variant) = arguments.first() {
                         let contract = self.variant_predicate_contract(
@@ -5059,6 +5102,50 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn variant_projection_contract(
+        &mut self,
+        node_id: &NodeId,
+        base: &MirValueId,
+        result: &MirValueId,
+        variant: &NodeId,
+        field: &NodeId,
+        consuming: bool,
+    ) -> Option<super::types::MirVariantProjectionTrapContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "Variant projection requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some(base_ty) = self.values.get(base).map(|value| value.ty.clone()) else {
+            self.error(node_id, "Variant projection base has no MIR type");
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(node_id, "Variant projection result has no MIR type");
+            return None;
+        };
+        let contract = if consuming {
+            type_catalog.validated_variant_move_projection_trap_contract(
+                &base_ty, variant, field, &result_ty,
+            )
+        } else {
+            type_catalog
+                .validated_variant_projection_trap_contract(&base_ty, variant, field, &result_ty)
+        };
+        match contract {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                self.error(
+                    node_id,
+                    format!("canonical variant projection contract is invalid: {message}"),
+                );
+                None
+            }
+        }
+    }
+
     fn variant_call_abi_contract(
         &mut self,
         node_id: &NodeId,
@@ -5350,6 +5437,98 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
         "builtin.method.result.is_err" => Some(MirVariantPredicate::IsErr),
         _ => None,
     }
+}
+
+/// Return the canonical success-variant payload identity for the narrow
+/// language-provided `Option<string>.unwrap` surface. The receiver/result
+/// TypeDesc is still validated by `variant_projection_contract`; this helper
+/// only maps the checker-owned builtin identity to the stable variant family.
+fn variant_projection_builtin(
+    call: &ResolvedCall,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> Option<(NodeId, NodeId)> {
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    if call.arguments.len() != 1 || builtin.as_str() != "builtin.method.option.unwrap" {
+        return None;
+    }
+    let catalog = type_catalog?;
+    let receiver_ty = &call.arguments.first()?.value.ty;
+    let descriptor = catalog.get(receiver_ty)?;
+    if descriptor.ownership != super::types::MirOwnership::Move {
+        return None;
+    }
+    let super::types::MirLayout::Option { variants, .. } = &descriptor.layout else {
+        return None;
+    };
+    let inner = catalog.get(match &descriptor.layout {
+        super::types::MirLayout::Option { inner, .. } => inner,
+        _ => return None,
+    })?;
+    if !matches!(
+        inner.kind,
+        super::types::MirTypeKind::Primitive(PrimitiveType::String)
+    ) {
+        return None;
+    }
+    let variant = variants.iter().find(|variant| variant.name == "Some")?;
+    let field = variant.fields.first()?;
+    Some((variant.id.clone(), field.id.clone()))
+}
+
+fn is_variant_projection_candidate(call: &ResolvedCall) -> bool {
+    matches!(&call.callee, ResolvedCallee::Builtin(builtin)
+    if matches!(
+        builtin.as_str(),
+        "builtin.method.option.unwrap"
+            | "builtin.method.option.expect"
+            | "builtin.method.result.unwrap"
+            | "builtin.method.result.expect"
+            | "builtin.method.option.unwrap_or"
+            | "builtin.method.result.unwrap_or"
+    ))
+}
+
+fn variant_projection_is_consuming(
+    call: &ResolvedCall,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> bool {
+    if !matches!(&call.callee, ResolvedCallee::Builtin(builtin)
+    if matches!(
+        builtin.as_str(),
+        "builtin.method.option.unwrap"
+    )) {
+        return false;
+    }
+    let Some(receiver_ty) = call.arguments.first().map(|argument| &argument.value.ty) else {
+        return false;
+    };
+    type_catalog
+        .and_then(|catalog| catalog.get(receiver_ty))
+        .is_some_and(|descriptor| {
+            if descriptor.ownership == super::types::MirOwnership::Copy {
+                return false;
+            }
+            let super::types::MirLayout::Option { inner, .. } = &descriptor.layout else {
+                return false;
+            };
+            catalog_has_owned_string(type_catalog, inner)
+        })
+}
+
+fn catalog_has_owned_string(
+    type_catalog: Option<&MirTypeCatalog>,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    type_catalog
+        .and_then(|catalog| catalog.get(ty))
+        .is_some_and(|descriptor| {
+            matches!(
+                descriptor.kind,
+                super::types::MirTypeKind::Primitive(PrimitiveType::String)
+            ) && descriptor.ownership == super::types::MirOwnership::Move
+        })
 }
 
 fn set_builtin_contract(
