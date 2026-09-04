@@ -192,6 +192,28 @@ impl<'a> CapabilityGate<'a> {
                     }
                 }
                 MirGenericInstanceContract::ScalarVariantProjection { contract } => {
+                    if contract.projection.ownership == MirOwnership::Move {
+                        if contract.projection.nominal.as_str() != "builtin:type:Option" {
+                            self.error(format!(
+                                "instance '{}' consuming generic variant projection is not the admitted Option<string> shape",
+                                instance.id
+                            ));
+                        } else if instance.arguments.len() != 1 {
+                            self.error(format!(
+                                "instance '{}' owned generic Option projection requires one concrete argument",
+                                instance.id
+                            ));
+                        } else if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_owned_string(&instance.arguments[0])
+                        {
+                            self.error(format!(
+                                "instance '{}' owned generic Option projection argument is unsupported: {message}",
+                                instance.id
+                            ));
+                        }
+                    }
                     if let Err(message) =
                         crate::core::mir::lower::validate_scalar_variant_projection_mir(
                             function,

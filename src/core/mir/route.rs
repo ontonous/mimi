@@ -1045,6 +1045,39 @@ mod tests {
     }
 
     #[test]
+    fn generic_owned_option_projection_materialization_carries_move_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_string.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.generic_option_projection,
+            GenericOptionProjectionAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete generic owned Option projection route must materialize");
+        assert!(route.materialized_generic_option_projection_candidate);
+        let instance = route
+            .program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                )
+            })
+            .expect("owned generic Option projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { .. }
+        ));
+    }
+
+    #[test]
     fn generic_result_projection_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap.mimi"

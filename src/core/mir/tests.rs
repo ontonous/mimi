@@ -130,6 +130,63 @@ fn materializes_generic_option_unwrap_with_a_specialized_projection_receipt() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_owned_string_with_move_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_owned_string.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option<string> unwrap must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Move
+            )
+        })
+        .expect("owned generic Option projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.variant_name, "Some");
+    assert_eq!(contract.discriminant, 1);
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Move);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::OwnedString);
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized owned generic Option target");
+    assert!(target.blocks.values().any(|block| {
+        matches!(
+            block.instructions.as_slice(),
+            [
+                MirInstruction {
+                    kind: MirInstructionKind::Move { .. },
+                    ..
+                },
+                MirInstruction {
+                    kind: MirInstructionKind::VariantProjectMove {
+                        contract: Some(_),
+                        ..
+                    },
+                    ..
+                }
+            ]
+        )
+    }));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option<string> unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
 fn generic_option_unwrap_none_preserves_the_canonical_trap() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi");
     let checked = checked_program(source);
@@ -580,12 +637,12 @@ fn generic_result_unwrap_or_stale_receipt_is_rejected_before_consumers() {
 }
 
 #[test]
-fn rejects_generic_option_unwrap_for_owned_payload_before_legacy() {
+fn rejects_generic_option_unwrap_for_unsupported_copy_payload_before_legacy() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi");
     let checked = checked_program(source);
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("owned generic Option unwrap must fail closed");
+        .expect_err("unsupported generic Option unwrap must fail closed");
     assert!(error.to_string().contains("MIR lowering failed"));
 }
 

@@ -1393,6 +1393,19 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarVariantProjection { ref contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Option"
+                    && contract.projection.ownership == super::types::MirOwnership::Move =>
+            {
+                if instance.arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic Option projection contract requires one type argument, got {}",
+                        instance.arguments.len()
+                    ))
+                } else {
+                    type_catalog.validate_owned_string(&instance.arguments[0])
+                }
+            }
             MirGenericInstanceContract::ScalarVariantProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
@@ -1831,6 +1844,47 @@ fn validate_call_graph(
                                 subject: instruction.id.to_string(),
                                 message: format!(
                                     "owned generic record projection call transfer is invalid: {message}"
+                                ),
+                            });
+                        }
+                    } else if matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::ScalarVariantProjection { contract }
+                            if contract.projection.nominal.as_str() == "builtin:type:Option"
+                                && contract.projection.ownership == super::types::MirOwnership::Move
+                    ) {
+                        let Some(target_parameter) = target.parameters.first() else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "owned generic Option projection target has no parameter"
+                                    .into(),
+                            });
+                            continue;
+                        };
+                        let Some(target_parameter_ty) = target
+                            .values
+                            .get(target_parameter)
+                            .map(|value| value.ty.clone())
+                        else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "owned generic Option projection target parameter TypeDesc is absent".into(),
+                            });
+                            continue;
+                        };
+                        if let Err(message) =
+                            super::lower::validate_owned_option_projection_call_argument(
+                                function,
+                                block,
+                                instruction_index,
+                                &target_parameter_ty,
+                                type_catalog,
+                            )
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "owned generic Option projection call transfer is invalid: {message}"
                                 ),
                             });
                         }

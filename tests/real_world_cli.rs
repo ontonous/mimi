@@ -1694,6 +1694,58 @@ fn canonical_default_generic_option_unwrap_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_owned_option_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_option_unwrap_owned_string.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default owned generic Option projection run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default owned generic Option projection verifier");
+    assert!(
+        verify.status.success(),
+        "default owned generic Option projection verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-owned-option-unwrap-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default owned generic Option projection native build");
+    assert!(
+        build.status.success(),
+        "default owned generic Option projection native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default owned generic Option projection native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
 fn canonical_default_generic_option_unwrap_or_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")

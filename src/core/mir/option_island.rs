@@ -446,10 +446,26 @@ impl<'a> OptionStringVariantValidator<'a> {
         if !self.program.functions().contains_key(&main) {
             self.error("program has no canonical function:main".into());
         }
-        if !self.program.instances().is_empty() {
-            self.error(format!(
-                "{NON_COPY_OPTION_STRING_VARIANT_ISLAND} does not admit generic MIR instances"
-            ));
+        for instance in self.program.instances().values() {
+            let admitted_owned_projection = matches!(
+                &instance.contract,
+                super::MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Move
+                        && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                        && instance.arguments.len() == 1
+                        && self
+                            .program
+                            .type_catalog()
+                            .validate_owned_string(&instance.arguments[0])
+                            .is_ok()
+            );
+            if !admitted_owned_projection {
+                self.error(format!(
+                    "instance '{}' is outside {NON_COPY_OPTION_STRING_VARIANT_ISLAND}",
+                    instance.id
+                ));
+            }
         }
         if !self.program.transitions().is_empty() {
             self.error(format!(
@@ -699,7 +715,9 @@ impl<'a> OptionStringVariantValidator<'a> {
                     ));
                     return;
                 };
-                if !type_arguments.is_empty() {
+                if !type_arguments.is_empty()
+                    && !self.is_admitted_owned_projection_call(owner, type_arguments)
+                {
                     self.error(format!("{subject} generic call is outside the island"));
                 }
                 let Some(target) = self.program.functions().get(owner) else {
@@ -792,6 +810,24 @@ impl<'a> OptionStringVariantValidator<'a> {
                 "{subject} instruction is outside {NON_COPY_OPTION_STRING_VARIANT_ISLAND}"
             )),
         }
+    }
+
+    fn is_admitted_owned_projection_call(
+        &self,
+        owner: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+    ) -> bool {
+        self.program.instances().values().any(|instance| {
+            instance.function == *owner
+                && instance.arguments == type_arguments
+                && matches!(
+                    &instance.contract,
+                    super::MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Option"
+                            && contract.projection.ownership == MirOwnership::Move
+                            && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                )
+        })
     }
 
     fn validate_scalar_value(

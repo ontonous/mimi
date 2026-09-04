@@ -3,8 +3,10 @@ func unwrap<T>(value: Option<T>) -> T {
 }
 
 func main() -> i32 {
-    let value: Option<string> = Some("owned")
+    // f64 remains outside the generic scalar admission (the concrete
+    // Option<f64> island is intentionally separate), so this shape must
+    // reject before any legacy consumer.
+    let value: Option<f64> = Some(41.0)
     let out = unwrap(value)
-    drop(out)
     41
 }

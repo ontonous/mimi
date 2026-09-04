@@ -384,6 +384,19 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                 .map(|value| value.ty.clone())
         })
         .flatten();
+        let owned_option_projection_target_parameter = match &instance.contract {
+            MirGenericInstanceContract::ScalarVariantProjection { contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Option"
+                    && contract.projection.ownership == super::types::MirOwnership::Move =>
+            {
+                function
+                    .parameters
+                    .first()
+                    .and_then(|parameter| function.values.get(parameter))
+                    .map(|value| value.ty.clone())
+            }
+            _ => None,
+        };
         if matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
@@ -419,6 +432,16 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             };
             if let Some(target_parameter_ty) = owned_record_target_parameter.as_ref() {
                 rewrite_owned_record_call_argument(
+                    function,
+                    &block_id,
+                    index,
+                    target_parameter_ty,
+                    type_catalog,
+                )?;
+            } else if let Some(target_parameter_ty) =
+                owned_option_projection_target_parameter.as_ref()
+            {
+                rewrite_owned_option_projection_call_argument(
                     function,
                     &block_id,
                     index,
@@ -673,6 +696,231 @@ fn rewrite_owned_record_call_argument(
         source: source.clone(),
     };
     Ok(())
+}
+
+/// Transfer an `Option<string>` value into an owned generic projection call.
+/// Generic call lowering normally emits a `Clone` for a local argument, while
+/// a fresh variant constructor already carries `ConstructVariantMove`.  The
+/// materialized `VariantProjectMove` target consumes the complete aggregate,
+/// so this boundary rewrites/validates the producer before any backend sees
+/// the call.  Indirect and conditional producers remain fail-closed.
+fn rewrite_owned_option_projection_call_argument(
+    caller: &mut MirFunction,
+    block_id: &MirBlockId,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), Vec<MirLoweringError>> {
+    let subject = caller
+        .blocks
+        .get(block_id)
+        .and_then(|block| block.instructions.get(call_index))
+        .map(|instruction| NodeId(instruction.id.as_str().to_owned()))
+        .unwrap_or_else(|| caller.owner.clone());
+    let Some(block) = caller.blocks.get_mut(block_id) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic Option projection call block is absent".into(),
+        }]);
+    };
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic Option projection call instruction is absent".into(),
+        }]);
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "owned generic Option projection call requires one argument".into(),
+        }]);
+    };
+    let validate_source = |source_ty: &crate::core::ResolvedTypeId| {
+        if source_ty != target_parameter_ty {
+            return Err(format!(
+                "owned generic Option projection call source type '{}' disagrees with target parameter '{}'",
+                source_ty.as_str(),
+                target_parameter_ty.as_str()
+            ));
+        }
+        let descriptor = type_catalog.get(source_ty).ok_or_else(|| {
+            "owned generic Option projection call source has no TypeDesc".to_string()
+        })?;
+        let is_option_string = matches!(
+            &descriptor.layout,
+            super::types::MirLayout::Option { inner, .. }
+                if descriptor.kind == super::types::MirTypeKind::Option
+                    && descriptor.ownership == super::types::MirOwnership::Move
+                    && type_catalog.validate_owned_string(inner).is_ok()
+        );
+        if !is_option_string {
+            return Err(
+                "owned generic Option projection call source is not a Move-owned Option<string>"
+                    .into(),
+            );
+        }
+        type_catalog.validate_glue(source_ty, super::types::MirGlueOperation::MoveOut)
+    };
+    let producer_index = call_index.checked_sub(1).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "owned generic Option projection call requires a direct Move, Clone or fresh variant producer"
+                    .into(),
+        }]
+    })?;
+    match block.instructions.get(producer_index).map(|instruction| &instruction.kind) {
+        Some(MirInstructionKind::ConstructVariantMove { result, .. }) if result == argument => {
+            let source_ty = caller
+                .values
+                .get(result)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| {
+                    vec![MirLoweringError {
+                        node_id: subject.clone(),
+                        message: "owned generic Option projection variant result has no TypeDesc"
+                            .into(),
+                    }]
+                })?;
+            validate_source(&source_ty).map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject.clone(),
+                    message,
+                }]
+            })?;
+            Ok(())
+        }
+        Some(MirInstructionKind::Move { result, source }) if result == argument => {
+            if !source.as_str().starts_with("local:") {
+                return Err(vec![MirLoweringError {
+                    node_id: subject,
+                    message: "owned generic Option projection call Move source is not a local".into(),
+                }]);
+            }
+            let source_ty = caller
+                .values
+                .get(source)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| {
+                    vec![MirLoweringError {
+                        node_id: subject.clone(),
+                        message: "owned generic Option projection call Move source has no TypeDesc"
+                            .into(),
+                    }]
+                })?;
+            validate_source(&source_ty).map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject.clone(),
+                    message,
+                }]
+            })?;
+            Ok(())
+        }
+        Some(MirInstructionKind::Clone { result, source }) if result == argument => {
+            if !source.as_str().starts_with("local:") {
+                return Err(vec![MirLoweringError {
+                    node_id: subject,
+                    message: "owned generic Option projection call Clone source is not a local".into(),
+                }]);
+            }
+            let source_ty = caller
+                .values
+                .get(source)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| {
+                    vec![MirLoweringError {
+                        node_id: subject.clone(),
+                        message: "owned generic Option projection call Clone source has no TypeDesc"
+                            .into(),
+                    }]
+                })?;
+            validate_source(&source_ty).map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject.clone(),
+                    message,
+                }]
+            })?;
+            let source = source.clone();
+            let result = result.clone();
+            block.instructions[producer_index].kind = MirInstructionKind::Move { result, source };
+            Ok(())
+        }
+        _ => Err(vec![MirLoweringError {
+            node_id: subject,
+            message:
+                "owned generic Option projection call requires a direct Move, Clone or fresh variant producer"
+                    .into(),
+        }]),
+    }
+}
+
+/// Revalidate the caller-side producer for an owned generic Option projection
+/// without mutating the graph.  This mirrors the materialization rewrite and
+/// keeps the program-boundary validator independent of backend representation.
+pub(crate) fn validate_owned_option_projection_call_argument(
+    caller: &MirFunction,
+    block: &MirBlock,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), String> {
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err("owned generic Option projection call instruction is absent".into());
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err("owned generic Option projection call requires one argument".into());
+    };
+    let producer_index = call_index.checked_sub(1).ok_or_else(|| {
+        "owned generic Option projection call requires a direct Move, Clone or fresh variant producer".to_string()
+    })?;
+    let source = match block.instructions.get(producer_index).map(|instruction| &instruction.kind) {
+        Some(MirInstructionKind::ConstructVariantMove { result, .. }) if result == argument => {
+            result
+        }
+        Some(MirInstructionKind::Move { result, source }) if result == argument => source,
+        Some(MirInstructionKind::Clone { result, source }) if result == argument => source,
+        _ => {
+            return Err(
+                "owned generic Option projection call requires a direct Move, Clone or fresh variant producer".into(),
+            )
+        }
+    };
+    let source_ty = caller
+        .values
+        .get(source)
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| "owned generic Option projection call source has no TypeDesc".to_string())?;
+    if source_ty != *target_parameter_ty {
+        return Err(format!(
+            "owned generic Option projection call source type '{}' disagrees with target parameter '{}'",
+            source_ty.as_str(),
+            target_parameter_ty.as_str()
+        ));
+    }
+    let descriptor = type_catalog
+        .get(&source_ty)
+        .ok_or_else(|| "owned generic Option projection call source has no TypeDesc".to_string())?;
+    let is_option_string = matches!(
+        &descriptor.layout,
+        super::types::MirLayout::Option { inner, .. }
+            if descriptor.kind == super::types::MirTypeKind::Option
+                && descriptor.ownership == super::types::MirOwnership::Move
+                && type_catalog.validate_owned_string(inner).is_ok()
+    );
+    if !is_option_string {
+        return Err(
+            "owned generic Option projection call source is not a Move-owned Option<string>".into(),
+        );
+    }
+    type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
 }
 
 /// Validate the materialized call-site transfer for an owned generic record
@@ -941,6 +1189,37 @@ fn materialize_generic_instance(
     })?;
     let is_owned_string_identity =
         is_identity && type_catalog.validate_owned_string(&concrete).is_ok();
+    // Generic Option<T>.unwrap is lowered through the Copy placeholder so the
+    // polymorphic body remains executable while T is opaque.  A concrete
+    // String specialization is different: the source aggregate and payload
+    // must cross the call boundary by Move and the body must use the explicit
+    // VariantProjectMove node.  Keep this predicate local to the exact
+    // checker-owned one-parameter unwrap envelope; predicates, Result and
+    // fallback projections remain on their existing scalar-only contracts.
+    let is_owned_option_projection = callable.signature.parameters.len() == 1
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| matches!(ty, ResolvedType::Option(inner) if inner == &generic_id))
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.option.unwrap"
+                        ) && call.arguments.len() == 1
+                )
+            })
+        && type_catalog.validate_owned_string(&concrete).is_ok();
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
     // executable parameter/result are the specialized record and String.
@@ -953,10 +1232,10 @@ fn materialize_generic_instance(
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
                 catalog.validate_generic_identity_arguments(arguments)
-            } else if is_owned_record_projection {
+            } else if is_owned_record_projection || is_owned_option_projection {
                 if arguments.len() != 1 {
                     Err(format!(
-                        "owned record projection contract requires one type argument, got {}",
+                        "owned generic projection contract requires one type argument, got {}",
                         arguments.len()
                     ))
                 } else {
@@ -970,7 +1249,12 @@ fn materialize_generic_instance(
         vec![MirLoweringError {
             node_id: subject(),
             message: format!(
-                "generic MIR instance argument is outside scalar contract or flat Copy variant contract: {message}"
+                "generic MIR instance argument is outside {}: {message}",
+                if is_owned_option_projection {
+                    "the admitted scalar or owned-string variant contract"
+                } else {
+                    "scalar contract or flat Copy variant contract"
+                }
             ),
         }]
     })?;
@@ -1414,46 +1698,135 @@ fn materialize_generic_instance(
                     message: "generic variant projection result has no specialized TypeDesc".into(),
                 }]
             })?;
-        let receipt = type_catalog
-            .validated_variant_projection_trap_contract(
+        let receipt = if is_owned_option_projection {
+            type_catalog.validated_variant_move_projection_trap_contract(
                 &base_ty,
                 &placeholder.projection.variant,
                 &placeholder.projection.field,
                 &result_ty,
             )
-            .or_else(|_| {
-                type_catalog.validated_result_scalar_projection_trap_contract(
+        } else {
+            type_catalog
+                .validated_variant_projection_trap_contract(
                     &base_ty,
                     &placeholder.projection.variant,
                     &placeholder.projection.field,
                     &result_ty,
                 )
-            })
-            .map_err(|message| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: format!(
-                        "generic variant projection receipt specialization failed: {message}"
-                    ),
-                }]
-            })?;
-        let instruction = function
-            .blocks
-            .get_mut(&block_id)
-            .and_then(|block| block.instructions.get_mut(instruction_index))
-            .ok_or_else(|| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: "generic variant projection disappeared during specialization".into(),
-                }]
-            })?;
-        let MirInstructionKind::VariantProject { contract, .. } = &mut instruction.kind else {
-            return Err(vec![MirLoweringError {
+                .or_else(|_| {
+                    type_catalog.validated_result_scalar_projection_trap_contract(
+                        &base_ty,
+                        &placeholder.projection.variant,
+                        &placeholder.projection.field,
+                        &result_ty,
+                    )
+                })
+        }
+        .map_err(|message| {
+            vec![MirLoweringError {
                 node_id: subject(),
-                message: "generic variant projection changed during specialization".into(),
-            }]);
-        };
-        *contract = Some(receipt);
+                message: format!(
+                    "generic variant projection receipt specialization failed: {message}"
+                ),
+            }]
+        })?;
+        if is_owned_option_projection {
+            let parameter = function.parameters.first().cloned().ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection has no parameter".into(),
+                }]
+            })?;
+            let block = function.blocks.get_mut(&block_id).ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic owned Option projection block disappeared during specialization"
+                            .into(),
+                }]
+            })?;
+            let previous = instruction_index.checked_sub(1).ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection requires a direct Clone producer"
+                        .into(),
+                }]
+            })?;
+            let (clone_result, clone_source) = match &block
+                .instructions
+                .get(previous)
+                .ok_or_else(|| {
+                    vec![MirLoweringError {
+                        node_id: subject(),
+                        message: "generic owned Option projection Clone producer is absent".into(),
+                    }]
+                })?
+                .kind
+            {
+                MirInstructionKind::Clone { result, source } => (result.clone(), source.clone()),
+                _ => {
+                    return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic owned Option projection must start with Clone then VariantProject"
+                            .into(),
+                }])
+                }
+            };
+            if clone_result != base || clone_source != parameter {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic owned Option projection Clone must transfer its sole parameter"
+                            .into(),
+                }]);
+            }
+            block.instructions[previous].kind = MirInstructionKind::Move {
+                result: clone_result,
+                source: clone_source,
+            };
+            let MirInstructionKind::VariantProject { contract: slot, .. } =
+                &mut block.instructions[instruction_index].kind
+            else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic owned Option projection VariantProject changed during specialization".into(),
+                }]);
+            };
+            *slot = Some(receipt);
+            let MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract,
+            } = block.instructions[instruction_index].kind.clone()
+            else {
+                unreachable!("matched immediately above")
+            };
+            block.instructions[instruction_index].kind = MirInstructionKind::VariantProjectMove {
+                result,
+                base,
+                contract,
+            };
+        } else {
+            let instruction = function
+                .blocks
+                .get_mut(&block_id)
+                .and_then(|block| block.instructions.get_mut(instruction_index))
+                .ok_or_else(|| {
+                    vec![MirLoweringError {
+                        node_id: subject(),
+                        message: "generic variant projection disappeared during specialization"
+                            .into(),
+                    }]
+                })?;
+            let MirInstructionKind::VariantProject { contract, .. } = &mut instruction.kind else {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant projection changed during specialization".into(),
+                }]);
+            };
+            *contract = Some(receipt);
+        }
     }
     let variant_projection_fallbacks = function
         .blocks
@@ -1719,6 +2092,9 @@ fn materialize_generic_instance(
                 MirInstructionKind::VariantProject {
                     contract: Some(_),
                     ..
+                } | MirInstructionKind::VariantProjectMove {
+                    contract: Some(_),
+                    ..
                 }
             )
         })
@@ -1825,7 +2201,12 @@ fn materialize_generic_instance(
         vec![MirLoweringError {
             node_id: subject(),
             message: format!(
-                "specialized generic TypeDesc is outside scalar contract or flat Copy variant contract: {message}"
+                "specialized generic TypeDesc is outside {}: {message}",
+                if is_owned_option_projection {
+                    "the admitted scalar or owned-string variant contract"
+                } else {
+                    "scalar contract or flat Copy variant contract"
+                }
             ),
         }]
     })?;
@@ -1981,8 +2362,10 @@ fn detect_scalar_variant_predicate_contract(
 }
 
 /// Validate the concrete body of a generic `Option<T>.unwrap()` projection.
-/// The specialized function must remain exactly one receipt-bearing
-/// `VariantProject` over its sole parameter and directly return that payload.
+/// Copy specializations remain exactly `Clone; VariantProject; Return`; the
+/// owned String specialization is exactly `Move; VariantProjectMove; Return`.
+/// Keeping both forms under one receipt validator prevents consumers from
+/// widening a Move instance back into an implicit clone.
 pub(crate) fn validate_scalar_variant_projection_mir(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -1998,32 +2381,52 @@ pub(crate) fn validate_scalar_variant_projection_mir(
         .blocks
         .get(&function.entry)
         .ok_or_else(|| "generic variant projection entry block is absent".to_string())?;
-    let [MirInstruction {
-        kind:
-            MirInstructionKind::Clone {
-                result: cloned,
-                source: clone_source,
-            },
-        ..
-    }, MirInstruction {
-        kind:
-            MirInstructionKind::VariantProject {
-                result,
-                base,
-                contract: Some(receipt),
-            },
-        ..
-    }] = block.instructions.as_slice()
-    else {
-        return Err(
-            "generic variant projection body must be exactly Clone then receipt-bearing VariantProject"
-                .into(),
-        );
+    let (result, base, receipt, consuming) = match block.instructions.as_slice() {
+        [MirInstruction {
+            kind:
+                MirInstructionKind::Clone {
+                    result: cloned,
+                    source: clone_source,
+                },
+            ..
+        }, MirInstruction {
+            kind:
+                MirInstructionKind::VariantProject {
+                    result,
+                    base,
+                    contract: Some(receipt),
+                },
+            ..
+        }] => {
+            if cloned != base || clone_source != &function.parameters[0] {
+                return Err("generic variant projection must project its sole parameter".into());
+            }
+            (result, base, receipt, false)
+        }
+        [MirInstruction {
+            kind: MirInstructionKind::Move { result: moved, source },
+            ..
+        }, MirInstruction {
+            kind:
+                MirInstructionKind::VariantProjectMove {
+                    result,
+                    base,
+                    contract: Some(receipt),
+                },
+            ..
+        }] => {
+            if moved != base || source != &function.parameters[0] {
+                return Err("generic owned variant projection must move its sole parameter".into());
+            }
+            (result, base, receipt, true)
+        }
+        _ => {
+            return Err(
+                "generic variant projection body must be exactly Clone/VariantProject or Move/VariantProjectMove"
+                    .into(),
+            )
+        }
     };
-    let parameter = &function.parameters[0];
-    if cloned != base || clone_source != parameter {
-        return Err("generic variant projection must project its sole parameter".into());
-    }
     let base_ty = function
         .values
         .get(base)
@@ -2036,7 +2439,12 @@ pub(crate) fn validate_scalar_variant_projection_mir(
         .ok_or_else(|| "generic variant projection result TypeDesc is absent".to_string())?
         .ty
         .clone();
-    type_catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+    if consuming {
+        type_catalog
+            .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+    } else {
+        type_catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+    }
     if receipt != contract {
         return Err(
             "generic variant projection receipt does not match the admitted contract".into(),
@@ -2059,10 +2467,20 @@ pub(crate) fn validate_scalar_variant_projection_mir(
         "builtin:type:Result" => receipt.variant_name == "Ok" && receipt.discriminant == 0,
         _ => false,
     };
-    if !valid_family
-        || receipt.projection.field_index != 0
-        || receipt.projection.arity != 1
-        || receipt.projection.ownership != super::types::MirOwnership::Copy
+    if !valid_family || receipt.projection.field_index != 0 || receipt.projection.arity != 1 {
+        return Err("generic variant projection receipt has non-canonical shape".into());
+    }
+    if consuming {
+        if receipt.projection.nominal.as_str() != "builtin:type:Option"
+            || receipt.projection.ownership != super::types::MirOwnership::Move
+            || receipt.projection.move_out_glue != super::types::MirGlueKind::OwnedString
+        {
+            return Err(
+                "generic owned variant projection receipt requires Move + OwnedString payload glue"
+                    .into(),
+            );
+        }
+    } else if receipt.projection.ownership != super::types::MirOwnership::Copy
         || receipt.projection.move_out_glue != super::types::MirGlueKind::Noop
     {
         return Err(
@@ -2084,6 +2502,10 @@ fn detect_scalar_variant_projection_contract(
         .flat_map(|block| block.instructions.iter())
         .find_map(|instruction| match &instruction.kind {
             MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            }
+            | MirInstructionKind::VariantProjectMove {
                 contract: Some(receipt),
                 ..
             } => Some(receipt.clone()),

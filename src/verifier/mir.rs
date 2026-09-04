@@ -2617,9 +2617,10 @@ fn eval_materialized_call(
 }
 
 /// Symbolically execute a materialized generic `Option<T>.unwrap()` call.
-/// The call is read-only over a Copy aggregate; its specialized target body
-/// and trap-bearing projection receipt are validated before the symbolic tag
-/// condition is added.  The verifier never reopens the generic source body.
+/// Copy instances are read-only; the owned String instance consumes its
+/// aggregate and carries the same Move receipt as the target body.  The
+/// verifier never reopens the generic source body or infers the ABI from the
+/// runtime handle.
 fn eval_materialized_variant_projection_call(
     function: &MirFunction,
     program: &MirProgram,
@@ -2637,7 +2638,19 @@ fn eval_materialized_variant_projection_call(
                 .into(),
         );
     }
-    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if contract.projection.ownership == MirOwnership::Move {
+        if contract.projection.nominal.as_str() != "builtin:type:Option"
+            || type_arguments.len() != 1
+        {
+            return Err(
+                "MIR verifier owned generic variant projection requires one Option type argument"
+                    .into(),
+            );
+        }
+        catalog.validate_owned_string(&type_arguments[0])?;
+    } else {
+        catalog.validate_scalar_generic_arguments(type_arguments)?;
+    }
     let target = program.functions().get(target_owner).ok_or_else(|| {
         format!(
             "MIR verifier generic variant projection target '{}' is absent",
@@ -2671,12 +2684,21 @@ fn eval_materialized_variant_projection_call(
                 .into(),
         );
     }
-    let argument_value = state.values.get(&arguments[0]).cloned().ok_or_else(|| {
-        format!(
-            "MIR verifier generic variant projection argument '{}' is not defined",
-            arguments[0]
-        )
-    })?;
+    let argument_value = if contract.projection.ownership == MirOwnership::Move {
+        state.values.remove(&arguments[0]).ok_or_else(|| {
+            format!(
+                "MIR verifier generic owned variant projection argument '{}' is not defined",
+                arguments[0]
+            )
+        })?
+    } else {
+        state.values.get(&arguments[0]).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier generic variant projection argument '{}' is not defined",
+                arguments[0]
+            )
+        })?
+    };
     let SymbolicValue::Variant {
         nominal,
         tag,

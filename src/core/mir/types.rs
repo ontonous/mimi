@@ -5532,9 +5532,9 @@ impl MirTypeCatalog {
     /// Materialize the non-executable placeholder receipt for the narrow
     /// generic `Option<T>.unwrap()` projection.  The generic payload is
     /// opaque until instance specialization, but the Option family, `Some`
-    /// identity, one-field ABI, and active-tag trap are fixed here.  Concrete
-    /// materialization must call `validated_variant_projection_trap_contract`
-    /// again after replacing `T` with a Copy scalar.
+    /// identity, one-field ABI, and active-tag trap are fixed here. Concrete
+    /// materialization must revalidate the concrete Copy or explicitly
+    /// admitted move-owned String contract after replacing `T`.
     pub(crate) fn validated_generic_option_projection_trap_contract(
         &self,
         source_ty: &ResolvedTypeId,

@@ -136,6 +136,8 @@ pub fn classify_generic_option_projection_admission(
 
 /// Stable candidate hint used by default dispatch when an unsupported generic
 /// Option shape must be rejected before a legacy consumer can observe it.
+/// `Option<string>` is admitted only by the ownership-aware projection
+/// materializer; other managed or non-Copy payloads remain fail-closed.
 pub fn has_unsupported_generic_option_projection_candidate(program: &CheckedProgram) -> bool {
     program.callables().values().any(|callable| {
         mentions_generic_option_callable(program, callable)
