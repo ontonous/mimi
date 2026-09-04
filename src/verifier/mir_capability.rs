@@ -1177,6 +1177,22 @@ impl<'a> CapabilityGate<'a> {
         let Some(descriptor) = scalar else {
             return;
         };
+        let result_descriptor = self.program.type_catalog().get(&result_ty);
+        let right_descriptor = self.program.type_catalog().get(&right_ty);
+        let float_shape = [Some(descriptor), right_descriptor, result_descriptor]
+            .iter()
+            .flatten()
+            .any(|descriptor| matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
+        if float_shape {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_copy_float_binary(&result_ty, &left_ty, &right_ty, op)
+            {
+                self.error(format!("{subject} float binary rejected: {message}"));
+            }
+            return;
+        }
         let valid = match descriptor.abi {
             MirAbiClass::Integer {
                 bits: 32 | 64,

@@ -1711,6 +1711,19 @@ impl<'a> NativeMirValidator<'a> {
         let Some(result_desc) = self.program.type_catalog().get(&result.ty) else {
             return;
         };
+        let float_shape = [left_desc, right_desc, result_desc]
+            .iter()
+            .any(|desc| matches!(desc.abi, MirAbiClass::Float { bits: 32 | 64 }));
+        if float_shape {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_copy_float_binary(&result.ty, &left.ty, &right.ty, op)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+            return;
+        }
         let same_operands = left.ty == right.ty;
         let integer = matches!(
             left_desc.abi,

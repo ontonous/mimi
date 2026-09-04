@@ -106,6 +106,25 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_trap_float_not_finite")
+            .is_none()
+        {
+            let i8_ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            self.generator.module.add_function(
+                "mimi_trap_float_not_finite",
+                self.generator
+                    .context
+                    .void_type()
+                    .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_set_clone_scalar")
             .is_none()
         {
@@ -808,7 +827,7 @@ mod tests {
 
     #[test]
     fn native_validator_rejects_before_llvm_declarations() {
-        let program = canonical_program("func main() -> f64 { 1.0 + 2.0 }");
+        let program = canonical_program("func main() -> f64 { 1.0 - 2.0 }");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_validator_test");
 
@@ -1187,6 +1206,61 @@ mod tests {
             .verify()
             .expect("native f64 negate module verifies");
         assert!(generator.module.get_function("negate").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_f64_add_finite_only_contract() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_f64_add.mimi"
+        ));
+        let add = crate::core::NodeId("function:add".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(
+                &add,
+                &[
+                    MirRuntimeValue::FloatBits(1.25f64.to_bits()),
+                    MirRuntimeValue::FloatBits(2.75f64.to_bits()),
+                ],
+            )
+            .expect("reference f64 add execution");
+        assert_eq!(reference, MirRuntimeValue::FloatBits(4.0f64.to_bits()));
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("f64 add MIR bytecode"))
+                .run_value()
+                .expect("bytecode f64 add execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for f64 add MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_f64_add_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("f64 add MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native f64 add module verifies");
+        assert!(generator.module.get_function("add").is_some());
+    }
+
+    #[test]
+    fn native_validator_rejects_f64_binary_shapes_outside_add_contract() {
+        for source in ["func main() -> f64 { 1.0 - 2.0 }"] {
+            let program = canonical_program(source);
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_native_f64_binary_rejected_test");
+            let diagnostics = generator
+                .compile_mir_native(&program)
+                .expect_err("unsupported f64 binary must fail closed");
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("canonical MIR native backend rejected")
+                    && diagnostic.message.contains("finite-only")
+            }));
+            assert!(generator.module.get_function("main").is_none());
+        }
     }
 
     #[test]

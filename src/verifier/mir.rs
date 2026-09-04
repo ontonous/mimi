@@ -1296,6 +1296,24 @@ fn eval_instruction(
             left,
             right,
         } => {
+            let result_ty = instruction_value_type(function, result, "binary result")?;
+            let left_ty = instruction_value_type(function, left, "binary left operand")?;
+            let right_ty = instruction_value_type(function, right, "binary right operand")?;
+            let float_shape = [
+                catalog.get(&result_ty),
+                catalog.get(&left_ty),
+                catalog.get(&right_ty),
+            ]
+            .iter()
+            .flatten()
+            .any(|descriptor| matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
+            if float_shape {
+                catalog.validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)?;
+                return Err(format!(
+                    "MIR verifier finite-only f64 Add has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
+                    crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
+                ));
+            }
             let left = state
                 .values
                 .get(left)

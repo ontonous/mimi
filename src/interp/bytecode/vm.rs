@@ -924,6 +924,8 @@ impl BytecodeVM {
                         )
                     };
                     let r = a + b;
+                    self.check_float(a, "+")?;
+                    self.check_float(b, "+")?;
                     // H1 fix (SD-9): route through check_float so `ieee_float { }`
                     // suspends the finiteness trap for basic arithmetic too
                     // (was: hardcoded is_nan/is_infinite, ignoring ieee_depth).

@@ -473,6 +473,101 @@ fn lowers_f64_unary_negate_with_explicit_copy_float_contract() {
 }
 
 #[test]
+fn lowers_f64_add_with_finite_only_copy_float_contract() {
+    let source = include_str!("../../../tests/fixtures/mir_native_f64_add.mimi");
+    let program =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("f64 add must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:add".into()))
+        .expect("add MIR function");
+    let (result_ty, left_ty, right_ty) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Binary {
+                result,
+                op: crate::core::ir::ResolvedBinaryOp::Add,
+                left,
+                right,
+            } => Some((
+                function.values.get(result)?.ty.clone(),
+                function.values.get(left)?.ty.clone(),
+                function.values.get(right)?.ty.clone(),
+            )),
+            _ => None,
+        })
+        .expect("canonical f64 add instruction");
+    program
+        .type_catalog()
+        .validate_copy_float_binary(
+            &result_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Add,
+        )
+        .expect("f64 add TypeDesc contract");
+    let descriptor = program
+        .type_catalog()
+        .get(&result_ty)
+        .expect("f64 add TypeDesc");
+    assert_eq!(
+        descriptor.abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+    );
+    assert_eq!(descriptor.ownership, MirOwnership::Copy);
+    assert_eq!(descriptor.glue.move_out, MirGlueKind::Noop);
+
+    let owner = crate::core::NodeId("function:add".into());
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&program);
+    let value = reference
+        .execute(
+            &owner,
+            &[
+                crate::core::mir::reference::MirRuntimeValue::FloatBits(1.25f64.to_bits()),
+                crate::core::mir::reference::MirRuntimeValue::FloatBits(2.75f64.to_bits()),
+            ],
+        )
+        .expect("reference f64 add execution");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::FloatBits(4.0f64.to_bits())
+    );
+    for (left, right, label) in [
+        (f64::NAN, 1.0, "NaN operand"),
+        (f64::INFINITY, 1.0, "Inf operand"),
+        (f64::MAX, f64::MAX, "non-finite result"),
+    ] {
+        let error = reference
+            .execute(
+                &owner,
+                &[
+                    crate::core::mir::reference::MirRuntimeValue::FloatBits(left.to_bits()),
+                    crate::core::mir::reference::MirRuntimeValue::FloatBits(right.to_bits()),
+                ],
+            )
+            .expect_err(label);
+        assert!(
+            error
+                .message
+                .contains(crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE),
+            "{label} must retain E0813 classification: {error}"
+        );
+    }
+    assert!(program
+        .type_catalog()
+        .validate_copy_float_binary(
+            &result_ty,
+            &left_ty,
+            &right_ty,
+            crate::core::ir::ResolvedBinaryOp::Subtract,
+        )
+        .is_err());
+}
+
+#[test]
 fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
     let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
         include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),

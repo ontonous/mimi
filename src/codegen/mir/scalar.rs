@@ -171,6 +171,29 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         right: &MirValueId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        let left_ty = self.value_type(left, subject)?;
+        let right_ty = self.value_type(right, subject)?;
+        let left_desc = self
+            .program
+            .type_catalog()
+            .get(&left_ty)
+            .ok_or_else(|| NativeMirError::new(subject, "binary left TypeDesc is absent"))?;
+        if matches!(left_desc.abi, MirAbiClass::Float { bits: 32 | 64 }) {
+            self.program
+                .type_catalog()
+                .validate_copy_float_binary(&result_ty, &left_ty, &right_ty, op)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let left_value = self.value(left, subject)?.into_float_value();
+            let right_value = self.value(right, subject)?.into_float_value();
+            let result = self
+                .generator
+                .builder
+                .build_float_add(left_value, right_value, "mir_fadd")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_float_finite_guard(result, "add", subject)?;
+            return Ok(result.into());
+        }
         let left_value = self.value(left, subject)?.into_int_value();
         let right_value = self.value(right, subject)?.into_int_value();
         match op {
@@ -219,6 +242,91 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let _ = result;
             value
         })
+    }
+
+    fn emit_float_finite_guard(
+        &mut self,
+        value: inkwell::values::FloatValue<'ctx>,
+        operation: &str,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let float_ty = value.get_type();
+        let is_nan = self
+            .generator
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, value, value, "mir_is_nan")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let pos_inf = float_ty.const_float(f64::INFINITY);
+        let neg_inf = float_ty.const_float(f64::NEG_INFINITY);
+        let is_pos_inf = self
+            .generator
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OEQ,
+                value,
+                pos_inf,
+                "mir_is_pos_inf",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let is_neg_inf = self
+            .generator
+            .builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OEQ,
+                value,
+                neg_inf,
+                "mir_is_neg_inf",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let is_inf = self
+            .generator
+            .builder
+            .build_or(is_pos_inf, is_neg_inf, "mir_is_inf")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let not_finite = self
+            .generator
+            .builder
+            .build_or(is_nan, is_inf, "mir_not_finite")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let function = self.llvm_function;
+        let trap = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_float_not_finite");
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(function, "mir_float_finite");
+        self.generator
+            .builder
+            .build_conditional_branch(not_finite, trap, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(trap);
+        let trap_fn = self
+            .generator
+            .get_runtime_fn("mimi_trap_float_not_finite")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let operation = self
+            .generator
+            .builder
+            .build_global_string_ptr(operation, "mir_float_operation")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                trap_fn,
+                &[inkwell::values::BasicMetadataValueEnum::from(
+                    operation.as_pointer_value(),
+                )],
+                "mir_float_not_finite_trap",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
     }
 
     pub(super) fn compare(

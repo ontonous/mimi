@@ -975,6 +975,59 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("binary operand '{}' has no type descriptor", left));
             return;
         };
+        let Some(result_ty) = self
+            .function
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+        else {
+            self.error(format!(
+                "binary result '{}' has no TypeDesc identity",
+                result
+            ));
+            return;
+        };
+        let Some(left_ty) = self.function.values.get(left).map(|value| value.ty.clone()) else {
+            self.error(format!(
+                "binary operand '{}' has no TypeDesc identity",
+                left
+            ));
+            return;
+        };
+        let Some(right_ty) = self
+            .function
+            .values
+            .get(right)
+            .map(|value| value.ty.clone())
+        else {
+            self.error(format!(
+                "binary operand '{}' has no TypeDesc identity",
+                right
+            ));
+            return;
+        };
+        let is_float_shape = [result_ty.clone(), left_ty.clone(), right_ty.clone()]
+            .iter()
+            .any(|ty| {
+                self.program
+                    .type_catalog()
+                    .get(ty)
+                    .is_some_and(|descriptor| {
+                        matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+                    })
+            });
+        if is_float_shape {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_copy_float_binary(&result_ty, &left_ty, &right_ty, op)
+            {
+                self.error(format!(
+                    "binary operator {op:?} is outside scalar bytecode slice: {message}"
+                ));
+                return;
+            }
+        }
         let opcode = match operand_desc.abi {
             MirAbiClass::Integer { bits, signed: true } if bits <= 64 => match op {
                 ResolvedBinaryOp::Add => Op::AddInt { rd, ra, rb },
@@ -999,23 +1052,17 @@ impl<'a> FunctionEmitter<'a> {
                     return;
                 }
             },
-            MirAbiClass::Float { bits: 32 | 64 } => match op {
+            MirAbiClass::Float { bits: 64 } => match op {
                 ResolvedBinaryOp::Add => Op::AddFloat { rd, ra, rb },
-                ResolvedBinaryOp::Subtract => Op::SubFloat { rd, ra, rb },
-                ResolvedBinaryOp::Multiply => Op::MulFloat { rd, ra, rb },
-                ResolvedBinaryOp::Divide => Op::DivFloat { rd, ra, rb },
-                ResolvedBinaryOp::Power => Op::PowFloat { rd, ra, rb },
-                ResolvedBinaryOp::Equal => Op::EqFloat { rd, ra, rb },
-                ResolvedBinaryOp::NotEqual => Op::Ne { rd, ra, rb },
-                ResolvedBinaryOp::Less => Op::LtFloat { rd, ra, rb },
-                ResolvedBinaryOp::Greater => Op::GtFloat { rd, ra, rb },
-                ResolvedBinaryOp::LessEqual => Op::LeFloat { rd, ra, rb },
-                ResolvedBinaryOp::GreaterEqual => Op::GeFloat { rd, ra, rb },
                 _ => {
-                    self.error(format!("operator {op:?} is invalid for float result"));
+                    self.error(format!("operator {op:?} is outside scalar bytecode slice"));
                     return;
                 }
             },
+            MirAbiClass::Float { bits: 32 } => {
+                self.error(format!("operator {op:?} is outside scalar bytecode slice"));
+                return;
+            }
             MirAbiClass::Bool => match op {
                 ResolvedBinaryOp::LogicalAnd => Op::And { rd, ra, rb },
                 ResolvedBinaryOp::LogicalOr => Op::Or { rd, ra, rb },

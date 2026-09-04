@@ -1,3 +1,4 @@
-// Canonical MIR accepts scalar f64 constants, but f64 arithmetic remains
-// outside the S117 native MIR slice until the float-operation contract lands.
-func main() -> f64 { 1.0 + 2.0 }
+// Canonical MIR accepts scalar f64 constants, but f64 subtraction remains
+// outside the first finite-only Add contract and must fail before LLVM
+// declarations.
+func main() -> f64 { 1.0 - 2.0 }

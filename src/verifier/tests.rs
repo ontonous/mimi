@@ -1036,6 +1036,57 @@ fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
 }
 
 #[test]
+fn finite_f64_add_verifier_capability_is_closed_before_symbolic_execution() {
+    let source = include_str!("../../tests/fixtures/mir_native_f64_add.mimi");
+    let file = parse_memory_source(source, "mir-f64-add-capability").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical f64 add MIR");
+    crate::verifier::validate_mir_capabilities(&canonical).expect("finite-only f64 Add capability");
+
+    let subtract = parse_memory_source(
+        "func main() -> f64 { 1.0 - 2.0 }",
+        "mir-f64-subtract-capability",
+    )
+    .expect("parse subtract");
+    let checked = crate::core::check_program(&subtract).expect("typecheck subtract");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical f64 subtract MIR");
+    let errors = crate::verifier::validate_mir_capabilities(&canonical)
+        .expect_err("f64 subtract must remain outside the closed Add capability");
+    let message = errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        message.contains("finite-only Copy f64 contract"),
+        "unexpected verifier capability rejection: {message}"
+    );
+}
+
+#[test]
+fn finite_f64_add_contract_is_rejected_before_symbolic_execution_without_float_model() {
+    let source = r#"
+func add(left: f64, right: f64) -> f64 {
+    requires: left == left
+    ensures: result == result
+    left + right
+}
+func main() -> i64 { 42 }
+"#;
+    let file = parse_memory_source(source, "mir-f64-add-symbolic-boundary").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("f64 contracts must remain outside the canonical verifier domain");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("ABI Float") && message.contains("canonical scalar verifier contract"),
+        "unexpected f64 contract boundary: {message}"
+    );
+}
+
+#[test]
 fn generic_record_projection_is_consumed_by_mir_verifier_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_record_projection.mimi");

@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedProjection, ResolvedType,
-    ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
+    BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedBinaryOp,
+    ResolvedProjection, ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
 };
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
@@ -28,6 +28,12 @@ pub const MIR_TRAP_CODE_MAX_LEN: usize = 128;
 /// generic MIR contract trap, not an argument-count or match-exhaustiveness
 /// diagnostic; all consumers must preserve this identity.
 pub const MIR_VARIANT_PROJECTION_TRAP_CODE: &str = "E0800";
+
+/// Stable runtime classification for the finite-only floating-point scalar
+/// arithmetic island.  Canonical MIR does not carry the surface
+/// `ieee_float` suspension effect yet, so this slice rejects a non-finite
+/// operand or result in every production consumer.
+pub const MIR_FLOAT_NOT_FINITE_TRAP_CODE: &str = "E0813";
 
 /// Validate the backend-independent contract for a canonical `Trap`.
 ///
@@ -1355,6 +1361,43 @@ impl MirTypeCatalog {
             return Err(format!(
                 "type '{}' is not a Copy f64 scalar for float unary negation",
                 operand_ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the first finite-only f64 binary arithmetic contract shared by
+    /// reference, bytecode, native, and verifier capability consumers.  The
+    /// three values retain one checker-owned TypeDesc identity, the ABI is a
+    /// Copy f64 scalar with no-op glue, and only `Add` is admitted.  The
+    /// runtime definedness policy is explicit: a non-finite operand or result
+    /// traps with [`MIR_FLOAT_NOT_FINITE_TRAP_CODE`].
+    pub fn validate_copy_float_binary(
+        &self,
+        result_ty: &ResolvedTypeId,
+        left_ty: &ResolvedTypeId,
+        right_ty: &ResolvedTypeId,
+        op: ResolvedBinaryOp,
+    ) -> Result<(), String> {
+        if op != ResolvedBinaryOp::Add {
+            return Err(format!(
+                "float binary operator {op:?} is outside the canonical finite-only Copy f64 contract"
+            ));
+        }
+        if result_ty != left_ty || left_ty != right_ty {
+            return Err("float binary result and operand TypeDesc identities disagree".into());
+        }
+        self.validate_copy_float_scalar(left_ty)?;
+        let descriptor = self.get(left_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR TypeDesc catalog",
+                left_ty.as_str()
+            )
+        })?;
+        if descriptor.abi != (MirAbiClass::Float { bits: 64 }) {
+            return Err(format!(
+                "type '{}' is not a Copy f64 scalar for finite-only binary arithmetic",
+                left_ty.as_str()
             ));
         }
         Ok(())

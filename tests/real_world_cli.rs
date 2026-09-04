@@ -1870,6 +1870,49 @@ fn canonical_explicit_mir_f64_unary_negate_matches_reference_bytecode_native() {
 }
 
 #[test]
+fn canonical_explicit_mir_f64_add_matches_reference_bytecode_native() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_f64_add.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn explicit MIR f64 add run");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "explicit MIR f64 add run failed:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let binary =
+        std::env::temp_dir().join(format!("mimi-explicit-mir-f64-add-{}", std::process::id()));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn explicit MIR f64 add build");
+    assert!(
+        build.status.success(),
+        "explicit MIR f64 add native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute explicit MIR f64 add native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(42));
+}
+
+#[test]
 fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")
@@ -2439,7 +2482,7 @@ fn canonical_mir_native_build_rejects_unsupported_shape_without_fallback() {
     assert!(
         stderr.contains("canonical MIR native backend rejected")
             && stderr.contains("binary operator")
-            && stderr.contains("outside native scalar contract"),
+            && stderr.contains("finite-only Copy f64 contract"),
         "unexpected canonical native rejection:\n{stderr}"
     );
     assert!(

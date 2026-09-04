@@ -3631,9 +3631,58 @@ impl<'a> MirReferenceInterpreter<'a> {
                 right,
             } => {
                 let integer_width = self.integer_width(function, left);
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| self.error(&function.owner, "MIR binary result is absent"))?
+                    .ty
+                    .clone();
+                let left_ty = function
+                    .values
+                    .get(left)
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "MIR binary left operand is absent")
+                    })?
+                    .ty
+                    .clone();
+                let right_ty = function
+                    .values
+                    .get(right)
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "MIR binary right operand is absent")
+                    })?
+                    .ty
+                    .clone();
+                let is_float_shape = [result_ty.clone(), left_ty.clone(), right_ty.clone()]
+                    .iter()
+                    .any(|ty| {
+                        self.program
+                            .type_catalog()
+                            .get(ty)
+                            .is_some_and(|descriptor| {
+                                matches!(
+                                    descriptor.abi,
+                                    super::types::MirAbiClass::Float { bits: 32 | 64 }
+                                )
+                            })
+                    });
+                if is_float_shape {
+                    self.program
+                        .type_catalog()
+                        .validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                }
+                let float_width = self.float_width(function, left);
                 let left = self.read_value(function, values, left)?;
                 let right = self.read_value(function, values, right)?;
-                let output = evaluate_binary(&function.owner, *op, left, right, integer_width)?;
+                let output = evaluate_binary(
+                    &function.owner,
+                    *op,
+                    left,
+                    right,
+                    integer_width,
+                    float_width,
+                )?;
                 values.insert(result.clone(), output);
             }
             MirInstructionKind::Unary {
@@ -4625,6 +4674,15 @@ impl<'a> MirReferenceInterpreter<'a> {
             _ => None,
         }
     }
+
+    fn float_width(&self, function: &MirFunction, value: &MirValueId) -> Option<u16> {
+        let ty = function.values.get(value)?.ty.clone();
+        let descriptor = self.program.type_catalog().get(&ty)?;
+        match descriptor.abi {
+            super::types::MirAbiClass::Float { bits } => Some(bits),
+            _ => None,
+        }
+    }
 }
 
 fn runtime_literal(literal: &ResolvedLiteral) -> MirRuntimeValue {
@@ -5060,9 +5118,34 @@ fn evaluate_binary(
     left: MirRuntimeValue,
     right: MirRuntimeValue,
     integer_width: Option<u16>,
+    float_width: Option<u16>,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
-    use MirRuntimeValue::{Bool, Int};
+    use MirRuntimeValue::{Bool, FloatBits, Int};
     match (op, left, right) {
+        (ResolvedBinaryOp::Add, FloatBits(left), FloatBits(right)) if float_width == Some(64) => {
+            let left = f64::from_bits(left);
+            let right = f64::from_bits(right);
+            if !left.is_finite() || !right.is_finite() {
+                return Err(execution_error(
+                    function,
+                    format!(
+                        "{}: non-finite floating-point operand",
+                        super::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
+                    ),
+                ));
+            }
+            let value = left + right;
+            if !value.is_finite() {
+                return Err(execution_error(
+                    function,
+                    format!(
+                        "{}: non-finite floating-point result from add",
+                        super::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
+                    ),
+                ));
+            }
+            Ok(FloatBits(value.to_bits()))
+        }
         (ResolvedBinaryOp::Add, Int(left), Int(right)) if integer_width == Some(32) => {
             let left = i32::try_from(left)
                 .map_err(|_| execution_error(function, "i32 operand out of range"))?;

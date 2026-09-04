@@ -1,0 +1,10 @@
+// Canonical MIR finite-only f64 addition: all consumers must agree on the
+// FloatBits ABI and reject NaN/Inf inputs or results with E0813.
+func add(left: f64, right: f64) -> f64 {
+    left + right
+}
+
+func main() -> i64 {
+    let value = add(1.25, 2.75)
+    42
+}
