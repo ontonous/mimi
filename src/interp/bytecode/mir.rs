@@ -5248,6 +5248,42 @@ mod tests {
     }
 
     #[test]
+    fn executes_generic_option_unwrap_owned_list_i64_and_bool_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list_scalars.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic Option<List<i64|bool>> unwrap MIR");
+        let instances = mir
+            .instances()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue
+                            == crate::core::mir::types::MirGlueKind::List
+                )
+            })
+            .count();
+        assert_eq!(instances, 2);
+        let bytecode =
+            compile_mir_program(&mir).expect("generic Option<List<i64|bool>> unwrap bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic Option<List<i64|bool>> bytecode execution");
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn generic_option_unwrap_none_matches_reference_trap() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi");

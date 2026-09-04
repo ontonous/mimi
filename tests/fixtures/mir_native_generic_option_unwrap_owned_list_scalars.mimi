@@ -1,0 +1,18 @@
+// Generic Option<T>.unwrap specialized to both admitted move-owned List scalar families.
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let i64_values: List<i64> = [10, 20, 30]
+    let i64_value: Option<List<i64>> = Some(i64_values)
+    let i64_out = unwrap(i64_value)
+    drop(i64_out)
+
+    let bool_values: List<bool> = [true, false, true]
+    let bool_value: Option<List<bool>> = Some(bool_values)
+    let bool_out = unwrap(bool_value)
+    drop(bool_out)
+    41
+}

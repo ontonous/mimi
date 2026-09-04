@@ -1487,6 +1487,37 @@ mod tests {
     }
 
     #[test]
+    fn generic_owned_list_scalar_family_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_option_unwrap_owned_list_scalars.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_option_projection_admission(&checked),
+            mimi::core::mir::GenericOptionProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Option<List<i64|bool>> projection must select canonical route");
+        };
+        let instances = program
+            .instances()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    &instance.contract,
+                    mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == mimi::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue
+                            == mimi::core::mir::types::MirGlueKind::List
+                )
+            })
+            .count();
+        assert_eq!(instances, 2);
+    }
+
+    #[test]
     fn unsupported_generic_option_projection_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi"

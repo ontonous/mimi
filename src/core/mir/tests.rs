@@ -244,6 +244,72 @@ fn materializes_generic_option_unwrap_owned_list_with_move_receipt() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_owned_list_i64_and_bool_family() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list_scalars.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option<List<i64|bool>> unwrap must lower to canonical MIR");
+    let instances = program
+        .instances()
+        .values()
+        .filter_map(|instance| match &instance.contract {
+            MirGenericInstanceContract::ScalarVariantProjection { contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Option"
+                    && contract.projection.ownership == MirOwnership::Move
+                    && contract.projection.move_out_glue == MirGlueKind::List =>
+            {
+                Some(instance)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instances.len(),
+        2,
+        "both concrete List scalar instances must materialize"
+    );
+    let element_kinds = instances
+        .iter()
+        .filter_map(|instance| {
+            let descriptor = program.type_catalog().get(&instance.arguments[0])?;
+            let crate::core::mir::types::MirLayout::List { element } = &descriptor.layout else {
+                return None;
+            };
+            Some(program.type_catalog().get(element)?.kind.clone())
+        })
+        .collect::<Vec<_>>();
+    assert!(element_kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            crate::core::mir::types::MirTypeKind::Primitive(PrimitiveType::I64)
+        )
+    }));
+    assert!(element_kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            crate::core::mir::types::MirTypeKind::Primitive(PrimitiveType::Bool)
+        )
+    }));
+    for instance in &instances {
+        let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+        else {
+            unreachable!("filtered to generic variant projections");
+        };
+        let (_, payload_glue) = program
+            .type_catalog()
+            .validate_option_move_variant(&contract.source_ty)
+            .expect("Option<List<Copy scalar>> TypeDesc receipt");
+        assert_eq!(payload_glue, MirGlueKind::List);
+    }
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option<List<i64|bool>> unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
 fn rejects_generic_option_unwrap_owned_float_list_before_legacy() {
     let source = include_str!(
         "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_float_list_rejected.mimi"

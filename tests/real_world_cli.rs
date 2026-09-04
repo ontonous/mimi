@@ -1845,6 +1845,62 @@ fn canonical_default_generic_owned_list_option_unwrap_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_owned_list_scalar_family_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_option_unwrap_owned_list_scalars.mimi");
+
+    for extra in [Some("--mir"), None] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run").arg(&fixture);
+        if let Some(flag) = extra {
+            command.arg(flag);
+        }
+        let run = command
+            .output()
+            .expect("failed to spawn generic Option<List<i64|bool>> run");
+        assert_eq!(run.status.code(), Some(41));
+    }
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Option<List<i64|bool>> verifier");
+    assert!(
+        verify.status.success(),
+        "generic Option<List<i64|bool>> verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-option-owned-list-scalars-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn generic Option<List<i64|bool>> native build");
+    assert!(
+        build.status.success(),
+        "generic Option<List<i64|bool>> native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute generic Option<List<i64|bool>> native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
 fn canonical_default_generic_owned_float_list_option_unwrap_rejects_before_legacy() {
     let fixture = project_root()
         .join("tests")

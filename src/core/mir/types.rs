@@ -2752,14 +2752,31 @@ impl MirTypeCatalog {
         if self.validate_owned_string(ty).is_ok() {
             return Ok(MirGlueKind::OwnedString);
         }
+        self.validate_move_owned_list_payload(ty)?;
+        Ok(MirGlueKind::List)
+    }
+
+    /// Validate the complete move-owned List payload contract used by tagged
+    /// variant projections.  Keeping this as a named TypeDesc boundary makes
+    /// the admitted scalar family explicit: List handles are Move-owned, all
+    /// three list glue operations are materialized, and the element is one of
+    /// the checker-proven Copy scalar leaves.  Consumers must use the returned
+    /// `MirGlueKind::List` from `validate_move_owned_payload` rather than infer
+    /// ownership from the opaque native/VM handle.
+    pub fn validate_move_owned_list_payload(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         for operation in [
             MirGlueOperation::MoveOut,
             MirGlueOperation::Clone,
             MirGlueOperation::Drop,
         ] {
-            self.validate_list_glue(ty, operation)?;
+            self.validate_list_glue(ty, operation).map_err(|message| {
+                format!(
+                    "move-owned List payload '{}' is outside the canonical List<Copy scalar> contract: {message}",
+                    ty.as_str()
+                )
+            })?;
         }
-        Ok(MirGlueKind::List)
+        Ok(())
     }
 
     /// Validate the first variable-length container contract. A List is a

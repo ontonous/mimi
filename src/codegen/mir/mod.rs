@@ -2793,6 +2793,56 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_generic_option_unwrap_owned_list_i64_and_bool() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list_scalars.mimi"
+        ));
+        let instances = program
+            .instances()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue == crate::core::mir::types::MirGlueKind::List
+                )
+            })
+            .count();
+        assert_eq!(instances, 2);
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Option<List<i64|bool>> execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("generic Option<List<i64|bool>> MIR bytecode"),
+        )
+        .run_value()
+        .expect("generic Option<List<i64|bool>> bytecode execution");
+        assert!(matches!(bytecode, Value::Int(41)));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_option_unwrap_owned_list_scalars",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option<List<i64|bool>> must consume Move MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option<List<i64|bool>> module verifies");
+        assert!(generator.module.get_function("main").is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_scalar")
+            .is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_option_unwrap_or_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"
