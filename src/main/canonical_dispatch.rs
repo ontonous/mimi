@@ -195,7 +195,7 @@ pub(crate) fn select_default_route(
             false,
             true,
             option_string_hint,
-            "generic Option predicate candidate is outside complete coverage",
+            "generic variant predicate candidate is outside complete coverage",
         );
     }
 
@@ -213,7 +213,7 @@ pub(crate) fn select_default_route(
                         mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                     ) {
                         format!(
-                            "generic Option predicate canonical MIR construction failed: {message}"
+                            "generic variant predicate canonical MIR construction failed: {message}"
                         )
                     } else {
                         format!("canonical MIR construction failed: {message}")
@@ -224,7 +224,7 @@ pub(crate) fn select_default_route(
                         profile,
                         mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                     ) {
-                        format!("generic Option predicate canonical graph did not materialize the selected production operation: {message}")
+                        format!("generic variant predicate canonical graph did not materialize the selected production operation: {message}")
                     } else {
                         format!("canonical graph did not materialize the selected production operation: {message}")
                     }
@@ -304,7 +304,7 @@ pub(crate) fn select_default_route(
                     false,
                     true,
                     false,
-                    "canonical generic Option predicate candidate did not materialize a supported MIR shape",
+                    "canonical generic variant predicate candidate did not materialize a supported MIR shape",
                 );
             }
             // S8 keeps its existing candidate hard boundary: the front-end
@@ -529,9 +529,9 @@ fn reject_migrated_candidates(
             "S11 scalar collection candidate is not eligible for the default route: {}",
             reason
         ))
-    } else if reason.contains("generic Option predicate") {
+    } else if reason.contains("generic variant predicate") {
         DefaultMirRoute::Rejected(format!(
-            "generic Option predicate candidate is not eligible for the default route: {}",
+            "generic variant predicate candidate is not eligible for the default route: {}",
             reason
         ))
     } else if record_candidate {
@@ -648,7 +648,43 @@ mod tests {
         let DefaultMirRoute::Rejected(reason) = route else {
             panic!("non-Copy generic Option predicate must fail closed before legacy");
         };
-        assert!(reason.contains("generic Option predicate"), "{reason}");
+        assert!(reason.contains("generic variant predicate"), "{reason}");
+    }
+
+    #[test]
+    fn generic_result_predicate_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_predicate.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_variant_predicate_admission(&checked),
+            mimi::core::mir::GenericVariantPredicateAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Result predicate must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarVariantPredicate {
+                contract: mimi::core::mir::types::MirVariantPredicateContract {
+                    predicate: mimi::core::mir::MirVariantPredicate::IsOk,
+                    ..
+                }
+            }
+        )));
+    }
+
+    #[test]
+    fn unsupported_generic_result_predicate_cannot_reenter_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_predicate_rejected.mimi"
+        ));
+        assert!(mimi::core::mir::has_unsupported_generic_variant_predicate_candidate(&checked));
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Rejected(reason) = route else {
+            panic!("non-Copy generic Result predicate must fail closed before legacy");
+        };
+        assert!(reason.contains("generic variant predicate"), "{reason}");
     }
 
     #[test]

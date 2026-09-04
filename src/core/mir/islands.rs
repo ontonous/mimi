@@ -29,9 +29,10 @@ use super::{
 
 /// Name of the finite whole-program island closed by this contract.
 pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
-/// Name of the narrow generic Option predicate island.  It admits only
-/// `is_some`/`is_none` over `Option<T>` where the concrete `T` is a signed
-/// scalar/bool; Result predicates and non-Copy payloads remain outside.
+/// Name of the narrow generic variant predicate island. It admits only
+/// `is_some`/`is_none` over `Option<T>` or `is_ok`/`is_err` over a one-binder
+/// `Result` shape where the concrete generic payload is a signed scalar/bool;
+/// non-Copy payloads remain outside.
 pub const GENERIC_VARIANT_PREDICATE_ISLAND: &str = "generic-option-predicate-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub enum GenericVariantPredicateAdmission {
     CompleteCoverage,
 }
 
-/// Classify the checker-owned generic Option predicate envelope before MIR
+/// Classify the checker-owned generic variant predicate envelope before MIR
 /// materialization.  This is deliberately a declaration/call-shape gate; the
 /// concrete TypeDesc receipt is still rebuilt by generic MIR specialization.
 pub fn classify_generic_variant_predicate_admission(
@@ -50,14 +51,16 @@ pub fn classify_generic_variant_predicate_admission(
     let has_candidate = program
         .callables()
         .values()
-        .any(|callable| is_generic_option_predicate_callable(program, callable));
+        .any(|callable| is_generic_variant_predicate_callable(program, callable));
     if !has_candidate {
         return GenericVariantPredicateAdmission::OutsideProfile;
     }
     if has_mixed_coverage(program)
         || program.callables().values().any(|callable| {
             mentions_generic_option_callable(program, callable)
-                && !is_generic_option_predicate_callable(program, callable)
+                && !is_generic_variant_predicate_callable(program, callable)
+                || mentions_generic_result_callable(program, callable)
+                    && !is_generic_variant_predicate_callable(program, callable)
         })
     {
         GenericVariantPredicateAdmission::MixedCoverage
@@ -71,10 +74,10 @@ pub fn classify_generic_variant_predicate_admission(
 /// to reject the shape before a legacy emitter can observe it if canonical
 /// materialization cannot produce the receipt.
 pub fn has_unsupported_generic_variant_predicate_candidate(program: &CheckedProgram) -> bool {
-    program
-        .callables()
-        .values()
-        .any(|callable| mentions_generic_option_callable(program, callable))
+    program.callables().values().any(|callable| {
+        mentions_generic_option_callable(program, callable)
+            || mentions_generic_result_callable(program, callable)
+    })
 }
 
 fn mentions_generic_option_callable(
@@ -132,6 +135,73 @@ fn is_generic_option_predicate_callable(
                 "builtin.method.option.is_some" | "builtin.method.option.is_none"
             )
     ) && call.arguments.len() == 1
+}
+
+fn mentions_generic_result_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if callable.signature.generic_parameters.len() != 1 {
+        return false;
+    }
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+        return false;
+    };
+    callable.signature.parameters.iter().any(|parameter| {
+        matches!(
+            program.resolved_types().get(&parameter.ty),
+            Some(ResolvedType::Result { ok, error })
+                if (ok == &generic_ty) || (error == &generic_ty)
+        )
+    })
+}
+
+fn generic_parameter_type_id(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> Option<crate::core::ResolvedTypeId> {
+    let parameter = callable.signature.generic_parameters.first()?;
+    program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(ty, ResolvedType::GenericParameter(candidate) if candidate == parameter)
+            .then_some(id.clone())
+    })
+}
+
+fn is_generic_result_predicate_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if !mentions_generic_result_callable(program, callable)
+        || callable.signature.parameters.len() != 1
+        || callable.signature.generic_parameters.len() != 1
+        || !matches!(
+            program.resolved_types().get(&callable.signature.result),
+            Some(ResolvedType::Primitive(PrimitiveType::Bool))
+        )
+        || !callable.body.root.statements.is_empty()
+    {
+        return false;
+    }
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name)
+            if matches!(name.as_str(), "builtin.method.result.is_ok" | "builtin.method.result.is_err")
+    ) && call.arguments.len() == 1
+}
+
+fn is_generic_variant_predicate_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    is_generic_option_predicate_callable(program, callable)
+        || is_generic_result_predicate_callable(program, callable)
 }
 
 /// Checker-owned admission state for the already implemented scalar
@@ -1662,7 +1732,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     .callables()
                     .get(&function.node_id)
                     .is_some_and(|callable| {
-                        is_generic_option_predicate_callable(program, callable)
+                        is_generic_variant_predicate_callable(program, callable)
                     });
                 ((!generic_record_callable && !generic_variant_callable)
                     && !function.generics.is_empty())
@@ -1679,7 +1749,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
             .any(|callable| {
                 (!is_scalar_generic_record_projection_callable(program, callable)
-                    && !is_generic_option_predicate_callable(program, callable)
+                    && !is_generic_variant_predicate_callable(program, callable)
                     && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()

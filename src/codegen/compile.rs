@@ -642,7 +642,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-LOWERING-001",
                         format!(
-                            "complete generic Option predicate MIR island construction failed: {message}"
+                            "complete generic variant predicate MIR island construction failed: {message}"
                         ),
                     ),
                     (
@@ -651,7 +651,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-COVERAGE-001",
                         format!(
-                            "complete generic Option predicate MIR island materialization failed: {message}"
+                            "complete generic variant predicate MIR island materialization failed: {message}"
                         ),
                     ),
                 };

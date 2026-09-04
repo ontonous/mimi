@@ -90,6 +90,69 @@ fn rejects_generic_option_predicate_for_non_copy_payload_before_legacy() {
 }
 
 #[test]
+fn materializes_generic_result_predicate_with_a_specialized_variant_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_result_predicate.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result predicate must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantPredicate {
+                    contract: crate::core::mir::types::MirVariantPredicateContract {
+                        predicate: crate::core::mir::MirVariantPredicate::IsOk,
+                        ..
+                    }
+                }
+            )
+        })
+        .expect("generic Result predicate instance");
+    let MirGenericInstanceContract::ScalarVariantPredicate { contract } = &instance.contract else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.nominal.as_str(), "builtin:type:Result");
+    assert_eq!(contract.variant_name, "Ok");
+    assert_eq!(contract.alternate_variant_name, "Err");
+    assert_eq!(contract.discriminant, 0);
+    let Some(result_desc) = program.type_catalog().get(&contract.variant_ty) else {
+        panic!("specialized Result TypeDesc is absent");
+    };
+    assert!(matches!(
+        result_desc.layout,
+        crate::core::mir::types::MirLayout::Result { .. }
+    ));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Result predicate execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn rejects_generic_result_predicate_for_non_copy_payload_before_legacy() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_predicate_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("non-Copy generic Result predicate must fail closed");
+    let message = error.to_string();
+    assert!(
+        message.contains("MIR lowering failed"),
+        "unexpected rejection: {message}"
+    );
+}
+
+#[test]
 fn materializes_generic_scalar_list_len_as_a_canonical_facade() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_list_len.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

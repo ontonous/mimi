@@ -318,7 +318,7 @@ pub fn materialize_canonical_mir_route(
             profile: CanonicalMirRouteProfile::GenericOptionPredicate,
             stage: CanonicalMirRouteFailureStage::Coverage,
             message:
-                "complete generic Option predicate admission did not materialize a VariantPredicate instance"
+                "complete generic variant predicate admission did not materialize a VariantPredicate instance"
                     .into(),
         });
     }

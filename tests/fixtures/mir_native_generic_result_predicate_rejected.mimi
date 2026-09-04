@@ -1,0 +1,11 @@
+func is_ok<T>(value: Result<T, i32>) -> bool {
+    value.is_ok()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Result<string, i32> = Ok("owned")
+    let flag = is_ok(value)
+    drop(value)
+    if flag { 1 } else { 0 }
+}

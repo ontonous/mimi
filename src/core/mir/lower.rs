@@ -919,14 +919,16 @@ fn materialize_generic_instance(
         &generic_id,
         &mut HashSet::new(),
     );
-    let generic_variant_predicate_facade = callable.signature.parameters.iter().any(|parameter| {
-        mentions_generic_option_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
-    }) || mentions_generic_option_type(
-        program,
-        &callable.signature.result,
-        &generic_id,
-        &mut HashSet::new(),
-    );
+    let generic_variant_predicate_facade =
+        callable.signature.parameters.iter().any(|parameter| {
+            mentions_generic_option_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
+                || mentions_generic_result_type(program, &parameter.ty, &generic_id)
+        }) || mentions_generic_option_type(
+            program,
+            &callable.signature.result,
+            &generic_id,
+            &mut HashSet::new(),
+        ) || mentions_generic_result_type(program, &callable.signature.result, &generic_id);
     let is_identity = callable.signature.parameters.len() == 1
         && callable.signature.parameters[0].ty == generic_id
         && callable.signature.result == generic_id;
@@ -1399,7 +1401,7 @@ fn materialize_generic_instance(
             .ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
-                    message: "generic Option predicate result has no specialized TypeDesc".into(),
+                    message: "generic variant predicate result has no specialized TypeDesc".into(),
                 }]
             })?;
         let variant_ty = function
@@ -1409,7 +1411,7 @@ fn materialize_generic_instance(
             .ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
-                    message: "generic Option predicate source has no specialized TypeDesc".into(),
+                    message: "generic variant predicate source has no specialized TypeDesc".into(),
                 }]
             })?;
         let receipt = type_catalog
@@ -1418,7 +1420,7 @@ fn materialize_generic_instance(
                 vec![MirLoweringError {
                     node_id: subject(),
                     message: format!(
-                        "generic Option predicate receipt specialization failed: {message}"
+                        "generic variant predicate receipt specialization failed: {message}"
                     ),
                 }]
             })?;
@@ -1429,13 +1431,13 @@ fn materialize_generic_instance(
             .ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
-                    message: "generic Option predicate disappeared during specialization".into(),
+                    message: "generic variant predicate disappeared during specialization".into(),
                 }]
             })?;
         let MirInstructionKind::VariantPredicate { contract, .. } = &mut instruction.kind else {
             return Err(vec![MirLoweringError {
                 node_id: subject(),
-                message: "generic Option predicate changed during specialization".into(),
+                message: "generic variant predicate changed during specialization".into(),
             }]);
         };
         *contract = Some(receipt);
@@ -1625,7 +1627,7 @@ fn detect_scalar_list_facade_operation(
     Ok(*operation)
 }
 
-/// Validate the concrete body of a generic scalar `Option<T>` predicate. The
+/// Validate the concrete body of a generic scalar `Option<T>`/`Result<T, E>` predicate. The
 /// body must contain exactly one receipt-bearing `VariantPredicate` over the
 /// sole parameter and return its canonical Copy bool result. The specialized
 /// receipt is regenerated from TypeDesc before this helper is called.
@@ -1637,7 +1639,7 @@ fn detect_scalar_variant_predicate_contract(
     if function.parameters.len() != 1 {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic Option predicate must have exactly one parameter".into(),
+            message: "generic variant predicate must have exactly one parameter".into(),
         }]);
     }
     let predicates = function
@@ -1662,7 +1664,7 @@ fn detect_scalar_variant_predicate_contract(
     let [(result, variant, predicate, contract)] = predicates.as_slice() else {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic Option predicate must lower to exactly one receipt-bearing VariantPredicate".into(),
+            message: "generic variant predicate must lower to exactly one receipt-bearing VariantPredicate".into(),
         }]);
     };
     let parameter = &function.parameters[0];
@@ -1679,7 +1681,7 @@ fn detect_scalar_variant_predicate_contract(
     if !direct_parameter && !cloned_parameter {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic Option predicate must inspect its sole parameter or a direct Clone"
+            message: "generic variant predicate must inspect its sole parameter or a direct Clone"
                 .into(),
         }]);
     }
@@ -1690,7 +1692,7 @@ fn detect_scalar_variant_predicate_contract(
         .ok_or_else(|| {
             vec![MirLoweringError {
                 node_id: subject.clone(),
-                message: "generic Option predicate result TypeDesc is absent".into(),
+                message: "generic variant predicate result TypeDesc is absent".into(),
             }]
         })?;
     let variant_ty = function
@@ -1700,7 +1702,7 @@ fn detect_scalar_variant_predicate_contract(
         .ok_or_else(|| {
             vec![MirLoweringError {
                 node_id: subject.clone(),
-                message: "generic Option predicate source TypeDesc is absent".into(),
+                message: "generic variant predicate source TypeDesc is absent".into(),
             }]
         })?;
     type_catalog
@@ -1708,22 +1710,25 @@ fn detect_scalar_variant_predicate_contract(
         .map_err(|message| {
             vec![MirLoweringError {
                 node_id: subject.clone(),
-                message: format!("generic Option predicate contract is invalid: {message}"),
+                message: format!("generic variant predicate contract is invalid: {message}"),
             }]
         })?;
     if !matches!(
         predicate,
-        super::MirVariantPredicate::IsSome | super::MirVariantPredicate::IsNone
+        super::MirVariantPredicate::IsSome
+            | super::MirVariantPredicate::IsNone
+            | super::MirVariantPredicate::IsOk
+            | super::MirVariantPredicate::IsErr
     ) {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic Option predicate only admits IsSome or IsNone".into(),
+            message: "generic variant predicate only admits IsSome/IsNone/IsOk/IsErr".into(),
         }]);
     }
     Ok(contract.clone())
 }
 
-/// Validate a materialized generic Option predicate instance. This is shared
+/// Validate a materialized generic variant predicate instance. This is shared
 /// by the MIR validator and all route owners; it proves the executable body
 /// remains the checker-selected Clone/VariantPredicate/Return shape and that
 /// the specialized receipt is exactly the TypeDesc predicate contract.
@@ -1733,7 +1738,7 @@ pub(crate) fn validate_scalar_variant_predicate_mir(
     contract: &super::types::MirVariantPredicateContract,
 ) -> Result<(), String> {
     if function.parameters.len() != 1 {
-        return Err("generic Option predicate must have exactly one parameter".into());
+        return Err("generic variant predicate must have exactly one parameter".into());
     }
     let predicates = function
         .blocks
@@ -1751,13 +1756,13 @@ pub(crate) fn validate_scalar_variant_predicate_mir(
         .collect::<Vec<_>>();
     let [(result, variant, predicate, receipt)] = predicates.as_slice() else {
         return Err(
-            "generic Option predicate must contain exactly one receipt-bearing VariantPredicate"
+            "generic variant predicate must contain exactly one receipt-bearing VariantPredicate"
                 .into(),
         );
     };
     if **receipt != *contract {
         return Err(
-            "generic Option predicate instance contract disagrees with its instruction receipt"
+            "generic variant predicate instance contract disagrees with its instruction receipt"
                 .into(),
         );
     }
@@ -1774,19 +1779,19 @@ pub(crate) fn validate_scalar_variant_predicate_mir(
         });
     if !valid_source {
         return Err(
-            "generic Option predicate must inspect its sole parameter or a direct Clone".into(),
+            "generic variant predicate must inspect its sole parameter or a direct Clone".into(),
         );
     }
     let result_ty = function
         .values
         .get(result)
-        .ok_or_else(|| "generic Option predicate result TypeDesc is absent".to_string())?
+        .ok_or_else(|| "generic variant predicate result TypeDesc is absent".to_string())?
         .ty
         .clone();
     let variant_ty = function
         .values
         .get(variant)
-        .ok_or_else(|| "generic Option predicate source TypeDesc is absent".to_string())?
+        .ok_or_else(|| "generic variant predicate source TypeDesc is absent".to_string())?
         .ty
         .clone();
     type_catalog.validate_variant_predicate_receipt(&result_ty, &variant_ty, *predicate, receipt)
@@ -3073,6 +3078,18 @@ fn mentions_generic_option_type(
     seen: &mut HashSet<crate::core::ResolvedTypeId>,
 ) -> bool {
     mentions_generic_variant_type(program, id, generic_id, "builtin:type:Option", seen)
+}
+
+fn mentions_generic_result_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(ResolvedType::Result { ok, error }) = program.resolved_types().get(id) else {
+        return false;
+    };
+    contains_generic_type(program, ok, generic_id, &mut HashSet::new())
+        || contains_generic_type(program, error, generic_id, &mut HashSet::new())
 }
 
 fn mentions_generic_variant_type(
@@ -5027,7 +5044,7 @@ impl<'a> Lowerer<'a> {
         {
             Ok(contract) => Some(contract),
             Err(message) => {
-                match type_catalog.validated_generic_option_predicate_contract(
+                match type_catalog.validated_generic_variant_predicate_contract(
                     &result_ty,
                     &variant_ty,
                     predicate,
