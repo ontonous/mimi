@@ -5440,10 +5440,11 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
 }
 
 /// Return the canonical success-variant payload identity for the explicitly
-/// admitted source-driven projection shapes: move-owned `Option<string>` and
-/// Copy `Option<i32>`/`Option<i64>`/`Option<f64>`/`Option<bool>`. The receiver/result TypeDesc is still validated by
-/// `variant_projection_contract`; this helper only maps the checker-owned
-/// builtin identity to the stable variant family.
+/// admitted source-driven projection shapes: move-owned `Option<string>`,
+/// Copy `Option<i32>`/`Option<i64>`/`Option<f64>`/`Option<bool>`, and the first
+/// concrete Copy `Result<i32, i32>` island. The receiver/result TypeDesc is
+/// still validated by `variant_projection_contract`; this helper only maps
+/// the checker-owned builtin identity to the stable variant family.
 fn variant_projection_builtin(
     call: &ResolvedCall,
     type_catalog: Option<&MirTypeCatalog>,
@@ -5451,37 +5452,71 @@ fn variant_projection_builtin(
     let ResolvedCallee::Builtin(builtin) = &call.callee else {
         return None;
     };
-    if call.arguments.len() != 1 || builtin.as_str() != "builtin.method.option.unwrap" {
+    if call.arguments.len() != 1
+        || !matches!(
+            builtin.as_str(),
+            "builtin.method.option.unwrap" | "builtin.method.result.unwrap"
+        )
+    {
         return None;
     }
     let catalog = type_catalog?;
     let receiver_ty = &call.arguments.first()?.value.ty;
     let descriptor = catalog.get(receiver_ty)?;
-    let super::types::MirLayout::Option { variants, .. } = &descriptor.layout else {
-        return None;
-    };
-    let inner = catalog.get(match &descriptor.layout {
-        super::types::MirLayout::Option { inner, .. } => inner,
+    let (variants, payload) = match (&descriptor.layout, builtin.as_str()) {
+        (super::types::MirLayout::Option { variants, inner }, "builtin.method.option.unwrap") => {
+            let inner_id = inner;
+            let inner = catalog.get(inner_id)?;
+            let supported = match descriptor.ownership {
+                super::types::MirOwnership::Move => matches!(
+                    inner.kind,
+                    super::types::MirTypeKind::Primitive(PrimitiveType::String)
+                ),
+                super::types::MirOwnership::Copy => matches!(
+                    inner.kind,
+                    super::types::MirTypeKind::Primitive(
+                        PrimitiveType::I32
+                            | PrimitiveType::I64
+                            | PrimitiveType::F64
+                            | PrimitiveType::Bool,
+                    )
+                ),
+                _ => false,
+            };
+            if !supported {
+                return None;
+            }
+            (variants, inner_id.clone())
+        }
+        (
+            super::types::MirLayout::Result {
+                variants,
+                ok,
+                error,
+                ..
+            },
+            "builtin.method.result.unwrap",
+        ) => {
+            catalog.validate_copy_result_i32_variant(receiver_ty).ok()?;
+            if ok != error {
+                return None;
+            }
+            (variants, ok.clone())
+        }
         _ => return None,
-    })?;
-    let supported = match descriptor.ownership {
-        super::types::MirOwnership::Move => matches!(
-            inner.kind,
-            super::types::MirTypeKind::Primitive(PrimitiveType::String)
-        ),
-        super::types::MirOwnership::Copy => matches!(
-            inner.kind,
-            super::types::MirTypeKind::Primitive(
-                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::F64 | PrimitiveType::Bool,
-            )
-        ),
-        _ => false,
     };
-    if !supported {
+    let variant_name = if builtin.as_str() == "builtin.method.result.unwrap" {
+        "Ok"
+    } else {
+        "Some"
+    };
+    let variant = variants
+        .iter()
+        .find(|variant| variant.name == variant_name)?;
+    let field = variant.fields.first()?;
+    if field.ty != payload || call.result != field.ty {
         return None;
     }
-    let variant = variants.iter().find(|variant| variant.name == "Some")?;
-    let field = variant.fields.first()?;
     Some((variant.id.clone(), field.id.clone()))
 }
 

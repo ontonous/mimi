@@ -1,0 +1,15 @@
+// Canonical MIR Copy Result<i32, i32> unwrap projection.
+func unwrap_copy() -> i32 {
+    ensures: result >= 0
+    let value: Result<i32, i32> = Ok(41)
+    value.unwrap()
+}
+
+func unwrap_err() -> i32 {
+    let value: Result<i32, i32> = Err(7)
+    value.unwrap()
+}
+
+func main() -> i32 {
+    unwrap_copy()
+}

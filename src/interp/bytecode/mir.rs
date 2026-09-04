@@ -5037,6 +5037,40 @@ mod tests {
     }
 
     #[test]
+    fn executes_copy_result_i32_i32_unwrap_without_ast() {
+        let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("Result<i32, i32>.unwrap MIR");
+        let function = mir
+            .functions()
+            .get(&crate::core::NodeId("function:unwrap_copy".into()))
+            .expect("unwrap_copy MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::VariantProject {
+                        contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result unwrap execution");
+        let bytecode = compile_mir_program(&mir).expect("Result unwrap bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode Result unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_materialized_two_field_generic_record_projection_without_ast() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_record_projection_pair.mimi");

@@ -272,6 +272,55 @@ fn lowers_option_i32_unwrap_to_copy_variant_projection() {
 }
 
 #[test]
+fn lowers_result_i32_i32_unwrap_to_copy_variant_projection() {
+    let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Result<i32, i32>.unwrap must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:unwrap_copy".into()))
+        .expect("unwrap_copy MIR function");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("Result unwrap must carry a read-only variant projection receipt");
+    assert_eq!(receipt.variant_name, "Ok");
+    assert_eq!(receipt.projection.nominal.as_str(), "builtin:type:Result");
+    assert_eq!(receipt.projection.field_index, 0);
+    assert_eq!(receipt.projection.arity, 1);
+    assert_eq!(receipt.projection.ownership, MirOwnership::Copy);
+    assert_eq!(receipt.projection.move_out_glue, MirGlueKind::Noop);
+    program
+        .type_catalog()
+        .validate_copy_result_i32_variant(&receipt.source_ty)
+        .expect("Result<i32, i32> TypeDesc contract");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Result<i32, i32>.unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:unwrap_err".into()), &[])
+        .expect_err("Result::unwrap on Err must trap");
+    assert!(
+        error.message.contains("E0800"),
+        "unexpected Result active-tag trap: {error}"
+    );
+}
+
+#[test]
 fn lowers_option_bool_unwrap_to_copy_variant_projection() {
     let source = include_str!("../../../tests/fixtures/mir_native_option_bool_unwrap.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -727,10 +776,10 @@ fn option_string_unwrap_none_preserves_canonical_trap_class() {
 }
 
 #[test]
-fn result_unwrap_remains_fail_closed_outside_option_projection_island() {
+fn result_i64_unwrap_remains_fail_closed_outside_copy_result_i32_island() {
     let source = r#"
-        func main() -> i32 {
-            let value: Result<i32, i32> = Ok(41)
+        func main() -> i64 {
+            let value: Result<i64, i32> = Ok(41)
             value.unwrap()
         }
     "#;
@@ -739,8 +788,9 @@ fn result_unwrap_remains_fail_closed_outside_option_projection_island() {
         .parse_file()
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check");
-    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("Result::unwrap must remain outside the Option<string> projection island");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked).expect_err(
+        "Result<i64, i32>::unwrap must remain outside the Copy Result<i32, i32> island",
+    );
     let crate::core::mir::reference::MirProgramBuildError::Lowering(errors) = error else {
         panic!("Result::unwrap must fail during MIR lowering");
     };

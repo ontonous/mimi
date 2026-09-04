@@ -1720,6 +1720,75 @@ impl MirTypeCatalog {
         }
     }
 
+    /// Validate the first concrete Copy `Result<i32, i32>` projection island.
+    /// Both payload slots are part of the ABI contract even though `unwrap`
+    /// reads only the `Ok` slot: proving the inactive `Err` slot is Copy and
+    /// no-op glue prevents a backend from silently inheriting a different
+    /// aggregate ownership policy.
+    pub fn validate_copy_result_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.kind != MirTypeKind::Result
+            || !matches!(descriptor.layout, MirLayout::Result { .. })
+        {
+            return Err(format!(
+                "type '{}' is not the built-in Copy Result<i32, i32> layout",
+                ty.as_str()
+            ));
+        }
+        let payload = self.validate_flat_copy_variant(ty)?;
+        let payload_desc = self.get(&payload).ok_or_else(|| {
+            format!(
+                "Result payload type '{}' is absent from MIR type catalog",
+                payload.as_str()
+            )
+        })?;
+        if payload_desc.kind != MirTypeKind::Primitive(PrimitiveType::I32) {
+            return Err(format!(
+                "Result payload is {:?}, expected canonical Copy i32",
+                payload_desc.kind
+            ));
+        }
+        self.validate_copy_scalar(&payload)?;
+        let MirLayout::Result { variants, .. } = &descriptor.layout else {
+            unreachable!("Result layout checked above");
+        };
+        if variants.len() != 2 {
+            return Err(format!(
+                "Result TypeDesc has {} variants; canonical Copy Result<i32, i32> requires Ok and Err",
+                variants.len()
+            ));
+        }
+        let ok = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Result::Ok"
+                && variant.name == "Ok"
+                && variant.discriminant == 0
+                && variant.fields.len() == 1
+        });
+        let err = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Result::Err"
+                && variant.name == "Err"
+                && variant.discriminant == 1
+                && variant.fields.len() == 1
+        });
+        let (Some(ok), Some(err)) = (ok, err) else {
+            return Err(
+                "Result TypeDesc variants do not match canonical Copy Ok/Err layout".into(),
+            );
+        };
+        for (variant_name, field) in [("Ok", &ok.fields[0]), ("Err", &err.fields[0])] {
+            if field.id.0 != format!("builtin:variant:Result::{variant_name}/payload:0")
+                || field.ty != payload
+            {
+                return Err(format!(
+                    "Result {variant_name} payload identity/type disagrees with canonical Copy i32 contract"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the flat Copy variant contract and return one stable variant
     /// descriptor for a native switch arm.  The caller receives a TypeDesc
     /// fact rather than re-deriving the arm from a backend representation.

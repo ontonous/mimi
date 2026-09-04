@@ -1016,6 +1016,67 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_result_i32_i32_unwrap_copy_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_result_i32_unwrap.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result<i32, i32>.unwrap execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Result<i32, i32>.unwrap MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode Result<i32, i32>.unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(bytecode, Value::Int(41)));
+
+        let unwrap_copy = program
+            .functions()
+            .get(&crate::core::NodeId("function:unwrap_copy".into()))
+            .expect("unwrap_copy MIR");
+        let receipt = unwrap_copy
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::VariantProject {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("Result unwrap must carry a read-only projection receipt");
+        assert_eq!(receipt.variant_name, "Ok");
+        assert_eq!(
+            receipt.projection.ownership,
+            crate::core::mir::types::MirOwnership::Copy
+        );
+        assert_eq!(
+            receipt.projection.move_out_glue,
+            crate::core::mir::types::MirGlueKind::Noop
+        );
+        program
+            .type_catalog()
+            .validate_copy_result_i32_variant(&receipt.source_ty)
+            .expect("Result<i32, i32> TypeDesc contract");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for Result<i32, i32>.unwrap MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_result_i32_unwrap_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Result<i32, i32>.unwrap MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Result<i32, i32>.unwrap module verifies");
+        assert!(generator.module.get_function("unwrap_copy").is_some());
+    }
+
+    #[test]
     fn native_emitter_materializes_option_bool_unwrap_copy_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_option_bool_unwrap.mimi"
