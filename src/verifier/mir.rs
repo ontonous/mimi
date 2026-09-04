@@ -2587,7 +2587,120 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } => {
+            eval_materialized_variant_projection_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                target_owner,
+                type_arguments,
+                arguments,
+                contract,
+            )
+        }
     }
+}
+
+/// Symbolically execute a materialized generic `Option<T>.unwrap()` call.
+/// The call is read-only over a Copy aggregate; its specialized target body
+/// and trap-bearing projection receipt are validated before the symbolic tag
+/// condition is added.  The verifier never reopens the generic source body.
+fn eval_materialized_variant_projection_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirVariantProjectionTrapContract,
+) -> Result<(), String> {
+    if type_arguments.len() != 1 || arguments.len() != 1 {
+        return Err(
+            "MIR verifier generic variant projection calls require one type and value argument"
+                .into(),
+        );
+    }
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier generic variant projection target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_variant_projection_mir(target, catalog, contract)?;
+    let target_parameter = target.parameters.first().ok_or_else(|| {
+        "MIR verifier generic variant projection target has no parameter".to_string()
+    })?;
+    let target_parameter_ty = target
+        .values
+        .get(target_parameter)
+        .ok_or_else(|| {
+            "MIR verifier generic variant projection target parameter TypeDesc is absent"
+                .to_string()
+        })?
+        .ty
+        .clone();
+    let argument_ty = function
+        .values
+        .get(&arguments[0])
+        .ok_or_else(|| {
+            "MIR verifier generic variant projection argument TypeDesc is absent".to_string()
+        })?
+        .ty
+        .clone();
+    if argument_ty != target_parameter_ty {
+        return Err(
+            "MIR verifier generic variant projection argument type disagrees with target parameter"
+                .into(),
+        );
+    }
+    let argument_value = state.values.get(&arguments[0]).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier generic variant projection argument '{}' is not defined",
+            arguments[0]
+        )
+    })?;
+    let SymbolicValue::Variant {
+        nominal,
+        tag,
+        payload,
+        active_variant,
+    } = argument_value
+    else {
+        return Err(
+            "MIR verifier generic variant projection argument is not a symbolic Option".into(),
+        );
+    };
+    if nominal != contract.projection.nominal {
+        return Err(
+            "MIR verifier generic variant projection nominal disagrees with TypeDesc".into(),
+        );
+    }
+    let active = tag.eq(&Int::from_i64(contract.discriminant as i64));
+    add_definedness(state, active, &contract.trap_code)?;
+    let projected = if active_variant
+        .as_ref()
+        .is_some_and(|variant| variant != &contract.projection.variant)
+    {
+        symbolic_zero_for_type(catalog, &target.result)?
+    } else {
+        payload
+            .get(&contract.projection.field)
+            .cloned()
+            .ok_or_else(|| {
+                "MIR verifier generic variant projection payload is absent".to_string()
+            })?
+    };
+    let result = result.as_ref().ok_or_else(|| {
+        "MIR verifier generic variant projection must produce a result".to_string()
+    })?;
+    ensure_result_shape(function, catalog, result, &projected)?;
+    state.values.insert(result.clone(), projected);
+    Ok(())
 }
 
 fn eval_materialized_variant_predicate_call(

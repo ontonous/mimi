@@ -2092,7 +2092,8 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
-                | MirGenericInstanceContract::ScalarVariantPredicate { .. } => {}
+                | MirGenericInstanceContract::ScalarVariantPredicate { .. }
+                | MirGenericInstanceContract::ScalarVariantProjection { .. } => {}
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit

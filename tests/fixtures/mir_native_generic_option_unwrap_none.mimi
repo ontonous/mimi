@@ -1,0 +1,9 @@
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let none: Option<i32> = None
+    unwrap(none)
+}

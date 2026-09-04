@@ -647,7 +647,7 @@ pub struct MirVariantDesc {
 /// resolved together from the TypeDesc graph. Consumers must carry this
 /// receipt into their physical read instruction instead of independently
 /// deriving a tag, index, or arity from a runtime representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirVariantProjectionContract {
     pub nominal: NominalTypeId,
     pub variant: NodeId,
@@ -672,7 +672,7 @@ pub struct MirVariantProjectionContract {
 /// spelling, discriminant, and explicit trap identity.  It is deliberately
 /// limited to the flat Copy variant island: a non-Copy payload would require
 /// a separate consuming projection and residual/drop proof.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirVariantProjectionTrapContract {
     pub source_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
@@ -5182,6 +5182,98 @@ impl MirTypeCatalog {
             alternate_variant_name: alternate.name.clone(),
             predicate,
             discriminant: variant.discriminant,
+        })
+    }
+
+    /// Materialize the non-executable placeholder receipt for the narrow
+    /// generic `Option<T>.unwrap()` projection.  The generic payload is
+    /// opaque until instance specialization, but the Option family, `Some`
+    /// identity, one-field ABI, and active-tag trap are fixed here.  Concrete
+    /// materialization must call `validated_variant_projection_trap_contract`
+    /// again after replacing `T` with a Copy scalar.
+    pub(crate) fn validated_generic_option_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "generic Option projection source type '{}' is absent from MIR TypeDesc catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Option { variants, inner } = &descriptor.layout else {
+            return Err(format!(
+                "generic Option projection source '{}' has no canonical Option layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Option
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "generic Option projection source must be Aggregate/Copy with canonical no-op glue"
+                    .into(),
+            );
+        }
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic Option projection result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        let generic_payload = self
+            .get(inner)
+            .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
+        if !generic_payload || result.kind != MirTypeKind::GenericParameter || inner != result_ty {
+            return Err(
+                "generic Option projection placeholder requires Option<T> and result T identity"
+                    .into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| {
+                variant.id == *variant_id
+                    && variant.name == "Some"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Option projection target must be the canonical Some variant".to_string()
+            })?;
+        if selected.fields[0].id != *field_id || selected.fields[0].ty != *result_ty {
+            return Err(
+                "generic Option projection field must be the canonical Some payload".into(),
+            );
+        }
+        Ok(MirVariantProjectionTrapContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection: MirVariantProjectionContract {
+                nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
+                variant: selected.id.clone(),
+                field: selected.fields[0].id.clone(),
+                field_index: 0,
+                arity: 1,
+                field_ty: result_ty.clone(),
+                ownership: MirOwnership::Copy,
+                move_out_glue: MirGlueKind::Noop,
+            },
+            variant_name: "Some".into(),
+            discriminant: 1,
+            trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
         })
     }
 

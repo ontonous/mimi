@@ -1393,6 +1393,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarVariantProjection { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
         };
         if let Err(message) = argument_error {
             errors.push(super::MirValidationError {
@@ -1541,6 +1544,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR Option predicate contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarVariantProjection { ref contract } => {
+                if let Err(message) = super::lower::validate_scalar_variant_projection_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR Option projection contract is invalid: {message}"
                         ),
                     });
                 }

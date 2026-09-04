@@ -1,0 +1,10 @@
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    let value: Option<string> = Some("owned")
+    let out = unwrap(value)
+    drop(out)
+    41
+}

@@ -1,0 +1,8 @@
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    unwrap(Some(41))
+}

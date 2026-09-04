@@ -357,6 +357,13 @@ pub enum MirGenericInstanceContract {
     ScalarVariantPredicate {
         contract: types::MirVariantPredicateContract,
     },
+    /// A generic `Option<T>.unwrap()` read-only payload projection specialized
+    /// to a concrete Copy scalar.  The trap-bearing projection receipt is
+    /// materialized after specialization so consumers cannot infer the
+    /// Option ABI from the generic instance symbol.
+    ScalarVariantProjection {
+        contract: types::MirVariantProjectionTrapContract,
+    },
 }
 
 /// Operations with explicit value and ownership boundaries. The MIR validator
@@ -425,7 +432,9 @@ pub enum MirInstructionKind {
     /// Read one payload field from the checker-selected active variant.
     /// Unlike a switch binding, this node has no arm-level tag proof, so the
     /// TypeDesc receipt carries the discriminant and explicit active-variant
-    /// trap contract. The admitted shape is read-only flat Copy Option/Result.
+    /// trap contract. The admitted shape is read-only flat Copy Option/Result;
+    /// generic `Option<T>.unwrap()` carries a non-executable placeholder until
+    /// concrete instance materialization supplies the Copy-scalar receipt.
     VariantProject {
         result: MirValueId,
         base: MirValueId,

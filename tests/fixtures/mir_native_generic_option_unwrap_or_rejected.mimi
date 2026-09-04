@@ -1,0 +1,7 @@
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    unwrap_or(Some(41), 7)
+}

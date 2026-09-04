@@ -5130,6 +5130,62 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_option_unwrap_without_ast() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic Option unwrap MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { .. }
+                )
+            })
+            .expect("generic Option projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.variant_name, "Some");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Option unwrap execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Option unwrap bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic Option unwrap bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn generic_option_unwrap_none_matches_reference_trap() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Option unwrap None MIR");
+        let reference_error = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference generic Option unwrap None must trap");
+        let bytecode = compile_mir_program(&mir).expect("generic Option unwrap None bytecode");
+        assert!(bytecode.ast.is_none());
+        let bytecode_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode generic Option unwrap None must trap");
+        assert!(reference_error.to_string().contains("E0800"));
+        assert_eq!(bytecode_error.code(), "E0800");
+    }
+
+    #[test]
     fn executes_copy_result_i32_i32_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

@@ -191,6 +191,20 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarVariantProjection { contract } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_variant_projection_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' Option projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -1127,7 +1141,8 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
-                | MirGenericInstanceContract::ScalarVariantPredicate { .. } => {}
+                | MirGenericInstanceContract::ScalarVariantPredicate { .. }
+                | MirGenericInstanceContract::ScalarVariantProjection { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

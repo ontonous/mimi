@@ -1162,6 +1162,33 @@ fn generic_option_predicate_is_verified_from_canonical_mir_without_ast_fallback(
 }
 
 #[test]
+fn generic_option_unwrap_is_verified_from_canonical_mir_without_ast_fallback() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
+    let file = parse_memory_source(source, "mir-generic-option-unwrap").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Option unwrap MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { .. }
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Option unwrap verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().any(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations
+        )
+    }));
+}
+
+#[test]
 fn generic_result_predicate_is_verified_from_canonical_mir_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_result_predicate.mimi");

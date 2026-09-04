@@ -2634,6 +2634,62 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_option_unwrap_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { .. }
+                )
+            })
+            .expect("generic Option projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.variant_name, "Some");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Option unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_option_unwrap");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option unwrap must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option unwrap module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_generic_option_unwrap_none_keeps_the_receipt_trap() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi"
+        ));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_option_unwrap_none");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option unwrap None must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option unwrap None module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_result_predicate() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_predicate.mimi"

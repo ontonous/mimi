@@ -1369,6 +1369,84 @@ fn materialize_generic_instance(
         };
         list_index_contract.replace(receipt);
     }
+    let variant_projections = function
+        .blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| match &instruction.kind {
+                    MirInstructionKind::VariantProject {
+                        result,
+                        base,
+                        contract: Some(receipt),
+                    } => Some((
+                        block_id.clone(),
+                        index,
+                        result.clone(),
+                        base.clone(),
+                        receipt.clone(),
+                    )),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (block_id, instruction_index, result, base, placeholder) in variant_projections {
+        let base_ty = function
+            .values
+            .get(&base)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant projection base has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let result_ty = function
+            .values
+            .get(&result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant projection result has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let receipt = type_catalog
+            .validated_variant_projection_trap_contract(
+                &base_ty,
+                &placeholder.projection.variant,
+                &placeholder.projection.field,
+                &result_ty,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "generic variant projection receipt specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = function
+            .blocks
+            .get_mut(&block_id)
+            .and_then(|block| block.instructions.get_mut(instruction_index))
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant projection disappeared during specialization".into(),
+                }]
+            })?;
+        let MirInstructionKind::VariantProject { contract, .. } = &mut instruction.kind else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic variant projection changed during specialization".into(),
+            }]);
+        };
+        *contract = Some(receipt);
+    }
     let variant_predicates = function
         .blocks
         .iter()
@@ -1494,12 +1572,27 @@ fn materialize_generic_instance(
             )
         })
     });
+    let has_generic_variant_projection = function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::VariantProject {
+                    contract: Some(_),
+                    ..
+                }
+            )
+        })
+    });
     let contract = if is_identity {
         if type_catalog.validate_owned_string(&concrete).is_ok() {
             MirGenericInstanceContract::OwnedStringIdentity
         } else {
             MirGenericInstanceContract::ScalarIdentity
         }
+    } else if has_generic_variant_projection {
+        let contract =
+            detect_scalar_variant_projection_contract(&function, type_catalog, &subject())?;
+        MirGenericInstanceContract::ScalarVariantProjection { contract }
     } else if generic_variant_predicate_facade {
         let contract =
             detect_scalar_variant_predicate_contract(&function, type_catalog, &subject())?;
@@ -1727,6 +1820,127 @@ fn detect_scalar_variant_predicate_contract(
         }]);
     }
     Ok(contract.clone())
+}
+
+/// Validate the concrete body of a generic `Option<T>.unwrap()` projection.
+/// The specialized function must remain exactly one receipt-bearing
+/// `VariantProject` over its sole parameter and directly return that payload.
+pub(crate) fn validate_scalar_variant_projection_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirVariantProjectionTrapContract,
+) -> Result<(), String> {
+    if function.parameters.len() != 1 {
+        return Err("generic variant projection must have exactly one parameter".into());
+    }
+    if function.blocks.len() != 1 {
+        return Err("generic variant projection must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic variant projection entry block is absent".to_string())?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::Clone {
+                result: cloned,
+                source: clone_source,
+            },
+        ..
+    }, MirInstruction {
+        kind:
+            MirInstructionKind::VariantProject {
+                result,
+                base,
+                contract: Some(receipt),
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(
+            "generic variant projection body must be exactly Clone then receipt-bearing VariantProject"
+                .into(),
+        );
+    };
+    let parameter = &function.parameters[0];
+    if cloned != base || clone_source != parameter {
+        return Err("generic variant projection must project its sole parameter".into());
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| "generic variant projection base TypeDesc is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| "generic variant projection result TypeDesc is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+    if receipt != contract {
+        return Err(
+            "generic variant projection receipt does not match the admitted contract".into(),
+        );
+    }
+    if function.result != result_ty {
+        return Err("generic variant projection result is not the function result".into());
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err("generic variant projection must directly return its Project result".into());
+    };
+    if *returned != *result {
+        return Err("generic variant projection return value is not the Project result".into());
+    }
+    if receipt.variant_name != "Some"
+        || receipt.discriminant != 1
+        || receipt.projection.field_index != 0
+        || receipt.projection.arity != 1
+        || receipt.projection.ownership != super::types::MirOwnership::Copy
+        || receipt.projection.move_out_glue != super::types::MirGlueKind::Noop
+    {
+        return Err(
+            "generic variant projection receipt is outside the Copy Option<T> contract".into(),
+        );
+    }
+    Ok(())
+}
+
+fn detect_scalar_variant_projection_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::types::MirVariantProjectionTrapContract, Vec<MirLoweringError>> {
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: "generic variant projection must carry one canonical trap receipt".into(),
+            }]
+        })?;
+    validate_scalar_variant_projection_mir(function, type_catalog, &receipt).map_err(
+        |message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!("generic variant projection contract is invalid: {message}"),
+            }]
+        },
+    )?;
+    Ok(receipt)
 }
 
 /// Validate a materialized generic variant predicate instance. This is shared
@@ -5167,6 +5381,15 @@ impl<'a> Lowerer<'a> {
         match contract {
             Ok(contract) => Some(contract),
             Err(message) => {
+                if !consuming {
+                    if let Ok(receipt) = type_catalog
+                        .validated_generic_option_projection_trap_contract(
+                            &base_ty, variant, field, &result_ty,
+                        )
+                    {
+                        return Some(receipt);
+                    }
+                }
                 self.error(
                     node_id,
                     format!("canonical variant projection contract is invalid: {message}"),
@@ -5572,6 +5795,25 @@ fn variant_projection_builtin(
         ) => {
             let inner_id = inner;
             let inner = catalog.get(inner_id)?;
+            // Generic `Option<T>.unwrap()` is admitted as an opaque
+            // placeholder; its concrete Copy-scalar payload is checked only
+            // during generic instance specialization.  `unwrap_or` remains a
+            // concrete i32 island and must not inherit this escape hatch.
+            if builtin.as_str() == "builtin.method.option.unwrap"
+                && inner.kind == super::types::MirTypeKind::GenericParameter
+            {
+                let variant = variants.iter().find(|variant| {
+                    variant.name == "Some"
+                        && variant.discriminant == 1
+                        && variant.fields.len() == 1
+                        && variant.fields[0].ty == *inner_id
+                })?;
+                let field = variant.fields.first()?;
+                if call.result == field.ty {
+                    return Some((variant.id.clone(), field.id.clone()));
+                }
+                return None;
+            }
             // The total fallback receipt is currently admitted only for the
             // concrete default-route Option<i32> island. Other Copy payloads
             // stay on the generic candidate error below rather than entering

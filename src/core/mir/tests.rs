@@ -98,6 +98,122 @@ fn rejects_generic_option_predicate_for_non_copy_payload_before_legacy() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_with_a_specialized_projection_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { .. }
+            )
+        })
+        .expect("generic Option projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.variant_name, "Some");
+    assert_eq!(contract.discriminant, 1);
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Copy);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn generic_option_unwrap_none_preserves_the_canonical_trap() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap None MIR");
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("generic Option unwrap None must trap");
+    assert!(
+        error.to_string().contains("E0800"),
+        "unexpected trap: {error}"
+    );
+}
+
+#[test]
+fn generic_option_unwrap_stale_receipt_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
+    let checked = checked_program(source);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { .. }
+            )
+        })
+        .expect("generic Option projection instance");
+    let mut functions = canonical.functions().clone();
+    let target = functions
+        .get_mut(&instance.function)
+        .expect("materialized generic Option projection target");
+    let receipt = target
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("projection receipt");
+    receipt.discriminant = receipt.discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog_and_instances(
+        functions,
+        canonical.type_catalog().clone(),
+        canonical.instances().clone(),
+    )
+    .expect_err("stale generic Option projection receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant projection trap receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn rejects_generic_option_unwrap_for_owned_payload_before_legacy() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi");
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("owned generic Option unwrap must fail closed");
+    assert!(error.to_string().contains("MIR lowering failed"));
+}
+
+#[test]
+fn rejects_generic_result_unwrap_and_option_unwrap_or_before_legacy() {
+    for source in [
+        include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"),
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi"),
+    ] {
+        let checked = checked_program(source);
+        let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect_err("unsupported generic variant projection must fail closed");
+        assert!(error.to_string().contains("MIR lowering failed"));
+    }
+}
+
+#[test]
 fn materializes_generic_result_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_result_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
