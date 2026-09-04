@@ -56,6 +56,18 @@ def scan_rust_files() -> list[tuple[str, str]]:
 def main() -> int:
     errors: list[str] = []
 
+    if not INVENTORY.is_file():
+        if not (ROOT / "devdocs").is_dir():
+            # devdocs/ 已于 2026-08-31 移出 git 跟踪（internal-only）；公共检出无
+            # edge inventory，跳过而非红闸。本地检出（devdocs 在场）仍全量执法。
+            print(
+                "edge isolation check skipped: "
+                "devdocs/ is internal-only (untracked) on this checkout"
+            )
+            return 0
+        print(f"error: missing {INVENTORY.relative_to(ROOT)}", file=sys.stderr)
+        return 1
+
     # 1) Manifest sanity.
     with INVENTORY.open("rb") as stream:
         inventory = tomllib.load(stream)

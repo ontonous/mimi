@@ -9,7 +9,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROADMAP = ROOT / "devdocs/v0.31/roadmap.toml"
 REQUIREMENTS = ROOT / "docs/language-requirements.toml"
 KINDS = {
     "baseline",
@@ -34,11 +33,44 @@ NO_FEATURE_KINDS = {
     "soundness",
     "completeness",
 }
+# v0.31 归档快照之后新增的 requirement，无法回填 0.31 里程碑归属。
+# 每一项必须登记引入出处；新增 post-0.31 requirement 时在此追加。
+POST_V0_31_REQUIREMENTS = {
+    # 0.1.8（0.38.122）：Flow `flow_drop` 显式释放 + EPOCH_ERR_STALE
+    "FLOW-EPOCH-DROP-001",
+}
 
 
 def main() -> int:
     errors: list[str] = []
-    with ROADMAP.open("rb") as stream:
+    # v0.31 目录已归档至 devdocs/archive/v0.31/（AGENTS.md §13 权威路径）；
+    # 旧路径保留为历史检出的回退。
+    roadmap_path = next(
+        (
+            candidate
+            for candidate in (
+                ROOT / "devdocs/archive/v0.31/roadmap.toml",
+                ROOT / "devdocs/v0.31/roadmap.toml",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if roadmap_path is None:
+        if not (ROOT / "devdocs").is_dir():
+            # devdocs/ 已于 2026-08-31 移出 git 跟踪（internal-only）；公共检出无此
+            # 目录，跳过而非红闸。本地检出（devdocs 在场）仍全量执法。
+            print(
+                "v0.31 roadmap check skipped: "
+                "devdocs/ is internal-only (untracked) on this checkout"
+            )
+            return 0
+        print(
+            "error: missing devdocs/archive/v0.31/roadmap.toml",
+            file=sys.stderr,
+        )
+        return 1
+    with roadmap_path.open("rb") as stream:
         roadmap = tomllib.load(stream)
     with REQUIREMENTS.open("rb") as stream:
         requirement_doc = tomllib.load(stream)
@@ -71,7 +103,7 @@ def main() -> int:
             errors.append(f"{version}: {kind} milestone cannot introduce requirements")
         assigned.update(requirements)
 
-    missing = requirement_ids - assigned
+    missing = requirement_ids - assigned - POST_V0_31_REQUIREMENTS
     if missing:
         errors.append(f"requirements without a v0.31 milestone: {sorted(missing)}")
 

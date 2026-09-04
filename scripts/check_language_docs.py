@@ -174,6 +174,14 @@ def check_philosophy_anchor(errors: list[str]) -> None:
     "锁定 / 不可逆承诺" without the anchor, one of these pins breaks.
     """
     if not PHILOSOPHY_ANCHOR.is_file():
+        if not (ROOT / "devdocs").is_dir():
+            # devdocs/ 已于 2026-08-31 移出 git 跟踪（internal-only）；公共检出既无锚
+            # 文档也无 AGENTS.md，整组探针跳过。本地检出（devdocs 在场）仍全量执法。
+            print(
+                "philosophy anchor check skipped: "
+                "devdocs/ is internal-only (untracked) on this checkout"
+            )
+            return
         fail(errors, "devdocs/v0.36/philosophy-anchor.md is missing (0.36.0 Phase 0 anchor)")
         return
     anchor = PHILOSOPHY_ANCHOR.read_text(encoding="utf-8")
