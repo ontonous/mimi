@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
-use crate::core::mir::types::MirOwnership;
+use crate::core::mir::types::{MirGlueKind, MirOwnership};
 
 fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
     table.intern_resolved(ty).expect("test type must intern")
@@ -227,6 +227,43 @@ fn lowers_option_string_unwrap_to_consuming_variant_projection() {
 }
 
 #[test]
+fn lowers_option_i32_unwrap_to_copy_variant_projection() {
+    let source = include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Option<i32>.unwrap must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:unwrap_copy".into()))
+        .expect("unwrap_copy MIR function");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("Copy unwrap must carry a read-only variant projection receipt");
+    assert_eq!(receipt.variant_name, "Some");
+    assert_eq!(receipt.projection.field_index, 0);
+    assert_eq!(receipt.projection.arity, 1);
+    assert_eq!(receipt.projection.ownership, MirOwnership::Copy);
+    assert_eq!(receipt.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Option<i32>.unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
 fn option_string_unwrap_none_preserves_canonical_trap_class() {
     let source = r#"
         func main() -> i32 {
@@ -281,8 +318,8 @@ fn result_unwrap_remains_fail_closed_outside_option_projection_island() {
 #[test]
 fn option_copy_unwrap_remains_fail_closed_outside_move_projection_island() {
     let source = r#"
-        func main() -> i32 {
-            let value: Option<i32> = Some(41)
+        func main() -> i64 {
+            let value: Option<i64> = Some(41)
             value.unwrap()
         }
     "#;

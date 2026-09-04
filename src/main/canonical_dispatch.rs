@@ -1519,6 +1519,21 @@ mod tests {
     }
 
     #[test]
+    fn option_i32_unwrap_remains_explicit_compatibility_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_option_i32_unwrap.mimi"
+        ));
+        let route = select_default_route(&checked, &file);
+        assert!(
+            matches!(
+                route,
+                DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile)
+            ),
+            "Option<i32>.unwrap is explicit-MIR-only until its default island is admitted"
+        );
+    }
+
+    #[test]
     fn option_string_variant_default_arm_is_rejected_without_legacy_fallback() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_option_string_default_rejected.mimi"

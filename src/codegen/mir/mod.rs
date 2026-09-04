@@ -942,6 +942,78 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_option_i32_unwrap_copy_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Option<i32>.unwrap execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Option<i32>.unwrap MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode Option<i32>.unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(bytecode, Value::Int(41)));
+
+        let unwrap_copy = program
+            .functions()
+            .get(&crate::core::NodeId("function:unwrap_copy".into()))
+            .expect("unwrap_copy MIR");
+        let receipt = unwrap_copy
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::VariantProject {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("Copy unwrap must carry a read-only projection receipt");
+        assert_eq!(receipt.variant_name, "Some");
+        assert_eq!(
+            receipt.projection.ownership,
+            crate::core::mir::types::MirOwnership::Copy
+        );
+        assert_eq!(
+            receipt.projection.move_out_glue,
+            crate::core::mir::types::MirGlueKind::Noop
+        );
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_option_i32_unwrap_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Option<i32>.unwrap MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Option<i32>.unwrap module verifies");
+        assert!(generator.module.get_function("unwrap_copy").is_some());
+    }
+
+    #[test]
+    fn bytecode_option_i32_unwrap_none_matches_reference_trap() {
+        let program = canonical_program(
+            "func main() -> i32 { let value: Option<i32> = None; value.unwrap() }",
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("reference Option<i32>.unwrap(None) must trap");
+        let bytecode = compile_mir_program(&program).expect("Option<i32> unwrap(None) bytecode");
+        let bytecode_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode Option<i32>.unwrap(None) must trap");
+        assert!(reference.to_string().contains("E0800"));
+        assert_eq!(bytecode_error.code(), "E0800");
+    }
+
+    #[test]
     fn bytecode_option_string_unwrap_none_matches_reference_trap() {
         let program = canonical_program(
             "func main() -> i32 { let value: Option<string> = None; let text = value.unwrap(); drop(text); 41 }",

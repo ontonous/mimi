@@ -1,0 +1,9 @@
+func unwrap_copy() -> i32 {
+    ensures: result >= 0
+    let value: Option<i32> = Some(41)
+    value.unwrap()
+}
+
+func main() -> i32 {
+    unwrap_copy()
+}

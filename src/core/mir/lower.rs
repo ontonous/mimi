@@ -5439,10 +5439,11 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
     }
 }
 
-/// Return the canonical success-variant payload identity for the narrow
-/// language-provided `Option<string>.unwrap` surface. The receiver/result
-/// TypeDesc is still validated by `variant_projection_contract`; this helper
-/// only maps the checker-owned builtin identity to the stable variant family.
+/// Return the canonical success-variant payload identity for the two explicitly
+/// admitted source-driven projection shapes: move-owned `Option<string>` and
+/// Copy `Option<i32>`. The receiver/result TypeDesc is still validated by
+/// `variant_projection_contract`; this helper only maps the checker-owned
+/// builtin identity to the stable variant family.
 fn variant_projection_builtin(
     call: &ResolvedCall,
     type_catalog: Option<&MirTypeCatalog>,
@@ -5456,9 +5457,6 @@ fn variant_projection_builtin(
     let catalog = type_catalog?;
     let receiver_ty = &call.arguments.first()?.value.ty;
     let descriptor = catalog.get(receiver_ty)?;
-    if descriptor.ownership != super::types::MirOwnership::Move {
-        return None;
-    }
     let super::types::MirLayout::Option { variants, .. } = &descriptor.layout else {
         return None;
     };
@@ -5466,10 +5464,18 @@ fn variant_projection_builtin(
         super::types::MirLayout::Option { inner, .. } => inner,
         _ => return None,
     })?;
-    if !matches!(
-        inner.kind,
-        super::types::MirTypeKind::Primitive(PrimitiveType::String)
-    ) {
+    let supported = match descriptor.ownership {
+        super::types::MirOwnership::Move => matches!(
+            inner.kind,
+            super::types::MirTypeKind::Primitive(PrimitiveType::String)
+        ),
+        super::types::MirOwnership::Copy => matches!(
+            inner.kind,
+            super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+        ),
+        _ => false,
+    };
+    if !supported {
         return None;
     }
     let variant = variants.iter().find(|variant| variant.name == "Some")?;
