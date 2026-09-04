@@ -17,6 +17,7 @@ use crate::core::ir::{
 use crate::core::{NodeId, ResolvedPlace};
 
 mod contracts;
+mod copy_option_island;
 mod eligibility;
 mod islands;
 pub mod lower;
@@ -28,6 +29,11 @@ pub mod types;
 
 pub use contracts::{
     MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
+};
+pub use copy_option_island::{
+    classify_copy_option_i32_variant_admission, contains_copy_option_i32_variant_candidate,
+    validate_copy_option_i32_variant_island, CopyOptionI32VariantAdmission,
+    COPY_OPTION_I32_VARIANT_ISLAND,
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{

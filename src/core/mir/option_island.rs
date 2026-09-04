@@ -93,7 +93,7 @@ fn is_option_string_type_in_checked(program: &CheckedProgram, ty: &ResolvedTypeI
     )
 }
 
-fn block_has_option_string_switch(
+pub(crate) fn block_has_option_string_switch(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
 ) -> bool {
@@ -272,7 +272,7 @@ fn is_option_string_unwrap_call(
         && is_option_string_type_in_checked(program, &call.arguments[0].value.ty)
 }
 
-fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
+pub(crate) fn option_body_is_closed(block: &crate::core::ir::ResolvedBlock) -> bool {
     block.statements.iter().all(|statement| {
         if !statement.backend_requirements.is_empty() {
             return false;

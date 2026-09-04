@@ -1532,6 +1532,37 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Validate the concrete default-route Copy `Option<i32>` projection
+    /// shape. The broader flat-Copy variant contract intentionally accepts
+    /// other scalar payloads; this narrower receipt distinguishes the
+    /// admitted i32 island from explicit-MIR-only `Option<i64>`/`Option<bool>`
+    /// projections.
+    pub fn validate_copy_option_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.kind != MirTypeKind::Option
+            || !matches!(descriptor.layout, MirLayout::Option { .. })
+        {
+            return Err(format!(
+                "type '{}' is not the built-in Copy Option layout",
+                ty.as_str()
+            ));
+        }
+        let inner = self.validate_flat_copy_variant(ty)?;
+        let inner_descriptor = self
+            .get(&inner)
+            .ok_or_else(|| format!("Option inner type '{}' is absent", inner.as_str()))?;
+        if inner_descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32) {
+            return Err(format!(
+                "type '{}' Option payload is {:?}, expected i32",
+                ty.as_str(),
+                inner_descriptor.kind
+            ));
+        }
+        self.validate_copy_scalar(&inner)
+    }
+
     /// Validate the flat Copy variant contract and return one stable variant
     /// descriptor for a native switch arm.  The caller receives a TypeDesc
     /// fact rather than re-deriving the arm from a backend representation.

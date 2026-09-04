@@ -6,6 +6,14 @@ fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
     table.intern_resolved(ty).expect("test type must intern")
 }
 
+fn checked_program(source: &str) -> crate::core::CheckedProgram {
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    crate::core::check_program(&file).expect("check")
+}
+
 #[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
@@ -261,6 +269,42 @@ fn lowers_option_i32_unwrap_to_copy_variant_projection() {
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect("reference Option<i32>.unwrap execution");
     assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
+        include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),
+    ))
+    .expect("Option<i32> MIR");
+    let option_i32 = program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == crate::core::mir::types::MirTypeKind::Option).then_some(id.clone())
+        })
+        .expect("Option<i32> TypeDesc");
+    assert!(program
+        .type_catalog()
+        .validate_copy_option_i32_variant(&option_i32)
+        .is_ok());
+
+    let i64_program = crate::core::mir::reference::MirProgram::from_checked_program(
+        &checked_program("func main() -> i64 { let value: Option<i64> = Some(7); drop(value); 7 }"),
+    )
+    .expect("Option<i64> construction MIR");
+    let option_i64 = i64_program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == crate::core::mir::types::MirTypeKind::Option).then_some(id.clone())
+        })
+        .expect("Option<i64> TypeDesc");
+    let error = i64_program
+        .type_catalog()
+        .validate_copy_option_i32_variant(&option_i64)
+        .expect_err("Option<i64> must stay outside the i32 island");
+    assert!(error.contains("expected i32"), "{error}");
 }
 
 #[test]
