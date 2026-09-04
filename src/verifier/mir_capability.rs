@@ -40,6 +40,13 @@ struct CapabilityGate<'a> {
     program: &'a MirProgram,
     errors: BTreeSet<String>,
     checked_types: HashSet<crate::core::ResolvedTypeId>,
+    /// A move-owned Result constructor is admitted only when the same
+    /// canonical graph contains the promoted generic Result projection
+    /// receipt.  This keeps the S144 extension local: an unrelated direct
+    /// Result<string, i32> helper cannot silently widen the older mixed
+    /// record/variant route before its own whole-program consumer matrix is
+    /// closed.
+    allow_result_string_i32_variant: bool,
 }
 
 impl<'a> CapabilityGate<'a> {
@@ -48,6 +55,15 @@ impl<'a> CapabilityGate<'a> {
             program,
             errors: BTreeSet::new(),
             checked_types: HashSet::new(),
+            allow_result_string_i32_variant: program.instances().values().any(|instance| {
+                matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Move
+                            && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                )
+            }),
         }
     }
 
@@ -222,14 +238,17 @@ impl<'a> CapabilityGate<'a> {
                 }
                 MirGenericInstanceContract::ScalarVariantProjection { contract } => {
                     if contract.projection.ownership == MirOwnership::Move {
-                        if contract.projection.nominal.as_str() != "builtin:type:Option" {
+                        if !matches!(
+                            contract.projection.nominal.as_str(),
+                            "builtin:type:Option" | "builtin:type:Result"
+                        ) {
                             self.error(format!(
-                                "instance '{}' consuming generic variant projection is not the admitted managed Option shape",
+                                "instance '{}' consuming generic variant projection is not the admitted managed Option/Result shape",
                                 instance.id
                             ));
                         } else if instance.arguments.len() != 1 {
                             self.error(format!(
-                                "instance '{}' owned generic Option projection requires one concrete argument",
+                                "instance '{}' owned generic variant projection requires one concrete argument",
                                 instance.id
                             ));
                         } else if let Err(message) = self
@@ -238,7 +257,7 @@ impl<'a> CapabilityGate<'a> {
                             .validate_move_owned_payload(&instance.arguments[0])
                         {
                             self.error(format!(
-                                "instance '{}' owned generic Option projection argument is unsupported: {message}",
+                                "instance '{}' owned generic variant projection argument is unsupported: {message}",
                                 instance.id
                             ));
                         }
@@ -251,7 +270,7 @@ impl<'a> CapabilityGate<'a> {
                         )
                     {
                         self.error(format!(
-                            "instance '{}' Option projection contract is unsupported: {message}",
+                            "instance '{}' generic variant projection contract is unsupported: {message}",
                             instance.id
                         ));
                     }
@@ -982,7 +1001,17 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} variant result is absent"));
                     return;
                 };
-                if let Err(message) = catalog.validate_option_move_variant(&result_ty) {
+                let move_variant = catalog
+                    .validate_option_move_variant(&result_ty)
+                    .map(|_| ())
+                    .or_else(|_| {
+                        if self.allow_result_string_i32_variant {
+                            catalog.validate_result_string_i32_variant(&result_ty)
+                        } else {
+                            Err("move-owned Result construction requires the promoted generic Result projection receipt".into())
+                        }
+                    });
+                if let Err(message) = move_variant {
                     self.error(format!(
                         "{subject} ConstructVariantMove rejected: {message}"
                     ));

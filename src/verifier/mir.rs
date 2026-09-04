@@ -2629,7 +2629,8 @@ fn eval_materialized_call(
     }
 }
 
-/// Symbolically execute a materialized generic `Option<T>.unwrap()` call.
+/// Symbolically execute a materialized generic `Option<T>.unwrap()` or
+/// `Result<T, i32>.unwrap()` call.
 /// Copy instances are read-only; the managed move instance consumes its
 /// aggregate and carries the same Move receipt as the target body.  The
 /// verifier never reopens the generic source body or infers the ABI from the
@@ -2652,11 +2653,13 @@ fn eval_materialized_variant_projection_call(
         );
     }
     if contract.projection.ownership == MirOwnership::Move {
-        if contract.projection.nominal.as_str() != "builtin:type:Option"
-            || type_arguments.len() != 1
+        if !matches!(
+            contract.projection.nominal.as_str(),
+            "builtin:type:Option" | "builtin:type:Result"
+        ) || type_arguments.len() != 1
         {
             return Err(
-                "MIR verifier owned generic variant projection requires one Option type argument"
+                "MIR verifier owned generic variant projection requires one Option/Result type argument"
                     .into(),
             );
         }
@@ -2720,7 +2723,8 @@ fn eval_materialized_variant_projection_call(
     } = argument_value
     else {
         return Err(
-            "MIR verifier generic variant projection argument is not a symbolic Option".into(),
+            "MIR verifier generic variant projection argument is not a symbolic Option/Result"
+                .into(),
         );
     };
     if nominal != contract.projection.nominal {

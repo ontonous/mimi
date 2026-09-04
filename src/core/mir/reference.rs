@@ -1404,12 +1404,14 @@ fn validate_instance_table(
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
             MirGenericInstanceContract::ScalarVariantProjection { ref contract }
-                if contract.projection.nominal.as_str() == "builtin:type:Option"
-                    && contract.projection.ownership == super::types::MirOwnership::Move =>
+                if matches!(
+                    contract.projection.nominal.as_str(),
+                    "builtin:type:Option" | "builtin:type:Result"
+                ) && contract.projection.ownership == super::types::MirOwnership::Move =>
             {
                 if instance.arguments.len() != 1 {
                     Err(format!(
-                        "owned generic Option projection contract requires one type argument, got {}",
+                        "owned generic variant projection contract requires one type argument, got {}",
                         instance.arguments.len()
                     ))
                 } else {
@@ -1878,13 +1880,16 @@ fn validate_call_graph(
                     } else if matches!(
                         &instance.contract,
                         MirGenericInstanceContract::ScalarVariantProjection { contract }
-                            if contract.projection.nominal.as_str() == "builtin:type:Option"
+                            if matches!(
+                                contract.projection.nominal.as_str(),
+                                "builtin:type:Option" | "builtin:type:Result"
+                            )
                                 && contract.projection.ownership == super::types::MirOwnership::Move
                     ) {
                         let Some(target_parameter) = target.parameters.first() else {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
-                                message: "owned generic Option projection target has no parameter"
+                                message: "owned generic variant projection target has no parameter"
                                     .into(),
                             });
                             continue;
@@ -1896,12 +1901,12 @@ fn validate_call_graph(
                         else {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
-                                message: "owned generic Option projection target parameter TypeDesc is absent".into(),
+                                message: "owned generic variant projection target parameter TypeDesc is absent".into(),
                             });
                             continue;
                         };
                         if let Err(message) =
-                            super::lower::validate_owned_option_projection_call_argument(
+                            super::lower::validate_owned_variant_projection_call_argument(
                                 function,
                                 block,
                                 instruction_index,
@@ -1912,7 +1917,7 @@ fn validate_call_graph(
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
                                 message: format!(
-                                    "owned generic Option projection call transfer is invalid: {message}"
+                                    "owned generic variant projection call transfer is invalid: {message}"
                                 ),
                             });
                         }
@@ -5593,6 +5598,7 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
+    use crate::core::mir::types::{MirGlueKind, MirOwnership};
     use crate::core::mir::{
         MirAggregateKind, MirGenericInstanceContract, MirInstruction, MirInstructionKind,
     };
@@ -6900,6 +6906,53 @@ mod tests {
                 })
             })
         }));
+    }
+
+    #[test]
+    fn concrete_generic_result_owned_string_unwrap_preserves_move_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_owned_string.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic Result<T,i32> owned String projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Move
+                )
+            })
+            .expect("owned generic Result projection instance");
+        let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert_eq!(contract.projection.move_out_glue, MirGlueKind::OwnedString);
+        assert_eq!(contract.projection.field_index, 0);
+        assert_eq!(contract.projection.arity, 1);
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic Result projection target");
+        assert!(target.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::VariantProjectMove { .. }
+                )
+            })
+        }));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic Result projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
     }
 
     #[test]

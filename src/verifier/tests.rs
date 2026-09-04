@@ -1517,6 +1517,43 @@ fn generic_result_bool_error_projection_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_result_owned_string_projection_is_verified_from_canonical_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_owned_string.mimi");
+    let file = parse_memory_source(source, "mir-generic-result-owned-string").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Result<T,i32> owned String MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract }
+            if contract.projection.nominal.as_str() == "builtin:type:Result"
+                && contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                && contract.projection.move_out_glue
+                    == crate::core::mir::types::MirGlueKind::OwnedString
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic owned Result projection verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn generic_option_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
     let source =
         include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi");

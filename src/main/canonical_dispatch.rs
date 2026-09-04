@@ -171,6 +171,10 @@ pub(crate) fn select_default_route(
         record_admission,
         mimi::core::mir::FlatCopyRecordAdmission::OutsideProfile
     );
+    let user_record_hint = checked.type_defs().values().any(|definition| {
+        definition.kind == mimi::core::ResolvedTypeKind::Record
+            && matches!(definition.origin, mimi::core::Origin::User(_))
+    });
     let complete_record_candidate = matches!(
         record_admission,
         mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
@@ -1028,6 +1032,15 @@ pub(crate) fn select_default_route(
     // verifier's contract pass so every selected consumer has an explicit
     // capability, including no-obligation functions.
     if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
+        if user_record_hint
+            && error
+                .iter()
+                .any(|message| message.contains("ConstructVariantMove"))
+        {
+            return DefaultMirRoute::Rejected(format!(
+                "S0 flat Copy record candidate is not eligible for the default route: verifier capability gate failed: {error:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -1654,6 +1667,35 @@ mod tests {
                 contract
             } if contract.projection.nominal.as_str() == "builtin:type:Result"
         )));
+    }
+
+    #[test]
+    fn generic_result_owned_string_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_owned_string.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic owned Result projection must select canonical MIR");
+        };
+        let instance = program.instances().values().find(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                    && contract.projection.ownership == mimi::core::mir::types::MirOwnership::Move
+                    && contract.projection.move_out_glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+            )
+        });
+        assert!(
+            instance.is_some(),
+            "owned generic Result projection receipt is absent"
+        );
     }
 
     #[test]

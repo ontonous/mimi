@@ -386,10 +386,12 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                 .map(|value| value.ty.clone())
         })
         .flatten();
-        let owned_option_projection_target_parameter = match &instance.contract {
+        let owned_variant_projection_target_parameter = match &instance.contract {
             MirGenericInstanceContract::ScalarVariantProjection { contract }
-                if contract.projection.nominal.as_str() == "builtin:type:Option"
-                    && contract.projection.ownership == super::types::MirOwnership::Move =>
+                if matches!(
+                    contract.projection.nominal.as_str(),
+                    "builtin:type:Option" | "builtin:type:Result"
+                ) && contract.projection.ownership == super::types::MirOwnership::Move =>
             {
                 function
                     .parameters
@@ -442,9 +444,9 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                     type_catalog,
                 )?;
             } else if let Some(target_parameter_ty) =
-                owned_option_projection_target_parameter.as_ref()
+                owned_variant_projection_target_parameter.as_ref()
             {
-                rewrite_owned_option_projection_call_argument(
+                rewrite_owned_variant_projection_call_argument(
                     function,
                     &block_id,
                     index,
@@ -707,7 +709,7 @@ fn rewrite_owned_record_call_argument(
 /// materialized `VariantProjectMove` target consumes the complete aggregate,
 /// so this boundary rewrites/validates the producer before any backend sees
 /// the call.  Indirect and conditional producers remain fail-closed.
-fn rewrite_owned_option_projection_call_argument(
+fn rewrite_owned_variant_projection_call_argument(
     caller: &mut MirFunction,
     block_id: &MirBlockId,
     call_index: usize,
@@ -753,9 +755,12 @@ fn rewrite_owned_option_projection_call_argument(
         if type_catalog
             .validate_option_move_variant(source_ty)
             .is_err()
+            && type_catalog
+                .validate_result_string_i32_variant(source_ty)
+                .is_err()
         {
             return Err(
-                "owned generic Option projection call source is not a Move-owned Option with a supported managed payload".into(),
+                "owned generic variant projection call source is not a supported Move-owned Option/Result managed payload".into(),
             );
         }
         type_catalog.validate_glue(source_ty, super::types::MirGlueOperation::MoveOut)
@@ -856,7 +861,7 @@ fn rewrite_owned_option_projection_call_argument(
 /// Revalidate the caller-side producer for an owned generic Option projection
 /// without mutating the graph.  This mirrors the materialization rewrite and
 /// keeps the program-boundary validator independent of backend representation.
-pub(crate) fn validate_owned_option_projection_call_argument(
+pub(crate) fn validate_owned_variant_projection_call_argument(
     caller: &MirFunction,
     block: &MirBlock,
     call_index: usize,
@@ -903,9 +908,12 @@ pub(crate) fn validate_owned_option_projection_call_argument(
     if type_catalog
         .validate_option_move_variant(&source_ty)
         .is_err()
+        && type_catalog
+            .validate_result_string_i32_variant(&source_ty)
+            .is_err()
     {
         return Err(
-            "owned generic Option projection call source is not a Move-owned Option with a supported managed payload".into(),
+            "owned generic variant projection call source is not a supported Move-owned Option/Result managed payload".into(),
         );
     }
     type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
@@ -1265,8 +1273,8 @@ fn materialize_generic_instance(
     // String specialization is different: the source aggregate and payload
     // must cross the call boundary by Move and the body must use the explicit
     // VariantProjectMove node.  Keep this predicate local to the exact
-    // checker-owned one-parameter unwrap envelope; predicates, Result and
-    // fallback projections remain on their existing scalar-only contracts.
+    // checker-owned one-parameter unwrap envelopes; predicates and fallback
+    // projections remain on their existing scalar-only contracts.
     let is_owned_option_projection = callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
         && program
@@ -1291,6 +1299,46 @@ fn materialize_generic_instance(
                 )
             })
         && type_catalog.validate_move_owned_payload(&concrete).is_ok();
+    // Result<T, i32>.unwrap follows the same move-owned payload proof as the
+    // Option island, but the fixed Err slot is part of the Result aggregate
+    // ABI. Keep this as an explicit second envelope so generic Result<T, i32>
+    // remains Copy-only unless the concrete TypeDesc proves the established
+    // Result<string, i32> move contract.
+    let is_owned_result_projection = callable.signature.parameters.len() == 1
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Result { ok, error }
+                        if ok == &generic_id
+                            && matches!(
+                                program.resolved_types().get(error),
+                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                            )
+                )
+            })
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.result.unwrap"
+                        ) && call.arguments.len() == 1
+                )
+            })
+        && type_catalog.validate_move_owned_payload(&concrete).is_ok();
+    let is_owned_variant_projection = is_owned_option_projection || is_owned_result_projection;
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
     // executable parameter/result are the specialized record and String.
@@ -1309,7 +1357,7 @@ fn materialize_generic_instance(
                 catalog.validate_generic_identity_arguments(arguments)
             } else if is_owned_record_projection_drop
                 || is_owned_record_projection
-                || is_owned_option_projection
+                || is_owned_variant_projection
             {
                 if arguments.len() != 1 {
                     Err(format!(
@@ -1330,7 +1378,7 @@ fn materialize_generic_instance(
             node_id: subject(),
             message: format!(
                 "generic MIR instance argument is outside {}: {message}",
-                if is_owned_option_projection {
+                if is_owned_variant_projection {
                     "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
@@ -1855,7 +1903,7 @@ fn materialize_generic_instance(
                     message: "generic variant projection result has no specialized TypeDesc".into(),
                 }]
             })?;
-        let receipt = if is_owned_option_projection {
+        let receipt = if is_owned_variant_projection {
             type_catalog.validated_variant_move_projection_trap_contract(
                 &base_ty,
                 &placeholder.projection.variant,
@@ -1887,7 +1935,7 @@ fn materialize_generic_instance(
                 ),
             }]
         })?;
-        if is_owned_option_projection {
+        if is_owned_variant_projection {
             let parameter = function.parameters.first().cloned().ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
@@ -2363,7 +2411,7 @@ fn materialize_generic_instance(
             node_id: subject(),
             message: format!(
                 "specialized generic TypeDesc is outside {}: {message}",
-                if is_owned_option_projection {
+                if is_owned_variant_projection {
                     "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
@@ -2522,7 +2570,8 @@ fn detect_scalar_variant_predicate_contract(
     Ok(contract.clone())
 }
 
-/// Validate the concrete body of a generic `Option<T>.unwrap()` projection.
+/// Validate the concrete body of a generic `Option<T>.unwrap()` or
+/// `Result<T, i32>.unwrap()` projection.
 /// Copy specializations remain exactly `Clone; VariantProject; Return`; the
 /// owned String specialization is exactly `Move; VariantProjectMove; Return`.
 /// Keeping both forms under one receipt validator prevents consumers from
@@ -2632,8 +2681,10 @@ pub(crate) fn validate_scalar_variant_projection_mir(
         return Err("generic variant projection receipt has non-canonical shape".into());
     }
     if consuming {
-        if receipt.projection.nominal.as_str() != "builtin:type:Option"
-            || receipt.projection.ownership != super::types::MirOwnership::Move
+        if !matches!(
+            receipt.projection.nominal.as_str(),
+            "builtin:type:Option" | "builtin:type:Result"
+        ) || receipt.projection.ownership != super::types::MirOwnership::Move
             || !matches!(
                 receipt.projection.move_out_glue,
                 super::types::MirGlueKind::OwnedString | super::types::MirGlueKind::List

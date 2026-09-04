@@ -1,4 +1,4 @@
-func unwrap<T>(value: Result<T, i32>) -> T {
+func unwrap<T>(value: Result<T, bool>) -> T {
     value.unwrap()
 }
 
