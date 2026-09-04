@@ -1,0 +1,9 @@
+func unwrap_copy() -> i64 {
+    ensures: result == 41
+    let value: Option<i64> = Some(41)
+    value.unwrap()
+}
+
+func main() -> i64 {
+    unwrap_copy()
+}

@@ -5441,7 +5441,7 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
 
 /// Return the canonical success-variant payload identity for the explicitly
 /// admitted source-driven projection shapes: move-owned `Option<string>` and
-/// Copy `Option<i32>`/`Option<bool>`. The receiver/result TypeDesc is still validated by
+/// Copy `Option<i32>`/`Option<i64>`/`Option<bool>`. The receiver/result TypeDesc is still validated by
 /// `variant_projection_contract`; this helper only maps the checker-owned
 /// builtin identity to the stable variant family.
 fn variant_projection_builtin(
@@ -5471,7 +5471,9 @@ fn variant_projection_builtin(
         ),
         super::types::MirOwnership::Copy => matches!(
             inner.kind,
-            super::types::MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+            super::types::MirTypeKind::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool,
+            )
         ),
         _ => false,
     };

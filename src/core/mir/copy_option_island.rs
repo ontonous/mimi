@@ -21,6 +21,9 @@ pub const COPY_OPTION_I32_VARIANT_ISLAND: &str = "copy-option-i32-variant-v1";
 /// Versioned default-route island for direct Copy `Option<bool>` projection.
 pub const COPY_OPTION_BOOL_VARIANT_ISLAND: &str = "copy-option-bool-variant-v1";
 
+/// Versioned default-route island for direct Copy `Option<i64>` projection.
+pub const COPY_OPTION_I64_VARIANT_ISLAND: &str = "copy-option-i64-variant-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyOptionVariantAdmission {
     OutsideProfile,
@@ -43,8 +46,8 @@ pub fn classify_copy_option_i32_variant_admission(
 }
 
 /// Classify one concrete Copy `Option<primitive>` projection family before
-/// canonical MIR construction.  The public i32 wrapper keeps S114's stable
-/// API while S115 reuses the exact same checker scan for bool.
+/// canonical MIR construction. The public i32 wrapper keeps S114's stable
+/// API while S115/S116 reuse the exact same checker scan for bool/i64.
 pub fn classify_copy_option_variant_admission(
     program: &CheckedProgram,
     expected: PrimitiveType,
@@ -377,6 +380,12 @@ pub fn contains_copy_option_i32_variant_candidate(program: &MirProgram) -> bool 
     contains_copy_option_variant_candidate(program, PrimitiveType::I32)
 }
 
+/// MIR-side materialization receipt counterpart for the concrete Copy
+/// `Option<i64>` projection island.
+pub fn contains_copy_option_i64_variant_candidate(program: &MirProgram) -> bool {
+    contains_copy_option_variant_candidate(program, PrimitiveType::I64)
+}
+
 /// Detect one concrete Copy `Option<primitive>` projection receipt in MIR.
 /// The operation is intentionally independent of source names and only
 /// accepts the read-only `VariantProject` node with a matching TypeDesc.
@@ -435,6 +444,12 @@ fn is_copy_option_primitive(
 /// while ordinary scalar code remains available to the shared consumers.
 pub fn validate_copy_option_i32_variant_island(program: &MirProgram) -> Result<(), Vec<String>> {
     validate_copy_option_variant_island(program, PrimitiveType::I32, COPY_OPTION_I32_VARIANT_ISLAND)
+}
+
+/// Validate the complete Copy `Option<i64>` island using the shared MIR-only
+/// validator and its versioned route identity.
+pub fn validate_copy_option_i64_variant_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    validate_copy_option_variant_island(program, PrimitiveType::I64, COPY_OPTION_I64_VARIANT_ISLAND)
 }
 
 /// Validate one concrete Copy `Option<primitive>` island using only canonical

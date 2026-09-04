@@ -1,0 +1,13 @@
+func unwrap_i64() -> i64 {
+    let value: Option<i64> = Some(41)
+    value.unwrap()
+}
+
+func unwrap_f64() -> f64 {
+    let value: Option<f64> = Some(7.0)
+    value.unwrap()
+}
+
+func main() -> i64 {
+    unwrap_i64()
+}

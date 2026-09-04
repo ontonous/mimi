@@ -32,10 +32,11 @@ pub use contracts::{
 };
 pub use copy_option_island::{
     classify_copy_option_i32_variant_admission, classify_copy_option_variant_admission,
-    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
-    validate_copy_option_i32_variant_island, validate_copy_option_variant_island,
+    contains_copy_option_i32_variant_candidate, contains_copy_option_i64_variant_candidate,
+    contains_copy_option_variant_candidate, validate_copy_option_i32_variant_island,
+    validate_copy_option_i64_variant_island, validate_copy_option_variant_island,
     CopyOptionI32VariantAdmission, CopyOptionVariantAdmission, COPY_OPTION_BOOL_VARIANT_ISLAND,
-    COPY_OPTION_I32_VARIANT_ISLAND,
+    COPY_OPTION_I32_VARIANT_ISLAND, COPY_OPTION_I64_VARIANT_ISLAND,
 };
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{

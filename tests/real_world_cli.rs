@@ -1703,6 +1703,67 @@ fn canonical_default_copy_option_bool_unwrap_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_copy_option_i64_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_i64_unwrap.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Option<i64> reference run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let explicit_mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn explicit MIR Copy Option<i64> reference run");
+    assert_eq!(explicit_mir_run.status.code(), Some(41));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Option<i64> verifier");
+    assert!(
+        verify.status.success(),
+        "default Copy Option<i64> verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-copy-option-i64-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default Copy Option<i64> native build");
+    assert!(
+        build.status.success(),
+        "default Copy Option<i64> native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default Copy Option<i64> native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
 fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")
@@ -1721,6 +1782,28 @@ fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
         "{stderr}"
     );
     assert!(stderr.contains("Copy Option<bool>"), "{stderr}");
+    assert!(!stderr.contains("bytecode runtime error"), "{stderr}");
+}
+
+#[test]
+fn canonical_default_rejects_mixed_copy_option_i64_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_option_i64_mixed_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn mixed Copy Option<i64> default run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("default Canonical MIR route rejected"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("S116 Copy Option<i64>"), "{stderr}");
     assert!(!stderr.contains("bytecode runtime error"), "{stderr}");
 }
 
