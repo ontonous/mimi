@@ -6460,6 +6460,104 @@ mod tests {
     }
 
     #[test]
+    fn concrete_three_field_owned_generic_record_projection_tracks_two_residuals() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("three-field owned generic record residual projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("three-field owned generic record residual instance");
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            panic!("three-field generic record must carry a residual drop receipt");
+        };
+        assert_eq!(contract.projection.arity, 3);
+        assert_eq!(contract.projection.name, "value");
+        assert_eq!(
+            contract
+                .residual
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tail", "note"]
+        );
+        assert!(contract
+            .residual
+            .iter()
+            .all(|field| field.glue == crate::core::mir::types::MirGlueKind::OwnedString));
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("three-field owned generic record target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference three-field owned generic residual execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn three_field_owned_generic_record_projection_rejects_truncated_residual_schedule() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("three-field owned generic record residual projection must materialize");
+        let owner = program
+            .instances()
+            .values()
+            .next()
+            .expect("three-field owned generic residual instance")
+            .function
+            .clone();
+        let mut target = program
+            .functions()
+            .get(&owner)
+            .expect("three-field owned generic residual target")
+            .clone();
+        let instruction = target
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::MoveProjectDrop { .. })
+            })
+            .expect("MoveProjectDrop instruction");
+        let MirInstructionKind::MoveProjectDrop {
+            contract: Some(receipt),
+            ..
+        } = &mut instruction.kind
+        else {
+            unreachable!();
+        };
+        receipt.residual.pop();
+        let mut functions = program.functions().clone();
+        functions.insert(owner, target);
+        let errors = MirProgram::with_type_catalog_and_instances(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+        )
+        .expect_err("truncated residual schedule must fail before execution");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("generic MIR owned record move/drop projection contract is invalid")
+                && error.message.contains("receipt disagrees")
+        }));
+    }
+
+    #[test]
     fn owned_generic_record_projection_call_clone_cannot_cross_mir_gate() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_projection.mimi"
@@ -6735,12 +6833,12 @@ mod tests {
 
     #[test]
     fn unsupported_owned_generic_record_projection_shape_fails_closed() {
-        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: \"owned\", second: \"keep\", third: \"also\" }; let picked = get(triple); drop(picked); 41 }";
+        let source = "type Quad<T> { first: T, second: T, third: T, fourth: T }\nfunc get<T>(quad: Quad<T>) -> T { quad.first }\nfunc main() -> i32 { let quad = Quad { first: \"owned\", second: \"keep\", third: \"also\", fourth: \"last\" }; let picked = get(quad); drop(picked); 41 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("three-field owned generic record projection must remain fail-closed");
+            .expect_err("four-field owned generic record projection must remain fail-closed");
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(
                 errors

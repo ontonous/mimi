@@ -1877,6 +1877,32 @@ mod tests {
     }
 
     #[test]
+    fn three_field_owned_generic_record_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_owned_string_three_field_residual.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!(
+                "three-field owned generic record residual projection must select canonical MIR"
+            );
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                ref contract
+            } if contract.projection.arity == 3
+                && contract.projection.name == "value"
+                && contract.residual.len() == 2
+                && contract.residual[0].name == "tail"
+                && contract.residual[1].name == "note"
+        )));
+    }
+
+    #[test]
     fn owned_generic_record_projection_rvalue_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
@@ -1936,11 +1962,11 @@ mod tests {
     }
 
     #[test]
-    fn three_field_owned_generic_record_projection_is_rejected_before_legacy_route() {
-        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: \"selected\", second: \"middle\", third: \"residual\" }; let picked = get(triple); drop(picked); 41 }";
+    fn four_field_owned_generic_record_projection_is_rejected_before_legacy_route() {
+        let source = "type Quad<T> { first: T, second: T, third: T, fourth: T }\nfunc get<T>(quad: Quad<T>) -> T { quad.first }\nfunc main() -> i32 { let quad = Quad { first: \"selected\", second: \"middle\", third: \"residual\", fourth: \"extra\" }; let picked = get(quad); drop(picked); 41 }";
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("three-field owned generic record projection must fail closed");
+            panic!("four-field owned generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
         assert!(
@@ -1972,10 +1998,10 @@ mod tests {
 
     #[test]
     fn unsupported_owned_generic_record_projection_is_rejected_before_legacy_route() {
-        let source = "type Triple<T> { first: T, second: T, third: T }\nfunc get<T>(triple: Triple<T>) -> T { triple.first }\nfunc main() -> i32 { let triple = Triple { first: \"owned\", second: \"keep\", third: \"also\" }; let picked = get(triple); drop(picked); 41 }";
+        let source = "type Quad<T> { first: T, second: T, third: T, fourth: T }\nfunc get<T>(quad: Quad<T>) -> T { quad.first }\nfunc main() -> i32 { let quad = Quad { first: \"owned\", second: \"keep\", third: \"also\", fourth: \"last\" }; let picked = get(quad); drop(picked); 41 }";
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("three-field owned generic record projection must fail closed");
+            panic!("four-field owned generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
     }

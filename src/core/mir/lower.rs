@@ -57,10 +57,10 @@ impl std::error::Error for MirLoweringError {}
 /// record construction/projection/update are also represented, as is the
 /// materialized recursive tuple product `(string, i32)` ownership shape.
 /// Direct local reads become explicit `Clone` nodes, while root drops become
-/// explicit `Drop` nodes.  With a TypeDesc catalog, the narrow
-/// ownership-safe record field move becomes `MoveProject`; general partial
-/// moves and projected drops remain rejected until their residual contracts
-/// are represented in MIR.
+/// explicit `Drop` nodes. With a TypeDesc catalog, the narrow ownership-safe
+/// record field move becomes `MoveProject`; the bounded two/three-field owned
+/// record shape uses receipt-bearing `MoveProjectDrop`, while all other partial
+/// moves and projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
     lower_body_impl(body, None)
 }
@@ -1104,9 +1104,10 @@ pub(crate) fn validate_scalar_record_call_argument(
 }
 
 /// Recognize the smallest generic record shape that needs an explicit
-/// residual-drop receipt: two fields, both bound to the callable's sole
-/// generic parameter, with one field projected and the other retained only so
-/// its ownership can be discharged by `MoveProjectDrop` after specialization.
+/// residual-drop receipt: two or three fields, all bound to the callable's sole
+/// generic parameter, with one field projected and the remaining siblings
+/// retained only so their ownership can be discharged by `MoveProjectDrop`
+/// after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
 /// concrete String/Move/glue proof is replayed from TypeDesc below.
 fn is_owned_record_projection_drop_callable(
@@ -1144,7 +1145,7 @@ fn is_owned_record_projection_drop_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || definition.fields.len() != 2
+        || !matches!(definition.fields.len(), 2 | 3)
         || callable.signature.result != generic_ty
     {
         return false;
@@ -6755,6 +6756,11 @@ impl<'a> Lowerer<'a> {
             };
             type_catalog
                 .validated_generic_record_field_projection_contract(&base_ty, field, result_ty)
+                .or_else(|_| {
+                    type_catalog.validated_generic_owned_record_field_projection_contract(
+                        &base_ty, field, result_ty,
+                    )
+                })
                 .is_ok()
                 .then_some(projection)
         } else {

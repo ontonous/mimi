@@ -1775,6 +1775,7 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
         definition.kind == crate::core::ResolvedTypeKind::Record
             && !is_flat_copy_record_definition(program, definition)
             && !is_scalar_generic_record_definition(program, definition)
+            && !is_owned_generic_record_definition(program, definition)
     });
     let record_ids = program
         .type_defs()
@@ -1803,10 +1804,9 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 
 /// Return whether a checker-resolved generic record projection looks like the
 /// S108 candidate but its declaration/body shape is outside the admitted
-/// one- or two-field Copy contract (homogeneous generic fields or a concrete
-/// Copy-scalar sibling).  Default dispatch uses this only on the mixed
-/// compatibility path to reject instead of silently handing the candidate to
-/// legacy code.
+/// one- or two-field Copy contract or the two/three-field owned residual
+/// contract. Default dispatch uses this only on the mixed compatibility path
+/// to reject instead of silently handing the candidate to legacy code.
 pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
     program.callables().values().any(|callable| {
         if callable.signature.generic_parameters.len() != 1
@@ -1847,6 +1847,7 @@ pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProg
                     if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
             )
             && !is_scalar_generic_record_definition(program, definition)
+            && !is_owned_generic_record_definition(program, definition)
     })
 }
 
@@ -1921,6 +1922,79 @@ fn is_scalar_generic_record_definition(
         }
     });
     fields_valid && has_generic_field
+}
+
+/// The managed generic record residual island admits exactly two or three
+/// homogeneous fields. Every field is the sole generic binder; concrete
+/// `String` specialization and Move/Drop glue are proved later by TypeDesc.
+/// Keeping this checker-side predicate separate from the Copy-record shape
+/// prevents a larger managed record from accidentally entering the scalar
+/// projection island.
+fn is_owned_generic_record_definition(
+    program: &CheckedProgram,
+    definition: &crate::core::ResolvedTypeDef,
+) -> bool {
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || !matches!(definition.fields.len(), 2 | 3)
+    {
+        return false;
+    }
+    let binder = &definition.generic_parameters[0].1;
+    definition.fields.iter().all(|(name, _)| {
+        definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_ty| program.resolved_types().get(field_ty))
+            .is_some_and(|field_ty| {
+                matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
+            })
+    })
+}
+
+/// Recognize the generic callable envelope for the managed residual record
+/// island without inspecting surface AST. The body remains a direct field
+/// projection; concrete materialization validates the selected field and the
+/// complete residual drop schedule.
+fn is_owned_generic_record_projection_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    if callable.signature.generic_parameters.len() != 1 || callable.signature.parameters.len() != 1
+    {
+        return false;
+    }
+    let Some(generic_ty) = program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(
+            ty,
+            ResolvedType::GenericParameter(candidate)
+                if candidate == &callable.signature.generic_parameters[0]
+        )
+        .then_some(id.clone())
+    }) else {
+        return false;
+    };
+    let Some(ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program
+        .resolved_types()
+        .get(&callable.signature.parameters[0].ty)
+    else {
+        return false;
+    };
+    let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    let Some(definition) = program.type_def(qualified_name) else {
+        return false;
+    };
+    is_owned_generic_record_definition(program, definition)
+        && arguments.as_slice() == [generic_ty.clone()]
+        && callable.signature.result == generic_ty
+        && matches!(
+            callable.body.root.result.as_deref().map(|expr| &expr.kind),
+            Some(ResolvedExprKind::Load(place))
+                if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
+        )
 }
 
 /// Recognize the only generic callable admitted with the generic record
@@ -2131,6 +2205,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
         || program.type_defs().values().any(|definition| {
             matches!(definition.origin, crate::core::Origin::User(_))
                 && (!is_scalar_generic_record_definition(program, definition)
+                    && !is_owned_generic_record_definition(program, definition)
                     && !definition.generic_parameters.is_empty()
                     || definition.kind != crate::core::ResolvedTypeKind::Record
                         && definition.kind != crate::core::ResolvedTypeKind::Alias
@@ -2146,6 +2221,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     .get(&function.node_id)
                     .is_some_and(|callable| {
                         is_scalar_generic_record_projection_callable(program, callable)
+                            || is_owned_generic_record_projection_callable(program, callable)
                     });
                 let generic_variant_callable = program
                     .callables()
@@ -2172,6 +2248,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
             .any(|callable| {
                 (!is_scalar_generic_record_projection_callable(program, callable)
+                    && !is_owned_generic_record_projection_callable(program, callable)
                     && !is_generic_variant_predicate_callable(program, callable)
                     && !is_generic_option_projection_callable(program, callable)
                     && !is_generic_option_projection_fallback_callable(program, callable)
@@ -2357,8 +2434,8 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
         })
 }
 
-/// Return whether the canonical executable graph contains a flat Copy record
-/// value at a consumer boundary.
+/// Return whether the canonical executable graph contains a record projection
+/// value at a consumer boundary, including the owned residual-record contract.
 ///
 /// This is the MIR-side counterpart of the default route's front-end record
 /// hint.  It deliberately examines only materialized values, parameters, and
