@@ -1251,14 +1251,14 @@ impl<'a> FunctionEmitter<'a> {
         let move_owned_result = self
             .program
             .type_catalog()
-            .validate_result_string_i32_variant(&target.result)
+            .validate_result_move_variant(&target.result)
             .is_ok();
         if flat_variant_result || move_owned_result {
             let Some(receipt) = variant_call_contract else {
                 self.error(if flat_variant_result {
                     "call returning flat Copy Option/Result has no canonical ABI receipt"
                 } else {
-                    "call returning move-owned Result<string, i32> has no canonical ABI receipt"
+                    "call returning move-owned managed Result has no canonical ABI receipt"
                 });
                 return;
             };
@@ -7272,6 +7272,55 @@ mod tests {
                     && tag == "Ok"
                     && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
         ));
+    }
+
+    #[test]
+    fn executes_move_owned_result_list_call_return_through_both_oracles() {
+        let source = include_str!("../../../tests/fixtures/mir_result_list_i32_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("Result<List<i32>, i32> call/return must lower");
+        let receipts = mir
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                && receipt.return_mode
+                    == crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+                && receipt
+                    .payload_types
+                    .first()
+                    .and_then(|ty| mir.type_catalog().get(ty))
+                    .is_some_and(|desc| matches!(desc.kind, crate::core::mir::types::MirTypeKind::List))
+        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference Result<List<i32>, i32> call/return execution");
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        assert!(bytecode
+            .functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .any(|op| matches!(op, Op::NewVariantMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode Result<List<i32>, i32> call/return execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(value, Value::Int(48)));
     }
 
     #[test]

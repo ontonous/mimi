@@ -1560,7 +1560,8 @@ pub(crate) fn validate_variant_call_return_coverage(function: &MirFunction) -> R
 }
 
 /// Validate the ownership-bearing return merge profile for the promoted
-/// `Result<string, i32>` direct-call ABI.  A returned aggregate may be
+/// managed `Result<Ok, i32>` direct-call ABI.  `Ok` is an owned String or
+/// `List<Copy scalar>` proven by TypeDesc. A returned aggregate may be
 /// assembled on several mutually-exclusive Branch paths, but every reachable
 /// path must be total and return the exact canonical Result TypeDesc.  The
 /// ownership ledger and TypeDesc glue checks remain the proof of the actual
@@ -1570,7 +1571,7 @@ pub(crate) fn validate_move_owned_result_return_merge(
     function: &MirFunction,
     type_catalog: &types::MirTypeCatalog,
 ) -> Result<(), String> {
-    type_catalog.validate_result_string_i32_variant(&function.result)?;
+    type_catalog.validate_result_move_variant(&function.result)?;
     validate_variant_call_return_coverage(function)?;
 
     // A Branch is the only admitted path split.  Prove its selector from

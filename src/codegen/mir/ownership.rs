@@ -78,6 +78,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         }
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_clone_value(value, subject),
+            MirGlueKind::List => self.emit_list_clone_value(value, ty, subject),
             MirGlueKind::Set => self.emit_set_clone_value(value, ty, subject),
             MirGlueKind::Aggregate => {
                 if matches!(layout, MirLayout::Option { .. } | MirLayout::Result { .. }) {

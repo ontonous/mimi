@@ -6444,18 +6444,19 @@ impl MirTypeCatalog {
         })
     }
 
-    /// Materialize the narrow move-owned direct-call ABI for
-    /// `Result<string, i32>`. The callee may return either canonical variant,
-    /// but the ownership-bearing payload is merged only under the narrow
-    /// path-exclusive return contract validated by Canonical MIR.
-    pub fn validated_result_string_i32_call_abi_contract(
+    /// Materialize the move-owned direct-call ABI for a managed Result.
+    /// `Ok` may be the canonical owned String or a `List<Copy scalar>` handle;
+    /// the callee may return either canonical variant, but the ownership-
+    /// bearing payload is merged only under the path-exclusive return
+    /// contract validated by Canonical MIR.
+    pub fn validated_result_move_call_abi_contract(
         &self,
         callee: &NodeId,
         type_arguments: &[ResolvedTypeId],
         parameter_types: &[ResolvedTypeId],
         result_ty: &ResolvedTypeId,
     ) -> Result<MirVariantCallAbiContract, String> {
-        self.validate_result_string_i32_variant(result_ty)?;
+        self.validate_result_move_variant(result_ty)?;
         let (nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
             format!(
                 "variant call result '{}' has no canonical Result layout",
@@ -6495,6 +6496,34 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Preserve the original narrow direct-call boundary for callers that
+    /// specifically require `Result<string, i32>`; generic managed Result
+    /// calls use [`Self::validated_result_move_call_abi_contract`].
+    pub fn validated_result_string_i32_call_abi_contract(
+        &self,
+        callee: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+        parameter_types: &[ResolvedTypeId],
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantCallAbiContract, String> {
+        let contract = self.validated_result_move_call_abi_contract(
+            callee,
+            type_arguments,
+            parameter_types,
+            result_ty,
+        )?;
+        if contract
+            .payload_types
+            .first()
+            .is_none_or(|payload| self.validate_owned_string(payload).is_err())
+        {
+            return Err(
+                "Result Ok payload must be the canonical owned StringHandle for the Result<string, i32> call ABI contract".into(),
+            );
+        }
+        Ok(contract)
+    }
+
     /// Validate a materialized call receipt against the callee result and
     /// checker-owned signature facts.  This is the shared pre-backend gate;
     /// backend adapters may add physical checks but may not replace it.
@@ -6513,13 +6542,12 @@ impl MirTypeCatalog {
                 parameter_types,
                 result_ty,
             )?,
-            MirVariantCallAbiMode::MoveOwned => self
-                .validated_result_string_i32_call_abi_contract(
-                    callee,
-                    type_arguments,
-                    parameter_types,
-                    result_ty,
-                )?,
+            MirVariantCallAbiMode::MoveOwned => self.validated_result_move_call_abi_contract(
+                callee,
+                type_arguments,
+                parameter_types,
+                result_ty,
+            )?,
         };
         if receipt != &expected {
             return Err("variant call ABI receipt disagrees with TypeDesc".into());
@@ -8221,6 +8249,76 @@ mod tests {
         let error = rejected_catalog
             .validate_result_move_variant(&rejected)
             .expect_err("List<f64> must remain outside managed Result contract");
+        assert!(error.contains("Copy scalar"), "{error}");
+    }
+
+    #[test]
+    fn materializes_result_list_call_abi_and_rejects_f64_payload() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let list_i32_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let result_i32_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: list_i32_id.clone(),
+                error: i32_id.clone(),
+            })
+            .expect("Result<List<i32>, i32>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let contract = catalog
+            .validated_result_move_call_abi_contract(
+                &crate::core::NodeId("function:make_ok".into()),
+                &[],
+                &[],
+                &result_i32_id,
+            )
+            .expect("Result<List<i32>, i32> direct-call ABI");
+        assert_eq!(
+            contract.mode,
+            crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+        );
+        assert_eq!(
+            contract.return_mode,
+            crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        );
+        assert_eq!(contract.payload_ty, list_i32_id);
+        assert_eq!(contract.payload_types.len(), 2);
+        assert_eq!(contract.payload_types[0], contract.payload_ty);
+
+        let mut rejected_table = table;
+        let f64_id = rejected_table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::F64))
+            .expect("f64");
+        let list_f64_id = rejected_table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![f64_id],
+                is_linear: false,
+            })
+            .expect("List<f64>");
+        let result_f64_id = rejected_table
+            .intern_resolved(ResolvedType::Result {
+                ok: list_f64_id,
+                error: i32_id,
+            })
+            .expect("Result<List<f64>, i32>");
+        let rejected_catalog =
+            MirTypeCatalog::from_resolved_types(&rejected_table).expect("catalog");
+        let error = rejected_catalog
+            .validated_result_move_call_abi_contract(
+                &crate::core::NodeId("function:make_bad".into()),
+                &[],
+                &[],
+                &result_f64_id,
+            )
+            .expect_err("Result<List<f64>, i32> direct-call ABI must fail closed");
         assert!(error.contains("Copy scalar"), "{error}");
     }
 

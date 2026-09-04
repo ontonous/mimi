@@ -1911,7 +1911,7 @@ impl<'a> NativeMirValidator<'a> {
         let move_owned_result = self
             .program
             .type_catalog()
-            .validate_result_string_i32_variant(&target.result)
+            .validate_result_move_variant(&target.result)
             .is_ok();
         if flat_variant_result || move_owned_result {
             let Some(receipt) = variant_call_contract else {
@@ -1920,7 +1920,7 @@ impl<'a> NativeMirValidator<'a> {
                     if flat_variant_result {
                         "call returning flat Copy Option/Result has no canonical ABI receipt"
                     } else {
-                        "call returning move-owned Result<string, i32> has no canonical ABI receipt"
+                        "call returning move-owned managed Result has no canonical ABI receipt"
                     },
                 ));
                 return;

@@ -1,0 +1,11 @@
+func make_bad() -> Result<List<f64>, i32> {
+    Ok([1.0])
+}
+
+func main() -> i32 {
+    let value = make_bad()
+    match value {
+        Ok(_) => 41,
+        Err(code) => code
+    }
+}

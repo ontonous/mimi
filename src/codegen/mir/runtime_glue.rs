@@ -149,6 +149,72 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(clone.into())
     }
 
+    pub(super) fn emit_list_clone_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let kind = native_list_kind(self.program.type_catalog(), ty)?;
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        let clone_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_clone_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    clone_fn,
+                    &[
+                        BasicMetadataValueEnum::from(value.into_pointer_value()),
+                        BasicMetadataValueEnum::from(kind_value),
+                    ],
+                    "mir_list_clone",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "List clone returned void"))?
+        .into_pointer_value();
+        self.emit_list_null_abort(clone, subject, "canonical MIR List clone failed")?;
+        Ok(clone.into())
+    }
+
+    fn emit_list_drop_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let kind = native_list_kind(self.program.type_catalog(), ty)?;
+        let kind_value = self
+            .generator
+            .context
+            .i8_type()
+            .const_int(kind as u64, false);
+        let drop_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_list_drop_scalar")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                drop_fn,
+                &[
+                    BasicMetadataValueEnum::from(value.into_pointer_value()),
+                    BasicMetadataValueEnum::from(kind_value),
+                ],
+                "mir_list_drop",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(())
+    }
+
     pub(super) fn emit_set_construct(
         &mut self,
         result: &MirValueId,
@@ -296,6 +362,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         }
         match glue {
             MirGlueKind::OwnedString => self.emit_owned_string_drop_value(value, subject),
+            MirGlueKind::List => self.emit_list_drop_value(value, ty, subject),
             MirGlueKind::Set => self.emit_set_drop_value(value, subject),
             MirGlueKind::Aggregate => {
                 if matches!(layout, MirLayout::Option { .. } | MirLayout::Result { .. }) {

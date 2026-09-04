@@ -3084,7 +3084,7 @@ fn eval_direct_owned_string_call(
 }
 
 /// Symbolically execute the narrow direct-call ABI island for a flat Copy
-/// Option/Result or move-owned `Result<string, i32>` result. The callee is
+/// Option/Result or move-owned managed Result result. The callee is
 /// already concrete MIR, so the verifier maps symbolic arguments into its
 /// entry block and reuses `explore_block`; it does not inspect a surface body
 /// or rediscover a call ABI. Ownership-bearing Result paths use the explicit
@@ -3136,9 +3136,7 @@ fn eval_direct_variant_call(
         return Err("MIR verifier direct variant call arity disagrees with target".into());
     }
     let flat_variant_result = catalog.validate_flat_copy_variant(&target.result).is_ok();
-    let move_owned_result = catalog
-        .validate_result_string_i32_variant(&target.result)
-        .is_ok();
+    let move_owned_result = catalog.validate_result_move_variant(&target.result).is_ok();
     if !flat_variant_result && !move_owned_result {
         return Err(
             "MIR verifier direct variant call result is outside the canonical call ABI contract"
@@ -3149,8 +3147,7 @@ fn eval_direct_variant_call(
         if flat_variant_result {
             "MIR verifier flat Copy variant call has no canonical ABI receipt".to_string()
         } else {
-            "MIR verifier move-owned Result<string, i32> call has no canonical ABI receipt"
-                .to_string()
+            "MIR verifier move-owned managed Result call has no canonical ABI receipt".to_string()
         }
     })?;
     catalog.validate_variant_call_abi_receipt(
@@ -3296,11 +3293,11 @@ fn merge_direct_variant_return_paths(
     Ok(merged)
 }
 
-/// Merge ownership-bearing `Result<string, i32>` returns after the canonical
-/// MIR path validator has proved that every reachable path is total and
-/// non-trapping.  The String payload is intentionally opaque to Z3, so the
-/// merge preserves its TypeDesc identity while the Copy `i32` payload remains
-/// symbolically selectable by the path condition.
+/// Merge ownership-bearing managed Result returns after the canonical MIR path
+/// validator has proved that every reachable path is total and non-trapping.
+/// Managed payloads are intentionally opaque to Z3, so the merge preserves
+/// their TypeDesc identity while the Copy `i32` payload remains symbolically
+/// selectable by the path condition.
 fn merge_move_owned_result_return_paths(
     catalog: &crate::core::mir::types::MirTypeCatalog,
     result_ty: &crate::core::ResolvedTypeId,
@@ -3309,7 +3306,7 @@ fn merge_move_owned_result_return_paths(
     if returns.is_empty() {
         return Err("MIR verifier direct variant call has no return paths to merge".into());
     }
-    catalog.validate_result_string_i32_variant(result_ty)?;
+    catalog.validate_result_move_variant(result_ty)?;
     let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
         return Err("MIR verifier direct variant call has no canonical Result layout".into());
     };
@@ -3397,6 +3394,12 @@ fn symbolic_zero_for_type(
         catalog.validate_owned_string(ty)?;
         return Ok(SymbolicValue::Opaque { ty: ty.clone() });
     }
+    if descriptor.kind == MirTypeKind::List {
+        catalog.validate_move_owned_list_payload(ty)?;
+        return Ok(SymbolicValue::List {
+            length: Int::from_i64(0),
+        });
+    }
     match descriptor.abi {
         MirAbiClass::Integer {
             bits: 32 | 64,
@@ -3477,7 +3480,15 @@ fn merge_symbolic_scalars(
         {
             Ok(SymbolicValue::Opaque { ty: when_true })
         }
-        _ => Err("MIR verifier direct variant call merge requires scalar payloads".into()),
+        (SymbolicValue::List { length: when_true }, SymbolicValue::List { length: when_false }) => {
+            Ok(SymbolicValue::List {
+                length: condition.ite(&when_true, &when_false),
+            })
+        }
+        _ => Err(
+            "MIR verifier direct variant call merge requires compatible Copy or opaque payloads"
+                .into(),
+        ),
     }
 }
 
@@ -5174,6 +5185,61 @@ mod tests {
         let value = MirReferenceInterpreter::new(&program)
             .execute(&crate::core::NodeId("function:main".into()), &[])
             .expect("reference move-owned Result call/return execution");
+        assert_eq!(value, MirRuntimeValue::Int(48));
+    }
+
+    #[test]
+    fn verifier_proves_move_owned_result_list_call_return_from_canonical_mir() {
+        let source = include_str!("../../tests/fixtures/mir_result_list_i32_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("move-owned Result<List<i32>, i32> call/return must be canonical MIR");
+        let receipts = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                && receipt.return_mode
+                    == crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+                && receipt
+                    .payload_types
+                    .first()
+                    .and_then(|ty| program.type_catalog().get(ty))
+                    .is_some_and(|desc| matches!(desc.kind, crate::core::mir::types::MirTypeKind::List))
+        }));
+        let results = verify_program(&program, "result-list-i32-call-return-source-hash".into())
+            .expect("move-owned Result<List<i32>, i32> verifier result");
+        for owner in ["function:use_ok", "function:use_err"] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner)
+                .expect("direct Result<List<i32>, i32> verification result");
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{owner}: {}",
+                result.message
+            );
+            assert!(result
+                .message
+                .contains("canonical MIR ensures contract proven"));
+        }
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference move-owned Result<List<i32>, i32> call/return execution");
         assert_eq!(value, MirRuntimeValue::Int(48));
     }
 

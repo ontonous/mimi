@@ -6756,7 +6756,7 @@ impl<'a> Lowerer<'a> {
                 &result_ty,
             )
         } else if matches!(result_desc.kind, super::types::MirTypeKind::Result) {
-            type_catalog.validated_result_string_i32_call_abi_contract(
+            type_catalog.validated_result_move_call_abi_contract(
                 owner,
                 type_arguments,
                 &parameter_types,

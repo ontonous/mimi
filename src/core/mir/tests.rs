@@ -4012,6 +4012,68 @@ fn direct_move_owned_result_calls_materialize_signature_receipts() {
 }
 
 #[test]
+fn direct_move_owned_result_list_calls_materialize_signature_receipts() {
+    let source = include_str!("../../../tests/fixtures/mir_result_list_i32_call_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned Result<List<i32>, i32> calls must lower");
+    let calls = canonical
+        .functions()
+        .values()
+        .flat_map(|function| function.blocks.values())
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                variant_call_contract: Some(receipt),
+                ..
+            } => Some((callee.clone(), receipt.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    for (callee, receipt) in calls {
+        assert_eq!(callee, receipt.callee);
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+        );
+        assert_eq!(
+            receipt.return_mode,
+            crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        );
+        assert_eq!(receipt.payload_types.len(), 2);
+        assert_eq!(receipt.payload_ty, receipt.payload_types[0]);
+        let payload = canonical
+            .type_catalog()
+            .get(&receipt.payload_types[0])
+            .expect("List payload TypeDesc");
+        assert!(matches!(
+            payload.kind,
+            crate::core::mir::types::MirTypeKind::List
+        ));
+        canonical
+            .type_catalog()
+            .validate_variant_call_abi_receipt(
+                &receipt.callee,
+                &receipt.type_arguments,
+                &receipt.parameter_types,
+                &receipt.result_ty,
+                &receipt,
+            )
+            .expect("List move-owned call receipt must be TypeDesc-derived");
+    }
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference move-owned Result<List<i32>, i32> call execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(48));
+}
+
+#[test]
 fn move_owned_result_call_receipt_drift_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_result_string_i32_call_return.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

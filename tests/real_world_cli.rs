@@ -3485,6 +3485,106 @@ fn canonical_mir_native_result_string_i32_call_return_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_native_result_list_i32_call_return_matches_mir_run() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_list_i32_call_return.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR Result<List<i32>, i32> reference run");
+    assert_eq!(mir_run.status.code(), Some(48));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-result-list-i32-call-return-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn canonical MIR Result<List<i32>, i32> native build");
+    assert!(
+        build.status.success(),
+        "canonical MIR Result<List<i32>, i32> native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute canonical MIR Result<List<i32>, i32> native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(48));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn canonical MIR Result<List<i32>, i32> verifier");
+    assert!(
+        verify.status.success(),
+        "canonical MIR Result<List<i32>, i32> verification failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(verify_output.contains("use_ok"), "{verify_output}");
+    assert!(verify_output.contains("use_err"), "{verify_output}");
+    assert!(verify_output.contains("2/2 verified"), "{verify_output}");
+}
+
+#[test]
+fn canonical_mir_result_list_f64_call_fails_closed_before_backends() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_list_f64_call_rejected.mimi");
+    for command in ["run", "build", "verify"] {
+        let mut invocation = Command::new(mimi_bin());
+        invocation
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&fixture)
+            .arg("--mir");
+        if command == "build" {
+            let output_path = std::env::temp_dir().join(format!(
+                "mimi-rejected-result-list-f64-{}",
+                std::process::id()
+            ));
+            invocation.arg("-o").arg(&output_path);
+        }
+        let output = invocation
+            .output()
+            .expect("failed to spawn rejected Result<List<f64>, i32> command");
+        assert!(
+            !output.status.success(),
+            "canonical MIR {command} unexpectedly accepted Result<List<f64>, i32>"
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains("Copy scalar") || diagnostics.contains("canonical"),
+            "{command} lost the stable fail-closed diagnostic:\n{diagnostics}"
+        );
+    }
+}
+
+#[test]
 fn canonical_mir_native_result_string_i32_call_return_multipath_matches_mir_run() {
     let fixture = project_root()
         .join("tests")
