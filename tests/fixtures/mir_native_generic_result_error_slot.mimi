@@ -1,0 +1,9 @@
+func is_err<T>(value: Result<i32, T>) -> bool {
+    value.is_err()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let err: Result<i32, i32> = Err(7)
+    if is_err(err) { 41 } else { 0 }
+}

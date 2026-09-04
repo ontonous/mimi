@@ -688,6 +688,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_error_slot_predicate_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_error_slot.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_variant_predicate_admission(&checked),
+            mimi::core::mir::GenericVariantPredicateAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("Result<i32, T> predicate must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarVariantPredicate {
+                contract: mimi::core::mir::types::MirVariantPredicateContract {
+                    predicate: mimi::core::mir::MirVariantPredicate::IsErr,
+                    ..
+                }
+            }
+        )));
+    }
+
+    #[test]
     fn scalar_generic_record_projection_i64_and_bool_enter_canonical_default_route() {
         for source in [
             include_str!("../../tests/fixtures/mir_native_generic_record_projection_i64.mimi"),

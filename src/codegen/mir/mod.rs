@@ -2057,6 +2057,42 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_generic_result_error_slot_predicate() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_error_slot.mimi"
+        ));
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantPredicate {
+                contract: crate::core::mir::types::MirVariantPredicateContract {
+                    predicate: crate::core::mir::MirVariantPredicate::IsErr,
+                    ..
+                }
+            }
+        )));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result error-slot predicate execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let bytecode_program =
+            compile_mir_program(&program).expect("Result error-slot predicate MIR bytecode");
+        assert!(bytecode_program.ast.is_none());
+        let bytecode = BytecodeVM::new(bytecode_program)
+            .run_value()
+            .expect("bytecode Result error-slot predicate execution");
+        assert!(matches!(bytecode, Value::Int(41)));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_result_error_slot");
+        generator
+            .compile_mir_native(&program)
+            .expect("native Result error-slot predicate must consume canonical MIR");
+        generator
+            .module
+            .verify()
+            .expect("native Result error-slot predicate module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_scalar_generic_list_reverse() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_list_reverse.mimi"
