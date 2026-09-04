@@ -119,8 +119,9 @@ pub(crate) fn build_canonical_program_for_sources(
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
 /// record value, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
-/// generic `Option<T>.is_some`/`is_none` predicate island, or the generic
-/// `Option<T>.unwrap()` projection island. The candidate then
+/// generic `Option<T>.is_some`/`is_none` predicate island, the generic
+/// `Option<T>.unwrap()` projection island, or generic `Result<T, T>.unwrap()`.
+/// The candidate then
 /// has to pass every consumer preflight before any caller starts execution or
 /// LLVM emission. A `Legacy(reason)` result is an explicit
 /// compatibility disposition for a program that has not entered a migrated
@@ -138,6 +139,7 @@ pub(crate) fn select_default_route(
     let option_string_admission = admission.option_string;
     let generic_variant_admission = admission.generic_variant;
     let generic_option_projection_admission = admission.generic_option_projection;
+    let generic_result_projection_admission = admission.generic_result_projection;
     let copy_option_i32_admission = admission.copy_option_i32;
     let copy_option_bool_admission = admission.copy_option_bool;
     let copy_option_i64_admission = admission.copy_option_i64;
@@ -194,6 +196,17 @@ pub(crate) fn select_default_route(
         generic_option_projection_admission,
         mimi::core::mir::GenericOptionProjectionAdmission::CompleteCoverage
     );
+    let generic_result_projection_unsupported_hint =
+        mimi::core::mir::has_unsupported_generic_result_projection_candidate(checked);
+    let generic_result_projection_hint = generic_result_projection_unsupported_hint
+        || !matches!(
+            generic_result_projection_admission,
+            mimi::core::mir::GenericResultProjectionAdmission::OutsideProfile
+        );
+    let complete_generic_result_projection_candidate = matches!(
+        generic_result_projection_admission,
+        mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+    );
     let copy_option_i32_hint = !matches!(
         copy_option_i32_admission,
         mimi::core::mir::CopyOptionI32VariantAdmission::OutsideProfile
@@ -245,6 +258,7 @@ pub(crate) fn select_default_route(
         && !option_string_hint
         && !generic_variant_hint
         && !generic_option_projection_hint
+        && !generic_result_projection_hint
         && !copy_option_i32_hint
         && !copy_option_bool_hint
         && !copy_option_i64_hint
@@ -265,6 +279,11 @@ pub(crate) fn select_default_route(
     if generic_option_projection_hint && !complete_generic_option_projection_candidate {
         return DefaultMirRoute::Rejected(
             "generic Option projection candidate is outside complete coverage".into(),
+        );
+    }
+    if generic_result_projection_hint && !complete_generic_result_projection_candidate {
+        return DefaultMirRoute::Rejected(
+            "generic Result projection candidate is outside complete coverage".into(),
         );
     }
     if copy_option_i32_hint && !complete_copy_option_i32_candidate {
@@ -343,6 +362,7 @@ pub(crate) fn select_default_route(
                         profile,
                         mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                             | mimi::core::mir::CanonicalMirRouteProfile::GenericOptionProjection
+                            | mimi::core::mir::CanonicalMirRouteProfile::GenericResultProjection
                     ) {
                         if matches!(
                             profile,
@@ -350,6 +370,13 @@ pub(crate) fn select_default_route(
                         ) {
                             format!(
                                 "generic Option projection canonical MIR construction failed: {message}"
+                            )
+                        } else if matches!(
+                            profile,
+                            mimi::core::mir::CanonicalMirRouteProfile::GenericResultProjection
+                        ) {
+                            format!(
+                                "generic Result projection canonical MIR construction failed: {message}"
                             )
                         } else {
                             format!(
@@ -365,12 +392,18 @@ pub(crate) fn select_default_route(
                         profile,
                         mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                             | mimi::core::mir::CanonicalMirRouteProfile::GenericOptionProjection
+                            | mimi::core::mir::CanonicalMirRouteProfile::GenericResultProjection
                     ) {
                         if matches!(
                             profile,
                             mimi::core::mir::CanonicalMirRouteProfile::GenericOptionProjection
                         ) {
                             format!("generic Option projection canonical graph did not materialize the selected production operation: {message}")
+                        } else if matches!(
+                            profile,
+                            mimi::core::mir::CanonicalMirRouteProfile::GenericResultProjection
+                        ) {
+                            format!("generic Result projection canonical graph did not materialize the selected production operation: {message}")
                         } else {
                             format!("generic variant predicate canonical graph did not materialize the selected production operation: {message}")
                         }
@@ -392,6 +425,7 @@ pub(crate) fn select_default_route(
                     profile,
                     mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                         | mimi::core::mir::CanonicalMirRouteProfile::GenericOptionProjection
+                        | mimi::core::mir::CanonicalMirRouteProfile::GenericResultProjection
                 ),
                 matches!(
                     profile,
@@ -475,6 +509,14 @@ pub(crate) fn select_default_route(
                     true,
                     false,
                     "canonical generic variant predicate candidate did not materialize a supported MIR shape",
+                );
+            }
+            if generic_result_projection_hint
+                && mimi::core::mir::has_unsupported_generic_result_projection_candidate(checked)
+            {
+                return DefaultMirRoute::Rejected(
+                    "generic Result projection candidate did not materialize a supported MIR shape"
+                        .into(),
                 );
             }
             // S8 keeps its existing candidate hard boundary: the front-end
@@ -573,6 +615,8 @@ pub(crate) fn select_default_route(
     let materialized_generic_variant_candidate = route.materialized_generic_variant_candidate;
     let materialized_generic_option_projection_candidate =
         route.materialized_generic_option_projection_candidate;
+    let materialized_generic_result_projection_candidate =
+        route.materialized_generic_result_projection_candidate;
     let materialized_copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
     let materialized_copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
     let materialized_copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
@@ -589,7 +633,9 @@ pub(crate) fn select_default_route(
     let generic_route_candidate = (complete_generic_variant_candidate
         && materialized_generic_variant_candidate)
         || (complete_generic_option_projection_candidate
-            && materialized_generic_option_projection_candidate);
+            && materialized_generic_option_projection_candidate)
+        || (complete_generic_result_projection_candidate
+            && materialized_generic_result_projection_candidate);
     let record_route_candidate =
         complete_record_candidate || (record_hint && copy_record) || generic_route_candidate;
     let option_string_route_candidate = complete_option_string_candidate
@@ -996,6 +1042,11 @@ fn reject_migrated_candidates(
             "generic Option projection candidate is not eligible for the default route: {}",
             reason
         ))
+    } else if reason.contains("generic Result projection") {
+        DefaultMirRoute::Rejected(format!(
+            "generic Result projection candidate is not eligible for the default route: {}",
+            reason
+        ))
     } else if record_candidate {
         DefaultMirRoute::Rejected(format!(
             "S0 flat Copy record candidate is not eligible for the default route: {}",
@@ -1308,6 +1359,40 @@ mod tests {
             panic!("generic Option unwrap_or must fail closed before legacy");
         };
         assert!(reason.contains("generic Option projection"), "{reason}");
+    }
+
+    #[test]
+    fn generic_result_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Result projection must select the canonical default route");
+        };
+        assert!(program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        }));
+    }
+
+    #[test]
+    fn unsupported_generic_result_projection_cannot_reenter_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"
+        ));
+        assert!(mimi::core::mir::has_unsupported_generic_result_projection_candidate(&checked));
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Rejected(reason) = route else {
+            panic!("unsupported generic Result projection must fail closed before legacy");
+        };
+        assert!(reason.contains("generic Result projection"), "{reason}");
     }
 
     #[test]

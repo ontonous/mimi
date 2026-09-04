@@ -1896,15 +1896,20 @@ pub(crate) fn validate_scalar_variant_projection_mir(
     if *returned != *result {
         return Err("generic variant projection return value is not the Project result".into());
     }
-    if receipt.variant_name != "Some"
-        || receipt.discriminant != 1
+    let valid_family = match receipt.projection.nominal.as_str() {
+        "builtin:type:Option" => receipt.variant_name == "Some" && receipt.discriminant == 1,
+        "builtin:type:Result" => receipt.variant_name == "Ok" && receipt.discriminant == 0,
+        _ => false,
+    };
+    if !valid_family
         || receipt.projection.field_index != 0
         || receipt.projection.arity != 1
         || receipt.projection.ownership != super::types::MirOwnership::Copy
         || receipt.projection.move_out_glue != super::types::MirGlueKind::Noop
     {
         return Err(
-            "generic variant projection receipt is outside the Copy Option<T> contract".into(),
+            "generic variant projection receipt is outside the Copy Option/Result<T> contract"
+                .into(),
         );
     }
     Ok(())
@@ -5389,6 +5394,13 @@ impl<'a> Lowerer<'a> {
                     {
                         return Some(receipt);
                     }
+                    if let Ok(receipt) = type_catalog
+                        .validated_generic_result_projection_trap_contract(
+                            &base_ty, variant, field, &result_ty,
+                        )
+                    {
+                        return Some(receipt);
+                    }
                 }
                 self.error(
                     node_id,
@@ -5856,6 +5868,24 @@ fn variant_projection_builtin(
             },
             "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or",
         ) => {
+            if builtin.as_str() == "builtin.method.result.unwrap"
+                && ok == error
+                && catalog.get(ok).is_some_and(|payload| {
+                    payload.kind == super::types::MirTypeKind::GenericParameter
+                })
+            {
+                let variant = variants.iter().find(|variant| {
+                    variant.name == "Ok"
+                        && variant.discriminant == 0
+                        && variant.fields.len() == 1
+                        && variant.fields[0].ty == *ok
+                })?;
+                let field = variant.fields.first()?;
+                if call.result == field.ty {
+                    return Some((variant.id.clone(), field.id.clone()));
+                }
+                return None;
+            }
             catalog.validate_copy_result_i32_variant(receiver_ty).ok()?;
             if ok != error {
                 return None;

@@ -1740,6 +1740,92 @@ fn canonical_default_generic_option_projection_rejects_unmigrated_fallback() {
 }
 
 #[test]
+fn canonical_default_generic_result_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_unwrap.mimi");
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Result projection run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Result projection verifier");
+    assert!(
+        verify.status.success(),
+        "default generic Result projection verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-result-unwrap-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default generic Result projection native build");
+    assert!(
+        build.status.success(),
+        "default generic Result projection native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default generic Result projection native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
+fn canonical_default_generic_result_projection_trap_and_rejection_are_fail_closed() {
+    let trap_fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_unwrap_none.mimi");
+    let trap_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&trap_fixture)
+        .output()
+        .expect("failed to spawn generic Result Err projection run");
+    assert!(!trap_run.status.success());
+    assert!(String::from_utf8_lossy(&trap_run.stderr).contains("E0800"));
+
+    let rejected_fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_unwrap_rejected.mimi");
+    for command in ["run", "verify", "build"] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&rejected_fixture)
+            .output()
+            .expect("failed to spawn unsupported generic Result projection command");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("generic Result projection"),
+            "unsupported generic Result projection must fail closed for {command}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn canonical_default_copy_option_bool_unwrap_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")

@@ -48,18 +48,20 @@ pub use copy_result_island::{
 pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,
-    classify_generic_variant_predicate_admission, classify_scalar_collection_admission,
-    contains_flat_copy_record_candidate, contains_generic_option_projection_candidate,
+    classify_generic_result_projection_admission, classify_generic_variant_predicate_admission,
+    classify_scalar_collection_admission, contains_flat_copy_record_candidate,
+    contains_generic_option_projection_candidate, contains_generic_result_projection_candidate,
     contains_generic_variant_predicate_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
     has_unsupported_generic_list_facade_candidate,
     has_unsupported_generic_option_projection_candidate,
     has_unsupported_generic_record_projection_candidate,
+    has_unsupported_generic_result_projection_candidate,
     has_unsupported_generic_variant_predicate_candidate, has_unsupported_list_concat_candidate,
     has_unsupported_list_reverse_candidate, validate_scalar_collection_island,
-    FlatCopyRecordAdmission, GenericOptionProjectionAdmission, GenericVariantPredicateAdmission,
-    ScalarCollectionAdmission, GENERIC_OPTION_PROJECTION_ISLAND, GENERIC_VARIANT_PREDICATE_ISLAND,
-    SCALAR_COLLECTION_ISLAND,
+    FlatCopyRecordAdmission, GenericOptionProjectionAdmission, GenericResultProjectionAdmission,
+    GenericVariantPredicateAdmission, ScalarCollectionAdmission, GENERIC_OPTION_PROJECTION_ISLAND,
+    GENERIC_RESULT_PROJECTION_ISLAND, GENERIC_VARIANT_PREDICATE_ISLAND, SCALAR_COLLECTION_ISLAND,
 };
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,

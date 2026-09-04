@@ -1189,6 +1189,50 @@ fn generic_option_unwrap_is_verified_from_canonical_mir_without_ast_fallback() {
 }
 
 #[test]
+fn generic_result_unwrap_is_verified_from_canonical_mir_without_ast_fallback() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_result_unwrap.mimi");
+    let file = parse_memory_source(source, "mir-generic-result-unwrap").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Result unwrap MIR");
+    assert!(canonical.instances().values().any(|instance| {
+        matches!(
+            &instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Result"
+        )
+    }));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Result unwrap verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
+fn generic_result_projection_is_rejected_before_legacy_verifier_fallback() {
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi");
+    let file = parse_memory_source(source, "mir-generic-result-rejected").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let error = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect_err("unsupported generic Result projection must not fall through to AST verifier");
+    assert!(error.contains("generic Result projection"), "{error}");
+}
+
+#[test]
 fn generic_option_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
     let source =
         include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi");

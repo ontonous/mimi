@@ -5277,6 +5277,128 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize the non-executable placeholder receipt for the narrow
+    /// generic `Result<T, T>.unwrap()` projection.  Both payload slots are
+    /// deliberately tied to the same generic parameter: this keeps the
+    /// concrete instance inside the flat Copy aggregate ABI while proving
+    /// the inactive `Err` slot has the same TypeDesc/glue policy as `Ok`.
+    /// Concrete materialization must call
+    /// `validated_variant_projection_trap_contract` again after replacing `T`
+    /// with a Copy scalar.
+    pub(crate) fn validated_generic_result_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "generic Result projection source type '{}' is absent from MIR TypeDesc catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Result {
+            variants,
+            ok,
+            error,
+            ..
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "generic Result projection source '{}' has no canonical Result layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "generic Result projection source must be Aggregate/Copy with canonical no-op glue"
+                    .into(),
+            );
+        }
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic Result projection result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        let generic_payload = self
+            .get(result_ty)
+            .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
+        if !generic_payload
+            || result.kind != MirTypeKind::GenericParameter
+            || ok != result_ty
+            || error != result_ty
+        {
+            return Err(
+                "generic Result projection placeholder requires Result<T, T> and result T identity"
+                    .into(),
+            );
+        }
+        if variants.len() != 2 {
+            return Err(
+                "generic Result projection source must have exactly canonical Ok/Err variants"
+                    .into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| {
+                variant.id == *variant_id
+                    && variant.name == "Ok"
+                    && variant.discriminant == 0
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Result projection target must be the canonical Ok variant".to_string()
+            })?;
+        let alternate = variants
+            .iter()
+            .find(|variant| {
+                variant.name == "Err" && variant.discriminant == 1 && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Result projection source must contain the canonical Err variant"
+                    .to_string()
+            })?;
+        if selected.fields[0].id != *field_id
+            || selected.fields[0].ty != *result_ty
+            || alternate.fields[0].ty != *result_ty
+        {
+            return Err(
+                "generic Result projection fields must be the canonical Ok/Err payloads".into(),
+            );
+        }
+        Ok(MirVariantProjectionTrapContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection: MirVariantProjectionContract {
+                nominal: NominalTypeId::new("builtin:type:Result").expect("static Result nominal"),
+                variant: selected.id.clone(),
+                field: selected.fields[0].id.clone(),
+                field_index: 0,
+                arity: 1,
+                field_ty: result_ty.clone(),
+                ownership: MirOwnership::Copy,
+                move_out_glue: MirGlueKind::Noop,
+            },
+            variant_name: "Ok".into(),
+            discriminant: 0,
+            trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
     /// Validate a materialized predicate receipt against the checker-owned
     /// TypeDesc graph. A stale discriminant, family, or predicate identity is
     /// invalid MIR and must be rejected before any backend reads a value.

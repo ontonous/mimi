@@ -258,21 +258,31 @@ pub fn verify_checked_dual(
     // canonical MIR profile below; mixed admission is a stable hard error.
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
     if matches!(
-        admission.copy_result_i32,
-        crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
-    ) {
-        return Err(
-            "MIR-COVERAGE-001: Copy Result<i32, i32> projection candidate is outside complete coverage"
-                .into(),
-        );
-    }
-    if matches!(
         admission.generic_option_projection,
         crate::core::mir::GenericOptionProjectionAdmission::MixedCoverage
     ) || crate::core::mir::has_unsupported_generic_option_projection_candidate(program)
     {
         return Err(
             "MIR-COVERAGE-001: generic Option projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.generic_result_projection,
+        crate::core::mir::GenericResultProjectionAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_result_projection_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Result projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
+        admission.copy_result_i32,
+        crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
+    ) {
+        return Err(
+            "MIR-COVERAGE-001: Copy Result<i32, i32> projection candidate is outside complete coverage"
                 .into(),
         );
     }
@@ -311,13 +321,14 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 11] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 12] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection,
+        crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant,
@@ -415,6 +426,7 @@ fn verify_closed_mir_profile(
         }
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate => {}
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection => {}
+        crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection => {}
     }
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(

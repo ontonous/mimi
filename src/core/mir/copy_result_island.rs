@@ -36,6 +36,13 @@ pub fn classify_copy_result_i32_variant_admission(
         if super::islands::is_prelude_origin(program, &callable.body.root.origin) {
             continue;
         }
+        // A specialized generic Result projection has its own admission and
+        // receipt. Do not let the generic template's builtin unwrap make the
+        // concrete Result<i32, i32> island report mixed coverage before the
+        // generic route can claim it.
+        if super::islands::is_generic_result_projection_callable(program, callable) {
+            continue;
+        }
         let body_is_closed = super::option_island::option_body_is_closed(&callable.body.root);
         let has_any_unwrap = body_has_result_unwrap(program, &callable.body.root, false);
         let has_expected_unwrap = body_has_result_unwrap(program, &callable.body.root, true);
@@ -305,45 +312,59 @@ fn expr_has_result_unwrap(
 
 /// Detect one concrete Copy Result projection receipt in MIR.
 pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool {
-    program.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                let (base, result, fallback) = match &instruction.kind {
-                    MirInstructionKind::VariantProject { base, result, .. } => (base, result, None),
-                    MirInstructionKind::VariantProjectOr {
-                        base,
-                        result,
-                        fallback,
-                        ..
-                    } => (base, result, Some(fallback)),
-                    _ => return false,
-                };
-                let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
-                    return false;
-                };
-                let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
-                    return false;
-                };
-                let result_is_i32 =
-                    program
-                        .type_catalog()
-                        .get(result_ty)
-                        .is_some_and(|descriptor| {
-                            descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
-                        });
-                let fallback_is_i32 = fallback.is_none_or(|fallback| {
-                    function
-                        .values
-                        .get(fallback)
-                        .and_then(|value| program.type_catalog().get(&value.ty))
-                        .is_some_and(|descriptor| {
-                            descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
-                        })
-                });
-                is_copy_result_i32(program, base_ty) && result_is_i32 && fallback_is_i32
+    // Generic Result projection instances carry a specialized receipt and
+    // belong to their own route profile; do not reclassify their VariantProject
+    // body as the direct concrete Result<i32, i32> island.
+    let generic_instance_functions = program
+        .instances()
+        .values()
+        .map(|instance| instance.function.clone())
+        .collect::<BTreeSet<_>>();
+    program
+        .functions()
+        .values()
+        .filter(|function| !generic_instance_functions.contains(&function.owner))
+        .any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    let (base, result, fallback) = match &instruction.kind {
+                        MirInstructionKind::VariantProject { base, result, .. } => {
+                            (base, result, None)
+                        }
+                        MirInstructionKind::VariantProjectOr {
+                            base,
+                            result,
+                            fallback,
+                            ..
+                        } => (base, result, Some(fallback)),
+                        _ => return false,
+                    };
+                    let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
+                        return false;
+                    };
+                    let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
+                        return false;
+                    };
+                    let result_is_i32 =
+                        program
+                            .type_catalog()
+                            .get(result_ty)
+                            .is_some_and(|descriptor| {
+                                descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                            });
+                    let fallback_is_i32 = fallback.is_none_or(|fallback| {
+                        function
+                            .values
+                            .get(fallback)
+                            .and_then(|value| program.type_catalog().get(&value.ty))
+                            .is_some_and(|descriptor| {
+                                descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                            })
+                    });
+                    is_copy_result_i32(program, base_ty) && result_is_i32 && fallback_is_i32
+                })
             })
         })
-    })
 }
 
 fn is_copy_result_i32(program: &MirProgram, ty: &ResolvedTypeId) -> bool {

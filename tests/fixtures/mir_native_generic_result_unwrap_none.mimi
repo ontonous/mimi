@@ -1,0 +1,8 @@
+// Generic Result projection trap: Err is not an active Ok payload.
+func unwrap<T>(value: Result<T, T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    unwrap(Err(7))
+}

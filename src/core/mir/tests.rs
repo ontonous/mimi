@@ -191,6 +191,54 @@ fn generic_option_unwrap_stale_receipt_is_rejected_before_consumers() {
 }
 
 #[test]
+fn materializes_generic_result_unwrap_with_a_specialized_projection_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result unwrap must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { .. }
+            )
+        })
+        .expect("generic Result projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.variant_name, "Ok");
+    assert_eq!(contract.discriminant, 0);
+    assert_eq!(contract.projection.nominal.as_str(), "builtin:type:Result");
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Copy);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Result unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn generic_result_unwrap_err_preserves_the_canonical_trap() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result unwrap Err MIR");
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("generic Result unwrap Err must trap");
+    assert!(
+        error.to_string().contains("E0800"),
+        "unexpected trap: {error}"
+    );
+}
+
+#[test]
 fn rejects_generic_option_unwrap_for_owned_payload_before_legacy() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi");
