@@ -1300,6 +1300,30 @@ fn generic_result_unwrap_or_is_verified_from_canonical_mir_without_ast_fallback(
 }
 
 #[test]
+fn generic_distinct_result_unwrap_or_is_verified_from_canonical_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi");
+    let file = parse_memory_source(source, "mir-generic-distinct-result-unwrap-or").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical heterogeneous Result unwrap_or MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("heterogeneous Result unwrap_or verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn generic_result_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
     let source =
         include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi");

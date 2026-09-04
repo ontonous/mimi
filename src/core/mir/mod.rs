@@ -380,10 +380,11 @@ pub enum MirGenericInstanceContract {
     ScalarVariantProjection {
         contract: types::MirVariantProjectionTrapContract,
     },
-    /// A generic `Option<T>.unwrap_or(T)` or `Result<T,T>.unwrap_or(T)` total
-    /// projection specialized to a concrete Copy scalar. The fallback receipt
-    /// fixes both variant identities and the explicit fallback ABI so
-    /// consumers cannot infer a branch from a physical aggregate.
+    /// A generic `Option<T>.unwrap_or(T)`, `Result<T,T>.unwrap_or(T)` or
+    /// `Result<T,i32>.unwrap_or(T)` total projection specialized to a concrete
+    /// Copy scalar. The fallback receipt fixes both variant identities and the
+    /// explicit fallback ABI so consumers cannot infer a branch from a
+    /// physical aggregate.
     ScalarVariantProjectionFallback {
         contract: types::MirVariantProjectionFallbackContract,
     },

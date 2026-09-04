@@ -741,12 +741,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         // zero-field alternate.  The checker-owned receipt proves which case
         // applies; never require a physical payload slot merely to select an
         // explicit fallback operand.
-        if let Some(fallback_slot) = variant_abi.payload_slot(&receipt.fallback_variant) {
-            if fallback_slot.ty != fallback_ty {
-                return Err(NativeMirError::new(
-                    subject,
-                    "variant projection fallback receipt disagrees with native fallback ABI",
-                ));
+        if matches!(
+            self.program
+                .type_catalog()
+                .get(&base_ty)
+                .map(|desc| &desc.layout),
+            Some(crate::core::mir::types::MirLayout::Option { .. })
+        ) {
+            if let Some(fallback_slot) = variant_abi.payload_slot(&receipt.fallback_variant) {
+                if fallback_slot.ty != fallback_ty {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "variant projection fallback receipt disagrees with native fallback ABI",
+                    ));
+                }
             }
         }
         let aggregate = self.value(base, subject)?.into_struct_value();

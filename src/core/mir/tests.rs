@@ -486,6 +486,54 @@ fn materializes_generic_result_unwrap_or_with_a_specialized_fallback_receipt() {
 }
 
 #[test]
+fn materializes_generic_distinct_result_unwrap_or_with_two_payload_slots() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic heterogeneous Result unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("generic heterogeneous Result fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+        .type_catalog()
+        .get(&contract.source_ty)
+        .expect("specialized heterogeneous Result TypeDesc")
+        .layout
+    else {
+        panic!("specialized source must retain a Result layout");
+    };
+    assert_ne!(ok, error);
+    assert_eq!(ok, &contract.result_ty);
+    assert!(matches!(
+        program.type_catalog().get(error).map(|desc| &desc.kind),
+        Some(crate::core::mir::types::MirTypeKind::Primitive(
+            crate::core::PrimitiveType::I32
+        ))
+    ));
+    assert_eq!(contract.fallback_ty, contract.result_ty);
+    assert_eq!(contract.fallback_variant_name, "Err");
+    assert_eq!(contract.fallback_discriminant, 1);
+    assert_eq!(contract.fallback_arity, 1);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference heterogeneous Result unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(50));
+}
+
+#[test]
 fn generic_result_unwrap_or_stale_receipt_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
     let checked = checked_program(source);

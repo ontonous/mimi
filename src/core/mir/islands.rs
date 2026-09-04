@@ -50,9 +50,10 @@ pub const GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND: &str = "generic-option-proj
 /// aggregate ABI proof. The distinct `Err i32` shape uses the same
 /// receipt-bearing MIR node but a two-slot native aggregate ABI.
 pub const GENERIC_RESULT_PROJECTION_ISLAND: &str = "generic-result-projection-v1";
-/// Name of the generic `Result<T, T>.unwrap_or(T)` total projection island.
-/// It remains distinct from trap-bearing Result projection because both
-/// payload slots and the explicit fallback operand participate in the ABI.
+/// Name of the generic `Result<T, T>.unwrap_or(T)` /
+/// `Result<T, i32>.unwrap_or(T)` total projection island. It remains distinct
+/// from trap-bearing Result projection because both payload slots and the
+/// explicit fallback operand participate in the ABI.
 pub const GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND: &str = "generic-result-projection-fallback-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,8 +96,9 @@ pub enum GenericResultProjectionAdmission {
 }
 
 /// Checker-owned admission for the narrow generic `Result<T, T>.unwrap_or(T)`
-/// shape. The complete case is independent from the trap-bearing Result
-/// projection and concrete `Result<i32, i32>` island.
+/// and `Result<T, i32>.unwrap_or(T)` shapes. The complete case is independent
+/// from the trap-bearing Result projection and concrete `Result<i32, i32>`
+/// island.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericResultProjectionFallbackAdmission {
     OutsideProfile,
@@ -226,9 +228,10 @@ pub fn has_unsupported_generic_result_projection_candidate(program: &CheckedProg
     })
 }
 
-/// Classify the checker-owned generic `Result<T, T>.unwrap_or(T)` envelope.
-/// Only one generic binder, one `Result<T, T>` receiver, one `T` fallback, a
-/// `T` result, an empty body and the direct builtin call are admitted.
+/// Classify the checker-owned generic `Result<T, T>.unwrap_or(T)` and
+/// `Result<T, i32>.unwrap_or(T)` envelopes. Only one generic binder, one
+/// Result receiver, one `T` fallback, a `T` result, an empty body and the
+/// direct builtin call are admitted.
 pub fn classify_generic_result_projection_fallback_admission(
     program: &CheckedProgram,
 ) -> GenericResultProjectionFallbackAdmission {
@@ -495,8 +498,13 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
     else {
         return false;
     };
+    let error_is_same_generic = error == &generic_ty;
+    let error_is_i32 = matches!(
+        program.resolved_types().get(error),
+        Some(ResolvedType::Primitive(PrimitiveType::I32))
+    );
     if ok != &generic_ty
-        || error != &generic_ty
+        || (!error_is_same_generic && !error_is_i32)
         || callable.signature.parameters[1].ty != generic_ty
     {
         return false;
@@ -518,7 +526,8 @@ pub(crate) fn is_generic_result_projection_fallback_callable(
         && call.result == generic_ty
 }
 
-/// Broad checker-owned hint for the `Result<T,T>.unwrap_or(T)` family. This
+/// Broad checker-owned hint for the `Result<T,T>.unwrap_or(T)` /
+/// `Result<T,i32>.unwrap_or(T)` family. This
 /// deliberately admits malformed bodies (for example an extra statement) so
 /// the fallback route can emit its stable fail-closed diagnostic instead of
 /// being misclassified as the trap-bearing `unwrap` projection family.
@@ -2449,8 +2458,9 @@ pub fn contains_generic_result_projection_candidate(program: &MirProgram) -> boo
 }
 
 /// Return whether a canonical graph contains a materialized generic
-/// `Result<T, T>.unwrap_or(T)` projection instance. The specialized fallback
-/// receipt is the only source of this route fact for consumers.
+/// `Result<T, T>`/`Result<T, i32>.unwrap_or(T)` projection instance. The
+/// specialized fallback receipt is the only source of this route fact for
+/// consumers.
 pub fn contains_generic_result_projection_fallback_candidate(program: &MirProgram) -> bool {
     program.instances().values().any(|instance| {
         matches!(

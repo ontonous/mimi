@@ -5433,6 +5433,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_distinct_result_unwrap_or_matches_reference_and_bytecode() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic heterogeneous Result unwrap_or MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference heterogeneous Result unwrap_or execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("generic heterogeneous Result unwrap_or bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode heterogeneous Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(50));
+        assert!(matches!(value, Value::Int(50)));
+    }
+
+    #[test]
     fn executes_copy_result_i32_i32_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

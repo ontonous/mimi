@@ -371,6 +371,11 @@ impl<'a> NativeMirValidator<'a> {
                 crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
                     contract
                 } if contract.source_ty == *ty
+            ) || matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract
+                } if contract.source_ty == *ty
             )
         });
         if promoted_distinct_result {

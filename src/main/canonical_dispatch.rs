@@ -122,7 +122,8 @@ pub(crate) fn build_canonical_program_for_sources(
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
 /// fallback projection island, generic `Result<T, T>`/`Result<T, i32>`
-/// `unwrap()`, or generic `Result<T, T>.unwrap_or(T)` fallback projection
+/// `unwrap()`, or generic `Result<T, T>.unwrap_or(T)` /
+/// `Result<T, i32>.unwrap_or(T)` fallback projection
 /// island.
 /// The candidate then
 /// has to pass every consumer preflight before any caller starts execution or
@@ -1561,6 +1562,47 @@ mod tests {
                 contract
             } if contract.projection.nominal.as_str() == "builtin:type:Result"
         )));
+    }
+
+    #[test]
+    fn generic_result_distinct_unwrap_or_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_fallback_admission(&checked),
+            mimi::core::mir::GenericResultProjectionFallbackAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic heterogeneous Result unwrap_or must select canonical route");
+        };
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic heterogeneous Result fallback instance");
+        let mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let mimi::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("heterogeneous Result TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain Result layout");
+        };
+        assert_ne!(ok, error);
     }
 
     #[test]

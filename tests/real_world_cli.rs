@@ -1977,6 +1977,57 @@ fn canonical_default_generic_result_unwrap_or_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_distinct_result_unwrap_or_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_distinct_unwrap_or.mimi");
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default heterogeneous Result unwrap_or run");
+    assert_eq!(default_run.status.code(), Some(50));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default heterogeneous Result unwrap_or verifier");
+    assert!(
+        verify.status.success(),
+        "default heterogeneous Result unwrap_or verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-distinct-result-unwrap-or-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default heterogeneous Result unwrap_or native build");
+    assert!(
+        build.status.success(),
+        "default heterogeneous Result unwrap_or native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default heterogeneous Result unwrap_or native binary");
+    let _ = std::fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(50));
+}
+
+#[test]
 fn canonical_default_generic_result_unwrap_or_rejects_unmigrated_fallback() {
     let fixture = project_root()
         .join("tests")

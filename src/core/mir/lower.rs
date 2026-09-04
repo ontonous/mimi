@@ -1529,6 +1529,22 @@ fn materialize_generic_instance(
                     &result_ty,
                     &fallback_ty,
                 ),
+            Some(super::types::MirTypeKind::Result)
+                if type_catalog.get(&base_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        super::types::MirLayout::Result { ok, error, .. } if ok != error
+                    )
+                }) =>
+            {
+                type_catalog.validated_result_scalar_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
             Some(super::types::MirTypeKind::Result) => type_catalog
                 .validated_copy_result_scalar_projection_fallback_contract(
                     &base_ty,
@@ -5794,9 +5810,10 @@ impl<'a> Lowerer<'a> {
                         super::types::MirLayout::Result { ok, error, .. }
                             if type_catalog.get(ok).is_some_and(|payload| {
                                 payload.kind == super::types::MirTypeKind::GenericParameter
-                            }) && type_catalog.get(error).is_some_and(|payload| {
-                                payload.kind == super::types::MirTypeKind::GenericParameter
-                            })
+                            }) && (error == ok || type_catalog.get(error).is_some_and(|payload| {
+                                payload.kind
+                                    == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+                            }))
                     )
                 }) =>
             {
@@ -6233,7 +6250,6 @@ fn variant_projection_builtin(
             let generic_result = generic_ok && call.result == *ok;
             let same_generic_payload = generic_result && ok == error;
             let distinct_i32_error = generic_result
-                && builtin.as_str() == "builtin.method.result.unwrap"
                 && catalog.get(error).is_some_and(|payload| {
                     payload.kind == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
                 });

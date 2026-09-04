@@ -2997,6 +2997,56 @@ mod tests {
     }
 
     #[test]
+    fn native_generic_distinct_result_unwrap_or_consumes_two_slot_receipt() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic heterogeneous Result fallback projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized heterogeneous Result TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain a Result layout");
+        };
+        assert_ne!(ok, error);
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference heterogeneous Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(50));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_result_distinct_unwrap_or");
+        generator
+            .compile_mir_native(&program)
+            .expect("native heterogeneous Result unwrap_or must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native heterogeneous Result unwrap_or module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
     fn native_generic_result_unwrap_err_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi"

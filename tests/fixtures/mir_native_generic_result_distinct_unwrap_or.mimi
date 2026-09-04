@@ -1,0 +1,12 @@
+// Generic heterogeneous Result<T, i32> unwrap_or keeps the Err payload in a
+// distinct aggregate slot while returning the explicit T fallback.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let ok: Result<i64, i32> = Ok(41 as i64)
+    let err: Result<i64, i32> = Err(7)
+    unwrap_or(ok, 1 as i64) + unwrap_or(err, 9 as i64)
+}
