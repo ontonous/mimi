@@ -34,12 +34,66 @@ pub const SCALAR_COLLECTION_ISLAND: &str = "copy-scalar-collection-v1";
 /// `Result` shape where the concrete generic payload is a signed scalar/bool;
 /// non-Copy payloads remain outside.
 pub const GENERIC_VARIANT_PREDICATE_ISLAND: &str = "generic-option-predicate-v1";
+/// Name of the generic `Option<T>.unwrap()` projection island.  This is kept
+/// separate from the predicate profile because the projection has a
+/// trap-bearing payload receipt and therefore a different ownership/effect
+/// contract even though both shapes specialize through the same generic MIR
+/// machinery.
+pub const GENERIC_OPTION_PROJECTION_ISLAND: &str = "generic-option-projection-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericVariantPredicateAdmission {
     OutsideProfile,
     MixedCoverage,
     CompleteCoverage,
+}
+
+/// Checker-owned admission for the narrow generic `Option<T>.unwrap()` shape.
+/// The complete case is intentionally independent from generic variant
+/// predicates: a projection returns the payload and may trap, while a
+/// predicate is read-only and returns `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericOptionProjectionAdmission {
+    OutsideProfile,
+    MixedCoverage,
+    CompleteCoverage,
+}
+
+/// Classify the checker-owned generic `Option<T>.unwrap()` envelope before MIR
+/// materialization.  Only one generic binder, one `Option<T>` parameter, a
+/// `T` result, no statements, and the direct builtin unwrap call are admitted.
+/// Concrete payload/layout/glue checks remain in MIR specialization.
+pub fn classify_generic_option_projection_admission(
+    program: &CheckedProgram,
+) -> GenericOptionProjectionAdmission {
+    let has_candidate = program
+        .callables()
+        .values()
+        .any(|callable| is_generic_option_projection_callable(program, callable));
+    if !has_candidate {
+        return GenericOptionProjectionAdmission::OutsideProfile;
+    }
+    if has_mixed_coverage(program)
+        || program.callables().values().any(|callable| {
+            mentions_generic_option_callable(program, callable)
+                && !is_generic_option_projection_callable(program, callable)
+                && !is_generic_variant_predicate_callable(program, callable)
+        })
+    {
+        GenericOptionProjectionAdmission::MixedCoverage
+    } else {
+        GenericOptionProjectionAdmission::CompleteCoverage
+    }
+}
+
+/// Stable candidate hint used by default dispatch when an unsupported generic
+/// Option shape must be rejected before a legacy consumer can observe it.
+pub fn has_unsupported_generic_option_projection_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        mentions_generic_option_callable(program, callable)
+            && !is_generic_option_projection_callable(program, callable)
+            && !is_generic_variant_predicate_callable(program, callable)
+    })
 }
 
 /// Classify the checker-owned generic variant predicate envelope before MIR
@@ -134,6 +188,34 @@ fn is_generic_option_predicate_callable(
                 name.as_str(),
                 "builtin.method.option.is_some" | "builtin.method.option.is_none"
             )
+    ) && call.arguments.len() == 1
+}
+
+fn is_generic_option_projection_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    let Some(generic_ty) = generic_parameter_type_id(program, callable) else {
+        return false;
+    };
+    if !mentions_generic_option_callable(program, callable)
+        || callable.signature.parameters.len() != 1
+        || callable.signature.generic_parameters.len() != 1
+        || callable.signature.result != generic_ty
+        || !callable.body.root.statements.is_empty()
+    {
+        return false;
+    }
+    let Some(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = callable.body.root.result.as_deref()
+    else {
+        return false;
+    };
+    matches!(
+        &call.callee,
+        ResolvedCallee::Builtin(name) if name.as_str() == "builtin.method.option.unwrap"
     ) && call.arguments.len() == 1
 }
 
@@ -1733,6 +1815,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                     .get(&function.node_id)
                     .is_some_and(|callable| {
                         is_generic_variant_predicate_callable(program, callable)
+                            || is_generic_option_projection_callable(program, callable)
                     });
                 ((!generic_record_callable && !generic_variant_callable)
                     && !function.generics.is_empty())
@@ -1750,6 +1833,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .any(|callable| {
                 (!is_scalar_generic_record_projection_callable(program, callable)
                     && !is_generic_variant_predicate_callable(program, callable)
+                    && !is_generic_option_projection_callable(program, callable)
                     && !callable.signature.generic_parameters.is_empty())
                     || !callable.signature.effects.is_empty()
                     || !callable.body.captures.is_empty()
@@ -1989,6 +2073,18 @@ pub fn contains_generic_variant_predicate_candidate(program: &MirProgram) -> boo
         matches!(
             instance.contract,
             MirGenericInstanceContract::ScalarVariantPredicate { .. }
+        )
+    })
+}
+
+/// Return whether a canonical graph contains a materialized generic
+/// `Option<T>.unwrap()` projection instance.  The specialized projection
+/// receipt is the only source of this fact for route consumers.
+pub fn contains_generic_option_projection_candidate(program: &MirProgram) -> bool {
+    program.instances().values().any(|instance| {
+        matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarVariantProjection { .. }
         )
     })
 }

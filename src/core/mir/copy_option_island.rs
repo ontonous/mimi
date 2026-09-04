@@ -432,25 +432,41 @@ pub fn contains_copy_option_variant_candidate(
     program: &MirProgram,
     expected: PrimitiveType,
 ) -> bool {
-    program.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                let (base, result) = match &instruction.kind {
-                    MirInstructionKind::VariantProject { base, result, .. }
-                    | MirInstructionKind::VariantProjectOr { base, result, .. } => (base, result),
-                    _ => return false,
-                };
-                let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
-                    return false;
-                };
-                let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
-                    return false;
-                };
-                is_copy_option_primitive(program, base_ty, expected)
-                    && is_primitive(program, result_ty, expected)
+    // Generic instance bodies have their own projection receipt and are
+    // admitted by the generic Option projection island.  Do not reclassify
+    // their specialized `VariantProject` as a direct concrete Option island;
+    // otherwise a generic `unwrap<T>` call would spuriously enter the i32
+    // validator and be rejected for containing a generic instance.
+    let generic_instance_functions = program
+        .instances()
+        .values()
+        .map(|instance| instance.function.clone())
+        .collect::<BTreeSet<_>>();
+    program
+        .functions()
+        .values()
+        .filter(|function| !generic_instance_functions.contains(&function.owner))
+        .any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    let (base, result) = match &instruction.kind {
+                        MirInstructionKind::VariantProject { base, result, .. }
+                        | MirInstructionKind::VariantProjectOr { base, result, .. } => {
+                            (base, result)
+                        }
+                        _ => return false,
+                    };
+                    let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
+                        return false;
+                    };
+                    let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
+                        return false;
+                    };
+                    is_copy_option_primitive(program, base_ty, expected)
+                        && is_primitive(program, result_ty, expected)
+                })
             })
         })
-    })
 }
 
 fn is_primitive(program: &MirProgram, ty: &ResolvedTypeId, expected: PrimitiveType) -> bool {

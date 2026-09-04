@@ -1642,6 +1642,104 @@ fn canonical_default_copy_option_i32_unwrap_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_option_unwrap_matches_all_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_option_unwrap.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Option projection run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Option projection verifier");
+    assert!(
+        verify.status.success(),
+        "default generic Option projection verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-option-unwrap-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default generic Option projection native build");
+    assert!(
+        build.status.success(),
+        "default generic Option projection native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default generic Option projection native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(41));
+}
+
+#[test]
+fn canonical_default_generic_option_projection_rejects_unmigrated_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_option_unwrap_or_rejected.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn unsupported generic Option projection run");
+    assert!(!run.status.success());
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run_stderr.contains("generic Option projection") && !run_stderr.contains("legacy"),
+        "unsupported generic Option fallback must fail closed:\n{run_stderr}"
+    );
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn unsupported generic Option projection verifier");
+    assert!(!verify.status.success());
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        verify_stderr.contains("generic Option projection"),
+        "verifier must reject before AST compatibility fallback:\n{verify_stderr}"
+    );
+
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn unsupported generic Option projection build");
+    assert!(!build.status.success());
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        build_stderr.contains("generic Option projection"),
+        "native build must reject the unmigrated fallback shape:\n{build_stderr}"
+    );
+}
+
+#[test]
 fn canonical_default_copy_option_bool_unwrap_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")
