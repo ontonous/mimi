@@ -292,6 +292,13 @@ impl<'a> NativeMirValidator<'a> {
                     "flat Copy variant contract"
                 } else if matches!(desc.layout, MirLayout::Result { .. }) {
                     "native non-Copy Result<string, i32> variant contract"
+                } else if matches!(&desc.layout, MirLayout::Option { inner, .. } if self
+                    .program
+                    .type_catalog()
+                    .get(inner)
+                    .is_some_and(|inner| matches!(inner.layout, MirLayout::List { .. })))
+                {
+                    "native non-Copy Option<List<Copy scalar>> variant contract"
                 } else {
                     "native non-Copy Option<string> variant contract"
                 }

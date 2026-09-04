@@ -452,12 +452,15 @@ impl<'a> OptionStringVariantValidator<'a> {
                 super::MirGenericInstanceContract::ScalarVariantProjection { contract }
                     if contract.projection.nominal.as_str() == "builtin:type:Option"
                         && contract.projection.ownership == MirOwnership::Move
-                        && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                        && matches!(
+                            contract.projection.move_out_glue,
+                            MirGlueKind::OwnedString | MirGlueKind::List
+                        )
                         && instance.arguments.len() == 1
                         && self
                             .program
                             .type_catalog()
-                            .validate_owned_string(&instance.arguments[0])
+                            .validate_move_owned_payload(&instance.arguments[0])
                             .is_ok()
             );
             if !admitted_owned_projection {
@@ -825,7 +828,10 @@ impl<'a> OptionStringVariantValidator<'a> {
                     super::MirGenericInstanceContract::ScalarVariantProjection { contract }
                         if contract.projection.nominal.as_str() == "builtin:type:Option"
                             && contract.projection.ownership == MirOwnership::Move
-                            && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                        && matches!(
+                            contract.projection.move_out_glue,
+                            MirGlueKind::OwnedString | MirGlueKind::List
+                        )
                 )
         })
     }

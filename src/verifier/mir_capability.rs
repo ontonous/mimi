@@ -195,7 +195,7 @@ impl<'a> CapabilityGate<'a> {
                     if contract.projection.ownership == MirOwnership::Move {
                         if contract.projection.nominal.as_str() != "builtin:type:Option" {
                             self.error(format!(
-                                "instance '{}' consuming generic variant projection is not the admitted Option<string> shape",
+                                "instance '{}' consuming generic variant projection is not the admitted managed Option shape",
                                 instance.id
                             ));
                         } else if instance.arguments.len() != 1 {
@@ -206,7 +206,7 @@ impl<'a> CapabilityGate<'a> {
                         } else if let Err(message) = self
                             .program
                             .type_catalog()
-                            .validate_owned_string(&instance.arguments[0])
+                            .validate_move_owned_payload(&instance.arguments[0])
                         {
                             self.error(format!(
                                 "instance '{}' owned generic Option projection argument is unsupported: {message}",
@@ -408,7 +408,7 @@ impl<'a> CapabilityGate<'a> {
                 if descriptor.ownership == MirOwnership::Copy {
                     self.require_copy_aggregate(ty, &descriptor)?;
                 } else {
-                    catalog.validate_option_string_variant(ty).map_err(|message| {
+                    catalog.validate_non_copy_variant_contract(ty).map_err(|message| {
                         format!(
                             "non-Copy variant TypeDesc is outside the verifier capability: {message}"
                         )
@@ -930,7 +930,7 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} variant result is absent"));
                     return;
                 };
-                if let Err(message) = catalog.validate_option_string_variant(&result_ty) {
+                if let Err(message) = catalog.validate_option_move_variant(&result_ty) {
                     self.error(format!(
                         "{subject} ConstructVariantMove rejected: {message}"
                     ));

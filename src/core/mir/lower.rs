@@ -747,20 +747,12 @@ fn rewrite_owned_option_projection_call_argument(
                 target_parameter_ty.as_str()
             ));
         }
-        let descriptor = type_catalog.get(source_ty).ok_or_else(|| {
-            "owned generic Option projection call source has no TypeDesc".to_string()
-        })?;
-        let is_option_string = matches!(
-            &descriptor.layout,
-            super::types::MirLayout::Option { inner, .. }
-                if descriptor.kind == super::types::MirTypeKind::Option
-                    && descriptor.ownership == super::types::MirOwnership::Move
-                    && type_catalog.validate_owned_string(inner).is_ok()
-        );
-        if !is_option_string {
+        if type_catalog
+            .validate_option_move_variant(source_ty)
+            .is_err()
+        {
             return Err(
-                "owned generic Option projection call source is not a Move-owned Option<string>"
-                    .into(),
+                "owned generic Option projection call source is not a Move-owned Option with a supported managed payload".into(),
             );
         }
         type_catalog.validate_glue(source_ty, super::types::MirGlueOperation::MoveOut)
@@ -905,19 +897,12 @@ pub(crate) fn validate_owned_option_projection_call_argument(
             target_parameter_ty.as_str()
         ));
     }
-    let descriptor = type_catalog
-        .get(&source_ty)
-        .ok_or_else(|| "owned generic Option projection call source has no TypeDesc".to_string())?;
-    let is_option_string = matches!(
-        &descriptor.layout,
-        super::types::MirLayout::Option { inner, .. }
-            if descriptor.kind == super::types::MirTypeKind::Option
-                && descriptor.ownership == super::types::MirOwnership::Move
-                && type_catalog.validate_owned_string(inner).is_ok()
-    );
-    if !is_option_string {
+    if type_catalog
+        .validate_option_move_variant(&source_ty)
+        .is_err()
+    {
         return Err(
-            "owned generic Option projection call source is not a Move-owned Option<string>".into(),
+            "owned generic Option projection call source is not a Move-owned Option with a supported managed payload".into(),
         );
     }
     type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
@@ -1219,7 +1204,7 @@ fn materialize_generic_instance(
                         ) && call.arguments.len() == 1
                 )
             })
-        && type_catalog.validate_owned_string(&concrete).is_ok();
+        && type_catalog.validate_move_owned_payload(&concrete).is_ok();
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
     // executable parameter/result are the specialized record and String.
@@ -1239,7 +1224,9 @@ fn materialize_generic_instance(
                         arguments.len()
                     ))
                 } else {
-                    catalog.validate_owned_string(&arguments[0])
+                    catalog
+                        .validate_move_owned_payload(&arguments[0])
+                        .map(|_| ())
                 }
             } else {
                 catalog.validate_scalar_generic_arguments(arguments)
@@ -1251,7 +1238,7 @@ fn materialize_generic_instance(
             message: format!(
                 "generic MIR instance argument is outside {}: {message}",
                 if is_owned_option_projection {
-                    "the admitted scalar or owned-string variant contract"
+                    "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
                 }
@@ -2203,7 +2190,7 @@ fn materialize_generic_instance(
             message: format!(
                 "specialized generic TypeDesc is outside {}: {message}",
                 if is_owned_option_projection {
-                    "the admitted scalar or owned-string variant contract"
+                    "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
                 }
@@ -2473,10 +2460,17 @@ pub(crate) fn validate_scalar_variant_projection_mir(
     if consuming {
         if receipt.projection.nominal.as_str() != "builtin:type:Option"
             || receipt.projection.ownership != super::types::MirOwnership::Move
-            || receipt.projection.move_out_glue != super::types::MirGlueKind::OwnedString
+            || !matches!(
+                receipt.projection.move_out_glue,
+                super::types::MirGlueKind::OwnedString | super::types::MirGlueKind::List
+            )
+            || type_catalog
+                .validate_move_owned_payload(&result_ty)
+                .map(|glue| glue != receipt.projection.move_out_glue)
+                .unwrap_or(true)
         {
             return Err(
-                "generic owned variant projection receipt requires Move + OwnedString payload glue"
+                "generic owned variant projection receipt requires Move + supported managed payload glue"
                     .into(),
             );
         }

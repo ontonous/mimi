@@ -1,0 +1,13 @@
+// Generic Option<T>.unwrap specialized to a canonical move-owned List<i32>.
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let values: List<i32> = [1, 2, 3]
+    let value: Option<List<i32>> = Some(values)
+    let out = unwrap(value)
+    drop(out)
+    41
+}

@@ -251,20 +251,29 @@ pub(super) fn native_copy_variant_payload_type(
 /// contract. Result has a second physical payload slot; callers that need the
 /// complete ABI must use `native_variant_abi` below.
 ///
-/// The admitted native move-owned profiles are exactly `Option<string>` and
-/// `Result<string, i32>`. Their canonical TypeDesc/drop plans prove the active
-/// payload glue; the physical ABI is `{ i8 discriminant, StringHandle payload }`
-/// for Option and `{ i8 discriminant, StringHandle ok_payload, i32 err_payload }`
-/// for Result. Nested, mixed, unit-payload, and user-defined variants remain
-/// fail-closed until their own contracts are promoted.
+/// The admitted native move-owned profiles are `Option<string>`,
+/// `Option<List<Copy scalar>>` and `Result<string, i32>`. Their canonical
+/// TypeDesc/drop plans prove the active payload glue; the physical ABI is
+/// `{ i8 discriminant, managed payload }` for Option and
+/// `{ i8 discriminant, StringHandle ok_payload, i32 err_payload }` for Result.
+/// Nested, mixed, unit-payload, and user-defined variants remain fail-closed
+/// until their own contracts are promoted.
 pub(super) fn native_non_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
     let contract_name = catalog
         .get(ty)
-        .map(|descriptor| match descriptor.layout {
+        .map(|descriptor| match &descriptor.layout {
             MirLayout::Result { .. } => "Result<string, i32>",
+            MirLayout::Option { inner, .. }
+                if catalog
+                    .get(inner)
+                    .is_some_and(|inner| matches!(inner.layout, MirLayout::List { .. })) =>
+            {
+                "Option<List<Copy scalar>>"
+            }
+            MirLayout::Option { .. } => "Option<string>",
             _ => "Option<string>",
         })
         .unwrap_or("Option/Result");

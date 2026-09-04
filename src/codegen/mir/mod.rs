@@ -2742,6 +2742,57 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_option_unwrap_owned_list() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue == crate::core::mir::types::MirGlueKind::List
+                )
+            })
+            .expect("owned generic Option<List> projection instance");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic owned Option<List> unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("generic owned Option<List> MIR bytecode"),
+        )
+        .run_value()
+        .expect("generic owned Option<List> bytecode execution");
+        assert!(matches!(bytecode, Value::Int(41)));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_option_unwrap_owned_list");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic owned Option<List> must consume Move MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic owned Option<List> module verifies");
+        assert!(generator.module.get_function("main").is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_scalar")
+            .is_some());
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { .. }
+        ));
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_option_unwrap_or_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"

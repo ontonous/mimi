@@ -2525,9 +2525,9 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the consuming direct-projection contract for the currently
-    /// admitted non-Copy Option/Result families.  The selected field must be
-    /// the single owned String payload; consuming the complete variant leaves
-    /// no residual field that would need a separate partial-move node.
+    /// admitted non-Copy Option/Result families. The selected field must be
+    /// the single managed payload; consuming the complete variant leaves no
+    /// residual field that would need a separate partial-move node.
     pub fn validated_variant_move_projection_trap_contract(
         &self,
         source_ty: &ResolvedTypeId,
@@ -2539,20 +2539,33 @@ impl MirTypeCatalog {
         let projection = self.validated_variant_payload_projection_contract(
             source_ty, variant_id, field_id, result_ty,
         )?;
+        let payload_glue = self
+            .get(result_ty)
+            .map(|descriptor| descriptor.glue.move_out)
+            .ok_or_else(|| {
+                format!(
+                    "consuming direct variant projection result type '{}' is absent",
+                    result_ty.as_str()
+                )
+            })?;
         if projection.field_index != 0 || projection.arity != 1 {
             return Err(
                 "consuming direct variant projection requires one payload field at index 0".into(),
             );
         }
         if projection.ownership != MirOwnership::Move
-            || projection.move_out_glue != MirGlueKind::OwnedString
+            || !matches!(
+                projection.move_out_glue,
+                MirGlueKind::OwnedString | MirGlueKind::List
+            )
+            || projection.move_out_glue != payload_glue
         {
             return Err(
-                "consuming direct variant projection requires Move + OwnedString payload glue"
+                "consuming direct variant projection requires Move + a supported managed payload glue"
                     .into(),
             );
         }
-        self.validate_owned_string(result_ty)?;
+        self.validate_move_owned_payload(result_ty)?;
         self.validate_glue(source_ty, MirGlueOperation::MoveOut)?;
         self.validate_glue(source_ty, MirGlueOperation::Drop)?;
         let variant = self.validated_variant_switch_case(source_ty, variant_id)?.1;
@@ -2728,6 +2741,25 @@ impl MirTypeCatalog {
             ));
         }
         Ok(())
+    }
+
+    /// Validate one move-owned payload that a tagged variant projection may
+    /// transfer out without introducing residual ownership state. The current
+    /// managed payload island is deliberately limited to owned `String` and
+    /// `List<Copy scalar>` handles; callers receive the exact glue family so a
+    /// backend cannot infer ownership from representation.
+    pub fn validate_move_owned_payload(&self, ty: &ResolvedTypeId) -> Result<MirGlueKind, String> {
+        if self.validate_owned_string(ty).is_ok() {
+            return Ok(MirGlueKind::OwnedString);
+        }
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_list_glue(ty, operation)?;
+        }
+        Ok(MirGlueKind::List)
     }
 
     /// Validate the first variable-length container contract. A List is a
@@ -6390,6 +6422,83 @@ impl MirTypeCatalog {
         Ok(inner.clone())
     }
 
+    /// Validate the common Option envelope for a move-owned managed payload.
+    /// This helper is intentionally separate from the narrow Option<string>
+    /// accessor: it admits only the additional `List<Copy scalar>` payload
+    /// shape needed by the generic projection slice and returns its exact
+    /// child glue family.
+    pub fn validate_option_move_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let (inner, variants) = match &descriptor.layout {
+            MirLayout::Option { inner, variants } => (inner, variants),
+            layout => {
+                return Err(format!(
+                    "layout {layout:?} is outside the canonical non-Copy Option managed-payload variant contract"
+                ));
+            }
+        };
+        if descriptor.kind != MirTypeKind::Option
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Move
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.variant_drop_plan.is_none()
+        {
+            return Err(
+                "Option TypeDesc aggregate glue/drop plan is incomplete for the canonical managed-payload variant contract".into(),
+            );
+        }
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_glue(ty, operation)?;
+        }
+        if variants.len() != 2 {
+            return Err(format!(
+                "Option TypeDesc has {} variants; the canonical managed-payload contract requires None and Some",
+                variants.len()
+            ));
+        }
+        let none = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Option::None"
+                && variant.name == "None"
+                && variant.discriminant == 0
+                && variant.fields.is_empty()
+        });
+        let some = variants.iter().find(|variant| {
+            variant.id.0 == "builtin:variant:Option::Some"
+                && variant.name == "Some"
+                && variant.discriminant == 1
+                && variant.fields.len() == 1
+        });
+        if none.is_none() || some.is_none() {
+            return Err(
+                "Option TypeDesc variants do not match the canonical None/Some managed-payload contract".into(),
+            );
+        }
+        let field = &some.expect("checked above").fields[0];
+        if field.id.0 != "builtin:variant:Option::Some/payload:0" || field.ty != *inner {
+            return Err(
+                "Option Some payload identity/type disagrees with the canonical managed-payload contract".into(),
+            );
+        }
+        let payload_glue = self.validate_move_owned_payload(inner)?;
+        Ok((inner.clone(), payload_glue))
+    }
+
     /// Validate the first non-Copy Result variant contract.
     ///
     /// This deliberately admits exactly `Result<string, i32>`: the `Ok`
@@ -6507,7 +6616,8 @@ impl MirTypeCatalog {
     /// Validate either currently admitted non-Copy built-in variant shape.
     /// Consumers use this single TypeDesc boundary so they cannot silently
     /// widen a verifier switch/constructor by accepting a new layout in one
-    /// backend only.
+    /// backend only. Option permits the exact owned String or scalar List
+    /// payload contracts; Result remains the established String/i32 shape.
     pub fn validate_non_copy_variant_contract(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         let Some(descriptor) = self.get(ty) else {
             return Err(format!(
@@ -6517,11 +6627,11 @@ impl MirTypeCatalog {
         };
         match &descriptor.layout {
             MirLayout::Option { .. } => self
-                .validate_option_string_variant(ty)
+                .validate_option_move_variant(ty)
                 .map(|_| ())
                 .map_err(|message| {
                     format!(
-                        "type '{}' is outside the canonical non-Copy Option<string> variant contract: {message}",
+                        "type '{}' is outside the canonical non-Copy Option managed-payload variant contract: {message}",
                         ty.as_str()
                     )
                 }),

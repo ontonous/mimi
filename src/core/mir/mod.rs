@@ -374,9 +374,10 @@ pub enum MirGenericInstanceContract {
     },
     /// A generic `Option<T>.unwrap()` or `Result<T, T>`/`Result<T, i32>`
     /// payload projection specialized to a concrete Copy scalar, or the
-    /// explicitly admitted move-owned `Option<string>` shape. The trap-bearing
-    /// receipt is materialized after specialization so consumers cannot infer
-    /// the variant ABI or ownership from the generic instance symbol.
+    /// explicitly admitted move-owned `Option<string>`/`Option<List<Copy
+    /// scalar>>` shape. The trap-bearing receipt is materialized after
+    /// specialization so consumers cannot infer the variant ABI or ownership
+    /// from the generic instance symbol.
     ScalarVariantProjection {
         contract: types::MirVariantProjectionTrapContract,
     },

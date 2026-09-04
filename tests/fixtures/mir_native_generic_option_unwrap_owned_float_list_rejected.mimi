@@ -1,0 +1,14 @@
+// The managed generic Option projection island admits only List<Copy scalar>
+// payloads. A List<f64> must be rejected before any backend or legacy fallback.
+func unwrap<T>(value: Option<T>) -> T {
+    value.unwrap()
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let values: List<f64> = [1.0, 2.0]
+    let value: Option<List<f64>> = Some(values)
+    let out = unwrap(value)
+    drop(out)
+    41
+}

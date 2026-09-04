@@ -2617,7 +2617,7 @@ fn eval_materialized_call(
 }
 
 /// Symbolically execute a materialized generic `Option<T>.unwrap()` call.
-/// Copy instances are read-only; the owned String instance consumes its
+/// Copy instances are read-only; the managed move instance consumes its
 /// aggregate and carries the same Move receipt as the target body.  The
 /// verifier never reopens the generic source body or infers the ABI from the
 /// runtime handle.
@@ -2647,7 +2647,7 @@ fn eval_materialized_variant_projection_call(
                     .into(),
             );
         }
-        catalog.validate_owned_string(&type_arguments[0])?;
+        catalog.validate_move_owned_payload(&type_arguments[0])?;
     } else {
         catalog.validate_scalar_generic_arguments(type_arguments)?;
     }

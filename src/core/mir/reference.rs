@@ -1403,7 +1403,9 @@ fn validate_instance_table(
                         instance.arguments.len()
                     ))
                 } else {
-                    type_catalog.validate_owned_string(&instance.arguments[0])
+                    type_catalog
+                        .validate_move_owned_payload(&instance.arguments[0])
+                        .map(|_| ())
                 }
             }
             MirGenericInstanceContract::ScalarVariantProjection { .. } => {
