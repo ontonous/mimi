@@ -44,9 +44,11 @@ pub const GENERIC_OPTION_PROJECTION_ISLAND: &str = "generic-option-projection-v1
 /// separate from the trap-bearing projection because the fallback operand is
 /// an explicit second ABI value and the operation is total over both tags.
 pub const GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND: &str = "generic-option-projection-fallback-v1";
-/// Name of the generic `Result<T, T>.unwrap()` projection island.  It is
-/// separate from the Option projection profile because `Ok` is tag zero and
-/// both Result payload slots participate in the aggregate ABI proof.
+/// Name of the generic `Result<T, T>.unwrap()` / `Result<T, i32>.unwrap()`
+/// projection island. It is separate from the Option projection profile
+/// because `Ok` is tag zero and both Result payload slots participate in the
+/// aggregate ABI proof. The distinct `Err i32` shape uses the same
+/// receipt-bearing MIR node but a two-slot native aggregate ABI.
 pub const GENERIC_RESULT_PROJECTION_ISLAND: &str = "generic-result-projection-v1";
 /// Name of the generic `Result<T, T>.unwrap_or(T)` total projection island.
 /// It remains distinct from trap-bearing Result projection because both
@@ -81,9 +83,10 @@ pub enum GenericOptionProjectionFallbackAdmission {
     CompleteCoverage,
 }
 
-/// Checker-owned admission for the narrow generic `Result<T, T>.unwrap()`
-/// shape. The complete case is independent from predicates and Option
-/// projection because it carries the Result `Ok` tag/trap receipt.
+/// Checker-owned admission for the narrow generic `Result<T, T>.unwrap()` and
+/// `Result<T, i32>.unwrap()` shapes. The complete case is independent from
+/// predicates and Option projection because it carries the Result `Ok`
+/// tag/trap receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericResultProjectionAdmission {
     OutsideProfile,
@@ -181,10 +184,11 @@ pub fn has_unsupported_generic_option_projection_fallback_candidate(
     })
 }
 
-/// Classify the checker-owned generic `Result<T, T>.unwrap()` envelope before
-/// MIR materialization. Only one generic binder, one `Result<T, T>` parameter,
-/// a `T` result, no statements, and the direct builtin unwrap call are
-/// admitted. Concrete scalar/layout checks remain in MIR specialization.
+/// Classify the checker-owned generic `Result<T, T>.unwrap()` and
+/// `Result<T, i32>.unwrap()` envelopes before MIR materialization. Only one
+/// generic binder, one Result parameter, a `T` result, no statements, and the
+/// direct builtin unwrap call are admitted. Concrete scalar/layout checks
+/// remain in MIR specialization.
 pub fn classify_generic_result_projection_admission(
     program: &CheckedProgram,
 ) -> GenericResultProjectionAdmission {
@@ -449,7 +453,12 @@ pub(crate) fn is_generic_result_projection_callable(
     else {
         return false;
     };
-    if ok != &generic_ty || error != &generic_ty {
+    let error_is_same_generic = error == &generic_ty;
+    let error_is_i32 = matches!(
+        program.resolved_types().get(error),
+        Some(ResolvedType::Primitive(PrimitiveType::I32))
+    );
+    if ok != &generic_ty || (!error_is_same_generic && !error_is_i32) {
         return false;
     }
     let Some(ResolvedExpr {

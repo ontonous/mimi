@@ -358,6 +358,34 @@ impl<'a> NativeMirValidator<'a> {
         subject: &str,
         _desc: &MirTypeDesc,
     ) -> bool {
+        // Only a Result source can use the heterogeneous two-slot proof.  The
+        // instance table also contains Option projection receipts; matching
+        // those by source identity would incorrectly route an Option through
+        // the Result validator and reject every existing generic Option test.
+        let promoted_distinct_result = matches!(
+            &_desc.layout,
+            MirLayout::Result { ok, error, .. } if ok != error
+        ) && self.program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.source_ty == *ty
+            )
+        });
+        if promoted_distinct_result {
+            match self
+                .program
+                .type_catalog()
+                .validate_copy_result_scalar_variant(ty)
+            {
+                Ok(()) => return true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    return false;
+                }
+            }
+        }
         match native_copy_variant_payload_type(self.program.type_catalog(), ty) {
             Ok(_) => true,
             Err(message) => {
@@ -367,6 +395,21 @@ impl<'a> NativeMirValidator<'a> {
                 false
             }
         }
+    }
+
+    fn validate_copy_variant_type(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> bool {
+        let Some(desc) = self.program.type_catalog().get(ty) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()),
+            ));
+            return false;
+        };
+        self.validate_flat_copy_variant(ty, subject, desc)
     }
 
     fn validate_instruction(
@@ -1354,13 +1397,7 @@ impl<'a> NativeMirValidator<'a> {
         ) {
             self.errors.push(NativeMirError::new(subject, message));
         }
-        if let Err(message) =
-            native_copy_variant_payload_type(self.program.type_catalog(), &result_value.ty)
-        {
-            let mut message = message;
-            message.subject = subject.to_owned();
-            self.errors.push(message);
-        }
+        self.validate_copy_variant_type(&result_value.ty, subject);
     }
 
     fn validate_construct_variant_move(
@@ -1419,12 +1456,7 @@ impl<'a> NativeMirValidator<'a> {
         let Some(scrutinee_value) = function.values.get(scrutinee) else {
             return;
         };
-        if let Err(message) =
-            native_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_value.ty)
-        {
-            let mut message = message;
-            message.subject = subject.to_owned();
-            self.errors.push(message);
+        if !self.validate_copy_variant_type(&scrutinee_value.ty, subject) {
             return;
         }
         if let Err(message) = self

@@ -2026,11 +2026,55 @@ fn canonical_default_generic_result_projection_trap_and_rejection_are_fail_close
             .expect("failed to spawn unsupported generic Result projection command");
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("generic Result projection"),
+            (String::from_utf8_lossy(&output.stderr).contains("generic Result projection")
+                || String::from_utf8_lossy(&output.stderr)
+                    .contains("generic-result-projection-v1")),
             "unsupported generic Result projection must fail closed for {command}:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn canonical_default_generic_result_distinct_projection_matches_reference_and_native() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_distinct_unwrap.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic distinct Result projection run");
+    assert_eq!(
+        run.status.code(),
+        Some(41),
+        "reference/bytecode run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-generic-result-distinct-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn generic distinct Result projection native build");
+    assert!(
+        build.status.success(),
+        "native MIR build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute generic distinct Result projection native binary");
+    assert_eq!(native.status.code(), Some(41));
 }
 
 #[test]

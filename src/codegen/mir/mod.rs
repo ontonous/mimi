@@ -2845,6 +2845,80 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_result_distinct_unwrap_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic distinct Result projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized Result TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain a Result layout");
+        };
+        assert_ne!(ok, error);
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference distinct Result unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("generic distinct Result MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode distinct Result unwrap execution");
+        assert!(matches!(bytecode, Value::Int(41)));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_result_distinct_unwrap");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic distinct Result unwrap must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic distinct Result unwrap module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_generic_result_distinct_unwrap_err_keeps_the_receipt_trap() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_err.mimi"
+        ));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_result_distinct_unwrap_err");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic distinct Result Err must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic distinct Result Err module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_result_unwrap_or_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi"

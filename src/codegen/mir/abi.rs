@@ -346,6 +346,13 @@ pub(super) fn native_variant_abi(
                 ))
             }
         }
+    } else if matches!(descriptor.layout, MirLayout::Result { .. })
+        && catalog.validate_copy_result_scalar_variant(ty).is_ok()
+    {
+        let MirLayout::Result { ok, error, .. } = &descriptor.layout else {
+            unreachable!("Result layout checked above");
+        };
+        vec![ok.clone(), error.clone()]
     } else {
         vec![native_copy_variant_payload_type(catalog, ty)?]
     };
@@ -363,23 +370,24 @@ pub(super) fn native_variant_abi(
     let mut payload_fields = Vec::new();
     for variant in variants {
         for field in &variant.fields {
-            let physical_field = if moving && descriptor.kind == MirTypeKind::Result {
-                match variant.id.0.as_str() {
-                    "builtin:variant:Result::Ok" => 1,
-                    "builtin:variant:Result::Err" => 2,
-                    _ => {
-                        return Err(NativeMirError::new(
-                            ty.as_str(),
-                            format!(
-                                "variant '{}' is outside the native Result<string, i32> ABI",
-                                variant.id.0
-                            ),
-                        ))
+            let physical_field =
+                if descriptor.kind == MirTypeKind::Result && payload_types.len() == 2 {
+                    match variant.id.0.as_str() {
+                        "builtin:variant:Result::Ok" => 1,
+                        "builtin:variant:Result::Err" => 2,
+                        _ => {
+                            return Err(NativeMirError::new(
+                                ty.as_str(),
+                                format!(
+                                    "variant '{}' is outside the native canonical Result ABI",
+                                    variant.id.0
+                                ),
+                            ))
+                        }
                     }
-                }
-            } else {
-                1
-            };
+                } else {
+                    1
+                };
             payload_fields.push(NativeVariantPayloadSlot {
                 variant: variant.id.clone(),
                 field: field.id.clone(),

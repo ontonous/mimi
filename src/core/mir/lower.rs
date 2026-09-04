@@ -1421,6 +1421,14 @@ fn materialize_generic_instance(
                 &placeholder.projection.field,
                 &result_ty,
             )
+            .or_else(|_| {
+                type_catalog.validated_result_scalar_projection_trap_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                )
+            })
             .map_err(|message| {
                 vec![MirLoweringError {
                     node_id: subject(),
@@ -6121,8 +6129,9 @@ fn variant_predicate_builtin(call: &ResolvedCall) -> Option<MirVariantPredicate>
 
 /// Return the canonical success-variant payload identity for the explicitly
 /// admitted source-driven projection shapes: move-owned `Option<string>`,
-/// Copy `Option<i32>`/`Option<i64>`/`Option<f64>`/`Option<bool>`, and the first
-/// concrete Copy `Result<i32, i32>` island. The receiver/result TypeDesc is
+/// Copy `Option<i32>`/`Option<i64>`/`Option<f64>`/`Option<bool>`, the first
+/// concrete Copy `Result<i32, i32>` island, and the generic
+/// `Result<T, i32>` projection placeholder. The receiver/result TypeDesc is
 /// still validated by `variant_projection_contract`; this helper only maps
 /// the checker-owned builtin identity to the stable variant family.
 fn variant_projection_builtin(
@@ -6218,14 +6227,17 @@ fn variant_projection_builtin(
             },
             "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or",
         ) => {
-            if matches!(
-                builtin.as_str(),
-                "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or"
-            ) && ok == error
-                && catalog.get(ok).is_some_and(|payload| {
-                    payload.kind == super::types::MirTypeKind::GenericParameter
-                })
-            {
+            let generic_ok = catalog
+                .get(ok)
+                .is_some_and(|payload| payload.kind == super::types::MirTypeKind::GenericParameter);
+            let generic_result = generic_ok && call.result == *ok;
+            let same_generic_payload = generic_result && ok == error;
+            let distinct_i32_error = generic_result
+                && builtin.as_str() == "builtin.method.result.unwrap"
+                && catalog.get(error).is_some_and(|payload| {
+                    payload.kind == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+                });
+            if same_generic_payload || distinct_i32_error {
                 if builtin.as_str() == "builtin.method.result.unwrap_or"
                     && (call.arguments.get(1)?.value.ty != *ok || call.result != *ok)
                 {

@@ -121,8 +121,9 @@ pub(crate) fn build_canonical_program_for_sources(
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
-/// fallback projection island, generic `Result<T, T>.unwrap()`, or generic
-/// `Result<T, T>.unwrap_or(T)` fallback projection island.
+/// fallback projection island, generic `Result<T, T>`/`Result<T, i32>`
+/// `unwrap()`, or generic `Result<T, T>.unwrap_or(T)` fallback projection
+/// island.
 /// The candidate then
 /// has to pass every consumer preflight before any caller starts execution or
 /// LLVM emission. A `Legacy(reason)` result is an explicit
@@ -1485,16 +1486,61 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_distinct_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_distinct_unwrap.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic distinct Result projection must select the canonical default route");
+        };
+        let instance = program.instances().values().find(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        });
+        let Some(instance) = instance else {
+            panic!("generic distinct Result projection instance is absent");
+        };
+        let mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let mimi::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized Result TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain a Result layout");
+        };
+        assert_ne!(ok, error);
+    }
+
+    #[test]
     fn unsupported_generic_result_projection_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"
         ));
-        assert!(mimi::core::mir::has_unsupported_generic_result_projection_candidate(&checked));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
         let route = select_default_route(&checked, &file);
         let DefaultMirRoute::Rejected(reason) = route else {
             panic!("unsupported generic Result projection must fail closed before legacy");
         };
-        assert!(reason.contains("generic Result projection"), "{reason}");
+        assert!(
+            reason.contains("generic-result-projection-v1")
+                || reason.contains("generic Result projection"),
+            "{reason}"
+        );
     }
 
     #[test]

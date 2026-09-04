@@ -1327,7 +1327,25 @@ fn generic_result_projection_is_rejected_before_legacy_verifier_fallback() {
         blake3::hash(source.as_bytes()).to_hex().to_string(),
     )
     .expect_err("unsupported generic Result projection must not fall through to AST verifier");
-    assert!(error.contains("generic Result projection"), "{error}");
+    assert!(
+        error.contains("generic-result-projection-v1")
+            || error.contains("generic Result projection"),
+        "{error}"
+    );
+}
+
+#[test]
+fn generic_result_distinct_projection_is_verified_from_canonical_mir() {
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_result_distinct_unwrap.mimi");
+    let file = parse_memory_source(source, "mir-generic-result-distinct").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("distinct generic Result projection must remain on canonical MIR");
+    assert!(results.is_empty(), "fixture has no contracts to verify");
 }
 
 #[test]

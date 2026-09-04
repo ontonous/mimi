@@ -1,0 +1,7 @@
+func unwrap<T>(value: Result<T, i32>) -> T {
+    value.unwrap()
+}
+
+func main() -> i64 {
+    unwrap(Ok(41 as i64))
+}

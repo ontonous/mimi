@@ -3,5 +3,7 @@ func unwrap<T>(value: Result<T, i32>) -> T {
 }
 
 func main() -> i32 {
-    unwrap(Ok(41))
+    let value = unwrap(Ok("owned"))
+    drop(value)
+    41
 }

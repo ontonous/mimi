@@ -1,0 +1,8 @@
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Result<i64, i32> = Err(7)
+    unwrap_or(value, 9 as i64)
+}

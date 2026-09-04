@@ -334,6 +334,121 @@ fn generic_result_unwrap_err_preserves_the_canonical_trap() {
 }
 
 #[test]
+fn materializes_generic_result_distinct_unwrap_with_copy_scalar_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_distinct_unwrap.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result<T, i32> unwrap must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        })
+        .expect("generic distinct Result projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+        .type_catalog()
+        .get(&contract.source_ty)
+        .expect("specialized Result TypeDesc")
+        .layout
+    else {
+        panic!("specialized source must retain a Result layout");
+    };
+    assert_ne!(
+        ok, error,
+        "distinct projection must preserve separate payload IDs"
+    );
+    program
+        .type_catalog()
+        .validate_copy_result_scalar_variant(&contract.source_ty)
+        .expect("heterogeneous Copy Result TypeDesc contract");
+    assert!(
+        program
+            .type_catalog()
+            .validate_flat_copy_variant(&contract.source_ty)
+            .is_err(),
+        "the homogeneous concrete Result island remains closed"
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference distinct Result unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn generic_result_distinct_unwrap_stale_receipt_is_rejected_before_consumers() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_distinct_unwrap.mimi");
+    let checked = checked_program(source);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic distinct Result unwrap MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        })
+        .expect("generic distinct Result projection instance");
+    let mut functions = canonical.functions().clone();
+    let target = functions
+        .get_mut(&instance.function)
+        .expect("materialized generic distinct Result target");
+    let receipt = target
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("distinct Result projection receipt");
+    receipt.discriminant = receipt.discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog_and_instances(
+        functions,
+        canonical.type_catalog().clone(),
+        canonical.instances().clone(),
+    )
+    .expect_err("stale generic distinct Result receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant projection trap receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn generic_result_distinct_unwrap_err_preserves_the_canonical_trap() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_err.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic distinct Result Err MIR");
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("generic distinct Result unwrap Err must trap");
+    assert!(
+        error.to_string().contains("E0800"),
+        "unexpected trap: {error}"
+    );
+}
+
+#[test]
 fn materializes_generic_result_unwrap_or_with_a_specialized_fallback_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
     let checked = checked_program(source);
@@ -430,6 +545,9 @@ fn rejects_generic_option_unwrap_for_owned_payload_before_legacy() {
 fn rejects_generic_result_unwrap_and_option_unwrap_or_before_legacy() {
     for source in [
         include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"),
+        include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or_rejected.mimi"
+        ),
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi"),
     ] {
         let checked = checked_program(source);

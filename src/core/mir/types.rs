@@ -1973,12 +1973,21 @@ impl MirTypeCatalog {
                 receipt.trap_code, MIR_VARIANT_PROJECTION_TRAP_CODE
             ));
         }
-        let expected = self.validated_variant_projection_trap_contract(
-            source_ty,
-            &receipt.projection.variant,
-            &receipt.projection.field,
-            result_ty,
-        )?;
+        let expected = self
+            .validated_variant_projection_trap_contract(
+                source_ty,
+                &receipt.projection.variant,
+                &receipt.projection.field,
+                result_ty,
+            )
+            .or_else(|_| {
+                self.validated_result_scalar_projection_trap_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                )
+            })?;
         if receipt != &expected {
             return Err("variant projection trap receipt disagrees with TypeDesc".into());
         }
@@ -5599,10 +5608,12 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the non-executable placeholder receipt for the narrow
-    /// generic `Result<T, T>.unwrap()` projection.  Both payload slots are
-    /// deliberately tied to the same generic parameter: this keeps the
-    /// concrete instance inside the flat Copy aggregate ABI while proving
-    /// the inactive `Err` slot has the same TypeDesc/glue policy as `Ok`.
+    /// generic `Result<T, T>.unwrap()`/`Result<T, i32>.unwrap()` projection.
+    /// The `Ok` slot is tied to the result generic parameter. The `Err` slot
+    /// is either the same `T` (the original island) or the fixed Copy `i32`
+    /// payload promoted by the distinct-payload slice. Concrete
+    /// specialization replaces this placeholder with a receipt that proves
+    /// both payload TypeDesc/glue policies before execution.
     /// Concrete materialization must call
     /// `validated_variant_projection_trap_contract` again after replacing `T`
     /// with a Copy scalar.
@@ -5657,15 +5668,16 @@ impl MirTypeCatalog {
         let generic_payload = self
             .get(result_ty)
             .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
+        let error_is_same_generic = error == result_ty;
+        let error_is_i32 = self
+            .get(error)
+            .is_some_and(|payload| payload.kind == MirTypeKind::Primitive(PrimitiveType::I32));
         if !generic_payload
             || result.kind != MirTypeKind::GenericParameter
             || ok != result_ty
-            || error != result_ty
+            || (!error_is_same_generic && !error_is_i32)
         {
-            return Err(
-                "generic Result projection placeholder requires Result<T, T> and result T identity"
-                    .into(),
-            );
+            return Err("generic Result projection placeholder requires Result<T, T> or Result<T, i32> and result T identity".into());
         }
         if variants.len() != 2 {
             return Err(
@@ -5695,7 +5707,8 @@ impl MirTypeCatalog {
             })?;
         if selected.fields[0].id != *field_id
             || selected.fields[0].ty != *result_ty
-            || alternate.fields[0].ty != *result_ty
+            || (error_is_same_generic && alternate.fields[0].ty != *result_ty)
+            || (error_is_i32 && alternate.fields[0].ty != *error)
         {
             return Err(
                 "generic Result projection fields must be the canonical Ok/Err payloads".into(),
@@ -5718,6 +5731,149 @@ impl MirTypeCatalog {
             discriminant: 0,
             trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
         })
+    }
+
+    /// Materialize a concrete Copy `Result<Scalar, Scalar>` projection receipt
+    /// while allowing the two payload slots to have different scalar types.
+    /// This is intentionally separate from `validate_flat_copy_variant`, whose
+    /// homogeneous payload rule remains the concrete `Result<i32, i32>`
+    /// default island. The distinct generic route uses this helper only after
+    /// its checker-owned `Result<T, i32>` envelope has been specialized.
+    pub(crate) fn validated_result_scalar_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "Result projection source type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Result {
+            variants,
+            ok,
+            error,
+            ..
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "Result projection source '{}' has no canonical Result layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "Result projection source must be Aggregate/Copy with canonical no-op glue".into(),
+            );
+        }
+        if variants.len() != 2 || ok != result_ty {
+            return Err(
+                "Result projection requires canonical Ok/Err variants and Ok/result identity"
+                    .into(),
+            );
+        }
+        self.validate_copy_scalar(result_ty)?;
+        self.validate_copy_scalar(error)?;
+        let selected = variants
+            .iter()
+            .find(|variant| {
+                variant.id == *variant_id
+                    && variant.name == "Ok"
+                    && variant.discriminant == 0
+                    && variant.fields.len() == 1
+                    && variant.fields[0].ty == *result_ty
+            })
+            .ok_or_else(|| {
+                "Result projection target must be the canonical Ok payload".to_string()
+            })?;
+        variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Result::Err"
+                    && variant.name == "Err"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+                    && variant.fields[0].ty == *error
+            })
+            .ok_or_else(|| {
+                "Result projection source must contain the canonical Err payload".to_string()
+            })?;
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Copy
+            || projection.move_out_glue != MirGlueKind::Noop
+            || projection.field_index != 0
+            || projection.arity != 1
+            || projection.variant != selected.id
+            || projection.field != selected.fields[0].id
+        {
+            return Err("Result projection requires the canonical single Copy Ok payload".into());
+        }
+        Ok(MirVariantProjectionTrapContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            projection,
+            variant_name: selected.name.clone(),
+            discriminant: selected.discriminant,
+            trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
+    /// Validate the complete heterogeneous Copy Result layout used by the
+    /// specialized `Result<T, i32>` projection island. This keeps native ABI
+    /// callers from having to synthesize a projection receipt merely to prove
+    /// that both payload slots are scalar and glue-free.
+    pub(crate) fn validate_copy_result_scalar_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::Result {
+            variants,
+            ok,
+            error,
+            ..
+        } = &descriptor.layout
+        else {
+            return Err(format!(
+                "type '{}' has no canonical Result layout",
+                ty.as_str()
+            ));
+        };
+        if ok == error {
+            return Err(
+                "Result layout is homogeneous; heterogeneous scalar proof is required".into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| variant.id.0 == "builtin:variant:Result::Ok")
+            .ok_or_else(|| "Result layout has no canonical Ok variant".to_string())?;
+        let field = selected
+            .fields
+            .first()
+            .ok_or_else(|| "Result Ok variant has no payload field".to_string())?;
+        self.validated_result_scalar_projection_trap_contract(ty, &selected.id, &field.id, ok)
+            .map(|_| ())
     }
 
     /// Materialize the non-executable placeholder receipt for generic
