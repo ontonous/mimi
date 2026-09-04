@@ -13,7 +13,8 @@ use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedTypeId};
 
 use super::{MirFunction, MirInstructionKind, MirTerminator};
 
-/// Versioned default-route island for direct Copy `Result<i32, i32>.unwrap()`.
+/// Versioned default-route island for direct Copy `Result<i32, i32>.unwrap()`
+/// and total `unwrap_or` projection.
 pub const COPY_RESULT_I32_VARIANT_ISLAND: &str = "copy-result-i32-variant-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +25,8 @@ pub enum CopyResultI32VariantAdmission {
 }
 
 /// Classify the concrete checker shape before MIR construction. The profile
-/// is closed: every Result unwrap must be the exact `Result<i32, i32>` builtin
-/// and every callable must contain only the already-migrated body subset.
+/// is closed: every Result unwrap/unwrap_or must use the canonical builtin,
+/// and only the exact `Result<i32, i32>` shape is complete.
 pub fn classify_copy_result_i32_variant_admission(
     program: &CheckedProgram,
 ) -> CopyResultI32VariantAdmission {
@@ -93,10 +94,39 @@ fn call_is_result_unwrap(
     call: &crate::core::ir::ResolvedCall,
     expected: bool,
 ) -> bool {
-    matches!(&call.callee, ResolvedCallee::Builtin(name)
-        if name.as_str() == "builtin.method.result.unwrap")
-        && call.arguments.len() == 1
-        && (!expected || is_result_i32_i32(program, &call.arguments[0].value.ty))
+    let ResolvedCallee::Builtin(name) = &call.callee else {
+        return false;
+    };
+    let is_unwrap = name.as_str() == "builtin.method.result.unwrap";
+    let is_unwrap_or = name.as_str() == "builtin.method.result.unwrap_or";
+    let arity_ok =
+        (is_unwrap && call.arguments.len() == 1) || (is_unwrap_or && call.arguments.len() == 2);
+    let Some(receiver) = call.arguments.first() else {
+        return false;
+    };
+    let is_result_shape = matches!(
+        program.resolved_types().get(&receiver.value.ty),
+        Some(crate::core::ir::ResolvedType::Result { .. })
+    );
+    if !arity_ok || !is_result_shape {
+        return false;
+    }
+    if !expected {
+        return true;
+    }
+    if !is_result_i32_i32(program, &receiver.value.ty) {
+        return false;
+    }
+    if is_unwrap {
+        return true;
+    }
+    if !is_unwrap_or {
+        return false;
+    }
+    matches!(
+        program.resolved_types().get(&call.arguments[1].value.ty),
+        Some(crate::core::ir::ResolvedType::Primitive(PrimitiveType::I32))
+    )
 }
 
 fn body_has_result_unwrap(
@@ -278,9 +308,15 @@ pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool 
     program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
-                let MirInstructionKind::VariantProject { base, result, .. } = &instruction.kind
-                else {
-                    return false;
+                let (base, result, fallback) = match &instruction.kind {
+                    MirInstructionKind::VariantProject { base, result, .. } => (base, result, None),
+                    MirInstructionKind::VariantProjectOr {
+                        base,
+                        result,
+                        fallback,
+                        ..
+                    } => (base, result, Some(fallback)),
+                    _ => return false,
                 };
                 let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
                     return false;
@@ -288,13 +324,23 @@ pub fn contains_copy_result_i32_variant_candidate(program: &MirProgram) -> bool 
                 let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
                     return false;
                 };
-                is_copy_result_i32(program, base_ty)
-                    && program
+                let result_is_i32 =
+                    program
                         .type_catalog()
                         .get(result_ty)
                         .is_some_and(|descriptor| {
                             descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                        });
+                let fallback_is_i32 = fallback.is_none_or(|fallback| {
+                    function
+                        .values
+                        .get(fallback)
+                        .and_then(|value| program.type_catalog().get(&value.ty))
+                        .is_some_and(|descriptor| {
+                            descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32)
                         })
+                });
+                is_copy_result_i32(program, base_ty) && result_is_i32 && fallback_is_i32
             })
         })
     })
@@ -427,6 +473,51 @@ impl<'a> CopyResultI32VariantValidator<'a> {
                             ));
                         }
                     }
+                    MirInstructionKind::VariantProjectOr {
+                        base,
+                        fallback,
+                        result,
+                        contract,
+                    } => {
+                        self.saw_projection = true;
+                        let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
+                            self.error(format!("{} variant base is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(result_ty) = function.values.get(result).map(|value| &value.ty)
+                        else {
+                            self.error(format!("{} variant result is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(fallback_ty) =
+                            function.values.get(fallback).map(|value| &value.ty)
+                        else {
+                            self.error(format!("{} fallback value is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(receipt) = contract else {
+                            self.error(format!(
+                                "{} has no TypeDesc fallback projection receipt",
+                                instruction.id
+                            ));
+                            continue;
+                        };
+                        if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_variant_projection_fallback_receipt(
+                                base_ty,
+                                result_ty,
+                                fallback_ty,
+                                receipt,
+                            )
+                        {
+                            self.error(format!(
+                                "{} fallback receipt rejected: {message}",
+                                instruction.id
+                            ));
+                        }
+                    }
                     MirInstructionKind::VariantProjectMove { .. } => self.error(format!(
                         "{} consuming variant operation is outside {}",
                         instruction.id, COPY_RESULT_I32_VARIANT_ISLAND
@@ -497,5 +588,39 @@ mod tests {
             projection.trap_code,
             crate::core::mir::types::MIR_VARIANT_PROJECTION_TRAP_CODE
         );
+    }
+
+    #[test]
+    fn unwrap_or_carries_both_result_tag_identities_and_copy_fallback_receipt() {
+        let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap_or.mimi");
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_copy_result_i32_variant_admission(&checked),
+            CopyResultI32VariantAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("lower");
+        validate_copy_result_i32_variant_island(&program).expect("Result unwrap_or island");
+        let receipt = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::VariantProjectOr {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("unwrap_or must carry a fallback receipt");
+        assert_eq!(receipt.variant_name, "Ok");
+        assert_eq!(receipt.discriminant, 0);
+        assert_eq!(receipt.fallback_variant_name, "Err");
+        assert_eq!(receipt.fallback_discriminant, 1);
+        assert_eq!(receipt.result_ty, receipt.fallback_ty);
     }
 }

@@ -1682,6 +1682,7 @@ impl BytecodeVM {
                         | Some(ConstValue::ListProjection(_))
                         | Some(ConstValue::ListOperation(_))
                         | Some(ConstValue::VariantPredicate(_))
+                        | Some(ConstValue::VariantProjectionFallback(_))
                         | None => {
                             return Err(InterpError::new("QuotePushLit: constant is not a literal"))
                         }
@@ -2887,6 +2888,64 @@ impl BytecodeVM {
                         ));
                     };
                     self.set_reg(rd, Value::Bool(is_target));
+                }
+                Op::MirVariantProjectOr {
+                    rd,
+                    ra,
+                    rb,
+                    contract,
+                } => {
+                    let shape = self
+                        .variant_projection_fallback_contract(contract)?
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "variant projection fallback: canonical operation has no receipt",
+                            )
+                        })?;
+                    let value = self.get_reg(ra).clone();
+                    let fallback = self.get_reg(rb).clone();
+                    let (nominal, variant, tag, payload) =
+                        match value {
+                            Value::CanonicalVariant {
+                                nominal,
+                                variant,
+                                tag,
+                                payload,
+                            } => (nominal, variant, tag, payload),
+                            _ => return Err(InterpError::new(
+                                "variant projection fallback: expected canonical Variant source",
+                            )),
+                        };
+                    if nominal != shape.nominal {
+                        return Err(InterpError::new(
+                            "variant projection fallback: runtime nominal disagrees with receipt",
+                        ));
+                    }
+                    if payload.len() != shape.arity as usize {
+                        return Err(InterpError::new(
+                            "variant projection fallback: payload arity disagrees with receipt",
+                        ));
+                    }
+                    let output = if variant == shape.variant {
+                        if tag != shape.variant_name {
+                            return Err(InterpError::new(
+                                "variant projection fallback: Ok tag disagrees with receipt",
+                            ));
+                        }
+                        payload[shape.field_index as usize].clone()
+                    } else if variant == shape.fallback_variant {
+                        if tag != shape.fallback_variant_name {
+                            return Err(InterpError::new(
+                                "variant projection fallback: Err tag disagrees with receipt",
+                            ));
+                        }
+                        fallback
+                    } else {
+                        return Err(InterpError::new(
+                            "variant projection fallback: runtime variant disagrees with receipt",
+                        ));
+                    };
+                    self.set_reg(rd, output);
                 }
 
                 // ── Map / Set ────────────────────────────────
@@ -4948,6 +5007,31 @@ impl BytecodeVM {
         }
     }
 
+    /// Decode the mandatory canonical Result.unwrap_or receipt.
+    fn variant_projection_fallback_contract(
+        &self,
+        contract: Option<ConstIdx>,
+    ) -> Result<Option<crate::interp::bytecode::instr::VariantProjectionFallbackShape>, InterpError>
+    {
+        let Some(contract_idx) = contract else {
+            return Ok(None);
+        };
+        match self.program.functions[self.cur_frame().proto_idx as usize]
+            .constants
+            .get(contract_idx as usize)
+        {
+            Some(ConstValue::VariantProjectionFallback(shape)) => Ok(Some(shape.clone())),
+            Some(_) => Err(InterpError::new(format!(
+                "variant projection fallback: contract constant {} is not a VariantProjectionFallback",
+                contract_idx
+            ))),
+            None => Err(InterpError::new(format!(
+                "variant projection fallback: contract constant {} is absent",
+                contract_idx
+            ))),
+        }
+    }
+
     fn validate_canonical_list_operation(
         value: &Value,
         shape: &crate::interp::bytecode::instr::ListOperationShape,
@@ -5379,6 +5463,7 @@ impl BytecodeVM {
             ConstValue::ListProjection(_) => Value::Unit,
             ConstValue::ListOperation(_) => Value::Unit,
             ConstValue::VariantPredicate(_) => Value::Unit,
+            ConstValue::VariantProjectionFallback(_) => Value::Unit,
         }
     }
 

@@ -118,7 +118,7 @@ pub(crate) fn build_canonical_program_for_sources(
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
 /// record value, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
-/// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands, or the
+/// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island. The candidate then
 /// has to pass every consumer preflight before any caller starts execution or
 /// LLVM emission. A `Legacy(reason)` result is an explicit
@@ -1090,7 +1090,7 @@ fn reject_migrated_candidates_with_copy_f64(
         ))
     } else if copy_result_i32_candidate {
         DefaultMirRoute::Rejected(format!(
-            "S122 Copy Result<i32, i32> variant candidate is not eligible for the default route: {}",
+            "S125 Copy Result<i32, i32> variant candidate is not eligible for the default route: {}",
             reason
         ))
     } else {

@@ -812,6 +812,15 @@ pub enum Op {
         predicate: crate::core::mir::MirVariantPredicate,
         contract: Option<ConstIdx>,
     },
+    /// rd = canonical Result.unwrap_or(ra, rb). The receipt carries both
+    /// active tag identities and the Copy payload ABI; no legacy tag lookup is
+    /// permitted for this MIR opcode.
+    MirVariantProjectOr {
+        rd: Reg,
+        ra: Reg,
+        rb: Reg,
+        contract: Option<ConstIdx>,
+    },
 
     // ═══════════════════════════════════════════════════════════
     // Enum / pattern matching
@@ -1145,6 +1154,7 @@ impl Op {
             | MirListReverse { rd, .. }
             | MirListConcat { rd, .. }
             | MirVariantPredicate { rd, .. }
+            | MirVariantProjectOr { rd, .. }
             | TupleGet { rd, .. }
             | RecordGet { rd, .. }
             | RecordMoveGet { rd, .. }
@@ -1403,6 +1413,7 @@ impl Op {
             | RetEarly { ra, .. }
             | JmpIf { ra, .. }
             | JmpIfNot { ra, .. } => *ra == reg,
+            MirVariantProjectOr { ra, rb, .. } => *ra == reg || *rb == reg,
             MaskShiftAmt { rb, .. } => *rb == reg,
             CheckI32 { rd, .. } | WrapI32 { rd, .. } => *rd == reg,
             And { ra, rb, .. } | Or { ra, rb, .. } => *ra == reg || *rb == reg,
@@ -1542,6 +1553,9 @@ pub enum ConstValue {
     /// Canonical Option/Result predicate receipt encoded for the bytecode
     /// physical ABI.
     VariantPredicate(VariantPredicateShape),
+    /// Canonical Result.unwrap_or receipt encoded for the bytecode physical
+    /// ABI. The fallback arm and selected payload remain checker identities.
+    VariantProjectionFallback(VariantProjectionFallbackShape),
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1573,6 +1587,24 @@ pub struct VariantPredicateShape {
     pub alternate_variant_name: String,
     pub predicate: crate::core::mir::MirVariantPredicate,
     pub discriminant: VariantIdx,
+}
+
+/// Canonical Copy Result payload-or-fallback receipt for MIR bytecode.
+#[derive(Debug, Clone)]
+pub struct VariantProjectionFallbackShape {
+    pub source_ty: crate::core::ResolvedTypeId,
+    pub result_ty: crate::core::ResolvedTypeId,
+    pub fallback_ty: crate::core::ResolvedTypeId,
+    pub nominal: crate::core::ir::NominalTypeId,
+    pub variant: crate::core::NodeId,
+    pub variant_name: String,
+    pub discriminant: VariantIdx,
+    pub fallback_variant: crate::core::NodeId,
+    pub fallback_variant_name: String,
+    pub fallback_discriminant: VariantIdx,
+    pub field: crate::core::NodeId,
+    pub field_index: u16,
+    pub arity: u16,
 }
 
 /// One canonical record field projection in the bytecode physical contract.

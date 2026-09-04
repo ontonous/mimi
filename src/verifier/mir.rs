@@ -1528,6 +1528,89 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &projected)?;
             state.values.insert(result.clone(), projected);
         }
+        MirInstructionKind::VariantProjectOr {
+            result,
+            base,
+            fallback,
+            contract,
+        } => {
+            let base_ty = function
+                .values
+                .get(base)
+                .ok_or_else(|| format!("MIR variant fallback base '{}' is absent", base))?
+                .ty
+                .clone();
+            let result_ty = function
+                .values
+                .get(result)
+                .ok_or_else(|| format!("MIR variant fallback result '{}' is absent", result))?
+                .ty
+                .clone();
+            let fallback_ty = function
+                .values
+                .get(fallback)
+                .ok_or_else(|| format!("MIR variant fallback operand '{}' is absent", fallback))?
+                .ty
+                .clone();
+            let receipt = contract.as_ref().ok_or_else(|| {
+                "MIR variant projection fallback has no canonical receipt".to_string()
+            })?;
+            catalog.validate_variant_projection_fallback_receipt(
+                &base_ty,
+                &result_ty,
+                &fallback_ty,
+                receipt,
+            )?;
+            let SymbolicValue::Variant {
+                nominal,
+                tag,
+                payload,
+                ..
+            } =
+                state.values.get(base).cloned().ok_or_else(|| {
+                    format!("MIR variant fallback base '{}' is not defined", base)
+                })?
+            else {
+                return Err(
+                    "MIR variant projection fallback requires a symbolic Option/Result value"
+                        .into(),
+                );
+            };
+            if nominal != receipt.projection.nominal {
+                return Err(
+                    "MIR variant projection fallback nominal disagrees with TypeDesc".into(),
+                );
+            }
+            // A symbolic Err value legitimately has only its Err payload
+            // field.  The Ok payload is semantically inactive on that tag,
+            // so materialize a typed zero for the inactive branch before the
+            // Z3 `ite`; demanding the field unconditionally would reject a
+            // valid total `unwrap_or` operation.
+            let selected = payload
+                .get(&receipt.projection.field)
+                .cloned()
+                .unwrap_or(symbolic_zero_for_type(catalog, &result_ty)?);
+            let fallback_value = state.values.get(fallback).cloned().ok_or_else(|| {
+                format!("MIR variant fallback operand '{}' is not defined", fallback)
+            })?;
+            let active_ok = tag.eq(Int::from_i64(receipt.discriminant as i64));
+            let projected = match (selected, fallback_value) {
+                (SymbolicValue::Int(selected), SymbolicValue::Int(fallback)) => {
+                    SymbolicValue::Int(active_ok.ite(&selected, &fallback))
+                }
+                (SymbolicValue::Bool(selected), SymbolicValue::Bool(fallback)) => {
+                    SymbolicValue::Bool(active_ok.ite(&selected, &fallback))
+                }
+                _ => {
+                    return Err(
+                        "MIR variant projection fallback values disagree with Copy scalar ABI"
+                            .into(),
+                    )
+                }
+            };
+            ensure_result_shape(function, catalog, result, &projected)?;
+            state.values.insert(result.clone(), projected);
+        }
         MirInstructionKind::VariantProjectMove {
             result,
             base,
@@ -6051,6 +6134,42 @@ mod tests {
             .find(|result| result.func_name.ends_with("unwrap_copy"))
             .expect("unwrap_copy verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+    }
+
+    #[test]
+    fn verifier_proves_result_i32_i32_unwrap_or_copy_projection() {
+        let source = include_str!("../../tests/fixtures/mir_native_result_i32_unwrap_or.mimi");
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("canonical Result<i32, i32>.unwrap_or MIR");
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:unwrap_err".into()))
+            .expect("unwrap_err MIR");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::VariantProjectOr {
+                        contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+        let results = verify_program(&program, "result-i32-i32-unwrap-or-source-hash".into())
+            .expect("verifier should prove the Copy Result unwrap_or projection");
+        for function_name in ["unwrap_ok", "unwrap_err"] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name.ends_with(function_name))
+                .expect("unwrap_or verification result");
+            assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        }
     }
 
     #[test]

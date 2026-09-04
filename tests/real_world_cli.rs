@@ -2185,6 +2185,96 @@ fn canonical_default_result_i32_i32_err_unwrap_preserves_active_tag_trap() {
 }
 
 #[test]
+fn canonical_default_result_i32_i32_unwrap_or_matches_reference_bytecode_native() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_result_i32_unwrap_or.mimi");
+
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Result unwrap_or reference run");
+    assert_eq!(default_run.status.code(), Some(14));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default Copy Result unwrap_or verifier");
+    assert!(
+        verify.status.success(),
+        "default Copy Result unwrap_or verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-copy-result-i32-i32-unwrap-or-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default Copy Result unwrap_or native build");
+    assert!(
+        build.status.success(),
+        "default Copy Result unwrap_or native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default Copy Result unwrap_or native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(14));
+}
+
+#[test]
+fn canonical_default_rejects_result_i64_i32_unwrap_or_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_result_i64_i32_unwrap_or_rejected.mimi");
+    for command in ["run", "verify", "build"] {
+        let binary = std::env::temp_dir().join(format!(
+            "mimi-default-copy-result-i64-i32-unwrap-or-rejected-{}",
+            std::process::id()
+        ));
+        let mut invocation = Command::new(mimi_bin());
+        invocation
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&fixture);
+        if command == "build" {
+            invocation.arg("-o").arg(&binary);
+        }
+        let output = invocation
+            .output()
+            .expect("failed to spawn unsupported Copy Result unwrap_or command");
+        let _ = fs::remove_file(&binary);
+        assert!(!output.status.success(), "{command} must fail closed");
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains(
+                "Copy Result<i32, i32> projection candidate is outside complete coverage"
+            ),
+            "{command} must reject before legacy/backend:\n{diagnostics}"
+        );
+    }
+}
+
+#[test]
 fn canonical_default_rejects_mixed_copy_option_bool_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")

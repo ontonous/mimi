@@ -773,6 +773,38 @@ mod tests {
     }
 
     #[test]
+    fn copy_result_i32_unwrap_or_materialization_carries_fallback_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_result_i32_unwrap_or.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.copy_result_i32,
+            CopyResultI32VariantAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete Copy Result unwrap_or route must materialize");
+        assert!(route.materialized_copy_result_i32_candidate);
+        let receipt = route
+            .program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::VariantProjectOr {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("unwrap_or must materialize a fallback receipt");
+        assert_eq!(receipt.fallback_variant_name, "Err");
+        assert_eq!(receipt.fallback_discriminant, 1);
+        assert_eq!(receipt.result_ty, receipt.fallback_ty);
+    }
+
+    #[test]
     fn generic_option_predicate_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_predicate.mimi"

@@ -108,6 +108,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirListReverse { .. } => "MIR_LIST_REVERSE",
         Op::MirListConcat { .. } => "MIR_LIST_CONCAT",
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
+        Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
@@ -204,6 +205,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
                 ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
+                ConstValue::VariantProjectionFallback(v) => {
+                    format!("variant_projection_fallback {:?}", v)
+                }
             };
             format!("{:04}  {:<16} r{} = {}", pc, name, rd, display)
         }
@@ -396,6 +400,9 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
                 ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
+                ConstValue::VariantProjectionFallback(v) => {
+                    format!("variant_projection_fallback {:?}", v)
+                }
             };
             format!("{:04}  {:<16} push {:?} ({})", pc, name, val, display)
         }
@@ -803,6 +810,22 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 .map(|contract| format!(" contract={contract}"))
                 .unwrap_or_default()
         ),
+        Op::MirVariantProjectOr {
+            rd,
+            ra,
+            rb,
+            contract,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_variant_project_or(r{}, r{}){}",
+            pc,
+            name,
+            rd,
+            ra,
+            rb,
+            contract
+                .map(|contract| format!(" contract={contract}"))
+                .unwrap_or_default()
+        ),
         Op::NewVariant {
             rd,
             type_name,
@@ -1100,6 +1123,9 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
             ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
+            ConstValue::VariantProjectionFallback(v) => {
+                format!("variant_projection_fallback {:?}", v)
+            }
         };
         out.push_str(&format!(";   const[{}] = {}\n", i, display));
     }

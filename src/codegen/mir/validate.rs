@@ -544,6 +544,19 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 contract,
             } => self.validate_variant_project(function, result, base, contract.as_ref(), subject),
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => self.validate_variant_project_or(
+                function,
+                result,
+                base,
+                fallback,
+                contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::VariantProjectMove {
                 result,
                 base,
@@ -1163,6 +1176,46 @@ impl<'a> NativeMirValidator<'a> {
             .program
             .type_catalog()
             .validate_variant_projection_trap_receipt(&base_value.ty, &result_value.ty, contract)
+        {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
+    }
+
+    fn validate_variant_project_or(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: &MirValueId,
+        fallback: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirVariantProjectionFallbackContract>,
+        subject: &str,
+    ) {
+        self.validate_value(function, result, "variant fallback projection result");
+        self.validate_value(function, base, "variant fallback projection base");
+        self.validate_value(function, fallback, "variant fallback projection operand");
+        let (Some(base_value), Some(result_value), Some(fallback_value)) = (
+            function.values.get(base),
+            function.values.get(result),
+            function.values.get(fallback),
+        ) else {
+            return;
+        };
+        let Some(contract) = contract else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "variant projection fallback has no canonical receipt",
+            ));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_projection_fallback_receipt(
+                &base_value.ty,
+                &result_value.ty,
+                &fallback_value.ty,
+                contract,
+            )
         {
             self.errors.push(NativeMirError::new(subject, message));
         }

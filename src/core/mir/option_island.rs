@@ -331,7 +331,9 @@ fn option_expr_is_closed(expression: &ResolvedExpr) -> bool {
                         | "Ok"
                         | "Err"
                         | "builtin.method.option.unwrap"
+                        | "builtin.method.option.unwrap_or"
                         | "builtin.method.result.unwrap"
+                        | "builtin.method.result.unwrap_or"
                 ),
                 ResolvedCallee::Function(_) => {
                     call.type_arguments.is_empty()
@@ -776,6 +778,7 @@ impl<'a> OptionStringVariantValidator<'a> {
             | MirInstructionKind::MoveProject { .. }
             | MirInstructionKind::MoveProjectDrop { .. }
             | MirInstructionKind::VariantProject { .. }
+            | MirInstructionKind::VariantProjectOr { .. }
             | MirInstructionKind::Construct { .. }
             | MirInstructionKind::ConstructList { .. }
             | MirInstructionKind::ListOp { .. }

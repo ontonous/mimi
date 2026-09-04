@@ -502,6 +502,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_variant_project(result, base, contract.as_ref(), subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => {
+                let value = self.emit_variant_project_or(
+                    result,
+                    base,
+                    fallback,
+                    contract.as_ref(),
+                    subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::VariantProjectMove {
                 result,
                 base,
@@ -1074,6 +1089,36 @@ mod tests {
             .verify()
             .expect("native Result<i32, i32>.unwrap module verifies");
         assert!(generator.module.get_function("unwrap_copy").is_some());
+    }
+
+    #[test]
+    fn native_emitter_materializes_result_i32_i32_unwrap_or_copy_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_result_i32_unwrap_or.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result<i32, i32>.unwrap_or execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Result<i32, i32>.unwrap_or MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode Result<i32, i32>.unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(14));
+        assert!(matches!(bytecode, Value::Int(14)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_result_i32_unwrap_or_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Result<i32, i32>.unwrap_or MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Result<i32, i32>.unwrap_or module verifies");
+        assert!(generator.module.get_function("unwrap_ok").is_some());
+        assert!(generator.module.get_function("unwrap_err").is_some());
     }
 
     #[test]

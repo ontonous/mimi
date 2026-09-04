@@ -431,6 +431,16 @@ pub enum MirInstructionKind {
         base: MirValueId,
         contract: Option<types::MirVariantProjectionTrapContract>,
     },
+    /// Read the selected `Ok` payload from a Copy Result, or return the
+    /// explicit checker-selected fallback operand for the alternate `Err`
+    /// tag.  The receipt proves both tag identities, payload ABI and Copy
+    /// ownership; consumers must not infer this choice from a runtime handle.
+    VariantProjectOr {
+        result: MirValueId,
+        base: MirValueId,
+        fallback: MirValueId,
+        contract: Option<types::MirVariantProjectionFallbackContract>,
+    },
     /// Consume a non-Copy variant and move its single owned payload field
     /// out.  The TypeDesc receipt proves the active discriminant trap and
     /// Move/OwnedString glue; this is intentionally distinct from the
@@ -1590,6 +1600,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::MoveProject { result, .. }
         | MirInstructionKind::MoveProjectDrop { result, .. }
         | MirInstructionKind::VariantProject { result, .. }
+        | MirInstructionKind::VariantProjectOr { result, .. }
         | MirInstructionKind::VariantProjectMove { result, .. }
         | MirInstructionKind::Construct { result, .. }
         | MirInstructionKind::ConstructList { result, .. }
@@ -1642,6 +1653,11 @@ fn instruction_consumes_owned_string(
             variant: source, ..
         }
         | MirInstructionKind::EndBorrow { borrow: source } => sources.push(source.clone()),
+        MirInstructionKind::VariantProjectOr {
+            base: source,
+            fallback,
+            ..
+        } => sources.extend([source.clone(), fallback.clone()]),
         MirInstructionKind::VariantProjectMove { base: source, .. } => sources.push(source.clone()),
         MirInstructionKind::Call { arguments, .. }
         | MirInstructionKind::FlowTransition { arguments, .. }
@@ -1763,6 +1779,18 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             contract
                 .as_ref()
                 .map(|contract| format!(" [variant_projection={contract:?}]"))
+                .unwrap_or_default()
+        ),
+        MirInstructionKind::VariantProjectOr {
+            result,
+            base,
+            fallback,
+            contract,
+        } => format!(
+            "variant_project_or {result} <- {base} else {fallback}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [variant_projection_fallback={contract:?}]"))
                 .unwrap_or_default()
         ),
         MirInstructionKind::VariantProjectMove {
@@ -2317,6 +2345,22 @@ impl<'a> MirValidator<'a> {
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
+            VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => {
+                self.use_value(base);
+                self.use_value(fallback);
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "variant projection fallback has no canonical receipt",
+                    );
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             VariantProjectMove {
                 result,
                 base,
@@ -2817,6 +2861,9 @@ impl<'a> MirValidator<'a> {
                 }
             }
             MirInstructionKind::VariantProject { base, .. } => uses.push(base.clone()),
+            MirInstructionKind::VariantProjectOr { base, fallback, .. } => {
+                uses.extend([base.clone(), fallback.clone()])
+            }
             MirInstructionKind::VariantProjectMove { base, .. } => uses.push(base.clone()),
             MirInstructionKind::MoveProjectDrop {
                 base, projection, ..

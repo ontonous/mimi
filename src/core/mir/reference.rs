@@ -460,6 +460,41 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::VariantProjectOr {
+                            result,
+                            base,
+                            fallback,
+                            contract,
+                        } => {
+                            let (Some(base_value), Some(result_value), Some(fallback_value)) = (
+                                function.values.get(base),
+                                function.values.get(result),
+                                function.values.get(fallback),
+                            ) else {
+                                continue;
+                            };
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "variant projection fallback has no canonical receipt"
+                                        .into(),
+                                });
+                                continue;
+                            };
+                            if let Err(message) = type_catalog
+                                .validate_variant_projection_fallback_receipt(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    &fallback_value.ty,
+                                    receipt,
+                                )
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::VariantProjectMove {
                             result,
                             base,
@@ -2547,6 +2582,9 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         }
         super::MirInstructionKind::VariantProject { base, .. }
         | super::MirInstructionKind::VariantProjectMove { base, .. } => base == needle,
+        super::MirInstructionKind::VariantProjectOr { base, fallback, .. } => {
+            base == needle || fallback == needle
+        }
         super::MirInstructionKind::Construct { fields, .. } => fields.iter().any(|v| v == needle),
         super::MirInstructionKind::ConstructList { elements, .. } => {
             elements.iter().any(|v| v == needle)
@@ -2617,6 +2655,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::MoveProject { result, .. }
         | super::MirInstructionKind::MoveProjectDrop { result, .. }
         | super::MirInstructionKind::VariantProject { result, .. }
+        | super::MirInstructionKind::VariantProjectOr { result, .. }
         | super::MirInstructionKind::VariantProjectMove { result, .. }
         | super::MirInstructionKind::Construct { result, .. }
         | super::MirInstructionKind::ConstructList { result, .. }
@@ -3147,6 +3186,70 @@ impl<'a> MirReferenceInterpreter<'a> {
                 let projected = project_variant_value(
                     &function.owner,
                     value,
+                    &base_ty,
+                    &result_ty,
+                    receipt,
+                    self.program.type_catalog(),
+                )?;
+                values.insert(result.clone(), projected);
+            }
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "variant fallback projection base has no type",
+                        )
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "variant fallback projection result has no type",
+                        )
+                    })?;
+                let fallback_ty = function
+                    .values
+                    .get(fallback)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "variant fallback projection operand has no type",
+                        )
+                    })?;
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "variant fallback projection has no canonical receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_variant_projection_fallback_receipt(
+                        &base_ty,
+                        &result_ty,
+                        &fallback_ty,
+                        receipt,
+                    )
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let value = self.read_value(function, values, base)?;
+                let fallback_value = self.read_value(function, values, fallback)?;
+                let projected = project_variant_fallback_value(
+                    &function.owner,
+                    value,
+                    fallback_value,
                     &base_ty,
                     &result_ty,
                     receipt,
@@ -4742,6 +4845,63 @@ fn project_variant_value(
         .get(receipt.projection.field_index)
         .cloned()
         .ok_or_else(|| execution_error(function, "direct variant projection field is absent"))
+}
+
+fn project_variant_fallback_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    fallback: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirVariantProjectionFallbackContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    type_catalog
+        .validate_variant_projection_fallback_receipt(
+            base_ty,
+            result_ty,
+            &receipt.fallback_ty,
+            receipt,
+        )
+        .map_err(|message| execution_error(function, message))?;
+    let MirRuntimeValue::Variant {
+        nominal,
+        variant,
+        payload,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "variant projection fallback base is not a canonical Variant",
+        ));
+    };
+    if nominal != receipt.projection.nominal {
+        return Err(execution_error(
+            function,
+            "variant projection fallback runtime nominal disagrees with TypeDesc",
+        ));
+    }
+    if payload.len() != receipt.projection.arity {
+        return Err(execution_error(
+            function,
+            "variant projection fallback runtime arity disagrees with TypeDesc",
+        ));
+    }
+    if variant == receipt.projection.variant {
+        return payload
+            .get(receipt.projection.field_index)
+            .cloned()
+            .ok_or_else(|| {
+                execution_error(function, "variant projection fallback field is absent")
+            });
+    }
+    if variant == receipt.fallback_variant {
+        return Ok(fallback);
+    }
+    Err(execution_error(
+        function,
+        "variant projection fallback runtime tag disagrees with TypeDesc",
+    ))
 }
 
 fn move_project_variant_value(

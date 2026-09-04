@@ -690,6 +690,107 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
+    /// Read the canonical `Ok` payload or select the explicit fallback value
+    /// for `Err`. The TypeDesc receipt proves both variant identities and the
+    /// scalar ABI before native LLVM sees the aggregate.
+    pub(super) fn emit_variant_project_or(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        fallback: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirVariantProjectionFallbackContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let base_ty = self.value_type(base, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        let fallback_ty = self.value_type(fallback, subject)?;
+        let receipt = contract.ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "variant projection fallback has no canonical receipt",
+            )
+        })?;
+        self.program
+            .type_catalog()
+            .validate_variant_projection_fallback_receipt(
+                &base_ty,
+                &result_ty,
+                &fallback_ty,
+                receipt,
+            )
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &base_ty, false)?;
+        let payload_slot = variant_abi
+            .payload_slot(&receipt.projection.variant)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "variant projection fallback has no native Ok payload slot",
+                )
+            })?;
+        let fallback_slot = variant_abi
+            .payload_slot(&receipt.fallback_variant)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "variant projection fallback has no native Err payload slot",
+                )
+            })?;
+        if payload_slot.field != receipt.projection.field
+            || payload_slot.ty != result_ty
+            || fallback_slot.ty != fallback_ty
+            || receipt.projection.field_index != 0
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "variant projection fallback receipt disagrees with native payload ABI",
+            ));
+        }
+        let aggregate = self.value(base, subject)?.into_struct_value();
+        let tag = self
+            .generator
+            .builder
+            .build_extract_value(
+                aggregate,
+                variant_abi.tag_field,
+                "mir_variant_project_or_tag",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let active_ok = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.generator
+                    .context
+                    .i8_type()
+                    .const_int(u64::from(receipt.discriminant), false),
+                "mir_variant_project_or_is_ok",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let projected = self
+            .generator
+            .builder
+            .build_extract_value(
+                aggregate,
+                payload_slot.physical_field,
+                "mir_variant_project_or_payload",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let fallback_value = self.value(fallback, subject)?;
+        self.generator
+            .builder
+            .build_select(
+                active_ok,
+                projected,
+                fallback_value,
+                "mir_variant_project_or_select",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
     /// Consume a non-Copy variant and move its owned payload field out.  The
     /// `moving=true` ABI is mandatory here: the source aggregate is consumed
     /// by the canonical MIR ownership ledger, so a Copy-layout projection

@@ -663,6 +663,36 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
             }
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => {
+                let (Some(base_ty), Some(result_ty), Some(fallback_ty)) = (
+                    value_type(function, base),
+                    value_type(function, result),
+                    value_type(function, fallback),
+                ) else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} variant projection fallback has no canonical receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog.validate_variant_projection_fallback_receipt(
+                    &base_ty,
+                    &result_ty,
+                    &fallback_ty,
+                    receipt,
+                ) {
+                    self.error(format!(
+                        "{subject} variant projection fallback rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::VariantProjectMove {
                 result,
                 base,

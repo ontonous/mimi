@@ -17,7 +17,8 @@ use crate::core::mir::types::{
     MirAbiClass, MirConversionContract, MirConversionKind, MirGlueKind, MirLayout,
     MirListIndexProjectionContract, MirListOperationContract, MirOwnership,
     MirRecordMoveProjectionDropContract, MirRecordProjectionContract, MirTypeDesc, MirTypeKind,
-    MirVariantPredicateContract, MirVariantProjectionTrapContract,
+    MirVariantPredicateContract, MirVariantProjectionFallbackContract,
+    MirVariantProjectionTrapContract,
 };
 use crate::core::mir::{
     MirAggregateKind, MirFunction, MirInstructionKind, MirListOperation, MirOwnershipEventKind,
@@ -28,7 +29,8 @@ use crate::core::NodeId;
 use super::instr::{
     BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
     ListProjectionShape, Op, RecordMoveDropProjectionShape, RecordProjectionShape,
-    RecordResidualDropShape, Reg, TupleProjectionShape, VariantPredicateShape, VariantShape,
+    RecordResidualDropShape, Reg, TupleProjectionShape, VariantPredicateShape,
+    VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -533,6 +535,12 @@ impl<'a> FunctionEmitter<'a> {
                 base,
                 contract,
             } => self.emit_variant_project(result, base, contract.as_ref()),
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract,
+            } => self.emit_variant_project_or(result, base, fallback, contract.as_ref()),
             MirInstructionKind::VariantProjectMove {
                 result,
                 base,
@@ -1883,6 +1891,86 @@ impl<'a> FunctionEmitter<'a> {
             idx: receipt.projection.field_index as u16,
             variant_tag,
             shapes,
+        });
+    }
+
+    fn emit_variant_project_or(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        fallback: &MirValueId,
+        contract: Option<&MirVariantProjectionFallbackContract>,
+    ) {
+        let (Some(rd), Some(ra), Some(rb)) = (self.reg(result), self.reg(base), self.reg(fallback))
+        else {
+            return;
+        };
+        for value in [result, base, fallback] {
+            if let Err(message) = self.supported_type_for_value(value) {
+                self.error(format!(
+                    "variant fallback projection value '{}' is unsupported: {message}",
+                    value
+                ));
+                return;
+            }
+        }
+        let Some(receipt) = contract else {
+            self.error("variant fallback projection has no canonical receipt");
+            return;
+        };
+        let (Some(base_info), Some(result_info), Some(fallback_info)) = (
+            self.function.values.get(base),
+            self.function.values.get(result),
+            self.function.values.get(fallback),
+        ) else {
+            self.error("variant fallback projection value is absent");
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_variant_projection_fallback_receipt(
+                &base_info.ty,
+                &result_info.ty,
+                &fallback_info.ty,
+                receipt,
+            )
+        {
+            self.error(format!(
+                "variant fallback projection is unsupported: {message}"
+            ));
+            return;
+        }
+        let Ok(field_index) = u16::try_from(receipt.projection.field_index) else {
+            self.error("variant fallback projection field index exceeds bytecode ABI");
+            return;
+        };
+        let Ok(arity) = u16::try_from(receipt.projection.arity) else {
+            self.error("variant fallback projection arity exceeds bytecode ABI");
+            return;
+        };
+        let contract_idx = self.proto.add_const(ConstValue::VariantProjectionFallback(
+            VariantProjectionFallbackShape {
+                source_ty: receipt.source_ty.clone(),
+                result_ty: receipt.result_ty.clone(),
+                fallback_ty: receipt.fallback_ty.clone(),
+                nominal: receipt.projection.nominal.clone(),
+                variant: receipt.projection.variant.clone(),
+                variant_name: receipt.variant_name.clone(),
+                discriminant: receipt.discriminant,
+                fallback_variant: receipt.fallback_variant.clone(),
+                fallback_variant_name: receipt.fallback_variant_name.clone(),
+                fallback_discriminant: receipt.fallback_discriminant,
+                field: receipt.projection.field.clone(),
+                field_index,
+                arity,
+            },
+        ));
+        self.proto.emit(Op::MirVariantProjectOr {
+            rd,
+            ra,
+            rb,
+            contract: Some(contract_idx),
         });
     }
 
@@ -5068,6 +5156,26 @@ mod tests {
             .expect("bytecode Result unwrap execution");
         assert_eq!(reference, MirRuntimeValue::Int(41));
         assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn executes_copy_result_i32_i32_unwrap_or_for_both_tags_without_ast() {
+        let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap_or.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("Result<i32, i32>.unwrap_or MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("Result unwrap_or bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(14));
+        assert!(matches!(value, Value::Int(14)));
     }
 
     #[test]

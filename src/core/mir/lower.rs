@@ -4093,29 +4093,59 @@ impl<'a> Lowerer<'a> {
                     variant_projection_builtin(call, self.type_catalog)
                 {
                     if let Some(base) = arguments.first() {
-                        let contract = self.variant_projection_contract(
-                            &expression.node_id,
-                            base,
-                            &result,
-                            &variant,
-                            &field,
-                            consuming_variant_projection,
-                        );
-                        if let Some(contract) = contract {
-                            let instruction = if consuming_variant_projection {
-                                MirInstructionKind::VariantProjectMove {
-                                    result: result.clone(),
-                                    base: base.clone(),
-                                    contract: Some(contract),
+                        if variant_projection_is_fallback(call) {
+                            if let Some(fallback) = arguments.get(1) {
+                                let contract = self.variant_projection_fallback_contract(
+                                    &expression.node_id,
+                                    base,
+                                    fallback,
+                                    &result,
+                                    &variant,
+                                    &field,
+                                );
+                                if let Some(contract) = contract {
+                                    self.emit(
+                                        &expression.node_id,
+                                        "variant_project_or",
+                                        MirInstructionKind::VariantProjectOr {
+                                            result: result.clone(),
+                                            base: base.clone(),
+                                            fallback: fallback.clone(),
+                                            contract: Some(contract),
+                                        },
+                                    );
                                 }
                             } else {
-                                MirInstructionKind::VariantProject {
-                                    result: result.clone(),
-                                    base: base.clone(),
-                                    contract: Some(contract),
-                                }
-                            };
-                            self.emit(&expression.node_id, "variant_project", instruction);
+                                self.error(
+                                    &expression.node_id,
+                                    "Result.unwrap_or requires one fallback operand",
+                                );
+                            }
+                        } else {
+                            let contract = self.variant_projection_contract(
+                                &expression.node_id,
+                                base,
+                                &result,
+                                &variant,
+                                &field,
+                                consuming_variant_projection,
+                            );
+                            if let Some(contract) = contract {
+                                let instruction = if consuming_variant_projection {
+                                    MirInstructionKind::VariantProjectMove {
+                                        result: result.clone(),
+                                        base: base.clone(),
+                                        contract: Some(contract),
+                                    }
+                                } else {
+                                    MirInstructionKind::VariantProject {
+                                        result: result.clone(),
+                                        base: base.clone(),
+                                        contract: Some(contract),
+                                    }
+                                };
+                                self.emit(&expression.node_id, "variant_project", instruction);
+                            }
                         }
                     } else {
                         self.error(
@@ -5146,6 +5176,58 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn variant_projection_fallback_contract(
+        &mut self,
+        node_id: &NodeId,
+        base: &MirValueId,
+        fallback: &MirValueId,
+        result: &MirValueId,
+        variant: &NodeId,
+        field: &NodeId,
+    ) -> Option<super::types::MirVariantProjectionFallbackContract> {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "Variant fallback projection requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some(base_ty) = self.values.get(base).map(|value| value.ty.clone()) else {
+            self.error(node_id, "Variant fallback projection base has no MIR type");
+            return None;
+        };
+        let Some(result_ty) = self.values.get(result).map(|value| value.ty.clone()) else {
+            self.error(
+                node_id,
+                "Variant fallback projection result has no MIR type",
+            );
+            return None;
+        };
+        let Some(fallback_ty) = self.values.get(fallback).map(|value| value.ty.clone()) else {
+            self.error(
+                node_id,
+                "Variant fallback projection operand has no MIR type",
+            );
+            return None;
+        };
+        match type_catalog.validated_copy_result_i32_projection_fallback_contract(
+            &base_ty,
+            variant,
+            field,
+            &result_ty,
+            &fallback_ty,
+        ) {
+            Ok(contract) => Some(contract),
+            Err(message) => {
+                self.error(
+                    node_id,
+                    format!("canonical variant fallback projection contract is invalid: {message}"),
+                );
+                None
+            }
+        }
+    }
+
     fn variant_call_abi_contract(
         &mut self,
         node_id: &NodeId,
@@ -5452,12 +5534,12 @@ fn variant_projection_builtin(
     let ResolvedCallee::Builtin(builtin) = &call.callee else {
         return None;
     };
-    if call.arguments.len() != 1
-        || !matches!(
-            builtin.as_str(),
-            "builtin.method.option.unwrap" | "builtin.method.result.unwrap"
-        )
-    {
+    let expected_arity = match builtin.as_str() {
+        "builtin.method.option.unwrap" | "builtin.method.result.unwrap" => 1,
+        "builtin.method.result.unwrap_or" => 2,
+        _ => return None,
+    };
+    if call.arguments.len() != expected_arity {
         return None;
     }
     let catalog = type_catalog?;
@@ -5495,7 +5577,7 @@ fn variant_projection_builtin(
                 error,
                 ..
             },
-            "builtin.method.result.unwrap",
+            "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or",
         ) => {
             catalog.validate_copy_result_i32_variant(receiver_ty).ok()?;
             if ok != error {
@@ -5505,7 +5587,10 @@ fn variant_projection_builtin(
         }
         _ => return None,
     };
-    let variant_name = if builtin.as_str() == "builtin.method.result.unwrap" {
+    let variant_name = if matches!(
+        builtin.as_str(),
+        "builtin.method.result.unwrap" | "builtin.method.result.unwrap_or"
+    ) {
         "Ok"
     } else {
         "Some"
@@ -5518,6 +5603,11 @@ fn variant_projection_builtin(
         return None;
     }
     Some((variant.id.clone(), field.id.clone()))
+}
+
+fn variant_projection_is_fallback(call: &ResolvedCall) -> bool {
+    matches!(&call.callee, ResolvedCallee::Builtin(builtin)
+        if builtin.as_str() == "builtin.method.result.unwrap_or")
 }
 
 fn is_variant_projection_candidate(call: &ResolvedCall) -> bool {
