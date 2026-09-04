@@ -1949,6 +1949,10 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant fallback projection arity exceeds bytecode ABI");
             return;
         };
+        let Ok(fallback_arity) = u16::try_from(receipt.fallback_arity) else {
+            self.error("variant fallback alternate arity exceeds bytecode ABI");
+            return;
+        };
         let contract_idx = self.proto.add_const(ConstValue::VariantProjectionFallback(
             VariantProjectionFallbackShape {
                 source_ty: receipt.source_ty.clone(),
@@ -1961,6 +1965,7 @@ impl<'a> FunctionEmitter<'a> {
                 fallback_variant: receipt.fallback_variant.clone(),
                 fallback_variant_name: receipt.fallback_variant_name.clone(),
                 fallback_discriminant: receipt.fallback_discriminant,
+                fallback_arity,
                 field: receipt.projection.field.clone(),
                 field_index,
                 arity,
@@ -5174,6 +5179,25 @@ mod tests {
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("bytecode Result unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(14));
+        assert!(matches!(value, Value::Int(14)));
+    }
+
+    #[test]
+    fn executes_copy_option_i32_unwrap_or_for_some_and_none_without_ast() {
+        let source = include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap_or.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("Option<i32>.unwrap_or MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Option unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("Option unwrap_or bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode Option unwrap_or execution");
         assert_eq!(reference, MirRuntimeValue::Int(14));
         assert!(matches!(value, Value::Int(14)));
     }

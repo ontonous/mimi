@@ -4881,13 +4881,13 @@ fn project_variant_fallback_value(
             "variant projection fallback runtime nominal disagrees with TypeDesc",
         ));
     }
-    if payload.len() != receipt.projection.arity {
-        return Err(execution_error(
-            function,
-            "variant projection fallback runtime arity disagrees with TypeDesc",
-        ));
-    }
     if variant == receipt.projection.variant {
+        if payload.len() != receipt.projection.arity {
+            return Err(execution_error(
+                function,
+                "variant projection fallback selected arity disagrees with TypeDesc",
+            ));
+        }
         return payload
             .get(receipt.projection.field_index)
             .cloned()
@@ -4896,6 +4896,12 @@ fn project_variant_fallback_value(
             });
     }
     if variant == receipt.fallback_variant {
+        if payload.len() != receipt.fallback_arity {
+            return Err(execution_error(
+                function,
+                "variant projection fallback alternate arity disagrees with TypeDesc",
+            ));
+        }
         return Ok(fallback);
     }
     Err(execution_error(

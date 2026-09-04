@@ -39,7 +39,7 @@ pub type CopyOptionI32VariantAdmission = CopyOptionVariantAdmission;
 
 /// Classify the concrete checker shape before MIR construction. A body is
 /// admitted only when it is closed and contains a direct Copy
-/// `Option<primitive>.unwrap` call. Any other Option unwrap in a candidate
+/// `Option<primitive>.unwrap`/`unwrap_or` call. Any other Option projection in a candidate
 /// program makes the whole profile mixed, so it cannot silently fall through
 /// to legacy.
 pub fn classify_copy_option_i32_variant_admission(
@@ -119,10 +119,39 @@ fn call_is_option_unwrap(
     call: &crate::core::ir::ResolvedCall,
     expected: Option<PrimitiveType>,
 ) -> bool {
-    matches!(&call.callee, ResolvedCallee::Builtin(name)
-        if name.as_str() == "builtin.method.option.unwrap")
-        && call.arguments.len() == 1
-        && is_option_with_inner(program, &call.arguments[0].value.ty, expected)
+    let ResolvedCallee::Builtin(name) = &call.callee else {
+        return false;
+    };
+    let is_unwrap = name.as_str() == "builtin.method.option.unwrap";
+    let is_unwrap_or = name.as_str() == "builtin.method.option.unwrap_or";
+    let arity_ok =
+        (is_unwrap && call.arguments.len() == 1) || (is_unwrap_or && call.arguments.len() == 2);
+    let Some(receiver) = call.arguments.first() else {
+        return false;
+    };
+    if !arity_ok || !is_option_with_inner(program, &receiver.value.ty, expected) {
+        return false;
+    }
+    if !is_unwrap_or {
+        return true;
+    }
+    let Some(fallback) = call.arguments.get(1) else {
+        return false;
+    };
+    let Some(crate::core::ir::ResolvedType::Primitive(inner)) = program
+        .resolved_types()
+        .get(&receiver.value.ty)
+        .and_then(|ty| {
+            let crate::core::ir::ResolvedType::Option(inner) = ty else {
+                return None;
+            };
+            program.resolved_types().get(inner)
+        })
+    else {
+        return false;
+    };
+    matches!(program.resolved_types().get(&fallback.value.ty),
+        Some(crate::core::ir::ResolvedType::Primitive(fallback_inner)) if fallback_inner == inner)
 }
 
 fn body_has_option_unwrap(
@@ -397,7 +426,8 @@ pub fn contains_copy_option_f64_variant_candidate(program: &MirProgram) -> bool 
 
 /// Detect one concrete Copy `Option<primitive>` projection receipt in MIR.
 /// The operation is intentionally independent of source names and only
-/// accepts the read-only `VariantProject` node with a matching TypeDesc.
+/// accepts the read-only `VariantProject`/`VariantProjectOr` nodes with a
+/// matching TypeDesc receipt.
 pub fn contains_copy_option_variant_candidate(
     program: &MirProgram,
     expected: PrimitiveType,
@@ -405,9 +435,10 @@ pub fn contains_copy_option_variant_candidate(
     program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
-                let MirInstructionKind::VariantProject { base, result, .. } = &instruction.kind
-                else {
-                    return false;
+                let (base, result) = match &instruction.kind {
+                    MirInstructionKind::VariantProject { base, result, .. }
+                    | MirInstructionKind::VariantProjectOr { base, result, .. } => (base, result),
+                    _ => return false,
                 };
                 let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
                     return false;
@@ -581,6 +612,61 @@ impl<'a> CopyOptionVariantValidator<'a> {
                             ));
                         }
                     }
+                    MirInstructionKind::VariantProjectOr {
+                        base,
+                        result,
+                        fallback,
+                        contract,
+                    } => {
+                        self.saw_projection = true;
+                        let Some(base_ty) = function.values.get(base).map(|value| &value.ty) else {
+                            self.error(format!("{} variant base is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(result_ty) = function.values.get(result).map(|value| &value.ty)
+                        else {
+                            self.error(format!("{} variant result is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(fallback_ty) =
+                            function.values.get(fallback).map(|value| &value.ty)
+                        else {
+                            self.error(format!("{} fallback value is absent", instruction.id));
+                            continue;
+                        };
+                        let Some(receipt) = contract else {
+                            self.error(format!(
+                                "{} has no TypeDesc fallback projection receipt",
+                                instruction.id
+                            ));
+                            continue;
+                        };
+                        if !is_copy_option_primitive(self.program, base_ty, self.expected)
+                            || !is_primitive(self.program, result_ty, self.expected)
+                            || !is_primitive(self.program, fallback_ty, self.expected)
+                        {
+                            self.error(format!(
+                                "{} is outside the Copy Option<{:?}> fallback projection shape",
+                                instruction.id, self.expected
+                            ));
+                            continue;
+                        }
+                        if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_variant_projection_fallback_receipt(
+                                base_ty,
+                                result_ty,
+                                fallback_ty,
+                                receipt,
+                            )
+                        {
+                            self.error(format!(
+                                "{} fallback receipt rejected: {message}",
+                                instruction.id
+                            ));
+                        }
+                    }
                     MirInstructionKind::VariantProjectMove { .. } => self.error(format!(
                         "{} consuming variant operation is outside {}",
                         instruction.id, self.island
@@ -599,5 +685,45 @@ impl<'a> CopyOptionVariantValidator<'a> {
 
     fn error(&mut self, message: String) {
         self.errors.insert(message);
+    }
+}
+
+#[cfg(test)]
+mod unwrap_or_tests {
+    use super::*;
+
+    #[test]
+    fn option_i32_unwrap_or_is_complete_and_records_zero_field_none() {
+        let source = include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap_or.mimi");
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        assert_eq!(
+            classify_copy_option_i32_variant_admission(&checked),
+            CopyOptionVariantAdmission::CompleteCoverage
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("lower");
+        validate_copy_option_i32_variant_island(&program).expect("Option unwrap_or island");
+        let receipt = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::VariantProjectOr {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("Option unwrap_or must carry a fallback receipt");
+        assert_eq!(receipt.variant_name, "Some");
+        assert_eq!(receipt.discriminant, 1);
+        assert_eq!(receipt.fallback_variant_name, "None");
+        assert_eq!(receipt.fallback_discriminant, 0);
+        assert_eq!(receipt.projection.arity, 1);
+        assert_eq!(receipt.fallback_arity, 0);
     }
 }

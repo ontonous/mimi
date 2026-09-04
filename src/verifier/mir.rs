@@ -6173,6 +6173,44 @@ mod tests {
     }
 
     #[test]
+    fn verifier_proves_option_i32_unwrap_or_copy_projection() {
+        let source = include_str!("../../tests/fixtures/mir_native_option_i32_unwrap_or.mimi");
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("canonical Option<i32>.unwrap_or MIR");
+        for function_name in ["some_value", "none_value"] {
+            let function = program
+                .functions()
+                .get(&crate::core::NodeId(format!("function:{function_name}")))
+                .expect("Option unwrap_or MIR function");
+            assert!(function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        crate::core::mir::MirInstructionKind::VariantProjectOr {
+                            contract: Some(_),
+                            ..
+                        }
+                    )
+                })
+            }));
+        }
+        let results = verify_program(&program, "option-i32-unwrap-or-source-hash".into())
+            .expect("verifier should prove the Copy Option unwrap_or projection");
+        for function_name in ["some_value", "none_value"] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name.ends_with(function_name))
+                .expect("Option unwrap_or verification result");
+            assert_eq!(result.status, crate::verifier::VerifStatus::Proven);
+        }
+    }
+
+    #[test]
     fn verifier_proves_option_bool_unwrap_copy_projection() {
         let source = include_str!("../../tests/fixtures/mir_native_option_bool_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

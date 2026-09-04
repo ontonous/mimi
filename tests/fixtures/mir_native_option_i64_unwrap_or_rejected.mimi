@@ -1,0 +1,4 @@
+func main() -> i64 {
+    let value: Option<i64> = Some(7 as i64)
+    value.unwrap_or(35 as i64)
+}

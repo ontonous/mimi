@@ -684,10 +684,11 @@ pub struct MirVariantProjectionTrapContract {
 
 /// Complete contract for a read-only variant payload projection with a
 /// checker-selected fallback value.  Unlike `MirVariantProjectionTrapContract`
-/// this operation is total over the admitted Result tags: the selected `Ok`
-/// payload is returned for discriminant 0 and the explicit fallback operand is
-/// returned for discriminant 1.  The receipt carries both tag identities so a
-/// backend cannot infer the `Err` arm from a physical aggregate or VM handle.
+/// this operation is total over the admitted Option/Result tags: the selected
+/// `Some`/`Ok` payload is returned for its discriminant and the explicit
+/// fallback operand is returned for the alternate tag.  The receipt carries
+/// both tag identities so a backend cannot infer the alternate arm from a
+/// physical aggregate or VM handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVariantProjectionFallbackContract {
     pub source_ty: ResolvedTypeId,
@@ -699,6 +700,10 @@ pub struct MirVariantProjectionFallbackContract {
     pub fallback_variant: NodeId,
     pub fallback_variant_name: String,
     pub fallback_discriminant: u16,
+    /// Payload arity of the alternate variant. `Option::None` is zero while
+    /// `Result::Err` in the current island is one; consumers must not assume
+    /// both runtime payload vectors have the selected arm's arity.
+    pub fallback_arity: usize,
 }
 
 /// Backend-independent receipt for one canonical record field projection.
@@ -2049,6 +2054,77 @@ impl MirTypeCatalog {
             fallback_variant: fallback.id.clone(),
             fallback_variant_name: fallback.name.clone(),
             fallback_discriminant: fallback.discriminant,
+            fallback_arity: fallback.fields.len(),
+        })
+    }
+
+    /// Materialize the complete contract for a total Copy `Option<i32>`
+    /// projection with an explicit fallback operand (`unwrap_or`). `Some`
+    /// carries the selected payload and `None` is a zero-field alternate;
+    /// therefore the receipt proves the alternate tag without pretending it
+    /// has a payload slot or an ownership obligation.
+    pub fn validated_copy_option_i32_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        self.validate_copy_option_i32_variant(source_ty)?;
+        if result_ty != fallback_ty {
+            return Err(format!(
+                "Option unwrap_or fallback type '{}' disagrees with result type '{}'",
+                fallback_ty.as_str(),
+                result_ty.as_str()
+            ));
+        }
+        self.validate_copy_scalar(result_ty)?;
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Copy
+            || projection.move_out_glue != MirGlueKind::Noop
+            || projection.field_index != 0
+            || projection.arity != 1
+            || projection.variant.0 != "builtin:variant:Option::Some"
+            || projection.field.0 != "builtin:variant:Option::Some/payload:0"
+        {
+            return Err(
+                "Option unwrap_or projection requires the canonical single Copy Some payload"
+                    .into(),
+            );
+        }
+        let (_, variants) = self
+            .variant_layout(source_ty)
+            .ok_or_else(|| "Option unwrap_or source has no canonical variant layout".to_string())?;
+        let fallback = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Option::None"
+                    && variant.name == "None"
+                    && variant.discriminant == 0
+                    && variant.fields.is_empty()
+            })
+            .ok_or_else(|| "Option unwrap_or requires the canonical None variant".to_string())?;
+        let selected = variants
+            .iter()
+            .find(|variant| variant.id == projection.variant)
+            .ok_or_else(|| "Option unwrap_or Some variant is absent from TypeDesc".to_string())?;
+        if selected.name != "Some" || selected.discriminant != 1 {
+            return Err("Option unwrap_or Some discriminant disagrees with TypeDesc".into());
+        }
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection,
+            variant_name: selected.name.clone(),
+            discriminant: selected.discriminant,
+            fallback_variant: fallback.id.clone(),
+            fallback_variant_name: fallback.name.clone(),
+            fallback_discriminant: fallback.discriminant,
+            fallback_arity: fallback.fields.len(),
         })
     }
 
@@ -2070,13 +2146,34 @@ impl MirTypeCatalog {
                 "variant projection fallback receipt disagrees with MIR value types".into(),
             );
         }
-        let expected = self.validated_copy_result_i32_projection_fallback_contract(
-            source_ty,
-            &receipt.projection.variant,
-            &receipt.projection.field,
-            result_ty,
-            fallback_ty,
-        )?;
+        let expected = match self
+            .get(source_ty)
+            .map(|descriptor| descriptor.kind.clone())
+        {
+            Some(MirTypeKind::Option) => self
+                .validated_copy_option_i32_projection_fallback_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                    fallback_ty,
+                )?,
+            Some(MirTypeKind::Result) => self
+                .validated_copy_result_i32_projection_fallback_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                    fallback_ty,
+                )?,
+            Some(kind) => {
+                return Err(format!(
+                    "variant projection fallback source kind {:?} is outside the canonical Option/Result contract",
+                    kind
+                ));
+            }
+            None => return Err("variant projection fallback source TypeDesc is absent".into()),
+        };
         if receipt != &expected {
             return Err("variant projection fallback receipt disagrees with TypeDesc".into());
         }

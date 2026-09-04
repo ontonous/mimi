@@ -1,0 +1,15 @@
+func some_value() -> i32 {
+    ensures: result >= 0
+    let value: Option<i32> = Some(7)
+    value.unwrap_or(35)
+}
+
+func none_value() -> i32 {
+    ensures: result >= 0
+    let value: Option<i32> = None
+    value.unwrap_or(7)
+}
+
+func main() -> i32 {
+    some_value() + none_value()
+}

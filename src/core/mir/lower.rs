@@ -4118,7 +4118,7 @@ impl<'a> Lowerer<'a> {
                             } else {
                                 self.error(
                                     &expression.node_id,
-                                    "Result.unwrap_or requires one fallback operand",
+                                    "Option/Result.unwrap_or requires one fallback operand",
                                 );
                             }
                         } else {
@@ -5210,13 +5210,33 @@ impl<'a> Lowerer<'a> {
             );
             return None;
         };
-        match type_catalog.validated_copy_result_i32_projection_fallback_contract(
-            &base_ty,
-            variant,
-            field,
-            &result_ty,
-            &fallback_ty,
-        ) {
+        let contract = match type_catalog
+            .get(&base_ty)
+            .map(|descriptor| &descriptor.kind)
+        {
+            Some(super::types::MirTypeKind::Option) => type_catalog
+                .validated_copy_option_i32_projection_fallback_contract(
+                    &base_ty,
+                    variant,
+                    field,
+                    &result_ty,
+                    &fallback_ty,
+                ),
+            Some(super::types::MirTypeKind::Result) => type_catalog
+                .validated_copy_result_i32_projection_fallback_contract(
+                    &base_ty,
+                    variant,
+                    field,
+                    &result_ty,
+                    &fallback_ty,
+                ),
+            Some(kind) => Err(format!(
+                "variant fallback source kind {:?} is outside the canonical Option/Result contract",
+                kind
+            )),
+            None => Err("variant fallback source TypeDesc is absent".into()),
+        };
+        match contract {
             Ok(contract) => Some(contract),
             Err(message) => {
                 self.error(
@@ -5536,7 +5556,7 @@ fn variant_projection_builtin(
     };
     let expected_arity = match builtin.as_str() {
         "builtin.method.option.unwrap" | "builtin.method.result.unwrap" => 1,
-        "builtin.method.result.unwrap_or" => 2,
+        "builtin.method.option.unwrap_or" | "builtin.method.result.unwrap_or" => 2,
         _ => return None,
     };
     if call.arguments.len() != expected_arity {
@@ -5546,9 +5566,24 @@ fn variant_projection_builtin(
     let receiver_ty = &call.arguments.first()?.value.ty;
     let descriptor = catalog.get(receiver_ty)?;
     let (variants, payload) = match (&descriptor.layout, builtin.as_str()) {
-        (super::types::MirLayout::Option { variants, inner }, "builtin.method.option.unwrap") => {
+        (
+            super::types::MirLayout::Option { variants, inner },
+            "builtin.method.option.unwrap" | "builtin.method.option.unwrap_or",
+        ) => {
             let inner_id = inner;
             let inner = catalog.get(inner_id)?;
+            // The total fallback receipt is currently admitted only for the
+            // concrete default-route Option<i32> island. Other Copy payloads
+            // stay on the generic candidate error below rather than entering
+            // a Result-shaped contract and producing an unstable diagnostic.
+            if builtin.as_str() == "builtin.method.option.unwrap_or"
+                && !matches!(
+                    inner.kind,
+                    super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+                )
+            {
+                return None;
+            }
             let supported = match descriptor.ownership {
                 super::types::MirOwnership::Move => matches!(
                     inner.kind,
@@ -5607,7 +5642,10 @@ fn variant_projection_builtin(
 
 fn variant_projection_is_fallback(call: &ResolvedCall) -> bool {
     matches!(&call.callee, ResolvedCallee::Builtin(builtin)
-        if builtin.as_str() == "builtin.method.result.unwrap_or")
+    if matches!(
+        builtin.as_str(),
+        "builtin.method.option.unwrap_or" | "builtin.method.result.unwrap_or"
+    ))
 }
 
 fn is_variant_projection_candidate(call: &ResolvedCall) -> bool {

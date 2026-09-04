@@ -1122,6 +1122,36 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_option_i32_unwrap_or_copy_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_option_i32_unwrap_or.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Option<i32>.unwrap_or execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Option<i32>.unwrap_or MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode Option<i32>.unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(14));
+        assert!(matches!(bytecode, Value::Int(14)));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_option_i32_unwrap_or_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("Option<i32>.unwrap_or MIR should have a native contract");
+        generator
+            .module
+            .verify()
+            .expect("native Option<i32>.unwrap_or module verifies");
+        assert!(generator.module.get_function("some_value").is_some());
+        assert!(generator.module.get_function("none_value").is_some());
+    }
+
+    #[test]
     fn native_emitter_materializes_option_bool_unwrap_copy_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_option_bool_unwrap.mimi"

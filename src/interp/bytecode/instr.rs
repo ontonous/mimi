@@ -1589,7 +1589,7 @@ pub struct VariantPredicateShape {
     pub discriminant: VariantIdx,
 }
 
-/// Canonical Copy Result payload-or-fallback receipt for MIR bytecode.
+/// Canonical Copy Option/Result payload-or-fallback receipt for MIR bytecode.
 #[derive(Debug, Clone)]
 pub struct VariantProjectionFallbackShape {
     pub source_ty: crate::core::ResolvedTypeId,
@@ -1602,6 +1602,7 @@ pub struct VariantProjectionFallbackShape {
     pub fallback_variant: crate::core::NodeId,
     pub fallback_variant_name: String,
     pub fallback_discriminant: VariantIdx,
+    pub fallback_arity: u16,
     pub field: crate::core::NodeId,
     pub field_index: u16,
     pub arity: u16,

@@ -704,6 +704,23 @@ mod tests {
     }
 
     #[test]
+    fn copy_option_i32_unwrap_or_materialization_carries_fallback_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_option_i32_unwrap_or.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.copy_option_i32,
+            CopyOptionI32VariantAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete Copy Option<i32>.unwrap_or route must materialize");
+        assert!(route.materialized_copy_option_i32_candidate);
+        crate::core::mir::validate_copy_option_i32_variant_island(&route.program)
+            .expect("Option<i32>.unwrap_or island validator");
+    }
+
+    #[test]
     fn copy_option_bool_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_option_bool_unwrap.mimi"

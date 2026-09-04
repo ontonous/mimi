@@ -2921,22 +2921,27 @@ impl BytecodeVM {
                             "variant projection fallback: runtime nominal disagrees with receipt",
                         ));
                     }
-                    if payload.len() != shape.arity as usize {
-                        return Err(InterpError::new(
-                            "variant projection fallback: payload arity disagrees with receipt",
-                        ));
-                    }
                     let output = if variant == shape.variant {
                         if tag != shape.variant_name {
                             return Err(InterpError::new(
-                                "variant projection fallback: Ok tag disagrees with receipt",
+                                "variant projection fallback: selected tag disagrees with receipt",
+                            ));
+                        }
+                        if payload.len() != shape.arity as usize {
+                            return Err(InterpError::new(
+                                "variant projection fallback: selected payload arity disagrees with receipt",
                             ));
                         }
                         payload[shape.field_index as usize].clone()
                     } else if variant == shape.fallback_variant {
                         if tag != shape.fallback_variant_name {
                             return Err(InterpError::new(
-                                "variant projection fallback: Err tag disagrees with receipt",
+                                "variant projection fallback: alternate tag disagrees with receipt",
+                            ));
+                        }
+                        if payload.len() != shape.fallback_arity as usize {
+                            return Err(InterpError::new(
+                                "variant projection fallback: alternate payload arity disagrees with receipt",
                             ));
                         }
                         fallback
@@ -5007,7 +5012,7 @@ impl BytecodeVM {
         }
     }
 
-    /// Decode the mandatory canonical Result.unwrap_or receipt.
+    /// Decode the mandatory canonical Option/Result.unwrap_or receipt.
     fn variant_projection_fallback_contract(
         &self,
         contract: Option<ConstIdx>,

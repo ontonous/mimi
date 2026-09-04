@@ -728,23 +728,26 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "variant projection fallback has no native Ok payload slot",
                 )
             })?;
-        let fallback_slot = variant_abi
-            .payload_slot(&receipt.fallback_variant)
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    "variant projection fallback has no native Err payload slot",
-                )
-            })?;
         if payload_slot.field != receipt.projection.field
             || payload_slot.ty != result_ty
-            || fallback_slot.ty != fallback_ty
             || receipt.projection.field_index != 0
         {
             return Err(NativeMirError::new(
                 subject,
                 "variant projection fallback receipt disagrees with native payload ABI",
             ));
+        }
+        // Result::Err carries a second payload slot, while Option::None is a
+        // zero-field alternate.  The checker-owned receipt proves which case
+        // applies; never require a physical payload slot merely to select an
+        // explicit fallback operand.
+        if let Some(fallback_slot) = variant_abi.payload_slot(&receipt.fallback_variant) {
+            if fallback_slot.ty != fallback_ty {
+                return Err(NativeMirError::new(
+                    subject,
+                    "variant projection fallback receipt disagrees with native fallback ABI",
+                ));
+            }
         }
         let aggregate = self.value(base, subject)?.into_struct_value();
         let tag = self
