@@ -1,0 +1,14 @@
+func bool_unwrap() -> bool {
+    let value: Option<bool> = Some(true)
+    value.unwrap()
+}
+
+func i64_unwrap() -> i64 {
+    let value: Option<i64> = Some(7)
+    value.unwrap()
+}
+
+func main() -> i32 {
+    let flag = bool_unwrap()
+    42
+}

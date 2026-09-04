@@ -1,0 +1,10 @@
+func unwrap_copy() -> bool {
+    ensures: result == true
+    let value: Option<bool> = Some(true)
+    value.unwrap()
+}
+
+func main() -> i32 {
+    let flag = unwrap_copy()
+    42
+}

@@ -1535,9 +1535,20 @@ impl MirTypeCatalog {
     /// Validate the concrete default-route Copy `Option<i32>` projection
     /// shape. The broader flat-Copy variant contract intentionally accepts
     /// other scalar payloads; this narrower receipt distinguishes the
-    /// admitted i32 island from explicit-MIR-only `Option<i64>`/`Option<bool>`
-    /// projections.
+    /// admitted i32 island from explicit-MIR-only `Option<i64>` projections.
     pub fn validate_copy_option_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        self.validate_copy_option_variant(ty, PrimitiveType::I32)
+    }
+
+    /// Validate the concrete default-route Copy `Option<primitive>` projection
+    /// shape.  Only the closed Copy scalar payload families are accepted by
+    /// this helper; each default-route island still chooses its own primitive
+    /// and versioned admission profile.
+    pub fn validate_copy_option_variant(
+        &self,
+        ty: &ResolvedTypeId,
+        expected: PrimitiveType,
+    ) -> Result<(), String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
@@ -1553,11 +1564,12 @@ impl MirTypeCatalog {
         let inner_descriptor = self
             .get(&inner)
             .ok_or_else(|| format!("Option inner type '{}' is absent", inner.as_str()))?;
-        if inner_descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32) {
+        if inner_descriptor.kind != MirTypeKind::Primitive(expected) {
             return Err(format!(
-                "type '{}' Option payload is {:?}, expected i32",
+                "type '{}' Option payload is {:?}, expected {:?}",
                 ty.as_str(),
-                inner_descriptor.kind
+                inner_descriptor.kind,
+                expected,
             ));
         }
         self.validate_copy_scalar(&inner)

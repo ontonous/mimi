@@ -1,8 +1,8 @@
-//! Whole-program contract for the concrete Copy `Option<i32>` projection island.
+//! Whole-program contracts for concrete Copy `Option` projection islands.
 //!
-//! The direct `Option<i32>.unwrap()` node already has a canonical
-//! `VariantProject` receipt.  This module is the program-level admission and
-//! MIR-only capability gate that permits that shape on the default route.  It
+//! The direct `Option<primitive>.unwrap()` node already has a canonical
+//! `VariantProject` receipt. This module is the program-level admission and
+//! MIR-only capability gate that permits those shapes on the default route. It
 //! intentionally excludes generic instances, Flow transitions, consuming
 //! projections, and every other Option/Result payload family.
 
@@ -18,20 +18,37 @@ use super::{MirFunction, MirInstructionKind, MirTerminator};
 /// Versioned default-route island for direct Copy `Option<i32>` projection.
 pub const COPY_OPTION_I32_VARIANT_ISLAND: &str = "copy-option-i32-variant-v1";
 
+/// Versioned default-route island for direct Copy `Option<bool>` projection.
+pub const COPY_OPTION_BOOL_VARIANT_ISLAND: &str = "copy-option-bool-variant-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CopyOptionI32VariantAdmission {
+pub enum CopyOptionVariantAdmission {
     OutsideProfile,
     MixedCoverage,
     CompleteCoverage,
 }
 
-/// Classify the concrete checker shape before MIR construction.  A body is
-/// admitted only when it is closed and contains a direct `Option<i32>.unwrap`
-/// call.  Any other Option unwrap in a candidate program makes the whole
-/// profile mixed, so it cannot silently fall through to legacy.
+/// Compatibility alias retained for the S114 i32 public API.
+pub type CopyOptionI32VariantAdmission = CopyOptionVariantAdmission;
+
+/// Classify the concrete checker shape before MIR construction. A body is
+/// admitted only when it is closed and contains a direct Copy
+/// `Option<primitive>.unwrap` call. Any other Option unwrap in a candidate
+/// program makes the whole profile mixed, so it cannot silently fall through
+/// to legacy.
 pub fn classify_copy_option_i32_variant_admission(
     program: &CheckedProgram,
-) -> CopyOptionI32VariantAdmission {
+) -> CopyOptionVariantAdmission {
+    classify_copy_option_variant_admission(program, PrimitiveType::I32)
+}
+
+/// Classify one concrete Copy `Option<primitive>` projection family before
+/// canonical MIR construction.  The public i32 wrapper keeps S114's stable
+/// API while S115 reuses the exact same checker scan for bool.
+pub fn classify_copy_option_variant_admission(
+    program: &CheckedProgram,
+    expected: PrimitiveType,
+) -> CopyOptionVariantAdmission {
     let mut candidate = false;
     let mut mixed = super::islands::has_mixed_coverage(program);
     for callable in program.callables().values() {
@@ -40,12 +57,13 @@ pub fn classify_copy_option_i32_variant_admission(
         }
         let body_is_closed = super::option_island::option_body_is_closed(&callable.body.root);
         let has_any_unwrap = body_has_option_unwrap(program, &callable.body.root);
-        let has_i32_unwrap = body_has_option_i32_unwrap(program, &callable.body.root);
+        let has_expected_unwrap =
+            body_has_option_primitive_unwrap(program, &callable.body.root, expected);
         let has_option_string_shape =
             super::option_island::block_has_option_string_switch(program, &callable.body.root);
         if body_is_closed {
-            candidate |= has_i32_unwrap;
-            mixed |= has_any_unwrap && !has_i32_unwrap;
+            candidate |= has_expected_unwrap;
+            mixed |= has_any_unwrap && !has_expected_unwrap;
             mixed |= has_option_string_shape;
         } else {
             mixed = true;
@@ -65,11 +83,11 @@ pub fn classify_copy_option_i32_variant_admission(
         }
     }
     if !candidate {
-        CopyOptionI32VariantAdmission::OutsideProfile
+        CopyOptionVariantAdmission::OutsideProfile
     } else if mixed {
-        CopyOptionI32VariantAdmission::MixedCoverage
+        CopyOptionVariantAdmission::MixedCoverage
     } else {
-        CopyOptionI32VariantAdmission::CompleteCoverage
+        CopyOptionVariantAdmission::CompleteCoverage
     }
 }
 
@@ -166,38 +184,35 @@ fn body_has_option_unwrap(
             .is_some_and(|expr| expr_has_option_unwrap(program, expr, None))
 }
 
-fn body_has_option_i32_unwrap(
+fn body_has_option_primitive_unwrap(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
+    expected: PrimitiveType,
 ) -> bool {
     block
         .statements
         .iter()
         .any(|statement| match &statement.kind {
-            ResolvedStmtKind::Bind { initializer, .. } => {
-                initializer.as_ref().is_some_and(|expr| {
-                    expr_has_option_unwrap(program, expr, Some(PrimitiveType::I32))
-                })
-            }
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|expr| expr_has_option_unwrap(program, expr, Some(expected))),
             ResolvedStmtKind::Assign { value, .. }
             | ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
-            } => expr_has_option_unwrap(program, value, Some(PrimitiveType::I32)),
-            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
-                value.as_ref().is_some_and(|expr| {
-                    expr_has_option_unwrap(program, expr, Some(PrimitiveType::I32))
-                })
-            }
+            } => expr_has_option_unwrap(program, value, Some(expected)),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_some_and(|expr| expr_has_option_unwrap(program, expr, Some(expected))),
             ResolvedStmtKind::While { condition, body } => {
-                expr_has_option_unwrap(program, condition, Some(PrimitiveType::I32))
-                    || body_has_option_i32_unwrap(program, body)
+                expr_has_option_unwrap(program, condition, Some(expected))
+                    || body_has_option_primitive_unwrap(program, body, expected)
             }
             ResolvedStmtKind::WhileLet {
                 initializer, body, ..
             } => {
-                expr_has_option_unwrap(program, initializer, Some(PrimitiveType::I32))
-                    || body_has_option_i32_unwrap(program, body)
+                expr_has_option_unwrap(program, initializer, Some(expected))
+                    || body_has_option_primitive_unwrap(program, body, expected)
             }
             ResolvedStmtKind::IfLet {
                 initializer,
@@ -205,25 +220,25 @@ fn body_has_option_i32_unwrap(
                 else_block,
                 ..
             } => {
-                expr_has_option_unwrap(program, initializer, Some(PrimitiveType::I32))
-                    || body_has_option_i32_unwrap(program, then_block)
-                    || else_block
-                        .as_ref()
-                        .is_some_and(|block| body_has_option_i32_unwrap(program, block))
+                expr_has_option_unwrap(program, initializer, Some(expected))
+                    || body_has_option_primitive_unwrap(program, then_block, expected)
+                    || else_block.as_ref().is_some_and(|block| {
+                        body_has_option_primitive_unwrap(program, block, expected)
+                    })
             }
             ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
-                body_has_option_i32_unwrap(program, body)
+                body_has_option_primitive_unwrap(program, body, expected)
             }
             ResolvedStmtKind::For { iterable, body, .. } => {
-                expr_has_option_unwrap(program, iterable, Some(PrimitiveType::I32))
-                    || body_has_option_i32_unwrap(program, body)
+                expr_has_option_unwrap(program, iterable, Some(expected))
+                    || body_has_option_primitive_unwrap(program, body, expected)
             }
             ResolvedStmtKind::Math(expressions) => expressions
                 .iter()
-                .any(|expr| expr_has_option_unwrap(program, expr, Some(PrimitiveType::I32))),
+                .any(|expr| expr_has_option_unwrap(program, expr, Some(expected))),
             ResolvedStmtKind::Pinned { value, body, .. } => {
-                expr_has_option_unwrap(program, value, Some(PrimitiveType::I32))
-                    || body_has_option_i32_unwrap(program, body)
+                expr_has_option_unwrap(program, value, Some(expected))
+                    || body_has_option_primitive_unwrap(program, body, expected)
             }
             ResolvedStmtKind::Drop(_)
             | ResolvedStmtKind::Continue
@@ -232,7 +247,7 @@ fn body_has_option_i32_unwrap(
         || block
             .result
             .as_ref()
-            .is_some_and(|expr| expr_has_option_unwrap(program, expr, Some(PrimitiveType::I32)))
+            .is_some_and(|expr| expr_has_option_unwrap(program, expr, Some(expected)))
 }
 
 fn expr_has_option_unwrap(
@@ -252,9 +267,7 @@ fn expr_has_option_unwrap(
         | ResolvedExprKind::Scope { body: block, .. }
         | ResolvedExprKind::Comptime(block)
         | ResolvedExprKind::Quote(block) => match expected {
-            Some(primitive) => {
-                body_has_option_i32_unwrap(program, block) && primitive == PrimitiveType::I32
-            }
+            Some(primitive) => body_has_option_primitive_unwrap(program, block, primitive),
             None => body_has_option_unwrap(program, block),
         },
         ResolvedExprKind::If {
@@ -264,11 +277,10 @@ fn expr_has_option_unwrap(
         } => {
             expr_has_option_unwrap(program, condition, expected)
                 || match expected {
-                    Some(primitive) if primitive == PrimitiveType::I32 => {
-                        body_has_option_i32_unwrap(program, then_block)
-                            || body_has_option_i32_unwrap(program, else_block)
+                    Some(primitive) => {
+                        body_has_option_primitive_unwrap(program, then_block, primitive)
+                            || body_has_option_primitive_unwrap(program, else_block, primitive)
                     }
-                    Some(_) => false,
                     None => {
                         body_has_option_unwrap(program, then_block)
                             || body_has_option_unwrap(program, else_block)
@@ -347,10 +359,7 @@ fn expr_has_option_unwrap(
                     .is_some_and(|value| expr_has_option_unwrap(program, value, expected))
         }
         ResolvedExprKind::Lambda(lambda) => match expected {
-            Some(primitive) if primitive == PrimitiveType::I32 => {
-                body_has_option_i32_unwrap(program, &lambda.body)
-            }
-            Some(_) => false,
+            Some(primitive) => body_has_option_primitive_unwrap(program, &lambda.body, primitive),
             None => body_has_option_unwrap(program, &lambda.body),
         },
         ResolvedExprKind::Literal(_)
@@ -365,6 +374,16 @@ fn expr_has_option_unwrap(
 
 /// MIR-side materialization receipt counterpart of checker admission.
 pub fn contains_copy_option_i32_variant_candidate(program: &MirProgram) -> bool {
+    contains_copy_option_variant_candidate(program, PrimitiveType::I32)
+}
+
+/// Detect one concrete Copy `Option<primitive>` projection receipt in MIR.
+/// The operation is intentionally independent of source names and only
+/// accepts the read-only `VariantProject` node with a matching TypeDesc.
+pub fn contains_copy_option_variant_candidate(
+    program: &MirProgram,
+    expected: PrimitiveType,
+) -> bool {
     program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
@@ -378,30 +397,35 @@ pub fn contains_copy_option_i32_variant_candidate(program: &MirProgram) -> bool 
                 let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
                     return false;
                 };
-                is_copy_option_i32(program, base_ty) && is_i32(program, result_ty)
+                is_copy_option_primitive(program, base_ty, expected)
+                    && is_primitive(program, result_ty, expected)
             })
         })
     })
 }
 
-fn is_i32(program: &MirProgram, ty: &ResolvedTypeId) -> bool {
+fn is_primitive(program: &MirProgram, ty: &ResolvedTypeId, expected: PrimitiveType) -> bool {
     program
         .type_catalog()
         .get(ty)
-        .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Primitive(PrimitiveType::I32))
+        .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Primitive(expected))
 }
 
-fn is_copy_option_i32(program: &MirProgram, ty: &ResolvedTypeId) -> bool {
+fn is_copy_option_primitive(
+    program: &MirProgram,
+    ty: &ResolvedTypeId,
+    expected: PrimitiveType,
+) -> bool {
     let Some(descriptor) = program.type_catalog().get(ty) else {
         return false;
     };
     let MirLayout::Option { inner, .. } = &descriptor.layout else {
         return false;
     };
-    is_i32(program, inner)
+    is_primitive(program, inner, expected)
         && program
             .type_catalog()
-            .validate_copy_option_i32_variant(ty)
+            .validate_copy_option_variant(ty, expected)
             .is_ok()
 }
 
@@ -410,10 +434,23 @@ fn is_copy_option_i32(program: &MirProgram, ty: &ResolvedTypeId) -> bool {
 /// the generic MIR validator: unsupported variant instructions are rejected,
 /// while ordinary scalar code remains available to the shared consumers.
 pub fn validate_copy_option_i32_variant_island(program: &MirProgram) -> Result<(), Vec<String>> {
-    let mut validator = CopyOptionI32VariantValidator {
+    validate_copy_option_variant_island(program, PrimitiveType::I32, COPY_OPTION_I32_VARIANT_ISLAND)
+}
+
+/// Validate one concrete Copy `Option<primitive>` island using only canonical
+/// MIR and TypeDesc receipts.  The caller supplies the versioned profile name
+/// so diagnostics remain stable for each default-route admission family.
+pub fn validate_copy_option_variant_island(
+    program: &MirProgram,
+    expected: PrimitiveType,
+    island: &'static str,
+) -> Result<(), Vec<String>> {
+    let mut validator = CopyOptionVariantValidator {
         program,
         errors: BTreeSet::new(),
         saw_projection: false,
+        expected,
+        island,
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -423,13 +460,15 @@ pub fn validate_copy_option_i32_variant_island(program: &MirProgram) -> Result<(
     }
 }
 
-struct CopyOptionI32VariantValidator<'a> {
+struct CopyOptionVariantValidator<'a> {
     program: &'a MirProgram,
     errors: BTreeSet<String>,
     saw_projection: bool,
+    expected: PrimitiveType,
+    island: &'static str,
 }
 
-impl<'a> CopyOptionI32VariantValidator<'a> {
+impl<'a> CopyOptionVariantValidator<'a> {
     fn validate(&mut self) {
         if !self
             .program
@@ -440,12 +479,14 @@ impl<'a> CopyOptionI32VariantValidator<'a> {
         }
         if !self.program.instances().is_empty() {
             self.error(format!(
-                "{COPY_OPTION_I32_VARIANT_ISLAND} does not admit generic MIR instances"
+                "{} does not admit generic MIR instances",
+                self.island
             ));
         }
         if !self.program.transitions().is_empty() {
             self.error(format!(
-                "{COPY_OPTION_I32_VARIANT_ISLAND} does not admit FlowTransition contracts"
+                "{} does not admit FlowTransition contracts",
+                self.island
             ));
         }
         for function in self.program.functions().values() {
@@ -453,7 +494,8 @@ impl<'a> CopyOptionI32VariantValidator<'a> {
         }
         if !self.saw_projection {
             self.error(format!(
-                "{COPY_OPTION_I32_VARIANT_ISLAND} has no executable Option<i32> projection"
+                "{} has no executable Copy Option projection",
+                self.island
             ));
         }
     }
@@ -472,18 +514,24 @@ impl<'a> CopyOptionI32VariantValidator<'a> {
                             self.error(format!("{} variant base is absent", instruction.id));
                             continue;
                         };
-                        let Some(result_ty) = function.values.get(result).map(|value| &value.ty) else {
+                        let Some(result_ty) = function.values.get(result).map(|value| &value.ty)
+                        else {
                             self.error(format!("{} variant result is absent", instruction.id));
                             continue;
                         };
                         let Some(receipt) = contract else {
-                            self.error(format!("{} has no TypeDesc projection receipt", instruction.id));
+                            self.error(format!(
+                                "{} has no TypeDesc projection receipt",
+                                instruction.id
+                            ));
                             continue;
                         };
-                        if !is_copy_option_i32(self.program, base_ty) || !is_i32(self.program, result_ty) {
+                        if !is_copy_option_primitive(self.program, base_ty, self.expected)
+                            || !is_primitive(self.program, result_ty, self.expected)
+                        {
                             self.error(format!(
-                                "{} is outside the Copy Option<i32> projection shape",
-                                instruction.id
+                                "{} is outside the Copy Option<{:?}> projection shape",
+                                instruction.id, self.expected
                             ));
                             continue;
                         }
@@ -504,16 +552,16 @@ impl<'a> CopyOptionI32VariantValidator<'a> {
                         }
                     }
                     MirInstructionKind::VariantProjectMove { .. } => self.error(format!(
-                        "{} consuming variant operation is outside {COPY_OPTION_I32_VARIANT_ISLAND}",
-                        instruction.id
+                        "{} consuming variant operation is outside {}",
+                        instruction.id, self.island
                     )),
                     _ => {}
                 }
             }
             if matches!(block.terminator, MirTerminator::SwitchMove { .. }) {
                 self.error(format!(
-                    "{} consuming variant terminator is outside {COPY_OPTION_I32_VARIANT_ISLAND}",
-                    block.id
+                    "{} consuming variant terminator is outside {}",
+                    block.id, self.island
                 ));
             }
         }

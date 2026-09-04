@@ -672,6 +672,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete Copy Option<i32> variant MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete Copy Option<bool> variant MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete Copy Option<bool> variant MIR island materialization failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,
@@ -713,6 +731,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                         program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
                     )]);
                 }
+                if !matches!(
+                    admission.copy_option_bool,
+                    crate::core::mir::CopyOptionI32VariantAdmission::OutsideProfile
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized Copy Option<bool> variant candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
                 return Ok(None);
             }
         };
@@ -722,11 +752,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         let flow_transition_candidate = route.materialized_flow_candidate;
         let option_string_candidate = route.materialized_option_string_candidate;
         let copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
+        let copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
         if !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
             && !option_string_candidate
             && !copy_option_i32_candidate
+            && !copy_option_bool_candidate
         {
             return Ok(None);
         }
@@ -744,6 +776,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "non-Copy Option<string> variant island"
         } else if copy_option_i32_candidate {
             "Copy Option<i32> variant island"
+        } else if copy_option_bool_candidate {
+            "Copy Option<bool> variant island"
         } else {
             "S8 Flow transition island"
         };
@@ -772,6 +806,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             if let Err(errors) =
                 crate::core::mir::validate_copy_option_i32_variant_island(&canonical)
             {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if copy_option_bool_candidate {
+            if let Err(errors) = crate::core::mir::validate_copy_option_variant_island(
+                &canonical,
+                crate::core::PrimitiveType::Bool,
+                crate::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND,
+            ) {
                 return Err(Self::mir_gate_diagnostics(
                     program,
                     "MIR island contract",

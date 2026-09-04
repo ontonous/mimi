@@ -285,13 +285,14 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 6] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 7] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant,
+        crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
     ];
     for profile in PROFILES {
         if let Some(results) = verify_closed_mir_profile(program, profile, source_hash.clone())? {
@@ -342,6 +343,18 @@ fn verify_closed_mir_profile(
                     )
                 },
             )?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant => {
+            crate::core::mir::validate_copy_option_variant_island(
+                &canonical,
+                crate::core::PrimitiveType::Bool,
+                crate::core::mir::COPY_OPTION_BOOL_VARIANT_ISLAND,
+            )
+            .map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the Copy Option<bool> variant island: {errors:?}"
+                )
+            })?;
         }
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate => {}
     }

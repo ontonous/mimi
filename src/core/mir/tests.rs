@@ -272,6 +272,39 @@ fn lowers_option_i32_unwrap_to_copy_variant_projection() {
 }
 
 #[test]
+fn lowers_option_bool_unwrap_to_copy_variant_projection() {
+    let source = include_str!("../../../tests/fixtures/mir_native_option_bool_unwrap.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Option<bool>.unwrap must lower to canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:unwrap_copy".into()))
+        .expect("unwrap_copy MIR function");
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProject {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("Copy bool unwrap must carry a read-only variant projection receipt");
+    assert_eq!(receipt.variant_name, "Some");
+    assert_eq!(receipt.projection.field_index, 0);
+    assert_eq!(receipt.projection.arity, 1);
+    assert_eq!(receipt.projection.ownership, MirOwnership::Copy);
+    assert_eq!(receipt.projection.move_out_glue, MirGlueKind::Noop);
+}
+
+#[test]
 fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
     let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
         include_str!("../../../tests/fixtures/mir_native_option_i32_unwrap.mimi"),
@@ -304,7 +337,29 @@ fn copy_option_i32_typedesc_contract_rejects_other_payloads() {
         .type_catalog()
         .validate_copy_option_i32_variant(&option_i64)
         .expect_err("Option<i64> must stay outside the i32 island");
-    assert!(error.contains("expected i32"), "{error}");
+    assert!(error.contains("expected I32"), "{error}");
+
+    let bool_program =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
+            "func main() -> i32 { let value: Option<bool> = Some(true); drop(value); 0 }",
+        ))
+        .expect("Option<bool> construction MIR");
+    let option_bool = bool_program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == crate::core::mir::types::MirTypeKind::Option).then_some(id.clone())
+        })
+        .expect("Option<bool> TypeDesc");
+    assert!(bool_program
+        .type_catalog()
+        .validate_copy_option_variant(&option_bool, PrimitiveType::Bool)
+        .is_ok());
+    let error = bool_program
+        .type_catalog()
+        .validate_copy_option_i32_variant(&option_bool)
+        .expect_err("Option<bool> must not satisfy the i32 island");
+    assert!(error.contains("expected I32"), "{error}");
 }
 
 #[test]
