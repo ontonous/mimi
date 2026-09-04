@@ -689,7 +689,7 @@ pub struct MirVariantProjectionTrapContract {
 /// fallback operand is returned for the alternate tag.  The receipt carries
 /// both tag identities so a backend cannot infer the alternate arm from a
 /// physical aggregate or VM handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirVariantProjectionFallbackContract {
     pub source_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
@@ -2071,13 +2071,74 @@ impl MirTypeCatalog {
         result_ty: &ResolvedTypeId,
         fallback_ty: &ResolvedTypeId,
     ) -> Result<MirVariantProjectionFallbackContract, String> {
-        self.validate_copy_option_i32_variant(source_ty)?;
-        if result_ty != fallback_ty {
-            return Err(format!(
-                "Option unwrap_or fallback type '{}' disagrees with result type '{}'",
-                fallback_ty.as_str(),
+        let contract = self.validated_copy_option_scalar_projection_fallback_contract(
+            source_ty,
+            variant_id,
+            field_id,
+            result_ty,
+            fallback_ty,
+        )?;
+        let result_desc = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
                 result_ty.as_str()
+            )
+        })?;
+        if result_desc.kind != MirTypeKind::Primitive(PrimitiveType::I32) {
+            return Err(format!(
+                "type '{}' Option payload is {:?}, expected I32",
+                source_ty.as_str(),
+                result_desc.kind,
             ));
+        }
+        Ok(contract)
+    }
+
+    /// Materialize the total fallback receipt for any admitted generic Copy
+    /// scalar `Option<T>`.  Generic specialization uses this helper after the
+    /// concrete TypeDesc has replaced `T`; the older i32 helper above remains
+    /// the narrower default concrete island and delegates here so both routes
+    /// share one canonical Some/None/tag/ABI proof.
+    pub fn validated_copy_option_scalar_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Option { inner, variants } = &descriptor.layout else {
+            return Err(format!(
+                "type '{}' has no canonical Option layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Option
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "Option fallback source must be Aggregate/Copy with canonical no-op glue".into(),
+            );
+        }
+        if inner != result_ty || result_ty != fallback_ty {
+            return Err(
+                "Option unwrap_or fallback, result and inner TypeDesc identities must agree".into(),
+            );
         }
         self.validate_copy_scalar(result_ty)?;
         let projection = self.validated_variant_payload_projection_contract(
@@ -2095,9 +2156,6 @@ impl MirTypeCatalog {
                     .into(),
             );
         }
-        let (_, variants) = self
-            .variant_layout(source_ty)
-            .ok_or_else(|| "Option unwrap_or source has no canonical variant layout".to_string())?;
         let fallback = variants
             .iter()
             .find(|variant| {
@@ -2150,8 +2208,27 @@ impl MirTypeCatalog {
             .get(source_ty)
             .map(|descriptor| descriptor.kind.clone())
         {
+            Some(MirTypeKind::Option)
+                if self.get(source_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        MirLayout::Option { inner, .. }
+                            if self.get(inner).is_some_and(|payload| {
+                                payload.kind == MirTypeKind::GenericParameter
+                            })
+                    )
+                }) =>
+            {
+                self.validated_generic_option_projection_fallback_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                    fallback_ty,
+                )?
+            }
             Some(MirTypeKind::Option) => self
-                .validated_copy_option_i32_projection_fallback_contract(
+                .validated_copy_option_scalar_projection_fallback_contract(
                     source_ty,
                     &receipt.projection.variant,
                     &receipt.projection.field,
@@ -5274,6 +5351,119 @@ impl MirTypeCatalog {
             variant_name: "Some".into(),
             discriminant: 1,
             trap_code: MIR_VARIANT_PROJECTION_TRAP_CODE.into(),
+        })
+    }
+
+    /// Materialize the non-executable placeholder receipt for the narrow
+    /// generic `Option<T>.unwrap_or(T)` projection.  The selected `Some`
+    /// payload and the explicit fallback operand are both the same opaque
+    /// generic `T`; concrete specialization replays the Copy scalar contract
+    /// before any consumer executes the total projection.
+    pub(crate) fn validated_generic_option_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "generic Option fallback source type '{}' is absent from MIR TypeDesc catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Option { variants, inner } = &descriptor.layout else {
+            return Err(format!(
+                "generic Option fallback source '{}' has no canonical Option layout",
+                source_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Option
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(
+                "generic Option fallback source must be Aggregate/Copy with canonical no-op glue"
+                    .into(),
+            );
+        }
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic Option fallback result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        let fallback = self.get(fallback_ty).ok_or_else(|| {
+            format!(
+                "generic Option fallback operand type '{}' is absent from MIR TypeDesc catalog",
+                fallback_ty.as_str()
+            )
+        })?;
+        let generic_payload = self
+            .get(inner)
+            .is_some_and(|payload| payload.kind == MirTypeKind::GenericParameter);
+        if !generic_payload
+            || result.kind != MirTypeKind::GenericParameter
+            || fallback.kind != MirTypeKind::GenericParameter
+            || inner != result_ty
+            || inner != fallback_ty
+        {
+            return Err(
+                "generic Option fallback placeholder requires Option<T>, result T and fallback T identity"
+                    .into(),
+            );
+        }
+        let selected = variants
+            .iter()
+            .find(|variant| {
+                variant.id == *variant_id
+                    && variant.name == "Some"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| {
+                "generic Option fallback target must be the canonical Some variant".to_string()
+            })?;
+        let alternate = variants
+            .iter()
+            .find(|variant| {
+                variant.name == "None" && variant.discriminant == 0 && variant.fields.is_empty()
+            })
+            .ok_or_else(|| {
+                "generic Option fallback source must contain the canonical None variant".to_string()
+            })?;
+        if selected.fields[0].id != *field_id || selected.fields[0].ty != *result_ty {
+            return Err("generic Option fallback field must be the canonical Some payload".into());
+        }
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection: MirVariantProjectionContract {
+                nominal: NominalTypeId::new("builtin:type:Option").expect("static Option nominal"),
+                variant: selected.id.clone(),
+                field: selected.fields[0].id.clone(),
+                field_index: 0,
+                arity: 1,
+                field_ty: result_ty.clone(),
+                ownership: MirOwnership::Copy,
+                move_out_glue: MirGlueKind::Noop,
+            },
+            variant_name: "Some".into(),
+            discriminant: 1,
+            fallback_variant: alternate.id.clone(),
+            fallback_variant_name: "None".into(),
+            fallback_discriminant: 0,
+            fallback_arity: 0,
         })
     }
 

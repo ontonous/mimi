@@ -1,0 +1,9 @@
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let selected = unwrap_or(None, false)
+    if selected { 1 } else { 0 }
+}

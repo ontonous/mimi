@@ -1,5 +1,6 @@
 func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
-    value.unwrap_or(fallback)
+    let copied = fallback
+    value.unwrap_or(copied)
 }
 
 func main() -> i32 {

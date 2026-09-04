@@ -2600,6 +2600,19 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } => eval_materialized_variant_projection_fallback_call(
+            function,
+            program,
+            catalog,
+            state,
+            result,
+            target_owner,
+            type_arguments,
+            arguments,
+            contract,
+        ),
     }
 }
 
@@ -2697,6 +2710,129 @@ fn eval_materialized_variant_projection_call(
     };
     let result = result.as_ref().ok_or_else(|| {
         "MIR verifier generic variant projection must produce a result".to_string()
+    })?;
+    ensure_result_shape(function, catalog, result, &projected)?;
+    state.values.insert(result.clone(), projected);
+    Ok(())
+}
+
+/// Symbolically execute a materialized generic `Option<T>.unwrap_or(T)` call.
+/// The total projection selects the Some payload for tag `1` and the explicit
+/// fallback operand for tag `0`; all identities and Copy ABI facts come from
+/// the specialized fallback receipt.
+fn eval_materialized_variant_projection_fallback_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirVariantProjectionFallbackContract,
+) -> Result<(), String> {
+    if type_arguments.len() != 1 || arguments.len() != 2 {
+        return Err(
+            "MIR verifier generic variant fallback projection calls require one type and two value arguments"
+                .into(),
+        );
+    }
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier generic variant fallback projection target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_variant_projection_fallback_mir(
+        target, catalog, contract,
+    )?;
+    if target.parameters.len() != 2 {
+        return Err(
+            "MIR verifier generic variant fallback projection target must have two parameters"
+                .into(),
+        );
+    }
+    let target_parameter_types = target
+        .parameters
+        .iter()
+        .map(|parameter| {
+            target
+                .values
+                .get(parameter)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| {
+                    "MIR verifier generic variant fallback projection target parameter TypeDesc is absent"
+                        .to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let argument_types = arguments
+        .iter()
+        .map(|argument| {
+            function
+                .values
+                .get(argument)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| {
+                    "MIR verifier generic variant fallback projection argument TypeDesc is absent"
+                        .to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if argument_types != target_parameter_types {
+        return Err(
+            "MIR verifier generic variant fallback projection argument types disagree with target parameters"
+                .into(),
+        );
+    }
+    let SymbolicValue::Variant {
+        nominal,
+        tag,
+        payload,
+        ..
+    } = state.values.get(&arguments[0]).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier generic variant fallback projection base '{}' is not defined",
+            arguments[0]
+        )
+    })?
+    else {
+        return Err(
+            "MIR verifier generic variant fallback projection base is not a symbolic Option".into(),
+        );
+    };
+    if nominal != contract.projection.nominal {
+        return Err(
+            "MIR verifier generic variant fallback projection nominal disagrees with TypeDesc"
+                .into(),
+        );
+    }
+    let selected = payload
+        .get(&contract.projection.field)
+        .cloned()
+        .unwrap_or(symbolic_zero_for_type(catalog, &contract.result_ty)?);
+    let fallback_value = state.values.get(&arguments[1]).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier generic variant fallback operand '{}' is not defined",
+            arguments[1]
+        )
+    })?;
+    let active_some = tag.eq(Int::from_i64(contract.discriminant as i64));
+    let projected = match (selected, fallback_value) {
+        (SymbolicValue::Int(selected), SymbolicValue::Int(fallback)) => {
+            SymbolicValue::Int(active_some.ite(&selected, &fallback))
+        }
+        (SymbolicValue::Bool(selected), SymbolicValue::Bool(fallback)) => {
+            SymbolicValue::Bool(active_some.ite(&selected, &fallback))
+        }
+        _ => return Err(
+            "MIR verifier generic variant fallback projection values disagree with Copy scalar ABI"
+                .into(),
+        ),
+    };
+    let result = result.as_ref().ok_or_else(|| {
+        "MIR verifier generic variant fallback projection must produce a result".to_string()
     })?;
     ensure_result_shape(function, catalog, result, &projected)?;
     state.values.insert(result.clone(), projected);

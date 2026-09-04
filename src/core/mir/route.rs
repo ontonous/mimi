@@ -19,18 +19,21 @@ use crate::core::CheckedProgram;
 use super::{
     classify_copy_option_i32_variant_admission, classify_copy_option_variant_admission,
     classify_copy_result_i32_variant_admission, classify_flat_copy_record_admission,
-    classify_generic_option_projection_admission, classify_generic_result_projection_admission,
-    classify_generic_variant_predicate_admission, classify_option_string_variant_admission,
-    classify_scalar_collection_admission, contains_copy_option_i32_variant_candidate,
-    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
-    contains_flat_copy_record_candidate, contains_generic_option_projection_candidate,
+    classify_generic_option_projection_admission,
+    classify_generic_option_projection_fallback_admission,
+    classify_generic_result_projection_admission, classify_generic_variant_predicate_admission,
+    classify_option_string_variant_admission, classify_scalar_collection_admission,
+    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
+    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
+    contains_generic_option_projection_candidate,
+    contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate, contains_generic_variant_predicate_candidate,
     contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
     contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
     is_exact_s8_flow_transition, is_s8_flow_transition_candidate, CopyOptionI32VariantAdmission,
     CopyResultI32VariantAdmission, FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
-    GenericResultProjectionAdmission, GenericVariantPredicateAdmission,
-    OptionStringVariantAdmission, ScalarCollectionAdmission,
+    GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
+    GenericVariantPredicateAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -59,6 +62,7 @@ pub enum CanonicalMirRouteProfile {
     NonCopyOptionStringVariant,
     GenericOptionPredicate,
     GenericOptionProjection,
+    GenericOptionProjectionFallback,
     GenericResultProjection,
     CopyOptionI32Variant,
     CopyOptionBoolVariant,
@@ -76,6 +80,9 @@ impl CanonicalMirRouteProfile {
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
             Self::GenericOptionPredicate => super::GENERIC_VARIANT_PREDICATE_ISLAND,
             Self::GenericOptionProjection => super::GENERIC_OPTION_PROJECTION_ISLAND,
+            Self::GenericOptionProjectionFallback => {
+                super::GENERIC_OPTION_PROJECTION_FALLBACK_ISLAND
+            }
             Self::GenericResultProjection => super::GENERIC_RESULT_PROJECTION_ISLAND,
             Self::CopyOptionI32Variant => super::COPY_OPTION_I32_VARIANT_ISLAND,
             Self::CopyOptionBoolVariant => super::COPY_OPTION_BOOL_VARIANT_ISLAND,
@@ -98,6 +105,9 @@ impl CanonicalMirRouteProfile {
             Self::NonCopyOptionStringVariant => admission.option_string_complete(),
             Self::GenericOptionPredicate => admission.generic_variant_complete(),
             Self::GenericOptionProjection => admission.generic_option_projection_complete(),
+            Self::GenericOptionProjectionFallback => {
+                admission.generic_option_projection_fallback_complete()
+            }
             Self::GenericResultProjection => admission.generic_result_projection_complete(),
             Self::CopyOptionI32Variant => admission.copy_option_i32_complete(),
             Self::CopyOptionBoolVariant => admission.copy_option_bool_complete(),
@@ -117,6 +127,9 @@ impl CanonicalMirRouteProfile {
             Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
             Self::GenericOptionPredicate => route.materialized_generic_variant_candidate,
             Self::GenericOptionProjection => route.materialized_generic_option_projection_candidate,
+            Self::GenericOptionProjectionFallback => {
+                route.materialized_generic_option_projection_fallback_candidate
+            }
             Self::GenericResultProjection => route.materialized_generic_result_projection_candidate,
             Self::CopyOptionI32Variant => route.materialized_copy_option_i32_candidate,
             Self::CopyOptionBoolVariant => route.materialized_copy_option_bool_candidate,
@@ -197,6 +210,7 @@ pub struct CanonicalMirRouteAdmission {
     pub option_string: OptionStringVariantAdmission,
     pub generic_variant: GenericVariantPredicateAdmission,
     pub generic_option_projection: GenericOptionProjectionAdmission,
+    pub generic_option_projection_fallback: GenericOptionProjectionFallbackAdmission,
     pub generic_result_projection: GenericResultProjectionAdmission,
     pub copy_option_i32: CopyOptionI32VariantAdmission,
     pub copy_option_bool: CopyOptionI32VariantAdmission,
@@ -221,6 +235,10 @@ impl CanonicalMirRouteAdmission {
             || !matches!(
                 self.generic_option_projection,
                 GenericOptionProjectionAdmission::OutsideProfile
+            )
+            || !matches!(
+                self.generic_option_projection_fallback,
+                GenericOptionProjectionFallbackAdmission::OutsideProfile
             )
             || !matches!(
                 self.generic_result_projection,
@@ -288,6 +306,13 @@ impl CanonicalMirRouteAdmission {
         )
     }
 
+    pub const fn generic_option_projection_fallback_complete(self) -> bool {
+        matches!(
+            self.generic_option_projection_fallback,
+            GenericOptionProjectionFallbackAdmission::CompleteCoverage
+        )
+    }
+
     pub const fn copy_option_i32_complete(self) -> bool {
         matches!(
             self.copy_option_i32,
@@ -338,6 +363,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_option_string_candidate: bool,
     pub materialized_generic_variant_candidate: bool,
     pub materialized_generic_option_projection_candidate: bool,
+    pub materialized_generic_option_projection_fallback_candidate: bool,
     pub materialized_generic_result_projection_candidate: bool,
     pub materialized_copy_option_i32_candidate: bool,
     pub materialized_copy_option_bool_candidate: bool,
@@ -357,6 +383,9 @@ pub fn classify_canonical_mir_route_admission(
         option_string: classify_option_string_variant_admission(program),
         generic_variant: classify_generic_variant_predicate_admission(program),
         generic_option_projection: classify_generic_option_projection_admission(program),
+        generic_option_projection_fallback: classify_generic_option_projection_fallback_admission(
+            program,
+        ),
         generic_result_projection: classify_generic_result_projection_admission(program),
         copy_option_i32: classify_copy_option_i32_variant_admission(program),
         copy_option_bool: classify_copy_option_variant_admission(
@@ -424,6 +453,8 @@ pub fn materialize_canonical_mir_route(
         contains_generic_variant_predicate_candidate(&canonical);
     let materialized_generic_option_projection_candidate =
         contains_generic_option_projection_candidate(&canonical);
+    let materialized_generic_option_projection_fallback_candidate =
+        contains_generic_option_projection_fallback_candidate(&canonical);
     let materialized_generic_result_projection_candidate =
         contains_generic_result_projection_candidate(&canonical);
     let materialized_copy_option_i32_candidate =
@@ -500,6 +531,17 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.generic_option_projection_fallback_complete()
+        && !materialized_generic_option_projection_fallback_candidate
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::GenericOptionProjectionFallback,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete generic Option fallback projection admission did not materialize a VariantProjectOr instance"
+                    .into(),
+        });
+    }
     if admission.copy_option_i32_complete() && !materialized_copy_option_i32_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::CopyOptionI32Variant,
@@ -555,6 +597,7 @@ pub fn materialize_canonical_mir_route(
         materialized_option_string_candidate,
         materialized_generic_variant_candidate,
         materialized_generic_option_projection_candidate,
+        materialized_generic_option_projection_fallback_candidate,
         materialized_generic_result_projection_candidate,
         materialized_copy_option_i32_candidate,
         materialized_copy_option_bool_candidate,
@@ -608,6 +651,12 @@ fn match_complete_or_compatibility(
     } else if admission.generic_result_projection_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::GenericResultProjection,
+            stage,
+            message,
+        }
+    } else if admission.generic_option_projection_fallback_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::GenericOptionProjectionFallback,
             stage,
             message,
         }
@@ -728,6 +777,8 @@ mod tests {
             option_string: OptionStringVariantAdmission::OutsideProfile,
             generic_variant: GenericVariantPredicateAdmission::OutsideProfile,
             generic_option_projection: GenericOptionProjectionAdmission::OutsideProfile,
+            generic_option_projection_fallback:
+                GenericOptionProjectionFallbackAdmission::OutsideProfile,
             generic_result_projection: GenericResultProjectionAdmission::OutsideProfile,
             copy_option_i32: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_bool: CopyOptionI32VariantAdmission::OutsideProfile,
@@ -966,6 +1017,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_option_projection_fallback_materialization_carries_one_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.generic_option_projection_fallback,
+            GenericOptionProjectionFallbackAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete generic Option fallback route must materialize");
+        assert!(route.materialized_generic_option_projection_fallback_candidate);
+        assert!(route.program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Option"
+            )
+        }));
+    }
+
+    #[test]
     fn profile_matrix_owns_admission_and_materialization_mapping() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_list_len.mimi"
@@ -980,6 +1054,7 @@ mod tests {
             CanonicalMirRouteProfile::NonCopyOptionStringVariant,
             CanonicalMirRouteProfile::GenericOptionPredicate,
             CanonicalMirRouteProfile::GenericOptionProjection,
+            CanonicalMirRouteProfile::GenericOptionProjectionFallback,
             CanonicalMirRouteProfile::GenericResultProjection,
             CanonicalMirRouteProfile::CopyOptionI32Variant,
             CanonicalMirRouteProfile::CopyOptionBoolVariant,

@@ -1,0 +1,10 @@
+// Generic Option<T> unwrap_or with an admitted Copy i64 specialization.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let fallback: i64 = 7
+    unwrap_or(None, fallback)
+}

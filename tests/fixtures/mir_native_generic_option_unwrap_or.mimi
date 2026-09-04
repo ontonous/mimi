@@ -1,0 +1,9 @@
+// Canonical MIR generic Option<T> unwrap_or fallback projection.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    unwrap_or(Some(41), 7)
+}

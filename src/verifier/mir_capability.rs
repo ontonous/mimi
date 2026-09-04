@@ -205,6 +205,20 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_variant_projection_fallback_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' Option fallback projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
             }
             if matches!(
                 instance.contract,
@@ -1142,7 +1156,8 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
-                | MirGenericInstanceContract::ScalarVariantProjection { .. } => {}
+                | MirGenericInstanceContract::ScalarVariantProjection { .. }
+                | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(

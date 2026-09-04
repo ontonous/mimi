@@ -268,6 +268,16 @@ pub fn verify_checked_dual(
         );
     }
     if matches!(
+        admission.generic_option_projection_fallback,
+        crate::core::mir::GenericOptionProjectionFallbackAdmission::MixedCoverage
+    ) || crate::core::mir::has_unsupported_generic_option_projection_fallback_candidate(program)
+    {
+        return Err(
+            "MIR-COVERAGE-001: generic Option fallback projection candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
         admission.generic_result_projection,
         crate::core::mir::GenericResultProjectionAdmission::MixedCoverage
     ) || crate::core::mir::has_unsupported_generic_result_projection_candidate(program)
@@ -321,13 +331,14 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 12] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 13] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection,
+        crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjectionFallback,
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
@@ -426,6 +437,7 @@ fn verify_closed_mir_profile(
         }
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate => {}
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection => {}
+        crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjectionFallback => {}
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection => {}
     }
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {

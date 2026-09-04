@@ -1,0 +1,9 @@
+// Generic Option<T> unwrap_or must select the explicit fallback for None.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    unwrap_or(None, 7)
+}

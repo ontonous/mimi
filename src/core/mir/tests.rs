@@ -145,6 +145,101 @@ fn generic_option_unwrap_none_preserves_the_canonical_trap() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_or_with_a_specialized_fallback_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("generic Option fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.variant_name, "Some");
+    assert_eq!(contract.discriminant, 1);
+    assert_eq!(contract.fallback_variant_name, "None");
+    assert_eq!(contract.fallback_discriminant, 0);
+    assert_eq!(contract.fallback_arity, 0);
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Copy);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn generic_option_unwrap_or_none_selects_the_explicit_fallback() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_none.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap_or None MIR");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option unwrap_or None execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(7));
+}
+
+#[test]
+fn generic_option_unwrap_or_stale_receipt_is_rejected_before_consumers() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi");
+    let checked = checked_program(source);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option unwrap_or MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("generic Option fallback projection instance");
+    let mut functions = canonical.functions().clone();
+    let target = functions
+        .get_mut(&instance.function)
+        .expect("materialized generic Option fallback target");
+    let receipt = target
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::VariantProjectOr {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("fallback projection receipt");
+    receipt.fallback_discriminant = receipt.fallback_discriminant.wrapping_add(1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog_and_instances(
+        functions,
+        canonical.type_catalog().clone(),
+        canonical.instances().clone(),
+    )
+    .expect_err("stale generic Option fallback receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("variant projection fallback receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
 fn generic_option_unwrap_stale_receipt_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
     let checked = checked_program(source);

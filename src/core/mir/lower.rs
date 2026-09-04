@@ -1447,6 +1447,104 @@ fn materialize_generic_instance(
         };
         *contract = Some(receipt);
     }
+    let variant_projection_fallbacks = function
+        .blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| match &instruction.kind {
+                    MirInstructionKind::VariantProjectOr {
+                        result,
+                        base,
+                        fallback,
+                        contract: Some(receipt),
+                    } => Some((
+                        block_id.clone(),
+                        index,
+                        result.clone(),
+                        base.clone(),
+                        fallback.clone(),
+                        receipt.clone(),
+                    )),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    for (block_id, instruction_index, result, base, fallback, placeholder) in
+        variant_projection_fallbacks
+    {
+        let base_ty = function
+            .values
+            .get(&base)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant fallback projection base has no specialized TypeDesc"
+                        .into(),
+                }]
+            })?;
+        let result_ty = function
+            .values
+            .get(&result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic variant fallback projection result has no specialized TypeDesc"
+                            .into(),
+                }]
+            })?;
+        let fallback_ty = function
+            .values
+            .get(&fallback)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic variant fallback operand has no specialized TypeDesc".into(),
+                }]
+            })?;
+        let receipt = type_catalog
+            .validated_copy_option_scalar_projection_fallback_contract(
+                &base_ty,
+                &placeholder.projection.variant,
+                &placeholder.projection.field,
+                &result_ty,
+                &fallback_ty,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: format!(
+                        "generic variant fallback projection receipt specialization failed: {message}"
+                    ),
+                }]
+            })?;
+        let instruction = function
+            .blocks
+            .get_mut(&block_id)
+            .and_then(|block| block.instructions.get_mut(instruction_index))
+            .ok_or_else(|| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message:
+                        "generic variant fallback projection disappeared during specialization"
+                            .into(),
+                }]
+            })?;
+        let MirInstructionKind::VariantProjectOr { contract, .. } = &mut instruction.kind else {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic variant fallback projection changed during specialization".into(),
+            }]);
+        };
+        *contract = Some(receipt);
+    }
     let variant_predicates = function
         .blocks
         .iter()
@@ -1583,12 +1681,30 @@ fn materialize_generic_instance(
             )
         })
     });
+    let has_generic_variant_projection_fallback = function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::VariantProjectOr {
+                    contract: Some(_),
+                    ..
+                }
+            )
+        })
+    });
     let contract = if is_identity {
         if type_catalog.validate_owned_string(&concrete).is_ok() {
             MirGenericInstanceContract::OwnedStringIdentity
         } else {
             MirGenericInstanceContract::ScalarIdentity
         }
+    } else if has_generic_variant_projection_fallback {
+        let contract = detect_scalar_variant_projection_fallback_contract(
+            &function,
+            type_catalog,
+            &subject(),
+        )?;
+        MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
     } else if has_generic_variant_projection {
         let contract =
             detect_scalar_variant_projection_contract(&function, type_catalog, &subject())?;
@@ -1942,6 +2058,163 @@ fn detect_scalar_variant_projection_contract(
             vec![MirLoweringError {
                 node_id: subject.clone(),
                 message: format!("generic variant projection contract is invalid: {message}"),
+            }]
+        },
+    )?;
+    Ok(receipt)
+}
+
+/// Validate a materialized generic `Option<T>.unwrap_or(T)` projection. The
+/// specialized body must remain exactly one receipt-bearing `VariantProjectOr`
+/// over a direct Clone of the Option parameter and the second fallback
+/// parameter, then return the selected result.
+pub(crate) fn validate_scalar_variant_projection_fallback_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirVariantProjectionFallbackContract,
+) -> Result<(), String> {
+    if function.parameters.len() != 2 {
+        return Err("generic variant fallback projection must have exactly two parameters".into());
+    }
+    if function.blocks.len() != 1 {
+        return Err("generic variant fallback projection must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic variant fallback projection entry block is absent".to_string())?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::Clone {
+                result: cloned_base,
+                source: clone_base,
+            },
+        ..
+    }, MirInstruction {
+        kind:
+            MirInstructionKind::Clone {
+                result: cloned_fallback,
+                source: clone_fallback,
+            },
+        ..
+    }, MirInstruction {
+        kind:
+            MirInstructionKind::VariantProjectOr {
+                result,
+                base,
+                fallback,
+                contract: Some(receipt),
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(
+            "generic variant fallback projection body must be exactly two Clones then receipt-bearing VariantProjectOr"
+                .into(),
+        );
+    };
+    if cloned_base != base || clone_base != &function.parameters[0] {
+        return Err("generic variant fallback projection must clone its Option parameter".into());
+    }
+    if cloned_fallback != fallback || clone_fallback != &function.parameters[1] {
+        return Err("generic variant fallback projection must clone its fallback parameter".into());
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| "generic variant fallback projection base TypeDesc is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| "generic variant fallback projection result TypeDesc is absent".to_string())?
+        .ty
+        .clone();
+    let fallback_ty = function
+        .values
+        .get(fallback)
+        .ok_or_else(|| "generic variant fallback operand TypeDesc is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_variant_projection_fallback_receipt(
+        &base_ty,
+        &result_ty,
+        &fallback_ty,
+        receipt,
+    )?;
+    if receipt != contract {
+        return Err(
+            "generic variant fallback projection receipt does not match the admitted contract"
+                .into(),
+        );
+    }
+    if function.result != result_ty {
+        return Err("generic variant fallback projection result is not the function result".into());
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(
+            "generic variant fallback projection must directly return its ProjectOr result".into(),
+        );
+    };
+    if *returned != *result {
+        return Err(
+            "generic variant fallback projection return value is not the ProjectOr result".into(),
+        );
+    }
+    if receipt.projection.nominal.as_str() != "builtin:type:Option"
+        || receipt.variant_name != "Some"
+        || receipt.discriminant != 1
+        || receipt.fallback_variant_name != "None"
+        || receipt.fallback_discriminant != 0
+        || receipt.fallback_arity != 0
+        || receipt.projection.field_index != 0
+        || receipt.projection.arity != 1
+        || receipt.projection.ownership != super::types::MirOwnership::Copy
+        || receipt.projection.move_out_glue != super::types::MirGlueKind::Noop
+    {
+        return Err(
+            "generic variant fallback projection receipt is outside the Copy Option<T> contract"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn detect_scalar_variant_projection_fallback_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::types::MirVariantProjectionFallbackContract, Vec<MirLoweringError>> {
+    let receipt = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProjectOr {
+                contract: Some(receipt),
+                ..
+            } => Some(receipt.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message:
+                    "generic variant fallback projection must carry one canonical fallback receipt"
+                        .into(),
+            }]
+        })?;
+    validate_scalar_variant_projection_fallback_mir(function, type_catalog, &receipt).map_err(
+        |message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!(
+                    "generic variant fallback projection contract is invalid: {message}"
+                ),
             }]
         },
     )?;
@@ -5449,6 +5722,25 @@ impl<'a> Lowerer<'a> {
             .get(&base_ty)
             .map(|descriptor| &descriptor.kind)
         {
+            Some(super::types::MirTypeKind::Option)
+                if type_catalog.get(&base_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        super::types::MirLayout::Option { inner, .. }
+                            if type_catalog.get(inner).is_some_and(|payload| {
+                                payload.kind == super::types::MirTypeKind::GenericParameter
+                            })
+                    )
+                }) =>
+            {
+                type_catalog.validated_generic_option_projection_fallback_contract(
+                    &base_ty,
+                    variant,
+                    field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
             Some(super::types::MirTypeKind::Option) => type_catalog
                 .validated_copy_option_i32_projection_fallback_contract(
                     &base_ty,
@@ -5807,13 +6099,21 @@ fn variant_projection_builtin(
         ) => {
             let inner_id = inner;
             let inner = catalog.get(inner_id)?;
-            // Generic `Option<T>.unwrap()` is admitted as an opaque
-            // placeholder; its concrete Copy-scalar payload is checked only
-            // during generic instance specialization.  `unwrap_or` remains a
-            // concrete i32 island and must not inherit this escape hatch.
-            if builtin.as_str() == "builtin.method.option.unwrap"
-                && inner.kind == super::types::MirTypeKind::GenericParameter
+            // Generic `Option<T>.unwrap()` and `unwrap_or(T)` are admitted as
+            // opaque placeholders; their concrete Copy-scalar payload and
+            // fallback ABI are checked only during generic instance
+            // specialization.
+            if inner.kind == super::types::MirTypeKind::GenericParameter
+                && matches!(
+                    builtin.as_str(),
+                    "builtin.method.option.unwrap" | "builtin.method.option.unwrap_or"
+                )
             {
+                if builtin.as_str() == "builtin.method.option.unwrap_or"
+                    && (call.arguments.get(1)?.value.ty != *inner_id || call.result != *inner_id)
+                {
+                    return None;
+                }
                 let variant = variants.iter().find(|variant| {
                     variant.name == "Some"
                         && variant.discriminant == 1
@@ -5826,10 +6126,9 @@ fn variant_projection_builtin(
                 }
                 return None;
             }
-            // The total fallback receipt is currently admitted only for the
-            // concrete default-route Option<i32> island. Other Copy payloads
-            // stay on the generic candidate error below rather than entering
-            // a Result-shaped contract and producing an unstable diagnostic.
+            // Direct concrete fallback remains the i32 default-route island;
+            // generic placeholders are specialized separately for admitted
+            // Copy scalar payloads before they reach this branch.
             if builtin.as_str() == "builtin.method.option.unwrap_or"
                 && !matches!(
                     inner.kind,
