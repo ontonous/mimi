@@ -419,7 +419,7 @@ LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
 
 ## Status
 
-**Current**: 0.1.10-dev. 0.1.7 shipped (2026-08-19): Wave-3 honest infrastructure closeout; 0.1.8 gates green (semantic honesty + identity purity); 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.1.10-dev in progress (real-world pain-point repairs — integer-literal bidirectional coercion, Fault diagnostic, `state.method` desugar — and FFI component-symbol closure). Does not yet claim VM≡native.
+**Current**: 0.1.10-dev. 0.1.9 shipped (2026-08-28): linear kinds + capabilities (cap true move + std, small-step semantics, E0439); 0.1.10-dev in progress — 0.40.x landed the fat-ABI bug-hunt closure (F-001–F-024), ownership-metadata single-sourcing (A1) and derived value drop/clone glue (A2), and since 2026-08-31 the mainline is the **Canonical MIR architecture campaign** (internal sprint 0.41, targeting 0.1.11): one semantic core (Canonical MIR) consumed mechanically by the reference executor, bytecode VM, native/LLVM emitter and verifier, migrated island-by-island behind explicit capability gates with fail-closed rejection of unmodeled shapes. Language semantics (kernel card) are unchanged; default `run`/`build`/`verify` routes switch only for proven-complete islands. Does not yet claim VM≡native.
 
 
 ### References & External Reviews
@@ -434,10 +434,11 @@ CHANGELOG.md.
 ## Version History
 
 ### 1. Current Version
-- **0.1.10-dev** (current): continues 0.1.9 (linear kinds + capabilities) into real-world
-  pain-point repairs — integer-literal bidirectional coercion, Fault diagnostic,
-  `state.method` desugar — and FFI component-symbol closure (M-004 `extern "C" const`
-  export, M-001 export-prefix). See CHANGELOG.md.
+- **0.1.10-dev** (current): real-world pain-point repairs and FFI component-symbol closure
+  (M-004 `extern "C" const` export, M-001 export-prefix); 0.40.x added ownership-metadata
+  single-sourcing (A1) and derived value drop/clone glue (A2). Since 2026-08-31 the mainline
+  is the Canonical MIR architecture campaign (internal sprint 0.41, targeting 0.1.11).
+  See CHANGELOG.md.
 
 ### 2. Current Major Line (0.1.x)
 - **0.1.0 → 0.1.8**: CheckedProgram semantic hub, Typed Resolved IR, HM unification, CFG/ownership,

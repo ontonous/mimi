@@ -2,6 +2,50 @@
 
 ## [Unreleased] — 0.1.10-dev
 
+### Canonical MIR 架构战役（内部 sprint 0.41.x，2026-08-31 – 2026-09-05，s0–s144）
+
+主线自 2026-08-31 起转入语义架构升级：把 checker 产出的类型、控制流、ABI、所有权与
+Flow effect 收敛为唯一的 Canonical Mimi MIR，reference executor、MIR-bytecode、
+native/LLVM 与 verifier 逐步改为只机械消费该 MIR。**语言语义面零变化（kernel-card 不变）**；
+切片级台账与能力矩阵见 `devdocs/v0.41/`（本地审计文档），路线见
+`devdocs/MIMI_ARCHITECTURE_UPGRADE_PLAN.md` 与 `devdocs/MIMI_CANONICAL_MIR_LONG_TERM_GOAL.md`。
+
+- **骨架（08-31）**：`src/core/mir/`（`MirFunction`/`MirBlock`/`MirValue`/`MirTerminator` +
+  `ResolvedTypeId` 标注、结构 validator、确定性 canonical text、`ResolvedBody → MIR` lowering、
+  独立 reference executor）；`mimi mir` 打印规范 MIR；`mimi run --mir` 显式试运行、
+  `mimi build --mir` opt-in native；`canonical_mir_differential` 三方 harness；所有权事件自
+  checker `ResourceAnalysis` 投影到每个 `MirFunction`；`MirTypeDesc` 携带 MoveOut/Clone/Drop
+  glue 合同。
+- **合同与岛扩张（08-31–09-01）**：scalar 算术、`abs`/`min`/`max` builtin 合同、`Convert`
+  （ScalarIdentity + i32→i64 无损 widening）、flat Copy record 构造/投影/更新、递归 tuple、
+  owned string、immutable 局部 borrow、`List<Copy scalar>` 构造/索引/clone/drop 与 `List.len`
+  默认岛、typed scalar Set facade + `to_list` 默认岛、native record move projection
+  （`MoveProject`）、Option/Result 变体构造 + `SwitchMove` payload binding、显式 `Trap` 合同、
+  call-graph ABI gate。
+- **岛屿闭合与 legacy 删除门禁（09-02）**：scalar collection、flat Copy record、S8
+  silent-local Flow transition 三类 program-level default island 闭合（selector 在四消费者
+  预检通过后才切默认，绝不 fallback）；旧 resolved Map/Set lowering 与多条 legacy native
+  entry 删除；route disposition 显式化；stop-ship ledger 建立（38 项历史事件分层保留，
+  "未重现 ≠ 已修复"）。
+- **变体与泛型扩张（09-03–09-05）**：flat copy 用户 enum 全链（typedesc/payload 投影/drop
+  plan/switch/ABI）；共享 projection receipt（variant/record/tuple/list-index）；owned string
+  move return 与调用转移；`Result<string, i32>` native ABI；泛型 `identity<T>` 物化实例表、
+  泛型 List len/reverse/concat、泛型 record 投影族（owned/mixed-copy 兄弟字段/残差 drop
+  两字段-三字段-异构）；Option/Result `unwrap`/`unwrap_or` 投影默认岛（Copy 与泛型载荷）；
+  f64 显式有限算术（unary negate/add/subtract + verifier float boundary）。
+- **未切换声明**：默认 `run`/`build`/`verify` 仅对已证明完整闭合的 island 生效；未覆盖形状
+  （Flow failure-payload/multi-target、Session、actor、Map、嵌套/线性 List、复杂 error 槽等）
+  继续 fail-closed，绝不 fallback。`raw_ast()` 生产调用（当前 5）与 `compile_func_legacy`
+  引用（当前 30）单调下降为删除门禁，尚未清零。
+
+不变量类别：L1（同一 MIR 的 reference/bytecode/native 可观察等价 + 三方 differential
+harness）/ L2（validator 在任何后端前拒绝非法 MIR，禁止隐式 fallback）/ L3（drop/clone/
+transfer 由 TypeDesc + MIR 显式操作 + glue contract 共同证明）。
+
+测试：本周新增 ~830 项测试函数（5,630 → 6,456 `#[test]`）；全量 `cargo test --tests`
+6,778 passed / 0 failed / 35 ignored（`--test-threads=16`，2026-09-05 实测）；每切片交付
+正/负 fixture 与 `tests/real_world_cli.rs` CLI 门禁（`mir_native_*` 族）。
+
 ### 0.40.3.3 — A2：判别式容器 glue 与 actor 进程边界生命周期收口
 
 在 product glue 之后接通内建 `Option`/`Result` 的活动载荷语义，并收口 native actor
