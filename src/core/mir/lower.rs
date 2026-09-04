@@ -1013,7 +1013,8 @@ pub(crate) fn validate_owned_record_call_argument(
 /// call ABI still needs an explicit producer proof: either a direct local
 /// `Clone` or a fresh `Record Construct` immediately precedes the call, and
 /// both producer/result TypeDesc identities agree with the specialized
-/// one-, two-, or three-field record parameter.  Conditional and indirect producers therefore
+/// one-, two-, or three-field record parameter, including a non-zero
+/// declaration-order field index.  Conditional and indirect producers therefore
 /// remain fail-closed before every backend.
 pub(crate) fn validate_scalar_record_call_argument(
     caller: &MirFunction,

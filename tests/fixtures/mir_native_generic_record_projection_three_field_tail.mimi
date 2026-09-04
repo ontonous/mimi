@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow the last Copy-scalar field from a
+// three-field Record<T>; the selected field is intentionally non-zero index.
+type Triple<T> { tag: i32, enabled: bool, value: T }
+
+func get_value<T>(triple: Triple<T>) -> T {
+    triple.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let triple = Triple { tag: 7, enabled: true, value: 41 as i64 }
+    let picked = get_value(triple)
+    picked
+}

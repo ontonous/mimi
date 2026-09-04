@@ -6951,6 +6951,34 @@ mod tests {
     }
 
     #[test]
+    fn concrete_three_field_generic_record_projection_preserves_nonzero_field_identity() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("three-field tail projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("three-field tail projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("three-field tail projection must carry a record receipt");
+        };
+        assert_eq!(contract.name, "value");
+        assert_eq!(contract.field_index, 2);
+        assert_eq!(contract.arity, 3);
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference non-zero-index generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn four_field_generic_record_projection_fails_closed() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_four_field_rejected.mimi"

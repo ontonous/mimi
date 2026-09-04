@@ -2061,6 +2061,23 @@ mod tests {
     }
 
     #[test]
+    fn three_field_generic_record_tail_projection_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("three-field tail projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.field_index == 2 && contract.arity == 3 && contract.name == "value"
+        )));
+    }
+
+    #[test]
     fn four_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_projection_four_field_rejected.mimi"

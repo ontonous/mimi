@@ -710,6 +710,9 @@ pub struct MirVariantProjectionFallbackContract {
 ///
 /// The nominal/field identities, runtime field name, declaration-order index,
 /// record arity, and field type are resolved together from the TypeDesc graph.
+/// `field_index` is not implicitly zero: projections may select any declared
+/// field, and each consumer must use the receipt's index after validating the
+/// corresponding identity and arity.
 /// A backend may encode the name or index physically, but it must carry the
 /// receipt rather than infer record shape from a map, struct, or AST.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
