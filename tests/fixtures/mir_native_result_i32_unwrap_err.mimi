@@ -1,0 +1,6 @@
+// Canonical MIR Copy Result<i32, i32> active Err unwrap trap.
+func main() -> i32 {
+    ensures: result >= 0
+    let value: Result<i32, i32> = Err(7)
+    value.unwrap()
+}

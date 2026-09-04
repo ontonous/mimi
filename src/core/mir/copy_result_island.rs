@@ -465,4 +465,37 @@ mod tests {
             CopyResultI32VariantAdmission::CompleteCoverage
         );
     }
+
+    #[test]
+    fn err_projection_keeps_the_canonical_active_tag_trap_receipt() {
+        let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap_err.mimi");
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("lower");
+        validate_copy_result_i32_variant_island(&program).expect("Result island validator");
+        let projection = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR function")
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::VariantProject {
+                    contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("Err unwrap must carry a projection receipt");
+        assert_eq!(projection.variant_name, "Ok");
+        assert_eq!(projection.discriminant, 0);
+        assert_eq!(
+            projection.trap_code,
+            crate::core::mir::types::MIR_VARIANT_PROJECTION_TRAP_CODE
+        );
+    }
 }
