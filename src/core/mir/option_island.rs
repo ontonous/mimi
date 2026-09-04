@@ -388,10 +388,21 @@ pub fn contains_option_string_variant_candidate(program: &MirProgram) -> bool {
             || function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
                     matches!(
-                        instruction.kind,
-                        MirInstructionKind::ConstructVariantMove { .. }
+                        &instruction.kind,
+                        MirInstructionKind::ConstructVariantMove { result, .. }
+                            if function
+                                .values
+                                .get(result)
+                                .is_some_and(|value| is_option_string_type(program, &value.ty))
                     )
-                }) || matches!(block.terminator, MirTerminator::SwitchMove { .. })
+                }) || matches!(
+                    &block.terminator,
+                    MirTerminator::SwitchMove { scrutinee, .. }
+                        if function
+                            .values
+                            .get(scrutinee)
+                            .is_some_and(|value| is_option_string_type(program, &value.ty))
+                )
             })
     })
 }

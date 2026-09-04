@@ -1078,6 +1078,18 @@ mod tests {
     }
 
     #[test]
+    fn generic_owned_list_option_projection_is_not_misclassified_as_option_string() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_list.mimi"
+        ));
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete generic Option<List> route must materialize");
+        assert!(!route.materialized_option_string_candidate);
+        assert!(route.materialized_generic_option_projection_candidate);
+        assert!(route.admission.generic_option_projection_complete());
+    }
+
+    #[test]
     fn generic_result_projection_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap.mimi"

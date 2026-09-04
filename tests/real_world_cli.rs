@@ -1746,7 +1746,7 @@ fn canonical_default_generic_owned_option_unwrap_matches_all_consumers() {
 }
 
 #[test]
-fn canonical_generic_owned_list_option_unwrap_is_explicit_mir_only_until_island_closes() {
+fn canonical_default_generic_owned_list_option_unwrap_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
@@ -1799,21 +1799,73 @@ fn canonical_generic_owned_list_option_unwrap_is_explicit_mir_only_until_island_
     let _ = fs::remove_file(&binary);
     assert_eq!(native_run.status.code(), Some(41));
 
+    let default_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Option<List> run");
+    assert_eq!(default_run.status.code(), Some(41));
+
+    let default_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default generic Option<List> verifier");
+    assert!(
+        default_verify.status.success(),
+        "default generic Option<List> verifier failed:\n{}",
+        String::from_utf8_lossy(&default_verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&default_verify.stdout).contains("canonical MIR"));
+
+    let default_binary = std::env::temp_dir().join(format!(
+        "mimi-default-generic-option-owned-list-{}",
+        std::process::id()
+    ));
+    let default_build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("failed to spawn default generic Option<List> native build");
+    assert!(
+        default_build.status.success(),
+        "default generic Option<List> native build failed:\n{}",
+        String::from_utf8_lossy(&default_build.stderr)
+    );
+    let default_native_run = Command::new(&default_binary)
+        .output()
+        .expect("failed to execute default generic Option<List> native binary");
+    let _ = fs::remove_file(&default_binary);
+    assert_eq!(default_native_run.status.code(), Some(41));
+}
+
+#[test]
+fn canonical_default_generic_owned_float_list_option_unwrap_rejects_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_option_unwrap_owned_float_list_rejected.mimi");
+
     for command in ["run", "build", "verify"] {
         let output = Command::new(mimi_bin())
             .current_dir(project_root())
             .arg(command)
             .arg(&fixture)
             .output()
-            .expect("failed to spawn default generic Option<List> command");
+            .expect("failed to spawn unsupported generic Option<List<f64>> command");
         assert!(
             !output.status.success(),
-            "default {command} must remain fail-closed for the explicit-only List payload"
+            "default {command} must reject unsupported Option<List<f64>>"
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("Canonical MIR") || stderr.contains("generic Option projection"),
-            "default {command} rejection lost its stable MIR diagnostic:\n{stderr}"
+            stderr.contains("generic Option projection") && stderr.contains("Canonical MIR"),
+            "default {command} lost its stable fail-closed diagnostic:\n{stderr}"
         );
         assert!(
             !stderr.contains("legacy"),
