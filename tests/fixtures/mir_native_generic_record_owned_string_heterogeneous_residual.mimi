@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: move the generic String field while a
+// fixed owned String sibling is discharged by the explicit residual receipt.
+type Pair<T> { value: T, note: string }
+
+func take_value<T>(pair: Pair<T>) -> T {
+    pair.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let pair = Pair { value: "selected", note: "residual" }
+    let picked = take_value(pair)
+    drop(picked)
+    41
+}

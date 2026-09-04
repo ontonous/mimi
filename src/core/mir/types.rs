@@ -4854,6 +4854,89 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Build the non-executable placeholder receipt for the smallest
+    /// heterogeneous managed record projection.  The selected field is the
+    /// callable's generic binder and the only sibling is a canonical owned
+    /// `String`; concrete specialization must replay the complete aggregate
+    /// Move/Drop receipt before a consumer can execute the projection.
+    pub(crate) fn validated_generic_heterogeneous_owned_record_field_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirRecordProjectionContract, String> {
+        let descriptor = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "generic heterogeneous owned record projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+            return Err(format!(
+                "generic heterogeneous owned record projection base type '{}' has no canonical record layout",
+                base_ty.as_str()
+            ));
+        };
+        if descriptor.kind != MirTypeKind::Nominal
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Move
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || fields.len() != 2
+        {
+            return Err(
+                "generic heterogeneous owned record projection requires a two-field Move aggregate placeholder".into(),
+            );
+        }
+        let (field_index, field) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.id == *field_id)
+            .ok_or_else(|| {
+                format!(
+                    "generic heterogeneous owned record projection field '{}' is absent",
+                    field_id.0
+                )
+            })?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic heterogeneous owned record projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if result.kind != MirTypeKind::GenericParameter || field.ty != *result_ty {
+            return Err(
+                "generic heterogeneous owned record projection placeholder requires selected field/result GenericParameter identity".into(),
+            );
+        }
+        let mut siblings = fields.iter().filter(|candidate| candidate.id != field.id);
+        let sibling = siblings.next().ok_or_else(|| {
+            "generic heterogeneous owned record projection requires one owned String sibling"
+                .to_string()
+        })?;
+        if siblings.next().is_some() || self.validate_owned_string(&sibling.ty).is_err() {
+            return Err(
+                "generic heterogeneous owned record projection requires exactly one canonical owned String sibling".into(),
+            );
+        }
+        self.validate_aggregate_glue(base_ty, MirGlueOperation::MoveOut)?;
+        self.validate_aggregate_glue(base_ty, MirGlueOperation::Drop)?;
+        Ok(MirRecordProjectionContract {
+            nominal: nominal.clone(),
+            field: field.id.clone(),
+            name: field.name.clone(),
+            field_index,
+            arity: fields.len(),
+            field_ty: field.ty.clone(),
+        })
+    }
+
     /// Resolve the complete TypeDesc receipt for one canonical tuple field
     /// projection. The result type is part of the contract so a consumer
     /// cannot select a physically valid slot with a semantically unrelated

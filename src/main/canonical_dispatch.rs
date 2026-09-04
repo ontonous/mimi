@@ -1903,6 +1903,32 @@ mod tests {
     }
 
     #[test]
+    fn heterogeneous_owned_generic_record_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_owned_string_heterogeneous_residual.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!(
+                "heterogeneous owned generic record residual projection must select canonical MIR"
+            );
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                ref contract
+            } if contract.projection.arity == 2
+                && contract.projection.name == "value"
+                && contract.residual.len() == 1
+                && contract.residual[0].name == "note"
+                && contract.residual[0].glue == mimi::core::mir::types::MirGlueKind::OwnedString
+        )));
+    }
+
+    #[test]
     fn owned_generic_record_projection_rvalue_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
@@ -1986,9 +2012,9 @@ mod tests {
     }
 
     #[test]
-    fn mixed_owned_generic_record_projection_with_noncopy_sibling_is_rejected_before_legacy_route()
-    {
-        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: \"owned\", tag: \"residual\" }; let picked = get(tagged); drop(picked); 41 }";
+    fn mixed_owned_generic_record_projection_with_unsupported_noncopy_siblings_is_rejected_before_legacy_route(
+    ) {
+        let source = "type Triple<T> { value: T, tag: string, extra: string }\nfunc get<T>(triple: Triple<T>) -> T { triple.value }\nfunc main() -> i32 { let triple = Triple { value: \"owned\", tag: \"residual\", extra: \"extra\" }; let picked = get(triple); drop(picked); 41 }";
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("non-Copy sibling must fail closed before legacy route");

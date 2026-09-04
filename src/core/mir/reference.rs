@@ -6504,6 +6504,60 @@ mod tests {
     }
 
     #[test]
+    fn concrete_heterogeneous_owned_generic_record_projection_tracks_owned_string_residual() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_heterogeneous_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("heterogeneous owned generic record residual projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("heterogeneous owned generic residual instance");
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            panic!("heterogeneous generic record must carry a residual drop receipt");
+        };
+        assert_eq!(contract.projection.arity, 2);
+        assert_eq!(contract.projection.name, "value");
+        assert_eq!(contract.residual.len(), 1);
+        assert_eq!(contract.residual[0].name, "note");
+        assert_eq!(
+            contract.residual[0].glue,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("heterogeneous owned generic residual target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("heterogeneous record parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("heterogeneous record TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 2
+                    && program.type_catalog().validate_owned_string(&fields[0].ty).is_ok()
+                    && program.type_catalog().validate_owned_string(&fields[1].ty).is_ok()
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference heterogeneous owned generic residual execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn three_field_owned_generic_record_projection_rejects_truncated_residual_schedule() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_residual.mimi"
@@ -6812,8 +6866,8 @@ mod tests {
     }
 
     #[test]
-    fn mixed_owned_generic_record_projection_with_noncopy_sibling_fails_closed() {
-        let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: \"owned\", tag: \"residual\" }; let picked = get(tagged); drop(picked); 41 }";
+    fn mixed_owned_generic_record_projection_with_unsupported_noncopy_siblings_fails_closed() {
+        let source = "type Triple<T> { value: T, tag: string, extra: string }\nfunc get<T>(triple: Triple<T>) -> T { triple.value }\nfunc main() -> i32 { let triple = Triple { value: \"owned\", tag: \"residual\", extra: \"extra\" }; let picked = get(triple); drop(picked); 41 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");

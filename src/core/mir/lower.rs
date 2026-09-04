@@ -59,8 +59,9 @@ impl std::error::Error for MirLoweringError {}
 /// Direct local reads become explicit `Clone` nodes, while root drops become
 /// explicit `Drop` nodes. With a TypeDesc catalog, the narrow ownership-safe
 /// record field move becomes `MoveProject`; the bounded two/three-field owned
-/// record shape uses receipt-bearing `MoveProjectDrop`, while all other partial
-/// moves and projected drops remain fail-closed.
+/// record shapes (including the two-field `T + string` form) use
+/// receipt-bearing `MoveProjectDrop`, while all other partial moves and
+/// projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
     lower_body_impl(body, None)
 }
@@ -1103,11 +1104,12 @@ pub(crate) fn validate_scalar_record_call_argument(
     )
 }
 
-/// Recognize the smallest generic record shape that needs an explicit
-/// residual-drop receipt: two or three fields, all bound to the callable's sole
-/// generic parameter, with one field projected and the remaining siblings
-/// retained only so their ownership can be discharged by `MoveProjectDrop`
-/// after specialization.
+/// Recognize the smallest generic record shapes that need an explicit
+/// residual-drop receipt: two or three homogeneous fields bound to the
+/// callable's sole generic parameter, or the two-field heterogeneous form
+/// with one generic field and one owned `String` sibling. One field is
+/// projected and the remaining siblings are retained only so their ownership
+/// can be discharged by `MoveProjectDrop` after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
 /// concrete String/Move/glue proof is replayed from TypeDesc below.
 fn is_owned_record_projection_drop_callable(
@@ -1151,17 +1153,32 @@ fn is_owned_record_projection_drop_callable(
         return false;
     }
     let binder = &definition.generic_parameters[0].1;
-    let all_generic_fields = definition.fields.iter().all(|(name, _)| {
-        definition
+    let mut generic_fields = 0usize;
+    let mut owned_string_fields = 0usize;
+    let fields_admitted = definition.fields.iter().all(|(name, _)| {
+        let Some(field_ty) = definition
             .field_ids
             .get(name)
             .and_then(|field_id| program.resolved_field_type(field_id))
-            .and_then(|field_ty| program.resolved_types().get(field_ty))
-            .is_some_and(|field_ty| {
-                matches!(field_ty, ResolvedType::GenericParameter(candidate) if candidate == binder)
-            })
-    });
-    all_generic_fields
+            .and_then(|field_id| program.resolved_types().get(field_id))
+        else {
+            return false;
+        };
+        match field_ty {
+            ResolvedType::GenericParameter(candidate) if candidate == binder => {
+                generic_fields += 1;
+                true
+            }
+            ResolvedType::Primitive(PrimitiveType::String) => {
+                owned_string_fields += 1;
+                true
+            }
+            _ => false,
+        }
+    }) && ((generic_fields == definition.fields.len()
+        && matches!(definition.fields.len(), 2 | 3))
+        || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1));
+    fields_admitted
         && matches!(
             callable.body.root.result.as_deref().map(|expr| &expr.kind),
             Some(ResolvedExprKind::Load(place))
@@ -6760,6 +6777,12 @@ impl<'a> Lowerer<'a> {
                     type_catalog.validated_generic_owned_record_field_projection_contract(
                         &base_ty, field, result_ty,
                     )
+                })
+                .or_else(|_| {
+                    type_catalog
+                        .validated_generic_heterogeneous_owned_record_field_projection_contract(
+                            &base_ty, field, result_ty,
+                        )
                 })
                 .is_ok()
                 .then_some(projection)
