@@ -6,7 +6,7 @@
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
 //! glued tuple/record products, and concrete Lists including the
-//! bounded one-level nested List construction/clone/drop/outer-len/index shape.
+//! bounded one-level nested List construction/clone/drop/outer-len/index/reverse shape.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2684,6 +2684,7 @@ impl<'a> FunctionEmitter<'a> {
                 result_ty: receipt.result_ty.clone(),
                 argument_ty: receipt.argument_ty.clone(),
                 operation: receipt.operation,
+                mode: receipt.mode,
             }))
     }
 
@@ -5003,9 +5004,9 @@ mod tests {
     #[test]
     fn canonical_mir_rejects_nested_list_operation_before_backend() {
         let error = run_canonical_differential(
-            "func main() -> i32 { let inner: List<i32> = [1, 2]; let nested: List<List<i32>> = [inner]; let reversed = reverse(nested); drop(reversed); drop(nested); 0 }",
+            "func main() -> i32 { let first: List<i32> = [1, 2]; let second: List<i32> = [3]; let left: List<List<i32>> = [first]; let right: List<List<i32>> = [second]; let joined = left.concat(right); drop(joined); 0 }",
         )
-        .expect_err("nested List operations remain outside the first nested List slice");
+        .expect_err("nested List.concat remains outside the nested List slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
                 assert!(message.contains("List operation") && message.contains("one-level"));
@@ -5110,6 +5111,46 @@ mod tests {
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("nested List index bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(3));
+        assert!(matches!(value, Value::Int(3)));
+    }
+
+    #[test]
+    fn executes_nested_list_reverse_with_recursive_clone_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_nested_list_reverse.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("nested List.reverse MIR");
+        let main = mir
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("nested List.reverse function");
+        let receipt = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::ListOp {
+                    operation: crate::core::mir::MirListOperation::Reverse,
+                    list_operation_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("nested List.reverse receipt");
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirListOperationMode::Nested
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List.reverse execution");
+        let bytecode = compile_mir_program(&mir).expect("nested List.reverse bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("nested List.reverse bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(3));
         assert!(matches!(value, Value::Int(3)));
     }

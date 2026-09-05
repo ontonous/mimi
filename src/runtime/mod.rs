@@ -1597,6 +1597,37 @@ pub unsafe extern "C" fn mimi_mir_list_get_nested(
     clone
 }
 
+/// Clone a one-level nested List and reverse the child-handle order. The
+/// source remains borrowed; every child in the result is independently owned
+/// through `mimi_mir_list_clone_nested`, so reversing never aliases Drop
+/// obligations between source and result.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_reverse_nested(list: *const MimiList) -> *mut MimiList {
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List handle is null\0");
+    }
+    let source = unsafe { &*list };
+    if source.element_kind != ListElementKind::List || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical nested MIR List kind disagrees\0");
+    }
+    let clone = unsafe { mimi_mir_list_clone_nested(list) };
+    if clone.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List reverse clone failed\0");
+    }
+    // SAFETY: clone is a valid nested List with a non-null data pointer for
+    // every element, established by mimi_mir_list_clone_nested.
+    unsafe {
+        let count = (*clone).len as usize;
+        if count > 1 {
+            for left in 0..(count / 2) {
+                let right = count - 1 - left;
+                std::ptr::swap((*clone).data.add(left), (*clone).data.add(right));
+            }
+        }
+    }
+    clone
+}
+
 /// Clone and reverse a scalar List for canonical native MIR.
 ///
 /// The source handle remains owned by the caller.  Returning a fresh handle
@@ -2100,6 +2131,50 @@ mod canonical_mir_list_tests {
                 7
             );
             mimi_mir_list_drop_scalar(selected, ListElementKind::I64 as i8);
+            mimi_mir_list_drop_nested(parent);
+        }
+    }
+
+    #[test]
+    fn canonical_nested_list_reverse_reverses_and_deep_clones_children() {
+        let first = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let second = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!first.is_null());
+        assert!(!second.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(first, ListElementKind::I64 as i8, 1),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(second, ListElementKind::I64 as i8, 3),
+                1
+            );
+        }
+        let parent = unsafe { mimi_mir_list_new_nested() };
+        assert!(!parent.is_null());
+        unsafe {
+            assert_eq!(mimi_mir_list_push_nested(parent, first), 1);
+            assert_eq!(mimi_mir_list_push_nested(parent, second), 1);
+            let reversed = mimi_mir_list_reverse_nested(parent);
+            assert!(!reversed.is_null());
+            let reversed_first = (*(*reversed).data).cast::<MimiList>();
+            assert!(!reversed_first.is_null());
+            assert_eq!(
+                mimi_mir_list_get_scalar(reversed_first, ListElementKind::I64 as i8, 0),
+                3
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(reversed_first, ListElementKind::I64 as i8, 9),
+                1
+            );
+            let original_second = (*(*parent).data.add(1)).cast::<MimiList>();
+            assert_eq!((*original_second).len, 1);
+            assert_eq!(
+                mimi_mir_list_get_scalar(original_second, ListElementKind::I64 as i8, 0),
+                3
+            );
+            mimi_mir_list_drop_nested(reversed);
             mimi_mir_list_drop_nested(parent);
         }
     }

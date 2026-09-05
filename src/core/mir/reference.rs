@@ -4015,7 +4015,19 @@ impl<'a> MirReferenceInterpreter<'a> {
                         };
                         // Reverse is a cloning transform: the source List
                         // remains available for its own Drop and the result
-                        // owns an independent element vector.
+                        // owns an independent element vector. Nested mode
+                        // additionally asserts that every child is a List;
+                        // the TypeDesc receipt proves its scalar child glue.
+                        if receipt.mode == super::types::MirListOperationMode::Nested
+                            && elements
+                                .iter()
+                                .any(|element| !matches!(element, MirRuntimeValue::List(_)))
+                        {
+                            return Err(self.error(
+                                &function.owner,
+                                "nested List.reverse source contains a non-List child",
+                            ));
+                        }
                         MirRuntimeValue::List(elements.into_iter().rev().collect())
                     }
                     super::MirListOperation::Concat => {

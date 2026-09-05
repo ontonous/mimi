@@ -921,9 +921,21 @@ pub struct MirListIndexProjectionContract {
     pub mode: MirListIndexProjectionMode,
 }
 
+/// Physical ABI mode for one canonical List operation. Scalar operations use
+/// an element-kind argument; nested operations use the recursive child-handle
+/// ABI and require one-level nested List glue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirListOperationMode {
+    /// Scalar List operation using the element-kind argument ABI.
+    Scalar,
+    /// One-level nested List operation using the recursive child-handle ABI.
+    Nested,
+}
+
 /// Backend-independent receipt for one canonical read-only List operation.
-/// The operation, receiver identity, and result identity are checker-owned
-/// facts; consumers must not rediscover them from a List handle or scalar ABI.
+/// The operation, receiver identity, result identity and physical mode are
+/// checker-owned facts; consumers must not rediscover them from a List handle
+/// or scalar ABI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirListOperationContract {
     pub list_ty: ResolvedTypeId,
@@ -932,6 +944,7 @@ pub struct MirListOperationContract {
     /// The second List identity for `Concat`; absent for `Len`/`Reverse`.
     pub argument_ty: Option<ResolvedTypeId>,
     pub operation: crate::core::mir::MirListOperation,
+    pub mode: MirListOperationMode,
 }
 
 /// Backend-independent receipt for one canonical List construction. The
@@ -3832,7 +3845,13 @@ impl MirTypeCatalog {
                         .is_some_and(|element| element.kind == MirTypeKind::List)
             )
         });
-        if nested_receiver && operation != crate::core::mir::MirListOperation::Len {
+        if nested_receiver
+            && !matches!(
+                operation,
+                crate::core::mir::MirListOperation::Len
+                    | crate::core::mir::MirListOperation::Reverse
+            )
+        {
             return Err(format!(
                 "List operation {:?} is outside the one-level nested List construction/clone/drop contract",
                 operation
@@ -3876,6 +3895,9 @@ impl MirTypeCatalog {
                 // the read, then cloned. Validate both sides explicitly so a
                 // backend cannot erase the source Drop obligation or return
                 // a shallow alias as an owned result.
+                if nested_receiver {
+                    self.validate_nested_list_payload(list_ty)?;
+                }
                 self.validate_list_glue(list_ty, MirGlueOperation::Clone)?;
                 self.validate_list_glue(result_ty, MirGlueOperation::MoveOut)?;
             }
@@ -3947,6 +3969,7 @@ impl MirTypeCatalog {
             result_ty: result_ty.clone(),
             argument_ty: None,
             operation: crate::core::mir::MirListOperation::Len,
+            mode: MirListOperationMode::Scalar,
         })
     }
 
@@ -4002,6 +4025,7 @@ impl MirTypeCatalog {
             result_ty: result_ty.clone(),
             argument_ty: None,
             operation: crate::core::mir::MirListOperation::Reverse,
+            mode: MirListOperationMode::Scalar,
         })
     }
 
@@ -4061,6 +4085,7 @@ impl MirTypeCatalog {
             result_ty: result_ty.clone(),
             argument_ty: Some(argument_ty.clone()),
             operation: crate::core::mir::MirListOperation::Concat,
+            mode: MirListOperationMode::Scalar,
         })
     }
 
@@ -4096,12 +4121,26 @@ impl MirTypeCatalog {
                 list_ty.as_str()
             ));
         };
+        let mode = if self.get(list_ty).is_some_and(|descriptor| {
+            matches!(
+                descriptor.layout,
+                MirLayout::List { ref element }
+                    if self
+                        .get(element)
+                        .is_some_and(|element| element.kind == MirTypeKind::List)
+            )
+        }) {
+            MirListOperationMode::Nested
+        } else {
+            MirListOperationMode::Scalar
+        };
         Ok(MirListOperationContract {
             list_ty: list_ty.clone(),
             element_ty: element.clone(),
             result_ty: result_ty.clone(),
             argument_ty: argument_ty.cloned(),
             operation,
+            mode,
         })
     }
 
@@ -9002,8 +9041,8 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 mod tests {
     use super::{
         MirAbiClass, MirBuiltinContract, MirBuiltinEffect, MirBuiltinKind, MirGlueKind,
-        MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog, MirTypeKind,
-        MIR_VARIANT_PROJECTION_TRAP_CODE,
+        MirGlueOperation, MirLayout, MirListOperationMode, MirOwnership, MirTypeCatalog,
+        MirTypeKind, MIR_VARIANT_PROJECTION_TRAP_CODE,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
@@ -9276,7 +9315,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_list_len_contract_borrows_outer_handle_but_rejects_clone_operations() {
+    fn nested_list_len_and_reverse_contracts_clone_without_consuming_parent() {
         let mut table = ResolvedTypeTable::new();
         let i32_id = table
             .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
@@ -9312,9 +9351,17 @@ mod tests {
         );
 
         let reverse = catalog
-            .validate_list_operation(&nested_list_id, &nested_list_id, MirListOperation::Reverse)
-            .expect_err("nested List.reverse remains outside S191");
-        assert!(reverse.contains("one-level nested List construction/clone/drop"));
+            .validated_list_operation_contract(
+                &nested_list_id,
+                &nested_list_id,
+                MirListOperation::Reverse,
+            )
+            .expect("nested List.reverse clone contract");
+        assert_eq!(reverse.mode, MirListOperationMode::Nested);
+        let concat = catalog
+            .validate_list_operation(&nested_list_id, &nested_list_id, MirListOperation::Concat)
+            .expect_err("nested List.concat remains outside S193");
+        assert!(concat.contains("one-level nested List construction/clone/drop"));
     }
 
     #[test]

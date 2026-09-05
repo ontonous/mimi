@@ -1,0 +1,15 @@
+// Canonical nested List positive: reverse deep-clones child Lists and
+// reverses their outer order; the source remains independently droppable.
+func main() -> i32 {
+    ensures: result == 3
+    let first: List<i32> = [1, 2]
+    let second: List<i32> = [3]
+    let nested: List<List<i32>> = [first, second]
+    let reversed = reverse(nested)
+    let selected = reversed[0]
+    let value = selected[0]
+    drop(selected)
+    drop(reversed)
+    drop(nested)
+    value
+}

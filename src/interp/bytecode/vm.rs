@@ -2848,10 +2848,20 @@ impl BytecodeVM {
                             "canonical List.reverse: expected List source",
                         ));
                     };
-                    // Construct a fresh Arc explicitly. This preserves the
-                    // source value and proves the bytecode operation is a
-                    // Clone-based transform rather than in-place mutation.
-                    let reversed = std::sync::Arc::new(values.iter().rev().cloned().collect());
+                    // Construct a fresh Arc explicitly. Nested mode also
+                    // clones every child List, preserving independent Drop
+                    // obligations rather than merely reversing child Arcs.
+                    let reversed =
+                        if shape.mode == crate::core::mir::types::MirListOperationMode::Nested {
+                            values
+                                .iter()
+                                .rev()
+                                .map(Self::clone_nested_list_projection_value)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map(std::sync::Arc::new)?
+                        } else {
+                            std::sync::Arc::new(values.iter().rev().cloned().collect())
+                        };
                     self.set_reg(rd, Value::List(reversed));
                 }
                 Op::MirListConcat {
@@ -5240,6 +5250,23 @@ impl BytecodeVM {
             return Err(InterpError::new(
                 "List.concat: receipt has no second input type",
             ));
+        }
+        if let Value::List(values) = value {
+            let has_nested_child = values.iter().any(|value| matches!(value, Value::List(_)));
+            if shape.mode == crate::core::mir::types::MirListOperationMode::Nested
+                && values.iter().any(|value| !matches!(value, Value::List(_)))
+            {
+                return Err(InterpError::new(
+                    "canonical List operation: nested receipt requires List child handles",
+                ));
+            }
+            if shape.mode == crate::core::mir::types::MirListOperationMode::Scalar
+                && has_nested_child
+            {
+                return Err(InterpError::new(
+                    "canonical List operation: scalar receipt cannot consume a nested List source",
+                ));
+            }
         }
         Ok(())
     }

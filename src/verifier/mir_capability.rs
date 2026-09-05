@@ -2083,4 +2083,28 @@ mod tests {
             })
         }));
     }
+
+    #[test]
+    fn accepts_nested_list_reverse_with_materialized_recursive_clone_receipt() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_reverse.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("nested List.reverse clone receipt must satisfy verifier capability gate");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::ListOp {
+                            operation: crate::core::mir::MirListOperation::Reverse,
+                            list_operation_contract: Some(ref receipt),
+                            ..
+                        } if receipt.mode
+                            == crate::core::mir::types::MirListOperationMode::Nested
+                    )
+                })
+            })
+        }));
+    }
 }

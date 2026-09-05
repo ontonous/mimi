@@ -1209,6 +1209,34 @@ fn nested_list_index_is_consumed_by_mir_verifier_without_ast_fallback() {
 }
 
 #[test]
+fn nested_list_reverse_is_consumed_by_mir_verifier_without_ast_fallback() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_nested_list_reverse.mimi");
+    let file = parse_memory_source(source, "mir-nested-list-reverse").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical nested List.reverse MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("nested List.reverse verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn generic_record_update_is_consumed_by_mir_verifier_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_record_update.mimi");

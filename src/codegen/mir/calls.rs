@@ -163,13 +163,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .i8_type()
             .const_int(kind as u64, false);
-        let runtime_name = match operation {
-            MirListOperation::Len if kind == crate::runtime::ListElementKind::List as i8 => {
-                "mimi_mir_list_len_nested"
-            }
-            MirListOperation::Len => "mimi_mir_list_len_scalar",
-            MirListOperation::Reverse => "mimi_mir_list_reverse_scalar",
-            MirListOperation::Concat => "mimi_mir_list_concat_scalar",
+        let nested_mode = receipt.mode == crate::core::mir::types::MirListOperationMode::Nested;
+        let runtime_name = match (operation, nested_mode) {
+            (MirListOperation::Len, true) => "mimi_mir_list_len_nested",
+            (MirListOperation::Len, false) => "mimi_mir_list_len_scalar",
+            (MirListOperation::Reverse, true) => "mimi_mir_list_reverse_nested",
+            (MirListOperation::Reverse, false) => "mimi_mir_list_reverse_scalar",
+            (MirListOperation::Concat, _) => "mimi_mir_list_concat_scalar",
         };
         if operation == MirListOperation::Concat {
             crate::codegen::builtins::register_mir_list_concat_runtime(
@@ -185,9 +185,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if let Some(argument_handle) = argument_handle {
             call_arguments.push(BasicMetadataValueEnum::from(argument_handle));
         }
-        if !(operation == MirListOperation::Len
-            && kind == crate::runtime::ListElementKind::List as i8)
-        {
+        if !nested_mode {
             call_arguments.push(BasicMetadataValueEnum::from(kind_value));
         }
         let value = call_try_basic_value(

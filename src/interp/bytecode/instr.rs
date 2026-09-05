@@ -1688,6 +1688,7 @@ pub struct ListOperationShape {
     pub result_ty: crate::core::ResolvedTypeId,
     pub argument_ty: Option<crate::core::ResolvedTypeId>,
     pub operation: crate::core::mir::MirListOperation,
+    pub mode: crate::core::mir::types::MirListOperationMode,
 }
 
 impl FunctionProto {

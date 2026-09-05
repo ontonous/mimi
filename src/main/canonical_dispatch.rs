@@ -2792,6 +2792,35 @@ mod tests {
     }
 
     #[test]
+    fn nested_list_reverse_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_reverse.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("nested List.reverse must select the canonical default route");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::ListOp {
+                            operation: mimi::core::mir::MirListOperation::Reverse,
+                            list_operation_contract: Some(ref receipt),
+                            ..
+                        } if receipt.mode
+                            == mimi::core::mir::types::MirListOperationMode::Nested
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
     fn scalar_collection_generic_list_reverse_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_list_reverse.mimi"

@@ -3801,6 +3801,43 @@ fn materializes_nested_list_index_with_deep_clone_receipt() {
 }
 
 #[test]
+fn materializes_nested_list_reverse_with_recursive_clone_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_nested_list_reverse.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("nested List.reverse must lower to canonical MIR");
+    let target = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("nested List.reverse target");
+    let receipt = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                operation: crate::core::mir::MirListOperation::Reverse,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("nested List.reverse receipt");
+    assert_eq!(
+        receipt.mode,
+        crate::core::mir::types::MirListOperationMode::Nested
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested List.reverse execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(3));
+}
+
+#[test]
 fn materializes_generic_scalar_list_projection_with_a_constant_one_receipt() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi");
