@@ -4309,6 +4309,50 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_owned_generic_record_update_with_two_residuals() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_owned_multi_residual.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                )
+            })
+            .expect("multi-residual owned generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.arity == 3
+                    && contract.residual.len() == 2
+                    && contract
+                        .residual
+                        .iter()
+                        .all(|residual| residual.glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString)
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference multi-residual owned update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_update_owned_multi_residual",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native multi-residual owned update must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native multi-residual owned update module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_three_field_generic_record_tail_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"

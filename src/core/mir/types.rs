@@ -6201,9 +6201,9 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Materialize the narrow ownership-bearing update contract used by S173:
-    /// a Move-owned two-field record, one owned overlay, and one residual
-    /// field moved through the result. Both old/new field glue operations are
+    /// Materialize the bounded ownership-bearing update contract: a Move-owned
+    /// two- or three-field record, one owned overlay, and one or more residual
+    /// fields moved through the result. Both old/new field glue operations are
     /// explicit so a backend cannot clone the base or leak the overwritten
     /// payload.
     pub fn validated_record_update_move_contract(
@@ -6234,9 +6234,9 @@ impl MirTypeCatalog {
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
             return Err("generic record move update requires a record aggregate kind".into());
         };
-        if fields.len() != 2 || field_types.len() != 1 {
+        if !matches!(fields.len(), 2 | 3) || field_types.len() != 1 {
             return Err(
-                "generic record move update requires a two-field record with one override".into(),
+                "generic record move update requires a two- or three-field record with one override".into(),
             );
         }
         let MirLayout::Record {
@@ -6246,7 +6246,7 @@ impl MirTypeCatalog {
         else {
             return Err("generic record move update result has no record layout".into());
         };
-        if nominal != layout_nominal || layout_fields.len() != 2 {
+        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3) {
             return Err("generic record move update nominal/layout disagrees with TypeDesc".into());
         }
         let update_field = fields
@@ -6286,8 +6286,8 @@ impl MirTypeCatalog {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        if residual.len() != 1 {
-            return Err("generic record move update requires one residual field".into());
+        if residual.is_empty() {
+            return Err("generic record move update requires at least one residual field".into());
         }
         Ok(MirRecordUpdateMoveContract {
             source_ty: base_ty.clone(),

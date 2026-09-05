@@ -1872,6 +1872,7 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
             && !is_flat_copy_record_definition(program, definition)
             && !is_scalar_generic_record_definition(program, definition)
             && !is_owned_generic_record_definition(program, definition)
+            && !is_owned_generic_record_update_definition_used(program, definition)
     });
     let record_ids = program
         .type_defs()
@@ -2078,6 +2079,60 @@ fn is_owned_generic_record_definition(
             || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1))
 }
 
+/// Recognize the additional three-field declaration admitted only by the
+/// ownership-bearing record-update island: one generic field and two concrete
+/// owned String siblings. Projection of this shape remains outside the
+/// residual projection contract and must not be admitted through the generic
+/// record projection predicate.
+fn is_owned_generic_record_update_definition(
+    program: &CheckedProgram,
+    definition: &crate::core::ResolvedTypeDef,
+) -> bool {
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || definition.fields.len() != 3
+    {
+        return false;
+    }
+    let binder = &definition.generic_parameters[0].1;
+    let mut generic_fields = 0usize;
+    let mut owned_string_fields = 0usize;
+    let fields_admitted = definition.fields.iter().all(|(name, _)| {
+        let Some(field_ty) = definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_id| program.resolved_types().get(field_id))
+        else {
+            return false;
+        };
+        match field_ty {
+            ResolvedType::GenericParameter(candidate) if candidate == binder => {
+                generic_fields += 1;
+                true
+            }
+            ResolvedType::Primitive(PrimitiveType::String) => {
+                owned_string_fields += 1;
+                true
+            }
+            _ => false,
+        }
+    });
+    fields_admitted && generic_fields == 1 && owned_string_fields == 2
+}
+
+fn is_owned_generic_record_update_definition_used(
+    program: &CheckedProgram,
+    definition: &crate::core::ResolvedTypeDef,
+) -> bool {
+    is_owned_generic_record_update_definition(program, definition)
+        && program.callables().values().any(|callable| {
+            is_owned_generic_record_update_callable(program, callable)
+                && generic_record_update_envelope(program, callable)
+                    .is_some_and(|(_, candidate)| candidate.node_id == definition.node_id)
+        })
+}
+
 /// Recognize the generic callable envelope for the managed residual record
 /// island without inspecting surface AST. The body remains a direct field
 /// projection; concrete materialization validates the selected field and the
@@ -2259,10 +2314,12 @@ fn is_scalar_generic_record_update_callable(
     })
 }
 
-/// Recognize the S173 ownership-bearing update envelope: a two-field
-/// `Record<T>` with one generic field and one owned `String` sibling, a single
-/// direct String-literal override, and a record-rest expression. The concrete
-/// TypeDesc/glue receipt is still materialized only after specialization.
+/// Recognize the bounded ownership-bearing update envelope: a two- or
+/// three-field `Record<T>` with either homogeneous generic fields, the existing
+/// two-field generic-plus-String form, or one generic plus two String fields,
+/// a single direct String-literal override, and a record-rest expression. The
+/// concrete TypeDesc/glue receipt is still materialized only after
+/// specialization.
 pub(crate) fn is_owned_generic_record_update_callable(
     program: &CheckedProgram,
     callable: &crate::core::ir::ResolvedCallable,
@@ -2272,7 +2329,7 @@ pub(crate) fn is_owned_generic_record_update_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || definition.fields.len() != 2
+        || !matches!(definition.fields.len(), 2 | 3)
     {
         return false;
     }
@@ -2301,8 +2358,12 @@ pub(crate) fn is_owned_generic_record_update_callable(
     else {
         return false;
     };
-    generic_fields == 1
-        && string_fields == 1
+    let homogeneous = generic_fields == definition.fields.len() && string_fields == 0;
+    let heterogeneous_two =
+        definition.fields.len() == 2 && generic_fields == 1 && string_fields == 1;
+    let heterogeneous_three =
+        definition.fields.len() == 3 && generic_fields == 1 && string_fields == 2;
+    (homogeneous || heterogeneous_two || heterogeneous_three)
         && fields.len() == 1
         && fields[0].value.ty != generic_ty
         && matches!(
@@ -2476,6 +2537,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             matches!(definition.origin, crate::core::Origin::User(_))
                 && (!is_scalar_generic_record_definition(program, definition)
                     && !is_owned_generic_record_definition(program, definition)
+                    && !is_owned_generic_record_update_definition_used(program, definition)
                     && !definition.generic_parameters.is_empty()
                     || definition.kind != crate::core::ResolvedTypeKind::Record
                         && definition.kind != crate::core::ResolvedTypeKind::Alias

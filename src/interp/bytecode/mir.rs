@@ -5698,6 +5698,54 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_owned_generic_record_update_with_two_residuals_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_owned_multi_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("multi-residual update MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                )
+            })
+            .expect("multi-residual owned generic record update instance");
+        let crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract } =
+            instance.contract
+        else {
+            unreachable!()
+        };
+        assert_eq!(contract.arity, 3);
+        assert_eq!(contract.residual.len(), 2);
+        assert!(contract
+            .residual
+            .iter()
+            .all(|residual| residual.glue == crate::core::mir::types::MirGlueKind::OwnedString));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference multi-residual update execution");
+        let bytecode = compile_mir_program(&mir).expect("multi-residual update bytecode");
+        assert!(bytecode.ast.is_none());
+        assert!(bytecode.functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::UpdateRecordMove { .. }))
+        }));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("multi-residual update bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_materialized_generic_option_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

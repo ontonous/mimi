@@ -1,0 +1,14 @@
+// S175 positive: a three-field mixed-ABI owned update carries two residual moves.
+type Patch<T> { value: T, label: string, note: string }
+
+func replace<T>(patch: Patch<T>) -> Patch<T> {
+    Patch { label: "replaced", ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = Patch { value: 41, label: "old", note: "note" }
+    let updated = replace(patch)
+    drop(updated)
+    41
+}

@@ -4278,10 +4278,10 @@ fn detect_scalar_record_update_contract(
     Ok(contract)
 }
 
-/// Materialize the S173 ownership-bearing record update receipt. The MIR body
-/// must consume its sole record parameter, overwrite exactly one owned field,
-/// and return the rebuilt record directly; TypeDesc supplies old-drop,
-/// residual-move, and new-value MoveOut glue.
+/// Materialize the bounded ownership-bearing record update receipt. The MIR
+/// body must consume its sole record parameter, overwrite exactly one owned
+/// field, and return the rebuilt record directly; TypeDesc supplies old-drop,
+/// one-or-more residual-move entries, and new-value MoveOut glue.
 fn detect_owned_record_update_contract(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,

@@ -2329,13 +2329,13 @@ mod tests {
     }
 
     #[test]
-    fn owned_generic_record_update_three_field_shape_is_rejected_before_legacy_route() {
+    fn owned_generic_record_update_four_field_shape_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_update_owned_three_field_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("three-field owned generic record update must fail closed");
+            panic!("four-field owned generic record update must fail closed");
         };
         assert!(reason.contains("canonical generic record update candidate did not materialize"));
     }
@@ -2369,6 +2369,28 @@ mod tests {
             panic!("f64 mixed owned generic record update must fail closed");
         };
         assert!(reason.contains("canonical generic record update candidate did not materialize"));
+    }
+
+    #[test]
+    fn owned_generic_record_update_with_two_residuals_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_update_owned_multi_residual.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("owned generic record update with two residuals must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.arity == 3
+                    && contract.updates.len() == 1
+                    && contract.residual.len() == 2
+                    && contract.residual[0].glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+                    && contract.residual[1].glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+        )));
     }
 
     #[test]
