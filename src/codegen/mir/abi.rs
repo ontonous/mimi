@@ -253,7 +253,8 @@ pub(super) fn native_copy_variant_payload_type(
 ///
 /// The admitted native move-owned profiles are `Option<string>`,
 /// `Option<List<Copy scalar>>`, `Result<string, i32>` and
-/// `Result<List<Copy scalar>, i32>`. Their canonical TypeDesc/drop plans prove
+/// `Result<List<Copy scalar>, i32>` and the generic projection-only
+/// `Result<managed, bool>` shape. Their canonical TypeDesc/drop plans prove
 /// the active payload glue; the physical ABI is
 /// `{ i8 discriminant, managed payload }` for Option and
 /// `{ i8 discriminant, managed ok_payload, i32 err_payload }` for Result.
@@ -287,6 +288,11 @@ pub(super) fn native_non_copy_variant_payload_type(
         .unwrap_or("Option/Result");
     catalog
         .validate_non_copy_variant_contract(ty)
+        .or_else(|_| {
+            catalog
+                .validate_result_move_projection_variant(ty)
+                .map(|_| ())
+        })
         .map_err(|message| {
             NativeMirError::new(
                 ty.as_str(),

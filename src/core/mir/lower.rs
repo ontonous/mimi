@@ -843,7 +843,7 @@ fn rewrite_owned_variant_projection_call_argument(
             .validate_option_move_variant(source_ty)
             .is_err()
             && type_catalog
-                .validate_result_move_variant(source_ty)
+                .validate_result_move_projection_variant(source_ty)
                 .is_err()
         {
             return Err(
@@ -996,7 +996,7 @@ pub(crate) fn validate_owned_variant_projection_call_argument(
         .validate_option_move_variant(&source_ty)
         .is_err()
         && type_catalog
-            .validate_result_move_variant(&source_ty)
+            .validate_result_move_projection_variant(&source_ty)
             .is_err()
     {
         return Err(
@@ -1490,45 +1490,69 @@ fn materialize_generic_instance(
                 )
             })
         && type_catalog.validate_move_owned_payload(&concrete).is_ok();
-    // Result<T, i32>.unwrap follows the same move-owned payload proof as the
-    // Option island, but the fixed Err slot is part of the Result aggregate
-    // ABI. Keep this as an explicit second envelope so generic Result<T, i32>
-    // remains Copy-only unless the concrete TypeDesc proves the established
-    // Result managed-payload move contract (OwnedString or List<Copy scalar>).
-    let is_owned_result_projection = callable.signature.parameters.len() == 1
-        && callable.signature.result == generic_id
-        && program
-            .resolved_types()
-            .get(&callable.signature.parameters[0].ty)
+    // Result<T, i32|bool>.unwrap follows the same move-owned payload proof as
+    // the Option island, but the fixed Err slot is part of the Result
+    // aggregate ABI. Keep this as an explicit second envelope so generic
+    // Result remains Copy-only unless the concrete TypeDesc proves the
+    // established managed-payload move contract (OwnedString or
+    // List<Copy scalar>).
+    let is_owned_result_projection = {
+        let result_error_is_bool = callable
+            .signature
+            .parameters
+            .first()
+            .and_then(|parameter| program.resolved_types().get(&parameter.ty))
             .is_some_and(|ty| {
                 matches!(
                     ty,
-                    crate::core::ResolvedType::Result { ok, error }
-                        if ok == &generic_id
-                            && matches!(
-                                program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
-                            )
-                )
-            })
-        && callable.body.root.statements.is_empty()
-        && callable
-            .body
-            .root
-            .result
-            .as_deref()
-            .is_some_and(|expression| {
-                matches!(
-                    &expression.kind,
-                    ResolvedExprKind::Call(call)
+                    crate::core::ResolvedType::Result { error, .. }
                         if matches!(
-                            &call.callee,
-                            ResolvedCallee::Builtin(name)
-                                if name.as_str() == "builtin.method.result.unwrap"
-                        ) && call.arguments.len() == 1
+                            program.resolved_types().get(error),
+                            Some(crate::core::ResolvedType::Primitive(PrimitiveType::Bool))
+                        )
                 )
-            })
-        && type_catalog.validate_move_owned_payload(&concrete).is_ok();
+            });
+        callable.signature.parameters.len() == 1
+            && callable.signature.result == generic_id
+            && program
+                .resolved_types()
+                .get(&callable.signature.parameters[0].ty)
+                .is_some_and(|ty| {
+                    matches!(
+                        ty,
+                        crate::core::ResolvedType::Result { ok, error }
+                            if ok == &generic_id
+                                && matches!(
+                                    program.resolved_types().get(error),
+                                    Some(crate::core::ResolvedType::Primitive(
+                                        PrimitiveType::I32 | PrimitiveType::Bool
+                                    ))
+                                )
+                    )
+                })
+            && callable.body.root.statements.is_empty()
+            && callable
+                .body
+                .root
+                .result
+                .as_deref()
+                .is_some_and(|expression| {
+                    matches!(
+                        &expression.kind,
+                        ResolvedExprKind::Call(call)
+                            if matches!(
+                                &call.callee,
+                                ResolvedCallee::Builtin(name)
+                                    if name.as_str() == "builtin.method.result.unwrap"
+                            ) && call.arguments.len() == 1
+                    )
+                })
+            && if result_error_is_bool {
+                type_catalog.validate_owned_string(&concrete).is_ok()
+            } else {
+                type_catalog.validate_move_owned_payload(&concrete).is_ok()
+            }
+    };
     let is_owned_variant_projection = is_owned_option_projection || is_owned_result_projection;
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the

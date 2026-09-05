@@ -6283,6 +6283,64 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_result_bool_error_owned_string_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_error_owned_string.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic Result<T,bool> owned String MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+                )
+            })
+            .expect("owned generic Result<T,bool> projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let crate::core::mir::types::MirLayout::Result { error, .. } = &mir
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized Result<T,bool> TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain a Result layout");
+        };
+        assert_eq!(
+            mir.type_catalog().get(error).map(|desc| &desc.kind),
+            Some(&crate::core::mir::types::MirTypeKind::Primitive(
+                crate::core::PrimitiveType::Bool
+            ))
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Result<T,bool> owned String projection execution");
+        let bytecode = compile_mir_program(&mir)
+            .expect("generic Result<T,bool> owned String projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Result<T,bool> owned String projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_materialized_generic_result_bool_error_without_ast() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_result_bool_error.mimi");

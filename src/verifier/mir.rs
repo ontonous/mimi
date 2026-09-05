@@ -2192,7 +2192,13 @@ fn eval_instruction(
                 .ok_or_else(|| format!("MIR variant result '{}' is absent", result))?
                 .ty
                 .clone();
-            catalog.validate_non_copy_variant_contract(&result_ty)?;
+            catalog
+                .validate_non_copy_variant_contract(&result_ty)
+                .or_else(|_| {
+                    catalog
+                        .validate_result_move_projection_variant(&result_ty)
+                        .map(|_| ())
+                })?;
             let mut values = Vec::with_capacity(fields.len());
             let mut field_types = Vec::with_capacity(fields.len());
             for (field, value) in fields {

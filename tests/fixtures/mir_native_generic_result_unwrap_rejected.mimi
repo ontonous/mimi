@@ -1,4 +1,6 @@
-func unwrap<T>(value: Result<T, bool>) -> T {
+// Unsupported managed Result error shape remains fail-closed: only Copy i32
+// or bool Err slots are admitted by the generic projection contract.
+func unwrap<T>(value: Result<T, string>) -> T {
     value.unwrap()
 }
 

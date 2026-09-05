@@ -2775,7 +2775,30 @@ impl MirTypeCatalog {
         field_id: &NodeId,
         result_ty: &ResolvedTypeId,
     ) -> Result<MirVariantProjectionTrapContract, String> {
-        self.validate_non_copy_variant_contract(source_ty)?;
+        match self
+            .get(source_ty)
+            .map(|descriptor| descriptor.kind.clone())
+        {
+            Some(MirTypeKind::Option) => {
+                self.validate_option_move_variant(source_ty).map(|_| ())?
+            }
+            Some(MirTypeKind::Result) => self
+                .validate_result_move_projection_variant(source_ty)
+                .map(|_| ())?,
+            Some(kind) => {
+                return Err(format!(
+                    "type '{}' kind {:?} is outside the canonical consuming Option/Result projection contract",
+                    source_ty.as_str(),
+                    kind
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "type '{}' is absent from MIR type catalog",
+                    source_ty.as_str()
+                ));
+            }
+        }
         let projection = self.validated_variant_payload_projection_contract(
             source_ty, variant_id, field_id, result_ty,
         )?;
@@ -6981,7 +7004,7 @@ impl MirTypeCatalog {
             || ok != result_ty
             || (!error_is_same_generic && !error_is_scalar)
         {
-            return Err("generic Result projection placeholder requires Result<T, T> or Result<T, i32> and result T identity".into());
+            return Err("generic Result projection placeholder requires Result<T, T>, Result<T, i32>, or Result<T, bool> and result T identity".into());
         }
         if variants.len() != 2 {
             return Err(
@@ -7680,13 +7703,34 @@ impl MirTypeCatalog {
     ///
     /// `Ok` is admitted only when its payload is one of the TypeDesc-proven
     /// managed move payloads (`OwnedString` or `List<Copy scalar>`); `Err` is
-    /// fixed to Copy signed `i32`. The aggregate ABI, variant identities,
-    /// discriminants, payload identities, and complete recursive
-    /// Move/Clone/Drop proof remain canonical TypeDesc facts. Returning the
-    /// child glue family makes ownership explicit to every consumer.
+    /// fixed to Copy signed `i32` for the managed direct-call ABI. The
+    /// aggregate ABI, variant identities, discriminants, payload identities,
+    /// and complete recursive Move/Clone/Drop proof remain canonical TypeDesc
+    /// facts. Returning the child glue family makes ownership explicit to
+    /// every consumer.
     pub fn validate_result_move_variant(
         &self,
         ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+        self.validate_result_move_variant_with_error(ty, false)
+    }
+
+    /// Validate the managed Result shape used by generic consuming
+    /// projection. This is deliberately separate from the direct-call ABI:
+    /// the projection island admits a Copy `bool` Err slot in addition to the
+    /// established `i32` slot, while direct managed Result calls remain
+    /// `Result<managed, i32>` until their own route contract is widened.
+    pub(crate) fn validate_result_move_projection_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+        self.validate_result_move_variant_with_error(ty, true)
+    }
+
+    fn validate_result_move_variant_with_error(
+        &self,
+        ty: &ResolvedTypeId,
+        allow_bool_error: bool,
     ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
         let descriptor = self
             .get(ty)
@@ -7779,29 +7823,53 @@ impl MirTypeCatalog {
                 err_field.ty.as_str()
             )
         })?;
-        if err_descriptor.kind != MirTypeKind::Primitive(PrimitiveType::I32)
-            || err_descriptor.abi
-                != (MirAbiClass::Integer {
+        let valid_error = matches!(
+            (&err_descriptor.kind, &err_descriptor.abi),
+            (
+                MirTypeKind::Primitive(PrimitiveType::I32),
+                MirAbiClass::Integer {
                     bits: 32,
-                    signed: true,
-                })
+                    signed: true
+                }
+            ) | (
+                MirTypeKind::Primitive(PrimitiveType::Bool),
+                MirAbiClass::Bool
+            ) if allow_bool_error
+        ) || matches!(
+            (&err_descriptor.kind, &err_descriptor.abi),
+            (
+                MirTypeKind::Primitive(PrimitiveType::I32),
+                MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                }
+            )
+        );
+        if !valid_error
             || err_descriptor.layout != MirLayout::Scalar
             || err_descriptor.ownership != MirOwnership::Copy
         {
-            return Err("Result Err payload must be the canonical Copy signed i32 TypeDesc".into());
+            return Err(if allow_bool_error {
+                "Result Err payload must be the canonical Copy signed i32/bool TypeDesc".into()
+            } else {
+                "Result Err payload must be the canonical Copy signed i32 TypeDesc".into()
+            });
         }
         self.validate_copy_scalar(&err_field.ty)
             .map_err(|message| {
-                format!(
-                "Result Err payload is outside the canonical Copy signed i32 contract: {message}"
-            )
+                let contract = if allow_bool_error {
+                    "canonical Copy signed i32/bool contract"
+                } else {
+                    "canonical Copy signed i32 contract"
+                };
+                format!("Result Err payload is outside the {contract}: {message}")
             })?;
         Ok((ok_field.ty.clone(), payload_glue))
     }
 
     /// Validate the original narrow `Result<string, i32>` contract. Keep
     /// this named boundary for direct-call ABI users; generic managed
-    /// projections use [`Self::validate_result_move_variant`] so List glue is
+    /// projections use the projection-only Result validator so List glue is
     /// admitted only on that explicitly promoted path.
     pub fn validate_result_string_i32_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         let (_, payload_glue) = self.validate_result_move_variant(ty)?;

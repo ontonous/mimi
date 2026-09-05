@@ -540,7 +540,16 @@ impl<'a> CapabilityGate<'a> {
                 if descriptor.ownership == MirOwnership::Copy {
                     self.require_copy_aggregate(ty, &descriptor)?;
                 } else {
-                    catalog.validate_non_copy_variant_contract(ty).map_err(|message| {
+                    let validation = if self.allow_result_move_variant
+                        && matches!(descriptor.kind, MirTypeKind::Result)
+                    {
+                        catalog
+                            .validate_result_move_projection_variant(ty)
+                            .map(|_| ())
+                    } else {
+                        catalog.validate_non_copy_variant_contract(ty)
+                    };
+                    validation.map_err(|message| {
                         format!(
                             "non-Copy variant TypeDesc is outside the verifier capability: {message}"
                         )
@@ -1090,7 +1099,9 @@ impl<'a> CapabilityGate<'a> {
                     .map(|_| ())
                     .or_else(|_| {
                         if self.allow_result_move_variant {
-                            catalog.validate_result_move_variant(&result_ty).map(|_| ())
+                            catalog
+                                .validate_result_move_projection_variant(&result_ty)
+                                .map(|_| ())
                         } else {
                             Err("move-owned Result construction requires the promoted generic Result projection receipt".into())
                         }

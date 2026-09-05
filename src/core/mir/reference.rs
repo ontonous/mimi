@@ -6443,7 +6443,7 @@ mod tests {
 
     use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::lower::{lower_body, lower_program};
-    use crate::core::mir::types::{MirGlueKind, MirOwnership};
+    use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
     use crate::core::mir::{
         MirAggregateKind, MirGenericInstanceContract, MirInstruction, MirInstructionKind,
     };
@@ -7879,6 +7879,51 @@ mod tests {
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference owned generic Result projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn concrete_generic_result_bool_error_owned_string_unwrap_preserves_move_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_error_owned_string.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic Result<T,bool> owned String projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Move
+                            && contract.projection.move_out_glue == MirGlueKind::OwnedString
+                )
+            })
+            .expect("owned generic Result<T,bool> projection instance");
+        let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        let MirLayout::Result { error, .. } = &program
+            .type_catalog()
+            .get(&contract.source_ty)
+            .expect("specialized Result<T,bool> TypeDesc")
+            .layout
+        else {
+            panic!("specialized source must retain a Result layout");
+        };
+        assert_eq!(
+            program.type_catalog().get(error).map(|desc| &desc.kind),
+            Some(&MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
+        );
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic Result<T,bool> owned String projection execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
     }
 
