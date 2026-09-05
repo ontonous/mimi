@@ -23,21 +23,22 @@ use super::{
     classify_generic_option_projection_fallback_admission,
     classify_generic_result_projection_admission,
     classify_generic_result_projection_fallback_admission,
-    classify_generic_variant_predicate_admission, classify_option_string_variant_admission,
-    classify_scalar_collection_admission, contains_copy_option_i32_variant_candidate,
-    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
-    contains_flat_copy_record_candidate, contains_generic_option_projection_candidate,
+    classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
+    classify_option_string_variant_admission, classify_scalar_collection_admission,
+    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
+    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
+    contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
-    contains_generic_variant_predicate_candidate, contains_option_string_variant_candidate,
-    contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
-    contains_scalar_collection_operation_candidate, is_exact_s8_flow_transition,
-    is_s8_flow_transition_candidate, CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission,
-    FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
+    contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
+    contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
+    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
+    is_exact_s8_flow_transition, is_s8_flow_transition_candidate, CopyOptionI32VariantAdmission,
+    CopyResultI32VariantAdmission, FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
     GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
     GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
-    OptionStringVariantAdmission, ScalarCollectionAdmission,
+    ManagedResultCallAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ pub enum CanonicalMirRouteProfile {
     GenericOptionProjectionFallback,
     GenericResultProjection,
     GenericResultProjectionFallback,
+    ManagedResultCall,
     CopyOptionI32Variant,
     CopyOptionBoolVariant,
     CopyOptionI64Variant,
@@ -92,6 +94,7 @@ impl CanonicalMirRouteProfile {
             Self::GenericResultProjectionFallback => {
                 super::GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND
             }
+            Self::ManagedResultCall => super::MANAGED_RESULT_CALL_ISLAND,
             Self::CopyOptionI32Variant => super::COPY_OPTION_I32_VARIANT_ISLAND,
             Self::CopyOptionBoolVariant => super::COPY_OPTION_BOOL_VARIANT_ISLAND,
             Self::CopyOptionI64Variant => super::COPY_OPTION_I64_VARIANT_ISLAND,
@@ -120,6 +123,7 @@ impl CanonicalMirRouteProfile {
             Self::GenericResultProjectionFallback => {
                 admission.generic_result_projection_fallback_complete()
             }
+            Self::ManagedResultCall => admission.managed_result_call_complete(),
             Self::CopyOptionI32Variant => admission.copy_option_i32_complete(),
             Self::CopyOptionBoolVariant => admission.copy_option_bool_complete(),
             Self::CopyOptionI64Variant => admission.copy_option_i64_complete(),
@@ -145,6 +149,7 @@ impl CanonicalMirRouteProfile {
             Self::GenericResultProjectionFallback => {
                 route.materialized_generic_result_projection_fallback_candidate
             }
+            Self::ManagedResultCall => route.materialized_managed_result_call_candidate,
             Self::CopyOptionI32Variant => route.materialized_copy_option_i32_candidate,
             Self::CopyOptionBoolVariant => route.materialized_copy_option_bool_candidate,
             Self::CopyOptionI64Variant => route.materialized_copy_option_i64_candidate,
@@ -227,6 +232,7 @@ pub struct CanonicalMirRouteAdmission {
     pub generic_option_projection_fallback: GenericOptionProjectionFallbackAdmission,
     pub generic_result_projection: GenericResultProjectionAdmission,
     pub generic_result_projection_fallback: GenericResultProjectionFallbackAdmission,
+    pub managed_result_call: ManagedResultCallAdmission,
     pub copy_option_i32: CopyOptionI32VariantAdmission,
     pub copy_option_bool: CopyOptionI32VariantAdmission,
     pub copy_option_i64: CopyOptionI32VariantAdmission,
@@ -262,6 +268,10 @@ impl CanonicalMirRouteAdmission {
             || !matches!(
                 self.generic_result_projection_fallback,
                 GenericResultProjectionFallbackAdmission::OutsideProfile
+            )
+            || !matches!(
+                self.managed_result_call,
+                ManagedResultCallAdmission::OutsideProfile
             )
             || !matches!(
                 self.copy_option_i32,
@@ -332,6 +342,13 @@ impl CanonicalMirRouteAdmission {
         )
     }
 
+    pub const fn managed_result_call_complete(self) -> bool {
+        matches!(
+            self.managed_result_call,
+            ManagedResultCallAdmission::CompleteCoverage
+        )
+    }
+
     pub const fn generic_option_projection_fallback_complete(self) -> bool {
         matches!(
             self.generic_option_projection_fallback,
@@ -392,6 +409,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_generic_option_projection_fallback_candidate: bool,
     pub materialized_generic_result_projection_candidate: bool,
     pub materialized_generic_result_projection_fallback_candidate: bool,
+    pub materialized_managed_result_call_candidate: bool,
     pub materialized_copy_option_i32_candidate: bool,
     pub materialized_copy_option_bool_candidate: bool,
     pub materialized_copy_option_i64_candidate: bool,
@@ -417,6 +435,7 @@ pub fn classify_canonical_mir_route_admission(
         generic_result_projection_fallback: classify_generic_result_projection_fallback_admission(
             program,
         ),
+        managed_result_call: classify_managed_result_call_admission(program),
         copy_option_i32: classify_copy_option_i32_variant_admission(program),
         copy_option_bool: classify_copy_option_variant_admission(
             program,
@@ -489,6 +508,8 @@ pub fn materialize_canonical_mir_route(
         contains_generic_result_projection_candidate(&canonical);
     let materialized_generic_result_projection_fallback_candidate =
         contains_generic_result_projection_fallback_candidate(&canonical);
+    let materialized_managed_result_call_candidate =
+        contains_managed_result_call_candidate(&canonical);
     let materialized_copy_option_i32_candidate =
         contains_copy_option_i32_variant_candidate(&canonical);
     let materialized_copy_option_bool_candidate =
@@ -574,6 +595,15 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.managed_result_call_complete() && !materialized_managed_result_call_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ManagedResultCall,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete managed Result direct-call admission did not materialize a call ABI receipt"
+                    .into(),
+        });
+    }
     if admission.generic_option_projection_fallback_complete()
         && !materialized_generic_option_projection_fallback_candidate
     {
@@ -643,6 +673,7 @@ pub fn materialize_canonical_mir_route(
         materialized_generic_option_projection_fallback_candidate,
         materialized_generic_result_projection_candidate,
         materialized_generic_result_projection_fallback_candidate,
+        materialized_managed_result_call_candidate,
         materialized_copy_option_i32_candidate,
         materialized_copy_option_bool_candidate,
         materialized_copy_option_i64_candidate,
@@ -656,7 +687,13 @@ fn match_complete_or_compatibility(
     stage: CanonicalMirRouteFailureStage,
     message: String,
 ) -> CanonicalMirRouteMaterializationError {
-    if admission.collection_complete() {
+    if admission.managed_result_call_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ManagedResultCall,
+            stage,
+            message,
+        }
+    } else if admission.collection_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
             stage,
@@ -832,6 +869,7 @@ mod tests {
             generic_result_projection: GenericResultProjectionAdmission::OutsideProfile,
             generic_result_projection_fallback:
                 GenericResultProjectionFallbackAdmission::OutsideProfile,
+            managed_result_call: ManagedResultCallAdmission::OutsideProfile,
             copy_option_i32: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_bool: CopyOptionI32VariantAdmission::OutsideProfile,
             copy_option_i64: CopyOptionI32VariantAdmission::OutsideProfile,
@@ -1114,6 +1152,49 @@ mod tests {
     }
 
     #[test]
+    fn managed_result_call_materialization_carries_one_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_result_list_i32_call_return.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.managed_result_call,
+            ManagedResultCallAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("managed Result direct-call route must materialize");
+        assert!(route.materialized_managed_result_call_candidate);
+        assert!(route
+            .program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Call {
+                        variant_call_contract: Some(_),
+                        ..
+                    }
+                )
+            }));
+        crate::core::mir::validate_managed_result_call_island(&route.program)
+            .expect("managed Result direct-call island validator");
+    }
+
+    #[test]
+    fn unsupported_managed_result_call_admission_is_fail_closed() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_result_list_f64_call_rejected.mimi"
+        ));
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).managed_result_call,
+            ManagedResultCallAdmission::MixedCoverage
+        );
+    }
+
+    #[test]
     fn generic_option_projection_fallback_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi"
@@ -1153,6 +1234,7 @@ mod tests {
             CanonicalMirRouteProfile::GenericOptionProjection,
             CanonicalMirRouteProfile::GenericOptionProjectionFallback,
             CanonicalMirRouteProfile::GenericResultProjection,
+            CanonicalMirRouteProfile::ManagedResultCall,
             CanonicalMirRouteProfile::CopyOptionI32Variant,
             CanonicalMirRouteProfile::CopyOptionBoolVariant,
             CanonicalMirRouteProfile::CopyOptionI64Variant,

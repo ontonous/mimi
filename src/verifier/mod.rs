@@ -298,6 +298,20 @@ pub fn verify_checked_dual(
         );
     }
     if matches!(
+        admission.managed_result_call,
+        crate::core::mir::ManagedResultCallAdmission::MixedCoverage
+    ) || (crate::core::mir::has_managed_result_call_candidate(program)
+        && !matches!(
+            admission.managed_result_call,
+            crate::core::mir::ManagedResultCallAdmission::CompleteCoverage
+        ))
+    {
+        return Err(
+            "MIR-COVERAGE-001: managed Result direct-call candidate is outside complete coverage"
+                .into(),
+        );
+    }
+    if matches!(
         admission.copy_result_i32,
         crate::core::mir::CopyResultI32VariantAdmission::MixedCoverage
     ) {
@@ -341,7 +355,7 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 14] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 15] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
@@ -351,6 +365,7 @@ fn verify_closed_mir_program(
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjectionFallback,
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection,
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjectionFallback,
+        crate::core::mir::CanonicalMirRouteProfile::ManagedResultCall,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI32Variant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionBoolVariant,
         crate::core::mir::CanonicalMirRouteProfile::CopyOptionI64Variant,
@@ -451,6 +466,13 @@ fn verify_closed_mir_profile(
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjectionFallback => {}
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjection => {}
         crate::core::mir::CanonicalMirRouteProfile::GenericResultProjectionFallback => {}
+        crate::core::mir::CanonicalMirRouteProfile::ManagedResultCall => {
+            crate::core::mir::validate_managed_result_call_island(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the managed Result direct-call island: {errors:?}"
+                )
+            })?;
+        }
     }
     crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
         format!(

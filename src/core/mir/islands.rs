@@ -20,7 +20,7 @@ use crate::core::mir::types::{
     MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
     MirTypeKind,
 };
-use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedTypeId};
+use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId};
 
 use super::{
     MirFunction, MirGenericInstanceContract, MirInstructionKind, MirListOperation, MirTerminator,
@@ -56,6 +56,11 @@ pub const GENERIC_RESULT_PROJECTION_ISLAND: &str = "generic-result-projection-v1
 /// because both payload slots and the explicit fallback operand participate
 /// in the ABI.
 pub const GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND: &str = "generic-result-projection-fallback-v1";
+/// Name of the direct-call managed Result ABI island.  This profile covers
+/// concrete calls returning `Result<String, i32>` or
+/// `Result<List<Copy scalar>, i32>`; the call receipt carries the aggregate
+/// layout and move-owned return merge proof for every consumer.
+pub const MANAGED_RESULT_CALL_ISLAND: &str = "managed-result-call-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericVariantPredicateAdmission {
@@ -105,6 +110,91 @@ pub enum GenericResultProjectionFallbackAdmission {
     OutsideProfile,
     MixedCoverage,
     CompleteCoverage,
+}
+
+/// Checker-owned admission for concrete direct calls returning the managed
+/// Result ABI.  A mixed/unsupported call graph is still a candidate and must
+/// fail closed before a compatibility emitter can observe the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedResultCallAdmission {
+    OutsideProfile,
+    MixedCoverage,
+    CompleteCoverage,
+}
+
+/// Classify concrete direct calls whose checker-finalized result is a Result.
+/// The canonical MIR materializer remains the authority for the recursive
+/// TypeDesc/glue proof; this front-end gate only ensures that a recognized
+/// direct Result call cannot silently fall back to legacy when that proof is
+/// unavailable (for example `Result<List<f64>, i32>`).
+pub fn classify_managed_result_call_admission(
+    program: &CheckedProgram,
+) -> ManagedResultCallAdmission {
+    let mut has_candidate = false;
+    let mut unsupported_shape = false;
+    for site in program.call_sites().values() {
+        if site.kind != ResolvedCallKind::Function {
+            continue;
+        }
+        let Some(result_ty) = program.resolved_node_type(&site.node_id) else {
+            continue;
+        };
+        let Some(ResolvedType::Result { .. }) = program.resolved_types().get(result_ty) else {
+            continue;
+        };
+        has_candidate = true;
+        if !checker_managed_result_shape(program, result_ty) {
+            unsupported_shape = true;
+        }
+    }
+    if !has_candidate {
+        return ManagedResultCallAdmission::OutsideProfile;
+    }
+    if unsupported_shape || has_mixed_coverage(program) {
+        ManagedResultCallAdmission::MixedCoverage
+    } else {
+        ManagedResultCallAdmission::CompleteCoverage
+    }
+}
+
+/// Stable candidate hint for direct managed Result calls.  The hint is based
+/// only on checker call-site/type facts and is intentionally broader than the
+/// concrete TypeDesc contract so unsupported payloads are rejected rather
+/// than routed through a legacy consumer.
+pub fn has_managed_result_call_candidate(program: &CheckedProgram) -> bool {
+    program.call_sites().values().any(|site| {
+        site.kind == ResolvedCallKind::Function
+            && program
+                .resolved_node_type(&site.node_id)
+                .and_then(|ty| program.resolved_types().get(ty))
+                .is_some_and(|ty| matches!(ty, ResolvedType::Result { .. }))
+    })
+}
+
+fn checker_managed_result_shape(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+    let Some(ResolvedType::Result { ok, error }) = program.resolved_types().get(ty) else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(error),
+        Some(ResolvedType::Primitive(PrimitiveType::I32))
+    ) {
+        return false;
+    }
+    match program.resolved_types().get(ok) {
+        Some(ResolvedType::Primitive(PrimitiveType::String)) => true,
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) if item.as_str() == "builtin:type:List" && arguments.len() == 1 => {
+            matches!(
+                program.resolved_types().get(&arguments[0]),
+                Some(ResolvedType::Primitive(
+                    PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool,
+                ))
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Classify the checker-owned generic `Option<T>.unwrap()` envelope before MIR
@@ -2573,6 +2663,111 @@ pub fn contains_generic_result_projection_fallback_candidate(program: &MirProgra
                 if contract.projection.nominal.as_str() == "builtin:type:Result"
         )
     })
+}
+
+/// Return whether the canonical executable graph contains a direct call
+/// carrying the move-owned managed Result ABI receipt.  The receipt, rather
+/// than a backend representation, is the materialization fact consumed by
+/// route owners.
+pub fn contains_managed_result_call_candidate(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                let MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } = &instruction.kind
+                else {
+                    return false;
+                };
+                receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                    && program
+                        .type_catalog()
+                        .get(&receipt.result_ty)
+                        .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
+            })
+        })
+    })
+}
+
+/// Validate the complete direct managed Result call island before a backend
+/// consumes the graph.  Every Result-typed direct call must carry the exact
+/// TypeDesc-derived receipt; a missing receipt or drift is a hard MIR error,
+/// not an invitation to re-check the source or call a legacy emitter.
+pub fn validate_managed_result_call_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    let mut errors = BTreeSet::new();
+    for function in program.functions().values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let MirInstructionKind::Call {
+                    result,
+                    callee: ResolvedCallee::Function(callee),
+                    type_arguments,
+                    arguments,
+                    variant_call_contract,
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let Some(result) = result else { continue };
+                let Some(result_value) = function.values.get(result) else {
+                    errors.insert(format!(
+                        "{} managed Result call result value '{}' is absent",
+                        MANAGED_RESULT_CALL_ISLAND, result.0
+                    ));
+                    continue;
+                };
+                let Some(result_desc) = program.type_catalog().get(&result_value.ty) else {
+                    errors.insert(format!(
+                        "{} managed Result call result type '{}' is absent",
+                        MANAGED_RESULT_CALL_ISLAND,
+                        result_value.ty.as_str()
+                    ));
+                    continue;
+                };
+                if result_desc.kind != MirTypeKind::Result {
+                    continue;
+                }
+                let Some(receipt) = variant_call_contract else {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' has no ABI receipt",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                    continue;
+                };
+                let parameter_types = arguments
+                    .iter()
+                    .filter_map(|argument| {
+                        function.values.get(argument).map(|value| value.ty.clone())
+                    })
+                    .collect::<Vec<_>>();
+                if parameter_types.len() != arguments.len() {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' has an absent argument value",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                    continue;
+                }
+                if let Err(message) = program.type_catalog().validate_variant_call_abi_receipt(
+                    callee,
+                    type_arguments,
+                    &parameter_types,
+                    &result_value.ty,
+                    receipt,
+                ) {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' receipt failed: {message}",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.into_iter().collect())
+    }
 }
 
 /// Return whether the canonical executable graph contains the S8 silent-local

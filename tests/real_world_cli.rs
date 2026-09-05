@@ -3546,6 +3546,118 @@ fn canonical_mir_native_result_list_i32_call_return_matches_mir_run() {
 }
 
 #[test]
+fn default_route_result_list_i32_call_return_matches_canonical_backends() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_list_i32_call_return.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<List<i32>, i32> run");
+    assert_eq!(run.status.code(), Some(48));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-result-list-i32-call-return-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default managed Result<List<i32>, i32> build");
+    assert!(
+        build.status.success(),
+        "default managed Result<List<i32>, i32> build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default managed Result<List<i32>, i32> binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(48));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<List<i32>, i32> verifier");
+    assert!(
+        verify.status.success(),
+        "default managed Result<List<i32>, i32> verification failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(output.contains("2/2 verified"), "{output}");
+}
+
+#[test]
+fn default_route_result_string_i32_call_return_matches_canonical_backends() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_string_i32_call_return.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<string, i32> run");
+    assert_eq!(run.status.code(), Some(48));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-result-string-i32-call-return-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default managed Result<string, i32> build");
+    assert!(
+        build.status.success(),
+        "default managed Result<string, i32> build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default managed Result<string, i32> binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(48));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<string, i32> verifier");
+    assert!(
+        verify.status.success(),
+        "default managed Result<string, i32> verification failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(output.contains("2/2 verified"), "{output}");
+}
+
+#[test]
 fn canonical_mir_result_list_f64_call_fails_closed_before_backends() {
     let fixture = project_root()
         .join("tests")
@@ -3579,6 +3691,46 @@ fn canonical_mir_result_list_f64_call_fails_closed_before_backends() {
         );
         assert!(
             diagnostics.contains("Copy scalar") || diagnostics.contains("canonical"),
+            "{command} lost the stable fail-closed diagnostic:\n{diagnostics}"
+        );
+    }
+}
+
+#[test]
+fn default_route_result_list_f64_call_fails_closed_without_legacy_fallback() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_list_f64_call_rejected.mimi");
+    for command in ["run", "build", "verify"] {
+        let mut invocation = Command::new(mimi_bin());
+        invocation
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&fixture);
+        if command == "build" {
+            let output_path = std::env::temp_dir().join(format!(
+                "mimi-default-rejected-result-list-f64-{}",
+                std::process::id()
+            ));
+            invocation.arg("-o").arg(&output_path);
+        }
+        let output = invocation
+            .output()
+            .expect("failed to spawn default rejected Result<List<f64>, i32> command");
+        assert!(
+            !output.status.success(),
+            "default route unexpectedly accepted Result<List<f64>, i32> for {command}"
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains("managed Result direct-call")
+                || diagnostics.contains("canonical")
+                || diagnostics.contains("Copy scalar"),
             "{command} lost the stable fail-closed diagnostic:\n{diagnostics}"
         );
     }

@@ -5,8 +5,8 @@
 //! by legacy code on failure: programs either pass this preflight and use the
 //! canonical route, or remain on the legacy route because their capability
 //! set is not yet migrated. Once the scalar collection or exact non-Copy
-//! `Option<string>` island is recognized, its failure is an explicit rejection
-//! rather than compatibility fallback.
+//! `Option<string>` or managed direct-Result-call island is recognized, its
+//! failure is an explicit rejection rather than compatibility fallback.
 
 use std::collections::HashSet;
 
@@ -124,7 +124,8 @@ pub(crate) fn build_canonical_program_for_sources(
 /// fallback projection island, generic `Result<T, T>`/`Result<T, i32>`
 /// `unwrap()`, or generic `Result<T, T>.unwrap_or(T)` /
 /// `Result<T, i32>.unwrap_or(T)` fallback projection
-/// island.
+/// island, or a concrete managed direct `Result` call with the closed
+/// String/List payload contract.
 /// The candidate then
 /// has to pass every consumer preflight before any caller starts execution or
 /// LLVM emission. A `Legacy(reason)` result is an explicit
@@ -146,6 +147,7 @@ pub(crate) fn select_default_route(
     let generic_option_projection_fallback_admission = admission.generic_option_projection_fallback;
     let generic_result_projection_admission = admission.generic_result_projection;
     let generic_result_projection_fallback_admission = admission.generic_result_projection_fallback;
+    let managed_result_call_admission = admission.managed_result_call;
     let copy_option_i32_admission = admission.copy_option_i32;
     let copy_option_bool_admission = admission.copy_option_bool;
     let copy_option_i64_admission = admission.copy_option_i64;
@@ -241,6 +243,11 @@ pub(crate) fn select_default_route(
         generic_result_projection_fallback_admission,
         mimi::core::mir::GenericResultProjectionFallbackAdmission::CompleteCoverage
     );
+    let managed_result_call_hint = mimi::core::mir::has_managed_result_call_candidate(checked);
+    let complete_managed_result_call_candidate = matches!(
+        managed_result_call_admission,
+        mimi::core::mir::ManagedResultCallAdmission::CompleteCoverage
+    );
     let copy_option_i32_hint = !matches!(
         copy_option_i32_admission,
         mimi::core::mir::CopyOptionI32VariantAdmission::OutsideProfile
@@ -295,6 +302,7 @@ pub(crate) fn select_default_route(
         && !generic_option_projection_fallback_hint
         && !generic_result_projection_hint
         && !generic_result_projection_fallback_hint
+        && !managed_result_call_hint
         && !copy_option_i32_hint
         && !copy_option_bool_hint
         && !copy_option_i64_hint
@@ -302,6 +310,11 @@ pub(crate) fn select_default_route(
         && !copy_result_i32_hint
     {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
+    }
+    if managed_result_call_hint && !complete_managed_result_call_candidate {
+        return DefaultMirRoute::Rejected(
+            "managed Result direct-call candidate is outside complete coverage".into(),
+        );
     }
     if generic_variant_hint && !complete_generic_variant_candidate {
         return reject_migrated_candidates(
@@ -406,6 +419,14 @@ pub(crate) fn select_default_route(
             stage,
             message,
         }) => {
+            if matches!(
+                profile,
+                mimi::core::mir::CanonicalMirRouteProfile::ManagedResultCall
+            ) {
+                return DefaultMirRoute::Rejected(format!(
+                    "managed Result direct-call canonical MIR {stage:?} failed: {message}"
+                ));
+            }
             let reason = match stage {
                 mimi::core::mir::CanonicalMirRouteFailureStage::Construction => {
                     if matches!(
@@ -540,6 +561,12 @@ pub(crate) fn select_default_route(
             // different: its unsupported shape must fail closed even when
             // canonical construction cannot produce a receipt, otherwise a
             // List<T> contract hole would silently enter legacy.
+            if managed_result_call_hint {
+                return DefaultMirRoute::Rejected(
+                    "managed Result direct-call candidate did not materialize a supported MIR shape"
+                        .into(),
+                );
+            }
             if collection_hint && mimi::core::mir::has_unsupported_list_reverse_candidate(checked) {
                 return reject_migrated_candidates(
                     flow_candidate,
@@ -721,6 +748,8 @@ pub(crate) fn select_default_route(
         route.materialized_generic_result_projection_candidate;
     let materialized_generic_result_projection_fallback_candidate =
         route.materialized_generic_result_projection_fallback_candidate;
+    let materialized_managed_result_call_candidate =
+        route.materialized_managed_result_call_candidate;
     let materialized_copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
     let materialized_copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
     let materialized_copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
@@ -744,6 +773,8 @@ pub(crate) fn select_default_route(
             && materialized_generic_result_projection_candidate)
         || (complete_generic_result_projection_fallback_candidate
             && materialized_generic_result_projection_fallback_candidate);
+    let managed_result_call_route_candidate = complete_managed_result_call_candidate
+        || (managed_result_call_hint && materialized_managed_result_call_candidate);
     let record_route_candidate =
         complete_record_candidate || (record_hint && copy_record) || generic_route_candidate;
     let option_string_route_candidate = complete_option_string_candidate
@@ -870,6 +901,7 @@ pub(crate) fn select_default_route(
         && !copy_option_i64_route_candidate
         && !copy_option_f64_route_candidate
         && !copy_result_i32_route_candidate
+        && !managed_result_call_route_candidate
     {
         return DefaultMirRoute::Legacy(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
@@ -1026,12 +1058,26 @@ pub(crate) fn select_default_route(
         }
     }
 
+    if materialized_managed_result_call_candidate {
+        if let Err(errors) = mimi::core::mir::validate_managed_result_call_island(&canonical) {
+            return DefaultMirRoute::Rejected(format!(
+                "{} capability gate failed: {errors:?}",
+                mimi::core::mir::MANAGED_RESULT_CALL_ISLAND
+            ));
+        }
+    }
+
     // The MIR verifier intentionally skips bodies with no contract.  That is
     // not permission for an unsupported instruction to enter a default
     // native/bytecode island.  Scan the complete canonical graph before the
     // verifier's contract pass so every selected consumer has an explicit
     // capability, including no-obligation functions.
     if let Err(error) = mimi::verifier::validate_mir_capabilities(&canonical) {
+        if materialized_managed_result_call_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "managed Result direct-call canonical MIR verifier capability gate failed: {error:?}"
+            ));
+        }
         if user_record_hint
             && error
                 .iter()
@@ -1059,6 +1105,11 @@ pub(crate) fn select_default_route(
     // gate.  The actual consumers repeat their own validation immediately
     // before use.
     if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&canonical) {
+        if materialized_managed_result_call_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "managed Result direct-call MIR-bytecode preflight failed: {errors:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -1073,6 +1124,11 @@ pub(crate) fn select_default_route(
         );
     }
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&canonical) {
+        if materialized_managed_result_call_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "managed Result direct-call native MIR preflight failed: {errors:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -1099,6 +1155,11 @@ pub(crate) fn select_default_route(
             )
         }),
         Err(error) => {
+            if materialized_managed_result_call_candidate {
+                return DefaultMirRoute::Rejected(format!(
+                    "managed Result direct-call verifier contract pass failed: {error}"
+                ));
+            }
             return reject_migrated_candidates_with_copy_f64(
                 flow_route_candidate,
                 collection_route_candidate,
@@ -1110,10 +1171,16 @@ pub(crate) fn select_default_route(
                 copy_option_f64_route_candidate,
                 copy_result_i32_route_candidate,
                 format!("verifier contract pass failed: {error}"),
-            )
+            );
         }
     };
     if !verifier_ready {
+        if materialized_managed_result_call_candidate {
+            return DefaultMirRoute::Rejected(
+                "managed Result direct-call verifier returned an unsupported or inconclusive result"
+                    .into(),
+            );
+        }
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
