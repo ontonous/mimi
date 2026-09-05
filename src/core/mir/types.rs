@@ -3850,6 +3850,7 @@ impl MirTypeCatalog {
                 operation,
                 crate::core::mir::MirListOperation::Len
                     | crate::core::mir::MirListOperation::Reverse
+                    | crate::core::mir::MirListOperation::Concat
             )
         {
             return Err(format!(
@@ -3904,6 +3905,10 @@ impl MirTypeCatalog {
             crate::core::mir::MirListOperation::Concat => {
                 let argument_ty = argument_ty
                     .ok_or_else(|| "List.concat requires a second List argument".to_string())?;
+                if nested_receiver {
+                    self.validate_nested_list_payload(list_ty)?;
+                    self.validate_nested_list_payload(argument_ty)?;
+                }
                 self.validate_list_glue(argument_ty, MirGlueOperation::MoveOut)?;
                 if result_ty != list_ty || result_ty != argument_ty {
                     return Err(format!(
@@ -9315,7 +9320,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_list_len_and_reverse_contracts_clone_without_consuming_parent() {
+    fn nested_list_len_reverse_and_concat_contracts_are_explicit() {
         let mut table = ResolvedTypeTable::new();
         let i32_id = table
             .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
@@ -9359,9 +9364,14 @@ mod tests {
             .expect("nested List.reverse clone contract");
         assert_eq!(reverse.mode, MirListOperationMode::Nested);
         let concat = catalog
-            .validate_list_operation(&nested_list_id, &nested_list_id, MirListOperation::Concat)
-            .expect_err("nested List.concat remains outside S193");
-        assert!(concat.contains("one-level nested List construction/clone/drop"));
+            .validated_list_operation_contract_with_argument(
+                &nested_list_id,
+                &nested_list_id,
+                Some(&nested_list_id),
+                MirListOperation::Concat,
+            )
+            .expect("nested List.concat child-move contract");
+        assert_eq!(concat.mode, MirListOperationMode::Nested);
     }
 
     #[test]

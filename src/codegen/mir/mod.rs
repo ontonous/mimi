@@ -1,6 +1,6 @@
 //! AST-free native consumer for the closed scalar/owned-String,
 //! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List
-//! (including bounded nested List construction/clone/drop/outer-len/index/reverse), and
+//! (including bounded nested List construction/clone/drop/outer-len/index/reverse/concat), and
 //! local immutable-borrow
 //! Canonical MIR slices.
 //!
@@ -4511,6 +4511,35 @@ mod tests {
         assert!(generator
             .module
             .get_function("mimi_mir_list_reverse_nested")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_nested")
+            .is_some());
+    }
+
+    #[test]
+    fn native_emitter_consumes_nested_list_concat_with_child_move_abi() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_nested_list_concat.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List.concat execution");
+        assert_eq!(reference, MirRuntimeValue::Int(3));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_nested_list_concat");
+        generator
+            .compile_mir_native(&program)
+            .expect("native nested List.concat must consume canonical MIR");
+        generator
+            .module
+            .verify()
+            .expect("native nested List.concat module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_concat_nested")
             .is_some());
         assert!(generator
             .module

@@ -2107,4 +2107,28 @@ mod tests {
             })
         }));
     }
+
+    #[test]
+    fn accepts_nested_list_concat_with_materialized_child_move_receipt() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_concat.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("nested List.concat move receipt must satisfy verifier capability gate");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::ListOp {
+                            operation: crate::core::mir::MirListOperation::Concat,
+                            list_operation_contract: Some(ref receipt),
+                            ..
+                        } if receipt.mode
+                            == crate::core::mir::types::MirListOperationMode::Nested
+                    )
+                })
+            })
+        }));
+    }
 }

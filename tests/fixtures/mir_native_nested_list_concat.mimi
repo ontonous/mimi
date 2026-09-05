@@ -1,0 +1,15 @@
+// Canonical nested List positive: concat consumes both outer handles and
+// transfers their child Lists into one independently droppable result.
+func main() -> i32 {
+    ensures: result == 3
+    let first: List<i32> = [1, 2]
+    let second: List<i32> = [3]
+    let left: List<List<i32>> = [first]
+    let right: List<List<i32>> = [second]
+    let joined = left.concat(right)
+    let selected = joined[1]
+    let value = selected[0]
+    drop(selected)
+    drop(joined)
+    value
+}

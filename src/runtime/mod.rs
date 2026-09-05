@@ -1742,6 +1742,73 @@ pub unsafe extern "C" fn mimi_mir_list_concat_scalar(
     result
 }
 
+/// Consume two one-level nested Lists and concatenate their owned child
+/// handles into a fresh outer List. The child pointers are moved slot by slot
+/// (not cloned); both source headers and storage are freed after their slots
+/// are nulled, so each child has exactly one resulting owner.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_concat_nested(
+    left: *mut MimiList,
+    right: *mut MimiList,
+) -> *mut MimiList {
+    if left.is_null() || right.is_null() || left == right {
+        mir_list_abort(b"[E0800] canonical nested MIR List concat handle is invalid\0");
+    }
+    for source in [left, right] {
+        let source_ref = unsafe { &*source };
+        if source_ref.element_kind != ListElementKind::List || source_ref.len < 0 {
+            mir_list_abort(b"[E0800] canonical nested MIR List concat kind disagrees\0");
+        }
+        let cap = list_cap(source_ref);
+        if (cap > 0 && source_ref.len > cap) || (source_ref.len > 0 && source_ref.data.is_null()) {
+            mir_list_abort(b"[E0800] canonical nested MIR List concat storage is invalid\0");
+        }
+        for index in 0..source_ref.len as usize {
+            let child = unsafe { (*source_ref.data.add(index)).cast::<MimiList>() };
+            if child.is_null()
+                || !matches!(
+                    unsafe { (*child).element_kind },
+                    ListElementKind::I64 | ListElementKind::Bool
+                )
+            {
+                mir_list_abort(b"[E0800] canonical nested MIR List child kind is invalid\0");
+            }
+        }
+    }
+    let total_len = unsafe { (*left).len }
+        .checked_add(unsafe { (*right).len })
+        .unwrap_or_else(|| {
+            mir_list_abort(b"[E0800] canonical nested MIR List concat length overflow\0")
+        });
+    let result = unsafe { mimi_mir_list_new_nested() };
+    if result.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List concat allocation failed\0");
+    }
+    for source in [left, right] {
+        let source_len = unsafe { (*source).len } as usize;
+        for index in 0..source_len {
+            let child = unsafe { (*(*source).data.add(index)).cast::<MimiList>() };
+            if unsafe { mimi_mir_list_push_nested(result, child) } == 0 {
+                mir_list_abort(b"[E0800] canonical nested MIR List concat append failed\0");
+            }
+            // Transfer is complete; the source outer header must not retain a
+            // child pointer that its destructor could free a second time.
+            unsafe { *(*source).data.add(index) = std::ptr::null_mut() };
+        }
+        unsafe { (*source).len = 0 };
+    }
+    if unsafe { (*result).len } != total_len {
+        mir_list_abort(b"[E0800] canonical nested MIR List concat result length disagrees\0");
+    }
+    // Source slots are null and lengths are zero, so freeing the outer
+    // headers cannot reclaim any child now owned by the result.
+    unsafe {
+        mimi_list_free(left, false);
+        mimi_list_free(right, false);
+    }
+    result
+}
+
 /// Drop a scalar list allocated by canonical native MIR.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8) {
@@ -2176,6 +2243,41 @@ mod canonical_mir_list_tests {
             );
             mimi_mir_list_drop_nested(reversed);
             mimi_mir_list_drop_nested(parent);
+        }
+    }
+
+    #[test]
+    fn canonical_nested_list_concat_moves_children_into_fresh_outer_list() {
+        let left_child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        let right_child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!left_child.is_null());
+        assert!(!right_child.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(left_child, ListElementKind::I64 as i8, 1),
+                1
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(right_child, ListElementKind::I64 as i8, 3),
+                1
+            );
+        }
+        let left = unsafe { mimi_mir_list_new_nested() };
+        let right = unsafe { mimi_mir_list_new_nested() };
+        assert!(!left.is_null());
+        assert!(!right.is_null());
+        unsafe {
+            assert_eq!(mimi_mir_list_push_nested(left, left_child), 1);
+            assert_eq!(mimi_mir_list_push_nested(right, right_child), 1);
+            let joined = mimi_mir_list_concat_nested(left, right);
+            assert!(!joined.is_null());
+            assert_eq!((*joined).len, 2);
+            let selected = (*(*joined).data.add(1)).cast::<MimiList>();
+            assert_eq!(
+                mimi_mir_list_get_scalar(selected, ListElementKind::I64 as i8, 0),
+                3
+            );
+            mimi_mir_list_drop_nested(joined);
         }
     }
 

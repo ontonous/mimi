@@ -169,9 +169,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             (MirListOperation::Len, false) => "mimi_mir_list_len_scalar",
             (MirListOperation::Reverse, true) => "mimi_mir_list_reverse_nested",
             (MirListOperation::Reverse, false) => "mimi_mir_list_reverse_scalar",
-            (MirListOperation::Concat, _) => "mimi_mir_list_concat_scalar",
+            (MirListOperation::Concat, true) => "mimi_mir_list_concat_nested",
+            (MirListOperation::Concat, false) => "mimi_mir_list_concat_scalar",
         };
-        if operation == MirListOperation::Concat {
+        if operation == MirListOperation::Concat && !nested_mode {
             crate::codegen::builtins::register_mir_list_concat_runtime(
                 &self.generator.module,
                 self.generator.context,

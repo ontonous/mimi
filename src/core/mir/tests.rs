@@ -3838,6 +3838,43 @@ fn materializes_nested_list_reverse_with_recursive_clone_receipt() {
 }
 
 #[test]
+fn materializes_nested_list_concat_with_child_move_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_nested_list_concat.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("nested List.concat must lower to canonical MIR");
+    let target = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("nested List.concat target");
+    let receipt = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::ListOp {
+                operation: crate::core::mir::MirListOperation::Concat,
+                list_operation_contract: Some(receipt),
+                ..
+            } => Some(receipt),
+            _ => None,
+        })
+        .expect("nested List.concat receipt");
+    assert_eq!(
+        receipt.mode,
+        crate::core::mir::types::MirListOperationMode::Nested
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested List.concat execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(3));
+}
+
+#[test]
 fn materializes_generic_scalar_list_projection_with_a_constant_one_receipt() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_list_projection_index_one.mimi");
@@ -5605,6 +5642,52 @@ fn canonical_program_gate_rejects_missing_or_stale_list_operation_receipt() {
         canonical.type_catalog().clone(),
     )
     .expect_err("stale List operation receipt must fail before backend");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("List operation receipt disagrees with TypeDesc")
+    }));
+}
+
+#[test]
+fn canonical_nested_concat_receipt_rejects_forged_scalar_mode() {
+    let source = include_str!("../../../tests/fixtures/mir_native_nested_list_concat.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical nested List.concat MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical.functions().get(&owner).cloned().expect("main");
+    let instruction = forged
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::ListOp {
+                    operation: MirListOperation::Concat,
+                    ..
+                }
+            )
+        })
+        .expect("nested List.concat operation");
+    let MirInstructionKind::ListOp {
+        list_operation_contract: Some(receipt),
+        ..
+    } = &mut instruction.kind
+    else {
+        unreachable!()
+    };
+    receipt.mode = crate::core::mir::types::MirListOperationMode::Scalar;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        std::collections::BTreeMap::from([(owner, forged)]),
+        canonical.type_catalog().clone(),
+    )
+    .expect_err("nested List.concat scalar mode must fail before consumers");
     assert!(errors.iter().any(|error| {
         error
             .message
