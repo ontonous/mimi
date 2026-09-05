@@ -5516,6 +5516,64 @@ impl MirTypeCatalog {
             .map(|_| ())
     }
 
+    /// Validate a consuming variant construction at the MIR ownership
+    /// boundary.  The ordinary constructor check proves field identity and
+    /// type equality; this stronger view additionally proves that the result
+    /// is non-Copy, that its recursive MoveOut glue exists, and that every
+    /// supplied payload field agrees with the active variant's canonical drop
+    /// schedule.  Consumers must not infer this relationship from a runtime
+    /// payload vector or a native aggregate layout.
+    pub fn validate_variant_move_construct(
+        &self,
+        result_ty: &ResolvedTypeId,
+        nominal: &crate::core::NominalTypeId,
+        variant: &NodeId,
+        field_ids: &[NodeId],
+        field_types: &[ResolvedTypeId],
+    ) -> Result<(), String> {
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                result_ty.as_str()
+            )
+        })?;
+        if descriptor.ownership == MirOwnership::Copy {
+            return Err("ConstructVariantMove requires a non-Copy variant value".into());
+        }
+        let variant_desc =
+            self.validated_variant_construct(result_ty, nominal, variant, field_ids, field_types)?;
+        self.validate_glue(result_ty, MirGlueOperation::MoveOut)?;
+        let drop_plan = self.validated_variant_drop_plan(result_ty, variant)?;
+        for (index, field) in variant_desc.fields.iter().enumerate() {
+            let scheduled = drop_plan
+                .fields
+                .iter()
+                .find(|candidate| candidate.index == index)
+                .ok_or_else(|| {
+                    format!(
+                        "variant '{}' Move/Drop payload field {} is absent from TypeDesc plan",
+                        variant_desc.name, index
+                    )
+                })?;
+            let child = self.get(&field.ty).ok_or_else(|| {
+                format!(
+                    "variant '{}' payload field '{}' type '{}' is absent from MIR type catalog",
+                    variant_desc.name,
+                    field.name,
+                    field.ty.as_str()
+                )
+            })?;
+            if child.glue.drop != scheduled.glue {
+                return Err(format!(
+                    "variant '{}' payload field '{}' Drop glue disagrees with TypeDesc plan",
+                    variant_desc.name, field.name
+                ));
+            }
+            self.validate_glue(&field.ty, MirGlueOperation::MoveOut)?;
+        }
+        Ok(())
+    }
+
     /// Validate and materialize the receipt for a read-only Option/Result
     /// predicate. Only flat Copy variants are admitted in this slice: the
     /// predicate itself does not move the source, but its physical tag must

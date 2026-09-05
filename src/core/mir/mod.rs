@@ -1633,6 +1633,215 @@ pub(crate) fn validate_move_owned_result_return_merge(
     Ok(())
 }
 
+/// Check that checker-projected ownership events have a corresponding
+/// canonical MIR transfer boundary.  The checker remains the source of
+/// ownership facts; this pass only proves that a consumer-visible value
+/// identity is not orphaned from the MIR instruction/terminator that carries
+/// the event.  Events without a local value (for example synthetic session
+/// resources) retain their existing structural validation only.
+pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<MirValidationError> {
+    let mut moves = BTreeSet::new();
+    let mut drops = BTreeSet::new();
+    let mut returns = BTreeSet::new();
+    let mut transfers = BTreeSet::new();
+    let mut borrows = BTreeSet::new();
+    let mut consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                MirInstructionKind::Move { result, source }
+                | MirInstructionKind::MoveProject {
+                    result,
+                    base: source,
+                    ..
+                }
+                | MirInstructionKind::MoveProjectDrop {
+                    result,
+                    base: source,
+                    ..
+                }
+                | MirInstructionKind::VariantProjectMove {
+                    result,
+                    base: source,
+                    ..
+                } => {
+                    moves.insert(source.clone());
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(source.clone());
+                }
+                MirInstructionKind::ConstructVariantMove { result, fields, .. } => {
+                    let payloads = fields.iter().map(|(_, value)| value.clone());
+                    moves.extend(payloads.clone());
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .extend(payloads);
+                }
+                MirInstructionKind::ListOp {
+                    operation: MirListOperation::Concat,
+                    result,
+                    list,
+                    argument,
+                    ..
+                } => {
+                    moves.insert(list.clone());
+                    if let Some(argument) = argument {
+                        moves.insert(argument.clone());
+                        consuming_edges
+                            .entry(result.clone())
+                            .or_default()
+                            .extend([list.clone(), argument.clone()]);
+                    }
+                }
+                MirInstructionKind::SetOp {
+                    result,
+                    operation: MirSetOperation::Insert | MirSetOperation::Remove,
+                    set,
+                    ..
+                } => {
+                    moves.insert(set.clone());
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(set.clone());
+                }
+                MirInstructionKind::Drop { value } => {
+                    drops.insert(value.clone());
+                }
+                MirInstructionKind::Call { arguments, .. }
+                | MirInstructionKind::FlowTransition { arguments, .. } => {
+                    moves.extend(arguments.iter().cloned());
+                    transfers.extend(arguments.iter().cloned());
+                }
+                MirInstructionKind::BuiltinCall { arguments, .. } => {
+                    moves.extend(arguments.iter().cloned());
+                }
+                MirInstructionKind::Borrow { source, .. } => {
+                    borrows.insert(source.clone());
+                }
+                _ => {}
+            }
+        }
+        if let MirTerminator::Return { value: Some(value) } = &block.terminator {
+            returns.insert(value.clone());
+        }
+    }
+
+    // A checker Return event names the resource's stable local identity, while
+    // the MIR Return terminator often carries a fresh expression value.  Close
+    // that representation gap only through explicit consuming edges (never by
+    // type/layout inference) so the receipt still proves one ownership path.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current_returns = returns.iter().cloned().collect::<Vec<_>>();
+        for returned in current_returns {
+            let Some(sources) = consuming_edges.get(&returned) else {
+                continue;
+            };
+            for source in sources {
+                if returns.insert(source.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    for (index, event) in function.ownership.events.iter().enumerate() {
+        let Some(value) = &event.value else { continue };
+        let matched = match event.kind {
+            MirOwnershipEventKind::Move => moves.contains(value),
+            MirOwnershipEventKind::Drop => drops.contains(value),
+            MirOwnershipEventKind::Return => returns.contains(value),
+            MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild => {
+                transfers.contains(value)
+            }
+            MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut => {
+                borrows.contains(value)
+            }
+            MirOwnershipEventKind::BorrowEnd => true,
+            MirOwnershipEventKind::Read
+            | MirOwnershipEventKind::Write
+            | MirOwnershipEventKind::Introduce => true,
+        };
+        if !matched {
+            errors.push(MirValidationError {
+                subject: format!("ownership[{index}]"),
+                message: format!(
+                    "{} event value '{}' has no matching canonical MIR transfer boundary",
+                    event.kind.as_str(),
+                    value
+                ),
+            });
+        }
+    }
+    errors
+}
+
+/// Validate every consuming variant constructor against the active variant's
+/// TypeDesc/drop-plan identity.  This is intentionally a program-boundary
+/// pass: reference, bytecode, native and verifier consumers all receive the
+/// same proof before they can materialize a payload slot.
+pub(crate) fn validate_variant_move_payloads(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Vec<MirValidationError> {
+    let mut errors = Vec::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let MirInstructionKind::ConstructVariantMove {
+                result,
+                nominal,
+                variant,
+                fields,
+            } = &instruction.kind
+            else {
+                continue;
+            };
+            let Some(result_value) = function.values.get(result) else {
+                continue;
+            };
+            let mut field_types = Vec::with_capacity(fields.len());
+            let mut field_ids = Vec::with_capacity(fields.len());
+            let mut missing_value = false;
+            for (field, value) in fields {
+                field_ids.push(field.clone());
+                let Some(value_info) = function.values.get(value) else {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "canonical variant move payload value '{}' is absent from MIR value catalog",
+                            value
+                        ),
+                    });
+                    missing_value = true;
+                    break;
+                };
+                field_types.push(value_info.ty.clone());
+            }
+            if missing_value {
+                continue;
+            }
+            if let Err(message) = type_catalog.validate_variant_move_construct(
+                &result_value.ty,
+                nominal,
+                variant,
+                &field_ids,
+                &field_types,
+            ) {
+                errors.push(MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!("canonical variant move payload contract failed: {message}"),
+                });
+            }
+        }
+    }
+    errors
+}
+
 fn instruction_produces_owned_string(
     function: &MirFunction,
     type_catalog: &types::MirTypeCatalog,

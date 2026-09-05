@@ -297,6 +297,11 @@ impl MirProgram {
             }
             errors.extend(validate_linear_consumption(function, &type_catalog));
             errors.extend(validate_borrow_usage(function));
+            errors.extend(super::validate_ownership_event_receipts(function));
+            errors.extend(super::validate_variant_move_payloads(
+                function,
+                &type_catalog,
+            ));
             errors.extend(validate_builtin_calls(function, &type_catalog));
             errors.extend(validate_conversions(function, &type_catalog));
             errors.extend(super::contracts::validate_contracts(
@@ -869,27 +874,6 @@ impl MirProgram {
                                 &field_ids,
                                 &field_types,
                             ) {
-                                errors.push(super::MirValidationError {
-                                    subject: instruction.id.to_string(),
-                                    message,
-                                });
-                            }
-                            if type_catalog
-                                .get(&result_value.ty)
-                                .is_some_and(|descriptor| {
-                                    descriptor.ownership == super::types::MirOwnership::Copy
-                                })
-                            {
-                                errors.push(super::MirValidationError {
-                                    subject: instruction.id.to_string(),
-                                    message:
-                                        "ConstructVariantMove requires a non-Copy variant value"
-                                            .into(),
-                                });
-                            }
-                            if let Err(message) = type_catalog
-                                .validate_glue(&result_value.ty, MirGlueOperation::MoveOut)
-                            {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,

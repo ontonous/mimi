@@ -2585,6 +2585,131 @@ fn ownership_event_value_must_be_declared_by_the_function() {
 }
 
 #[test]
+fn ownership_return_event_must_match_a_mir_return_value() {
+    let mut function = fixture();
+    function.ownership.events.push(MirOwnershipEvent {
+        kind: MirOwnershipEventKind::Return,
+        resource: "resource:result".into(),
+        value: Some(MirValueId::new("v.result").unwrap()),
+        source: Some("result".into()),
+        target: None,
+        point: NodeId("node:return".into()),
+    });
+    assert!(validate_ownership_event_receipts(&function).is_empty());
+}
+
+#[test]
+fn ownership_move_event_without_a_mir_transfer_is_rejected() {
+    let mut function = fixture();
+    function.ownership.events.push(MirOwnershipEvent {
+        kind: MirOwnershipEventKind::Move,
+        resource: "resource:arg".into(),
+        value: Some(MirValueId::new("v.arg").unwrap()),
+        source: Some("arg".into()),
+        target: Some("consumed".into()),
+        point: NodeId("node:move".into()),
+    });
+    let errors = validate_ownership_event_receipts(&function);
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("move event value 'v.arg' has no matching canonical MIR transfer boundary")
+    }));
+}
+
+#[test]
+fn consuming_variant_payload_uses_the_canonical_drop_plan() {
+    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned variant glue must be materialized");
+    let main = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    let instruction = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::ConstructVariantMove {
+                result,
+                nominal,
+                variant,
+                fields,
+            } => Some((result, nominal, variant, fields)),
+            _ => None,
+        })
+        .expect("move variant construction");
+    let result_ty = &main.values.get(instruction.0).expect("result value").ty;
+    let field_ids = instruction
+        .3
+        .iter()
+        .map(|(field, _)| field.clone())
+        .collect::<Vec<_>>();
+    let field_types = instruction
+        .3
+        .iter()
+        .map(|(_, value)| main.values.get(value).expect("payload value").ty.clone())
+        .collect::<Vec<_>>();
+    canonical
+        .type_catalog()
+        .validate_variant_move_construct(
+            result_ty,
+            instruction.1,
+            instruction.2,
+            &field_ids,
+            &field_types,
+        )
+        .expect("variant payload/drop plan must agree");
+}
+
+#[test]
+fn consuming_variant_payload_identity_drift_is_rejected_before_consumers() {
+    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned variant glue must be materialized");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let instruction = forged
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::ConstructVariantMove { .. }
+            )
+        })
+        .expect("move variant construction");
+    let crate::core::mir::MirInstructionKind::ConstructVariantMove { fields, .. } =
+        &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    fields[0].0 = crate::core::NodeId("builtin:variant:Option::Some/payload:drift".into());
+    let errors = validate_variant_move_payloads(&forged, canonical.type_catalog());
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("canonical variant move payload contract failed")
+    }));
+}
+
+#[test]
 fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
     let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { x: 1, y: true }.x }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
