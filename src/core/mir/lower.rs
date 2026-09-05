@@ -1681,6 +1681,19 @@ fn materialize_generic_instance(
                         .validate_move_owned_payload(&arguments[0])
                         .map(|_| ())
                 }
+            } else if generic_list_facade {
+                catalog
+                    .validate_scalar_generic_arguments(arguments)
+                    .or_else(|scalar_error| {
+                        if arguments.len() == 1 {
+                            catalog
+                                .validate_move_owned_list_payload(&arguments[0])
+                                .or_else(|_| catalog.validate_nested_list_payload(&arguments[0]))
+                                .map_err(|_| scalar_error)
+                        } else {
+                            Err(scalar_error)
+                        }
+                    })
             } else {
                 catalog.validate_scalar_generic_arguments(arguments)
             }

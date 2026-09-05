@@ -5,7 +5,8 @@
 //! resolver, or checker.  Unsupported MIR shapes are reported explicitly
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
-//! glued tuple/record products, and concrete Copy-scalar Lists.
+//! glued tuple/record products, and concrete Copy-scalar Lists including the
+//! bounded one-level nested List construction/clone/drop shape.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -4999,14 +5000,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_mir_rejects_nested_list_shape_before_backend() {
-        let error = run_canonical_differential("func main() -> List<List<i32>> { [[1, 2]] }")
-            .expect_err("nested List is outside the first canonical List slice");
+    fn canonical_mir_rejects_nested_list_operation_before_backend() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let inner: List<i32> = [1, 2]; let nested: List<List<i32>> = [inner]; let size = len(nested); drop(nested); size }",
+        )
+        .expect_err("nested List operations remain outside the first nested List slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
-                assert!(message.contains("List") && message.contains("Copy scalar"));
+                assert!(message.contains("List operation") && message.contains("one-level"));
             }
-            other => panic!("nested List crossed the canonical gate: {other:?}"),
+            other => panic!("nested List operation crossed the canonical gate: {other:?}"),
         }
     }
 
@@ -5457,6 +5460,60 @@ mod tests {
             .expect("generic List construction bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(1));
         assert!(matches!(value, Value::Int(1)));
+    }
+
+    #[test]
+    fn executes_materialized_nested_generic_list_construct_through_mir_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_list_nested_owned.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("one-level nested List construction MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+                ) && instance.arguments.len() == 1
+            })
+            .expect("nested List construction instance");
+        let argument_desc = mir
+            .type_catalog()
+            .get(&instance.arguments[0])
+            .expect("nested List argument TypeDesc");
+        assert!(matches!(argument_desc.layout, MirLayout::List { .. }));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List construction execution");
+        let bytecode = compile_mir_program(&mir).expect("nested List construction bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("nested List construction bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn rejects_deep_nested_generic_list_before_bytecode_backend() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_list_nested_deep_rejected.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("deep nested List must fail before bytecode");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("one-level nested List contract")
+                || message.contains("outside the canonical Copy scalar"),
+            "unexpected deep nested List bytecode rejection: {message}"
+        );
     }
 
     #[test]

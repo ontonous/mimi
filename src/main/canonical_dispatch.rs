@@ -2892,6 +2892,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_generic_list_construct_stays_explicit_mir_only_without_legacy_fallback() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_nested_owned.mimi"
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("nested generic List construction must stay explicit-MIR-only");
+        };
+        assert!(
+            reason.contains("S11 scalar collection candidate"),
+            "{reason}"
+        );
+        assert!(reason.contains("Copy scalar contract"), "{reason}");
+    }
+
+    #[test]
     fn unsupported_generic_list_projection_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi"

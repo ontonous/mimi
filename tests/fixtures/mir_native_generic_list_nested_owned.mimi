@@ -1,0 +1,13 @@
+// Canonical generic MIR candidate: one-level nested List<T> construction.
+// The outer List owns the inner List; its drop must recursively release both.
+func wrap<T>(value: T) -> List<T> {
+    [value]
+}
+
+func main() -> i32 {
+    ensures: result == 41
+    let inner: List<i32> = [1, 2]
+    let nested = wrap(inner)
+    drop(nested)
+    41
+}

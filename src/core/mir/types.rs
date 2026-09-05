@@ -3583,13 +3583,13 @@ impl MirTypeCatalog {
         ))
     }
 
-    /// Validate the complete move-owned List payload contract used by tagged
-    /// variant projections.  Keeping this as a named TypeDesc boundary makes
-    /// the admitted scalar family explicit: List handles are Move-owned, all
-    /// three list glue operations are materialized, and the element is one of
-    /// the checker-proven Copy scalar leaves.  Consumers must use the returned
-    /// `MirGlueKind::List` from `validate_move_owned_payload` rather than infer
-    /// ownership from the opaque native/VM handle.
+    /// Validate the complete move-owned scalar List payload contract used by
+    /// tagged variant projections. Keeping this as a named TypeDesc boundary
+    /// makes the admitted family explicit: List handles are Move-owned, all
+    /// three list glue operations are materialized, and the element is a
+    /// checker-proven Copy scalar leaf. The nested List constructor island has
+    /// a separate validator so it cannot widen Option/Result payloads merely
+    /// because their handles share the same ABI.
     pub fn validate_move_owned_list_payload(&self, ty: &ResolvedTypeId) -> Result<(), String> {
         for operation in [
             MirGlueOperation::MoveOut,
@@ -3603,14 +3603,71 @@ impl MirTypeCatalog {
                 )
             })?;
         }
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "move-owned List payload '{}' has no canonical List layout",
+                ty.as_str()
+            ));
+        };
+        if self
+            .get(element)
+            .is_some_and(|element| matches!(element.layout, MirLayout::List { .. }))
+        {
+            return Err(format!(
+                "move-owned List payload '{}' is nested; tagged variant payloads require List<Copy scalar>",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the bounded nested List payload used by the generic List
+    /// construction island. This is intentionally separate from
+    /// `validate_move_owned_list_payload`: Option/Result payload contracts keep
+    /// their existing scalar-only boundary until a dedicated aggregate ABI is
+    /// specified for nested variant slots.
+    pub fn validate_nested_list_payload(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_list_glue(ty, operation).map_err(|message| {
+                format!(
+                    "nested List payload '{}' is outside the one-level List<List<Copy scalar>> contract: {message}",
+                    ty.as_str()
+                )
+            })?;
+        }
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::List { element } = &descriptor.layout else {
+            return Err(format!(
+                "nested List payload '{}' has no canonical List layout",
+                ty.as_str()
+            ));
+        };
+        if !self
+            .get(element)
+            .is_some_and(|element| matches!(element.layout, MirLayout::List { .. }))
+        {
+            return Err(format!(
+                "type '{}' is not a one-level nested List payload",
+                ty.as_str()
+            ));
+        }
         Ok(())
     }
 
     /// Validate the first variable-length container contract. A List is a
     /// move-owned runtime handle, but its element identity and glue are still
-    /// canonical MIR facts. This slice intentionally admits only concrete
-    /// Copy scalars so a backend cannot accidentally inherit recursive or
-    /// element-drop semantics from the VM's generic list implementation.
+    /// canonical MIR facts. The bounded nested form is deliberately only one
+    /// level deep: `List<List<Copy scalar>>`. Deeper recursion, managed
+    /// leaves and linear elements remain fail-closed before every backend.
     pub fn validate_list_glue(
         &self,
         ty: &ResolvedTypeId,
@@ -3652,24 +3709,64 @@ impl MirTypeCatalog {
                 element.as_str()
             )
         })?;
-        if element_desc.ownership != MirOwnership::Copy
-            || element_desc.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-            || !matches!(element_desc.layout, MirLayout::Scalar)
-            || !matches!(
-                element_desc.abi,
-                MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true,
-                } | MirAbiClass::Bool
-            )
-        {
+        let copy_scalar = || {
+            element_desc.ownership == MirOwnership::Copy
+                && element_desc.glue
+                    == (MirGlueContract {
+                        move_out: MirGlueKind::Noop,
+                        clone: MirGlueKind::Noop,
+                        drop: MirGlueKind::Noop,
+                    })
+                && matches!(element_desc.layout, MirLayout::Scalar)
+                && matches!(
+                    element_desc.abi,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true,
+                    } | MirAbiClass::Bool
+                )
+        };
+        let nested_copy_scalar = || {
+            let MirLayout::List {
+                element: nested_element,
+            } = &element_desc.layout
+            else {
+                return false;
+            };
+            if element_desc.kind != MirTypeKind::List
+                || element_desc.abi != MirAbiClass::OpaqueHandle
+                || element_desc.ownership != MirOwnership::Move
+                || element_desc.glue
+                    != (MirGlueContract {
+                        move_out: MirGlueKind::List,
+                        clone: MirGlueKind::List,
+                        drop: MirGlueKind::List,
+                    })
+            {
+                return false;
+            }
+            let Some(nested_desc) = self.get(nested_element) else {
+                return false;
+            };
+            nested_desc.ownership == MirOwnership::Copy
+                && nested_desc.glue
+                    == (MirGlueContract {
+                        move_out: MirGlueKind::Noop,
+                        clone: MirGlueKind::Noop,
+                        drop: MirGlueKind::Noop,
+                    })
+                && matches!(nested_desc.layout, MirLayout::Scalar)
+                && matches!(
+                    nested_desc.abi,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true,
+                    } | MirAbiClass::Bool
+                )
+        };
+        if !copy_scalar() && !nested_copy_scalar() {
             return Err(format!(
-                "List '{}' element type '{}' is outside the canonical Copy scalar contract (outside scalar contract)",
+                "List '{}' element type '{}' is outside the canonical Copy scalar or one-level nested List contract",
                 ty.as_str(),
                 element.as_str()
             ));
@@ -3712,6 +3809,21 @@ impl MirTypeCatalog {
         operation: crate::core::mir::MirListOperation,
     ) -> Result<(), String> {
         self.validate_list_glue(list_ty, MirGlueOperation::MoveOut)?;
+        let nested_receiver = self.get(list_ty).is_some_and(|descriptor| {
+            matches!(
+                descriptor.layout,
+                MirLayout::List { ref element }
+                    if self
+                        .get(element)
+                        .is_some_and(|element| element.kind == MirTypeKind::List)
+            )
+        });
+        if nested_receiver {
+            return Err(format!(
+                "List operation {:?} is outside the one-level nested List construction/clone/drop contract",
+                operation
+            ));
+        }
         let result = self.get(result_ty).ok_or_else(|| {
             format!(
                 "List operation result type '{}' is absent",

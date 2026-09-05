@@ -1,0 +1,13 @@
+// Canonical generic MIR negative: the one-level nested List contract must not
+// silently recurse into List<List<List<T>>>.
+func wrap<T>(value: T) -> List<T> {
+    [value]
+}
+
+func main() -> i32 {
+    let inner: List<i32> = [1]
+    let middle = wrap(inner)
+    let deep = wrap(middle)
+    drop(deep)
+    41
+}

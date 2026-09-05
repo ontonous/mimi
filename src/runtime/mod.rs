@@ -1656,6 +1656,168 @@ pub unsafe extern "C" fn mimi_mir_list_drop_scalar(list: *mut MimiList, kind: i8
     unsafe { mimi_list_free(list, false) };
 }
 
+/// Allocate an empty one-level nested List for canonical native MIR.
+/// Nested elements are pointers to child `MimiList` objects; the TypeDesc
+/// contract limits those children to scalar `i32`/`i64`/`bool` Lists.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_new_nested() -> *mut MimiList {
+    Box::into_raw(Box::new(MimiList::new_with_kind(ListElementKind::List)))
+}
+
+/// Append one owned child List to a canonical nested List. Ownership of
+/// `child` moves into `list`; a failed append leaves the child untouched.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_push_nested(
+    list: *mut MimiList,
+    child: *mut MimiList,
+) -> i8 {
+    if list.is_null() || child.is_null() {
+        return 0;
+    }
+    let target = unsafe { &mut *list };
+    let child_kind = unsafe { (*child).element_kind };
+    if target.element_kind != ListElementKind::List
+        || target.len < 0
+        || !matches!(child_kind, ListElementKind::I64 | ListElementKind::Bool)
+    {
+        return 0;
+    }
+    let cap = list_cap(target);
+    if (cap > 0 && target.len > cap) || target.len > 1_000_000_000 {
+        return 0;
+    }
+    let Some(new_len) = target.len.checked_add(1) else {
+        return 0;
+    };
+    if new_len > cap {
+        let new_cap = if cap <= 0 {
+            new_len.max(4)
+        } else {
+            match cap.checked_mul(2) {
+                Some(value) => value.max(new_len),
+                None => return 0,
+            }
+        };
+        if grow_list_data(target, new_cap).is_null() {
+            return 0;
+        }
+    }
+    if target.data.is_null() {
+        return 0;
+    }
+    unsafe {
+        *target.data.add(target.len as usize) = child.cast::<std::ffi::c_char>();
+    }
+    target.len = new_len;
+    1
+}
+
+unsafe fn mimi_mir_list_clone_any(list: *const MimiList) -> *mut MimiList {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    let kind = unsafe { (*list).element_kind };
+    match kind {
+        ListElementKind::I64 => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
+        ListElementKind::Bool => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
+        ListElementKind::List => unsafe { mimi_mir_list_clone_nested(list) },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+unsafe fn mimi_mir_list_drop_any(list: *mut MimiList) {
+    if list.is_null() {
+        return;
+    }
+    let kind = unsafe { (*list).element_kind };
+    match kind {
+        ListElementKind::I64 | ListElementKind::Bool => unsafe {
+            mimi_mir_list_drop_scalar(list, kind as i8)
+        },
+        ListElementKind::List => unsafe { mimi_mir_list_drop_nested(list) },
+        _ => {}
+    }
+}
+
+/// Deep-clone a one-level nested List. Child element kinds are checked by the
+/// recursive helper rather than inferred from the raw pointer storage.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_clone_nested(list: *const MimiList) -> *mut MimiList {
+    if list.is_null() || unsafe { (*list).element_kind } != ListElementKind::List {
+        return std::ptr::null_mut();
+    }
+    let source = unsafe { &*list };
+    if source.len < 0 || (source.len > 0 && source.data.is_null()) {
+        return std::ptr::null_mut();
+    }
+    let source_cap = list_cap(source);
+    if (source_cap > 0 && source.len > source_cap) || source.len > 1_000_000_000 {
+        return std::ptr::null_mut();
+    }
+    let clone = unsafe { mimi_mir_list_new_nested() };
+    if clone.is_null() {
+        return std::ptr::null_mut();
+    }
+    for index in 0..source.len as usize {
+        let child = unsafe { (*source.data.add(index)).cast::<MimiList>() };
+        if child.is_null()
+            || !matches!(
+                unsafe { (*child).element_kind },
+                ListElementKind::I64 | ListElementKind::Bool
+            )
+        {
+            unsafe { mimi_mir_list_drop_nested(clone) };
+            return std::ptr::null_mut();
+        }
+        let child_clone = unsafe { mimi_mir_list_clone_any(child) };
+        if child_clone.is_null() || unsafe { mimi_mir_list_push_nested(clone, child_clone) } == 0 {
+            if !child_clone.is_null() {
+                unsafe { mimi_mir_list_drop_any(child_clone) };
+            }
+            unsafe { mimi_mir_list_drop_nested(clone) };
+            return std::ptr::null_mut();
+        }
+    }
+    clone
+}
+
+/// Deep-drop a one-level nested List and every owned child List.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_drop_nested(list: *mut MimiList) {
+    if list.is_null() {
+        return;
+    }
+    if unsafe { (*list).element_kind } != ListElementKind::List {
+        mir_list_abort(b"[E0800] canonical nested List kind disagrees\0");
+    }
+    let (data, count) = unsafe {
+        let length = (*list).len;
+        let count = if length <= 0 {
+            0
+        } else {
+            let cap = list_cap(&*list);
+            let bounded = if cap > 0 { length.min(cap) } else { length };
+            bounded.min(1_000_000_000)
+        } as usize;
+        ((*list).data, count)
+    };
+    if !data.is_null() {
+        for index in 0..count {
+            let child = unsafe { (*data.add(index)).cast::<MimiList>() };
+            if child.is_null()
+                || !matches!(
+                    unsafe { (*child).element_kind },
+                    ListElementKind::I64 | ListElementKind::Bool
+                )
+            {
+                mir_list_abort(b"[E0800] canonical nested List child kind is invalid\0");
+            }
+            unsafe { mimi_mir_list_drop_any(child) };
+        }
+    }
+    unsafe { mimi_list_free(list, false) };
+}
+
 #[cfg(test)]
 mod canonical_mir_list_tests {
     use super::*;
@@ -1777,6 +1939,37 @@ mod canonical_mir_list_tests {
                 1
             );
             mimi_mir_list_drop_scalar(list, ListElementKind::Bool as i8);
+        }
+    }
+
+    #[test]
+    fn canonical_nested_list_clone_and_drop_recurse_through_owned_children() {
+        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!child.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(child, ListElementKind::I64 as i8, 41),
+                1
+            );
+        }
+        let parent = unsafe { mimi_mir_list_new_nested() };
+        assert!(!parent.is_null());
+        unsafe {
+            assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
+            assert_eq!((*parent).element_kind, ListElementKind::List);
+            assert_eq!((*parent).len, 1);
+            let clone = mimi_mir_list_clone_nested(parent);
+            assert!(!clone.is_null());
+            assert_eq!((*clone).element_kind, ListElementKind::List);
+            assert_eq!((*clone).len, 1);
+            let cloned_child = (*(*clone).data).cast::<MimiList>();
+            assert!(!cloned_child.is_null());
+            assert_eq!(
+                mimi_mir_list_get_scalar(cloned_child, ListElementKind::I64 as i8, 0),
+                41
+            );
+            mimi_mir_list_drop_nested(clone);
+            mimi_mir_list_drop_nested(parent);
         }
     }
 

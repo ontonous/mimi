@@ -1,6 +1,7 @@
 //! AST-free native consumer for the closed scalar/owned-String,
-//! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List,
-//! and local immutable-borrow
+//! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List
+//! (including bounded nested List construction/clone/drop), and local
+//! immutable-borrow
 //! Canonical MIR slices.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
@@ -837,6 +838,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 mod tests {
     use super::CodeGenerator;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
+    use crate::core::mir::types::MirLayout;
     use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
     use crate::interp::Value;
     use crate::lexer::Lexer;
@@ -4377,6 +4379,55 @@ mod tests {
         assert!(generator
             .module
             .get_function("mimi_mir_list_push_scalar")
+            .is_some());
+    }
+
+    #[test]
+    fn native_emitter_consumes_materialized_nested_generic_list_construct() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_list_nested_owned.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+                ) && instance.arguments.len() == 1
+            })
+            .expect("nested List construction instance");
+        let argument_desc = program
+            .type_catalog()
+            .get(&instance.arguments[0])
+            .expect("nested List argument TypeDesc");
+        assert!(matches!(argument_desc.layout, MirLayout::List { .. }));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List construction execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_list_nested_construct");
+        generator
+            .compile_mir_native(&program)
+            .expect("native nested List construction must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native nested List construction module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_new_nested")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_push_nested")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_nested")
             .is_some());
     }
 

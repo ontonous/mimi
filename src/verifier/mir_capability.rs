@@ -2013,4 +2013,28 @@ mod tests {
         validate_mir_capabilities(&program)
             .expect("List operation receipt must satisfy verifier capability gate");
     }
+
+    #[test]
+    fn accepts_one_level_nested_list_construct_and_recursive_glue() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_generic_list_nested_owned.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("nested List construction must satisfy verifier capability gate");
+        let nested = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                matches!(descriptor.layout, MirLayout::List { ref element }
+                if program.type_catalog().get(element).is_some_and(|child| {
+                    matches!(child.layout, MirLayout::List { .. })
+                }))
+                .then(|| ty.clone())
+            })
+            .expect("nested List TypeDesc");
+        program
+            .type_catalog()
+            .validate_nested_list_payload(&nested)
+            .expect("nested List TypeDesc glue");
+    }
 }

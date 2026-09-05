@@ -131,6 +131,32 @@ fn register_mir_list_runtime<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    module.add_function(
+        "mimi_mir_list_new_nested",
+        ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_push_nested",
+        i8.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::PointerType(ptr),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_clone_nested",
+        ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_drop_nested",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
 }
 
 /// Register the two-input native MIR List.concat helper on demand.

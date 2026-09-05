@@ -3608,6 +3608,88 @@ fn materializes_generic_scalar_list_construct_with_a_type_desc_receipt() {
 }
 
 #[test]
+fn materializes_generic_nested_list_construct_with_recursive_list_glue() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_list_nested_owned.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("one-level nested List construction must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarListConstruct { .. }
+            ) && instance.arguments.len() == 1
+        })
+        .expect("nested List construction instance");
+    let argument = &instance.arguments[0];
+    let argument_desc = program
+        .type_catalog()
+        .get(argument)
+        .expect("nested List argument TypeDesc");
+    assert!(matches!(
+        argument_desc.layout,
+        crate::core::mir::types::MirLayout::List { .. }
+    ));
+    program
+        .type_catalog()
+        .validate_nested_list_payload(argument)
+        .expect("nested List child glue must be fully materialized");
+    let nested_list_ty = program
+        .type_catalog()
+        .iter()
+        .find_map(|(ty, descriptor)| {
+            matches!(descriptor.layout, crate::core::mir::types::MirLayout::List { ref element }
+                if program
+                    .type_catalog()
+                    .get(element)
+                    .is_some_and(|child| matches!(child.layout, crate::core::mir::types::MirLayout::List { .. })))
+            .then(|| ty.clone())
+        })
+        .expect("nested List result TypeDesc");
+    assert!(
+        program
+            .type_catalog()
+            .validate_move_owned_payload(&nested_list_ty)
+            .is_err(),
+        "nested List must not widen managed variant payloads"
+    );
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized nested List construction target");
+    assert!(target.canonical_text().contains("list_construct_contract"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference nested List construction execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn rejects_generic_list_construct_beyond_one_nested_level_at_the_mir_gate() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_list_nested_deep_rejected.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("deep nested List construction must fail closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("one-level nested List contract")
+            || message.contains("outside the canonical Copy scalar"),
+        "unexpected deep nested List rejection: {message}"
+    );
+}
+
+#[test]
 fn rejects_generic_list_construct_for_non_copy_elements_at_the_mir_gate() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_list_construct_rejected.mimi");

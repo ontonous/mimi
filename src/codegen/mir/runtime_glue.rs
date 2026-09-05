@@ -38,19 +38,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .i8_type()
             .const_int(kind as u64, false);
+        let nested = kind == crate::runtime::ListElementKind::List as i8;
         let new_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_list_new_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_new_nested"
+            } else {
+                "mimi_mir_list_new_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let new_args = if nested {
+            Vec::new()
+        } else {
+            vec![BasicMetadataValueEnum::from(kind_value)]
+        };
         let list = call_try_basic_value(
             &self
                 .generator
                 .builder
-                .build_call(
-                    new_fn,
-                    &[BasicMetadataValueEnum::from(kind_value)],
-                    "mir_list_new",
-                )
+                .build_call(new_fn, &new_args, "mir_list_new")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
         .ok_or_else(|| NativeMirError::new(subject, "List constructor returned void"))?
@@ -59,26 +65,34 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 
         let push_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_list_push_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_push_nested"
+            } else {
+                "mimi_mir_list_push_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let element_desc = catalog
             .get(element)
             .ok_or_else(|| NativeMirError::new(subject, "List element TypeDesc is absent"))?;
         for value in elements {
-            let scalar = self.emit_list_scalar_as_i64(value, element_desc, subject)?;
+            let call_args = if nested {
+                vec![
+                    BasicMetadataValueEnum::from(list),
+                    BasicMetadataValueEnum::from(self.value(value, subject)?.into_pointer_value()),
+                ]
+            } else {
+                let scalar = self.emit_list_scalar_as_i64(value, element_desc, subject)?;
+                vec![
+                    BasicMetadataValueEnum::from(list),
+                    BasicMetadataValueEnum::from(kind_value),
+                    BasicMetadataValueEnum::from(scalar),
+                ]
+            };
             let status = call_try_basic_value(
                 &self
                     .generator
                     .builder
-                    .build_call(
-                        push_fn,
-                        &[
-                            BasicMetadataValueEnum::from(list),
-                            BasicMetadataValueEnum::from(kind_value),
-                            BasicMetadataValueEnum::from(scalar),
-                        ],
-                        "mir_list_push",
-                    )
+                    .build_call(push_fn, &call_args, "mir_list_push")
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
             )
             .ok_or_else(|| NativeMirError::new(subject, "List append returned void"))?
@@ -119,6 +133,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let source_ty = self.value_type(source, subject)?;
         let kind = native_list_kind(self.program.type_catalog(), &source_ty)?;
+        let nested = kind == crate::runtime::ListElementKind::List as i8;
         let source_value = self.value(source, subject)?.into_pointer_value();
         let kind_value = self
             .generator
@@ -127,20 +142,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let clone_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_list_clone_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_clone_nested"
+            } else {
+                "mimi_mir_list_clone_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone_args = if nested {
+            vec![BasicMetadataValueEnum::from(source_value)]
+        } else {
+            vec![
+                BasicMetadataValueEnum::from(source_value),
+                BasicMetadataValueEnum::from(kind_value),
+            ]
+        };
         let clone = call_try_basic_value(
             &self
                 .generator
                 .builder
-                .build_call(
-                    clone_fn,
-                    &[
-                        BasicMetadataValueEnum::from(source_value),
-                        BasicMetadataValueEnum::from(kind_value),
-                    ],
-                    "mir_list_clone",
-                )
+                .build_call(clone_fn, &clone_args, "mir_list_clone")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
         .ok_or_else(|| NativeMirError::new(subject, "List clone returned void"))?
@@ -156,6 +176,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let kind = native_list_kind(self.program.type_catalog(), ty)?;
+        let nested = kind == crate::runtime::ListElementKind::List as i8;
         let kind_value = self
             .generator
             .context
@@ -163,20 +184,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let clone_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_list_clone_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_clone_nested"
+            } else {
+                "mimi_mir_list_clone_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let clone_args = if nested {
+            vec![BasicMetadataValueEnum::from(value.into_pointer_value())]
+        } else {
+            vec![
+                BasicMetadataValueEnum::from(value.into_pointer_value()),
+                BasicMetadataValueEnum::from(kind_value),
+            ]
+        };
         let clone = call_try_basic_value(
             &self
                 .generator
                 .builder
-                .build_call(
-                    clone_fn,
-                    &[
-                        BasicMetadataValueEnum::from(value.into_pointer_value()),
-                        BasicMetadataValueEnum::from(kind_value),
-                    ],
-                    "mir_list_clone",
-                )
+                .build_call(clone_fn, &clone_args, "mir_list_clone")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
         .ok_or_else(|| NativeMirError::new(subject, "List clone returned void"))?
@@ -192,6 +218,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let kind = native_list_kind(self.program.type_catalog(), ty)?;
+        let nested = kind == crate::runtime::ListElementKind::List as i8;
         let kind_value = self
             .generator
             .context
@@ -199,18 +226,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let drop_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_list_drop_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_drop_nested"
+            } else {
+                "mimi_mir_list_drop_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let drop_args = if nested {
+            vec![BasicMetadataValueEnum::from(value.into_pointer_value())]
+        } else {
+            vec![
+                BasicMetadataValueEnum::from(value.into_pointer_value()),
+                BasicMetadataValueEnum::from(kind_value),
+            ]
+        };
         self.generator
             .builder
-            .build_call(
-                drop_fn,
-                &[
-                    BasicMetadataValueEnum::from(value.into_pointer_value()),
-                    BasicMetadataValueEnum::from(kind_value),
-                ],
-                "mir_list_drop",
-            )
+            .build_call(drop_fn, &drop_args, "mir_list_drop")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         Ok(())
     }
@@ -548,25 +580,33 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return self.emit_drop_value(self.value(value, subject)?, &ty, subject);
         }
         let kind = native_list_kind(self.program.type_catalog(), &ty)?;
+        let nested = kind == crate::runtime::ListElementKind::List as i8;
         let function = self
             .generator
-            .get_runtime_fn("mimi_mir_list_drop_scalar")
+            .get_runtime_fn(if nested {
+                "mimi_mir_list_drop_nested"
+            } else {
+                "mimi_mir_list_drop_scalar"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let kind_value = self
             .generator
             .context
             .i8_type()
             .const_int(kind as u64, false);
+        let drop_args = if nested {
+            vec![BasicMetadataValueEnum::from(
+                self.value(value, subject)?.into_pointer_value(),
+            )]
+        } else {
+            vec![
+                BasicMetadataValueEnum::from(self.value(value, subject)?.into_pointer_value()),
+                BasicMetadataValueEnum::from(kind_value),
+            ]
+        };
         self.generator
             .builder
-            .build_call(
-                function,
-                &[
-                    BasicMetadataValueEnum::from(self.value(value, subject)?.into_pointer_value()),
-                    BasicMetadataValueEnum::from(kind_value),
-                ],
-                "mir_list_drop",
-            )
+            .build_call(function, &drop_args, "mir_list_drop")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         Ok(())
     }

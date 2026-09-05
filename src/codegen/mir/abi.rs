@@ -162,10 +162,11 @@ pub(super) fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
             })
 }
 
-/// Map a TypeDesc-proven canonical scalar List element to the native runtime
-/// tag.  This is the only place where the native ABI names the runtime's
-/// serialized `ListElementKind` values; it never infers the element type from
-/// an LLVM pointer or from surface syntax.
+/// Map a TypeDesc-proven canonical List element to the native runtime tag.
+/// This is the only place where the native ABI names the runtime's serialized
+/// `ListElementKind` values; it never infers the element type from an LLVM
+/// pointer or from surface syntax. `ListElementKind::List` is admitted only
+/// for the one-level nested `List<List<Copy scalar>>` glue contract.
 pub(super) fn native_list_kind(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
@@ -188,6 +189,9 @@ pub(super) fn native_list_kind(
             format!("List element TypeDesc '{}' is absent", element.as_str()),
         )
     })?;
+    if matches!(element_desc.layout, MirLayout::List { .. }) {
+        return Ok(crate::runtime::ListElementKind::List as i8);
+    }
     match element_desc.abi {
         MirAbiClass::Integer {
             bits: 32 | 64,
