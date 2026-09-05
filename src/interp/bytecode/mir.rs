@@ -5535,6 +5535,40 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_two_override_generic_record_update_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_update_multi.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("two-override generic record update MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("two-override generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
+                ref contract
+            } if contract.arity == 3 && contract.fields.len() == 2
+                && contract.fields[0].name == "enabled"
+                && contract.fields[1].name == "tag"
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference two-override record update execution");
+        let bytecode = compile_mir_program(&mir).expect("two-override record update bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("two-override record update bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_materialized_generic_option_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

@@ -2274,6 +2274,40 @@ mod tests {
     }
 
     #[test]
+    fn two_override_generic_record_update_enters_canonical_default_route() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_record_update_multi.mimi");
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("two-override generic record update must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
+                ref contract
+            } if contract.arity == 3 && contract.fields.len() == 2
+                && contract.fields[0].name == "enabled"
+                && contract.fields[1].name == "tag"
+        )));
+    }
+
+    #[test]
+    fn three_override_generic_record_update_is_rejected_before_legacy_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_update_three_overrides_rejected.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("three-override generic record update must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
+        assert!(
+            reason.contains("canonical generic record update candidate did not materialize"),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn five_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"

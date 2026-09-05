@@ -4191,6 +4191,39 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_two_override_generic_record_update() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_multi.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("two-override generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
+                ref contract
+            } if contract.arity == 3 && contract.fields.len() == 2
+                && contract.fields[0].name == "enabled"
+                && contract.fields[1].name == "tag"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference two-override record update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_record_update_multi");
+        generator
+            .compile_mir_native(&program)
+            .expect("native two-override generic record update must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native two-override generic record update module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_three_field_generic_record_tail_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"

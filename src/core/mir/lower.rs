@@ -4101,10 +4101,10 @@ fn detect_scalar_record_update_contract(
             message: "generic record update must update its record parameter".into(),
         }]);
     }
-    if fields.len() != 1 {
+    if !matches!(fields.len(), 1 | 2) {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
-            message: "generic record update requires exactly one explicit field override".into(),
+            message: "generic record update requires one or two explicit field overrides".into(),
         }]);
     }
     let base_ty = function
@@ -4184,7 +4184,13 @@ fn detect_scalar_record_update_contract(
     else {
         unreachable!("shape matched above");
     };
-    if contract.fields[0].field != field_ids[0] || update_values.len() != 1 {
+    if update_values.len() != field_ids.len()
+        || contract
+            .fields
+            .iter()
+            .map(|field| &field.field)
+            .ne(field_ids.iter())
+    {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: "generic record update receipt field disagrees with MIR".into(),

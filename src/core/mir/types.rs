@@ -6060,10 +6060,10 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the complete receipt for the bounded generic Copy-record
-    /// update island.  This slice admits one explicit Copy-scalar override on
-    /// a two-, three-, or four-field flat Record; source and result share the
-    /// same nominal TypeDesc and the complete layout is proven before any
-    /// consumer receives the receipt.
+    /// update island.  This slice admits one or two explicit Copy-scalar
+    /// overrides on a two-, three-, or four-field flat Record; source and
+    /// result share the same nominal TypeDesc and the complete layout is
+    /// proven before any consumer receives the receipt.
     pub fn validated_record_update_contract(
         &self,
         result_ty: &ResolvedTypeId,
@@ -6081,9 +6081,9 @@ impl MirTypeCatalog {
             .map_err(|message| {
                 format!("generic record update requires a flat Copy record: {message}")
             })?;
-        if !matches!(field_types.len(), 1) {
+        if !matches!(field_types.len(), 1 | 2) {
             return Err(
-                "generic record update requires exactly one explicit Copy-scalar override".into(),
+                "generic record update requires one or two explicit Copy-scalar overrides".into(),
             );
         }
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
@@ -6110,21 +6110,25 @@ impl MirTypeCatalog {
         if nominal != layout_nominal || layout_fields.len() != fields.len() {
             return Err("generic record update nominal/layout disagrees with TypeDesc".into());
         }
-        let field = fields
-            .first()
-            .ok_or_else(|| "generic record update override field is absent".to_string())?;
-        let projection =
-            self.validated_record_field_projection_contract(result_ty, field, &field_types[0])?;
-        self.validate_copy_scalar(&projection.field_ty)
-            .map_err(|message| {
-                format!("generic record update override is not Copy scalar: {message}")
-            })?;
+        let projections = fields
+            .iter()
+            .zip(field_types)
+            .map(|(field, field_ty)| {
+                let projection =
+                    self.validated_record_field_projection_contract(result_ty, field, field_ty)?;
+                self.validate_copy_scalar(&projection.field_ty)
+                    .map_err(|message| {
+                        format!("generic record update override is not Copy scalar: {message}")
+                    })?;
+                Ok(projection)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(MirRecordUpdateContract {
             source_ty: base_ty.clone(),
             result_ty: result_ty.clone(),
             nominal: nominal.clone(),
             arity: layout_fields.len(),
-            fields: vec![projection],
+            fields: projections,
         })
     }
 

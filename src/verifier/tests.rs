@@ -1153,6 +1153,36 @@ fn generic_record_update_is_consumed_by_mir_verifier_without_ast_fallback() {
 }
 
 #[test]
+fn two_override_generic_record_update_is_consumed_by_mir_verifier() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_record_update_multi.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-update-multi").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical two-override generic record update MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate { ref contract }
+            if contract.arity == 3 && contract.fields.len() == 2
+                && contract.fields[0].name == "enabled"
+                && contract.fields[1].name == "tag"
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("two-override generic record update verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn generic_option_predicate_is_verified_from_canonical_mir_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_option_predicate.mimi");

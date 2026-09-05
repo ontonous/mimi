@@ -2219,10 +2219,10 @@ fn generic_record_update_envelope<'a>(
     Some((generic_ty, definition))
 }
 
-/// Recognize the exact S171 generic record update envelope: one generic
-/// `Record<T>` parameter/result, one explicit concrete Copy-scalar override,
-/// and a direct record-rest expression.  The complete TypeDesc contract is
-/// replayed after specialization by the MIR lowerer.
+/// Recognize the exact bounded generic record update envelope: one generic
+/// `Record<T>` parameter/result, one or two explicit concrete Copy-scalar
+/// overrides, and a direct record-rest expression.  The complete TypeDesc
+/// contract is replayed after specialization by the MIR lowerer.
 fn is_scalar_generic_record_update_callable(
     program: &CheckedProgram,
     callable: &crate::core::ir::ResolvedCallable,
@@ -2241,16 +2241,21 @@ fn is_scalar_generic_record_update_callable(
     else {
         return false;
     };
-    if fields.len() != 1 || fields[0].value.ty == generic_ty {
+    if !matches!(fields.len(), 1 | 2) {
         return false;
     }
-    let Some(updated_ty) = program.resolved_types().get(&fields[0].value.ty) else {
-        return false;
-    };
-    matches!(
-        updated_ty,
-        ResolvedType::Primitive(PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool)
-    )
+    fields.iter().all(|field| {
+        if field.value.ty == generic_ty {
+            return false;
+        }
+        let Some(updated_ty) = program.resolved_types().get(&field.value.ty) else {
+            return false;
+        };
+        matches!(
+            updated_ty,
+            ResolvedType::Primitive(PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool)
+        )
+    })
 }
 
 /// Keep the flat-record island closed over the complete typed body, not only

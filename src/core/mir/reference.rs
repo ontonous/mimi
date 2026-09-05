@@ -7862,6 +7862,56 @@ mod tests {
     }
 
     #[test]
+    fn concrete_generic_record_update_materializes_two_override_receipt() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_update_multi.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("two-override generic record update must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("two-override generic record update instance");
+        let MirGenericInstanceContract::ScalarRecordUpdate { contract } = &instance.contract else {
+            panic!("two-override generic record update must carry a receipt");
+        };
+        assert_eq!(contract.arity, 3);
+        assert_eq!(contract.fields.len(), 2);
+        assert_eq!(
+            contract
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["enabled", "tag"]
+        );
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference two-override record update execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn three_override_generic_record_update_fails_closed() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_three_overrides_rejected.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("three-override generic record update must remain fail-closed");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("generic record update") || message.contains("Copy-scalar"),
+            "unexpected generic record update diagnostic: {message}"
+        );
+    }
+
+    #[test]
     fn mixed_managed_generic_record_projection_fails_closed() {
         let source = "type Tagged<T> { value: T, tag: string }\nfunc get<T>(tagged: Tagged<T>) -> T { tagged.value }\nfunc main() -> i32 { let tagged = Tagged { value: 41, tag: \"managed\" }; let picked = get(tagged); picked }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
