@@ -6730,6 +6730,28 @@ mod tests {
     }
 
     #[test]
+    fn managed_generic_bool_result_unwrap_or_matches_reference_and_bytecode() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_owned_string.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("managed Result<bool> unwrap_or MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference managed Result<bool> unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("managed Result<bool> fallback bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode managed Result<bool> unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn managed_generic_result_unwrap_or_owned_list_matches_reference_and_bytecode() {
         for (source, expected) in [
             (

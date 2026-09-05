@@ -1,0 +1,16 @@
+// Generic Result<T, bool>.unwrap_or specialized to the projection-only
+// consuming Result<string, bool> fallback contract.
+func unwrap_or<T>(value: Result<T, bool>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let ok: Result<string, bool> = Ok("owned")
+    let err: Result<string, bool> = Err(false)
+    let first = unwrap_or(ok, "fallback")
+    let second = unwrap_or(err, "fallback2")
+    drop(first)
+    drop(second)
+    41
+}

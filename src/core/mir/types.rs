@@ -2731,11 +2731,12 @@ impl MirTypeCatalog {
         })
     }
 
-    /// Materialize the consuming `Result<T, i32>.unwrap_or(T)` receipt for
+    /// Materialize the consuming `Result<T, i32|bool>.unwrap_or(T)` receipt for
     /// the narrow managed-payload island.  The Result aggregate and the
     /// explicit fallback are both consumed; `Ok` carries the selected
-    /// managed payload while the canonical `Err(i32)` slot is Copy and has no
-    /// residual ownership obligation.
+    /// managed payload while the canonical Copy `Err` slot has no residual
+    /// ownership obligation. This is projection-only; direct managed Result
+    /// call ABI remains the narrower `i32` contract.
     pub fn validated_move_result_projection_fallback_contract(
         &self,
         source_ty: &ResolvedTypeId,
@@ -2744,7 +2745,7 @@ impl MirTypeCatalog {
         result_ty: &ResolvedTypeId,
         fallback_ty: &ResolvedTypeId,
     ) -> Result<MirVariantProjectionFallbackContract, String> {
-        let (inner, payload_glue) = self.validate_result_move_variant(source_ty)?;
+        let (inner, payload_glue) = self.validate_result_move_projection_variant(source_ty)?;
         if inner != *result_ty || result_ty != fallback_ty {
             return Err(
                 "managed Result unwrap_or requires matching Ok, result and fallback TypeDesc identities"
@@ -2791,12 +2792,15 @@ impl MirTypeCatalog {
                     && variant.discriminant == 1
                     && variant.fields.len() == 1
                     && self.get(&variant.fields[0].ty).is_some_and(|error| {
-                        error.kind == MirTypeKind::Primitive(PrimitiveType::I32)
-                            && error.ownership == MirOwnership::Copy
+                        matches!(
+                            error.kind,
+                            MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+                        ) && error.ownership == MirOwnership::Copy
                     })
             })
             .ok_or_else(|| {
-                "managed Result unwrap_or requires the canonical Copy Err(i32) variant".to_string()
+                "managed Result unwrap_or requires the canonical Copy Err(i32|bool) variant"
+                    .to_string()
             })?;
         Ok(MirVariantProjectionFallbackContract {
             source_ty: source_ty.clone(),

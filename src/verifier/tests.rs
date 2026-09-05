@@ -1782,6 +1782,41 @@ fn managed_generic_result_unwrap_or_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn managed_generic_bool_result_unwrap_or_is_verified_from_canonical_mir() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_owned_string.mimi"
+    );
+    let file =
+        parse_memory_source(source, "mir-managed-generic-result-bool-unwrap-or").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical managed Result<bool> unwrap_or MIR");
+    assert!(canonical.instances().values().any(|instance| {
+        matches!(
+            &instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract
+            } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                && contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+        )
+    }));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("managed Result<bool> unwrap_or verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn managed_generic_result_unwrap_or_owned_list_is_verified_from_canonical_mir() {
     require_z3!();
     for source in [

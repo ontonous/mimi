@@ -1582,8 +1582,8 @@ fn materialize_generic_instance(
                 type_catalog.validate_move_owned_payload(&concrete).is_ok()
             }
     };
-    // `Result<T, i32>.unwrap_or(T)` consumes both operands for a managed
-    // concrete payload.  The Err slot stays a canonical Copy i32, so the
+    // `Result<T, i32|bool>.unwrap_or(T)` consumes both operands for a managed
+    // concrete payload. The Err slot stays a canonical Copy scalar, so the
     // Move receipt only transfers the Ok payload or the explicit fallback.
     let is_owned_result_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
@@ -1597,7 +1597,9 @@ fn materialize_generic_instance(
                         if ok == &generic_id
                             && matches!(
                                 program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                                Some(crate::core::ResolvedType::Primitive(
+                                    PrimitiveType::I32 | PrimitiveType::Bool,
+                                ))
                             )
                 )
             })

@@ -4016,6 +4016,53 @@ mod tests {
     }
 
     #[test]
+    fn native_managed_generic_bool_result_unwrap_or_consumes_move_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_owned_string.mimi"
+        );
+        let program = canonical_program(source);
+        let contracts = program
+            .instances()
+            .values()
+            .filter_map(|instance| match &instance.contract {
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract,
+                } if contract.projection.nominal.as_str() == "builtin:type:Result" => {
+                    Some(contract)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contracts.len(),
+            1,
+            "one deduplicated String specialization serves Ok and Err"
+        );
+        assert!(contracts.iter().all(|contract| {
+            contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                && contract.projection.move_out_glue
+                    == crate::core::mir::types::MirGlueKind::OwnedString
+        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference managed Result<bool> unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_bool_result_unwrap_or_owned_string",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native managed Result<bool> unwrap_or must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native managed Result<bool> unwrap_or module verifies");
+    }
+
+    #[test]
     fn native_managed_generic_result_unwrap_or_owned_list_consumes_move_receipt() {
         for (source, expected, module_name) in [
             (
