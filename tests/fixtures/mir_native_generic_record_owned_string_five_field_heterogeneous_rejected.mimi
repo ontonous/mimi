@@ -1,0 +1,15 @@
+// Negative canonical candidate: five-field heterogeneous owned projection is
+// outside the bounded four-field residual projection contract.
+type WideTagged<T> { value: T, note: string, tail: string, spare: string, extra: string }
+
+func take_value<T>(wide: WideTagged<T>) -> T {
+    wide.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let wide = WideTagged { value: "selected", note: "note", tail: "tail", spare: "spare", extra: "extra" }
+    let picked = take_value(wide)
+    drop(picked)
+    41
+}

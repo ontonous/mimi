@@ -1,6 +1,5 @@
-// Historical S178 fixture retained under its compatibility filename. S179
-// admits this four-field heterogeneous projection shape; the active negative
-// boundary is the five-field fixture.
+// Canonical generic MIR candidate: move one owned String field while three
+// fixed owned String siblings are discharged by the residual receipt.
 type QuadTagged<T> { value: T, note: string, tail: string, spare: string }
 
 func take_value<T>(quad: QuadTagged<T>) -> T {

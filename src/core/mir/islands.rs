@@ -1902,8 +1902,8 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 /// Return whether a checker-resolved generic record projection looks like the
 /// S108 candidate but its declaration/body shape is outside the admitted
 /// one-, two-, three-, or four-field Copy contract, the two/three-field homogeneous owned
-/// residual contract, or the bounded two/three-field `T + string`/`T + string + string`
-/// owned residual contracts.
+/// residual contract, or the bounded two/three/four-field `T + string` /
+/// `T + string + string` / `T + string + string + string` owned residual contracts.
 /// Default dispatch uses this only on the mixed compatibility path to reject
 /// instead of silently handing the candidate to legacy code.
 pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
@@ -2035,8 +2035,9 @@ fn is_scalar_generic_record_definition(
 }
 
 /// The managed generic record residual island admits exactly two or three
-/// homogeneous fields, or the bounded heterogeneous two- or three-field
-/// forms with one generic field and one or two concrete `String` siblings.
+/// homogeneous fields, or the bounded heterogeneous two-, three-, or
+/// four-field forms with one generic field and one, two, or three concrete
+/// `String` siblings.
 /// Concrete `String` specialization and Move/Drop glue are proved later by
 /// TypeDesc. Keeping this checker-side predicate separate from the Copy-record
 /// shape prevents a larger or otherwise mixed managed record from entering
@@ -2047,7 +2048,7 @@ fn is_owned_generic_record_definition(
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3)
+        || !matches!(definition.fields.len(), 2 | 3 | 4)
     {
         return false;
     }
@@ -2078,15 +2079,15 @@ fn is_owned_generic_record_definition(
     fields_admitted
         && ((generic_fields == definition.fields.len() && matches!(definition.fields.len(), 2 | 3))
             || (generic_fields == 1
-                && matches!(definition.fields.len(), 2 | 3)
+                && matches!(definition.fields.len(), 2 | 3 | 4)
                 && owned_string_fields + generic_fields == definition.fields.len()))
 }
 
-/// Recognize the additional heterogeneous declarations admitted only by the
-/// ownership-bearing record-update island: one generic field and two or three
-/// concrete owned String siblings. Projection of these shapes remains outside
-/// the residual projection contract and must not be admitted through the
-/// generic record projection predicate.
+/// Recognize the heterogeneous declarations admitted by the ownership-bearing
+/// record-update envelope: one generic field and two or three concrete owned
+/// String siblings. Update admission remains separate from projection
+/// admission even where their declaration envelopes overlap; each callable is
+/// still checked against its own residual receipt contract.
 fn is_owned_generic_record_update_definition(
     program: &CheckedProgram,
     definition: &crate::core::ResolvedTypeDef,

@@ -2171,6 +2171,34 @@ mod tests {
     }
 
     #[test]
+    fn four_field_heterogeneous_owned_generic_record_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_owned_string_four_field_heterogeneous_residual.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("four-field heterogeneous owned projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                ref contract
+            } if contract.projection.arity == 4
+                && contract.projection.name == "value"
+                && contract.residual.len() == 3
+                && contract.residual[0].name == "spare"
+                && contract.residual[1].name == "tail"
+                && contract.residual[2].name == "note"
+                && contract.residual.iter().all(|residual| {
+                    residual.glue == mimi::core::mir::types::MirGlueKind::OwnedString
+                })
+        )));
+    }
+
+    #[test]
     fn owned_generic_record_projection_rvalue_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"
@@ -2486,7 +2514,7 @@ mod tests {
     fn mixed_owned_generic_record_projection_with_unsupported_noncopy_siblings_is_rejected_before_legacy_route(
     ) {
         let source = include_str!(
-            "../../tests/fixtures/mir_native_generic_record_owned_string_four_field_heterogeneous_rejected.mimi"
+            "../../tests/fixtures/mir_native_generic_record_owned_string_five_field_heterogeneous_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
