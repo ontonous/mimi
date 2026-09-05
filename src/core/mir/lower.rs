@@ -63,7 +63,7 @@ impl std::error::Error for MirLoweringError {}
 /// receipt-bearing `MoveProjectDrop`, while all other partial moves and
 /// projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, None)
+    lower_body_impl(body, None, None)
 }
 
 /// Lower a body with the checker-derived TypeDesc catalog available.  The
@@ -73,16 +73,18 @@ pub fn lower_body_with_type_catalog(
     body: &ResolvedBody,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, Some(type_catalog))
+    lower_body_impl(body, Some(type_catalog), None)
 }
 
 fn lower_body_impl(
     body: &ResolvedBody,
     type_catalog: Option<&MirTypeCatalog>,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,
         type_catalog,
+        call_parameter_permissions,
         values: BTreeMap::new(),
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
@@ -177,7 +179,23 @@ pub fn lower_callable_with_type_catalog(
     callable: &crate::core::ResolvedCallable,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    let mut function = lower_body_with_type_catalog(&callable.body, type_catalog)?;
+    lower_callable_with_type_catalog_and_permissions(callable, type_catalog, None)
+}
+
+/// Lower a callable with the canonical TypeDesc catalog and checker-owned
+/// parameter permission map.  The map is supplied by the whole-program
+/// lowering entry point so direct calls can distinguish an owned argument
+/// from a `view`/`mutate` borrow without reopening surface syntax.
+pub(crate) fn lower_callable_with_type_catalog_and_permissions(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    let mut function = lower_body_impl(
+        &callable.body,
+        Some(type_catalog),
+        call_parameter_permissions,
+    )?;
     function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.ownership = ownership_summary(&callable.resources);
     function.validate().map_err(|errors| {
@@ -232,6 +250,16 @@ pub fn lower_program_with_type_catalog(
     program: &CheckedProgram,
     type_catalog: &MirTypeCatalog,
 ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
+    let call_parameter_permissions = program
+        .resolved_signatures()
+        .values()
+        .flat_map(|signature| {
+            signature
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.id.0.clone(), parameter.permission))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
@@ -242,7 +270,11 @@ pub fn lower_program_with_type_catalog(
         if !is_concrete_callable(callable) {
             continue;
         }
-        match lower_callable_with_type_catalog(callable, type_catalog) {
+        match lower_callable_with_type_catalog_and_permissions(
+            callable,
+            type_catalog,
+            Some(&call_parameter_permissions),
+        ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
             }
@@ -4785,6 +4817,7 @@ struct LoopTargets {
 struct Lowerer<'a> {
     body: &'a ResolvedBody,
     type_catalog: Option<&'a MirTypeCatalog>,
+    call_parameter_permissions: Option<&'a BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     values: BTreeMap<MirValueId, MirValue>,
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
@@ -5328,15 +5361,20 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Call(call) => {
-                // `concat` is a destructive two-input transform.  Direct
-                // local arguments therefore enter the canonical operation via
-                // explicit Move values; using the ordinary Load lowering here
-                // would Clone both handles and leave the source allocations
-                // outside the operation's MoveOut proof.  Rvalues still use
-                // their normal lowering because their fresh result is already
-                // the owned operation input.
+                // Destructive transforms and owned direct-call parameters
+                // enter the canonical operation via explicit Move values;
+                // using ordinary Load lowering would Clone a managed handle
+                // and leave the source allocation outside the operation's
+                // MoveOut proof. Rvalues still use their normal lowering
+                // because their fresh result is already the owned input.
                 let consuming_list_concat = is_list_concat_builtin(call, self.type_catalog);
                 let consuming_transition = matches!(call.callee, ResolvedCallee::Transition(_));
+                let consuming_function_argument =
+                    matches!(call.callee, ResolvedCallee::Function(_));
+                let borrowed_receiver = matches!(
+                    call.permission,
+                    Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+                );
                 let consuming_variant_projection =
                     variant_projection_is_consuming(call, self.type_catalog);
                 let arguments: Vec<MirValueId> = call
@@ -5344,9 +5382,43 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
+                        let parameter_permission = self
+                            .call_parameter_permissions
+                            .and_then(|permissions| permissions.get(&argument.parameter.0));
+                        let argument_needs_drop = self.type_catalog.is_some_and(|catalog| {
+                            catalog
+                                .get(&argument.value.ty)
+                                .is_some_and(|descriptor| descriptor.ownership.needs_drop())
+                        });
+                        let borrowed_argument = borrowed_receiver && index == 0;
+                        if consuming_function_argument
+                            && !borrowed_argument
+                            && argument_needs_drop
+                            && parameter_permission.is_none()
+                        {
+                            self.error(
+                                &expression.node_id,
+                                format!(
+                                    "direct function call argument '{}' lacks a canonical parameter permission",
+                                    argument.parameter.0.0
+                                ),
+                            );
+                        }
+                        let parameter_is_owned = parameter_permission.is_some_and(|permission| {
+                            !matches!(
+                                permission,
+                                Some(crate::core::ir::Permission::View)
+                                    | Some(crate::core::ir::Permission::Mutate)
+                            )
+                        });
+                        let argument_needs_move = consuming_function_argument
+                            && !(borrowed_receiver && index == 0)
+                            && parameter_is_owned
+                            && argument_needs_drop;
                         if consuming_transition
                             || consuming_list_concat
                             || (consuming_variant_projection && index == 0)
+                            || argument_needs_move
                         {
                             self.lower_consuming_expr(&argument.value)
                         } else {

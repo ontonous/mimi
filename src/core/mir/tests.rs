@@ -2801,6 +2801,177 @@ fn flow_session_effect_receipt_cannot_be_attached_to_silent_local_transition() {
 }
 
 #[test]
+fn concrete_owned_call_argument_uses_a_canonical_move_boundary() {
+    let source = r#"
+func take(value: Option<string>) -> i32 {
+    drop(value)
+    41
+}
+func main() -> i32 {
+    let value = Some("owned")
+    take(value)
+}
+"#;
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("concrete owned call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let main = canonical.functions().get(&owner).expect("main MIR");
+    let call_argument = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call { arguments, .. } => arguments.first().cloned(),
+            _ => None,
+        })
+        .expect("direct call argument");
+    assert!(main.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. } if result == &call_argument
+            )
+        })
+    }));
+    crate::interp::bytecode::compile_mir_program(&canonical)
+        .expect("bytecode adapter must consume the admitted call receipt");
+}
+
+#[test]
+fn borrowed_function_argument_keeps_the_source_outside_the_move_boundary() {
+    let source = r#"
+func inspect(data: view List<i32>) -> i32 {
+    len(data)
+}
+func main() -> i32 {
+    let data = [1, 2]
+    let n = inspect(data)
+    drop(data)
+    n
+}
+"#;
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("borrowed direct call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let main = canonical.functions().get(&owner).expect("main MIR");
+    let (call_argument, call_point) = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call { arguments, .. } => Some((
+                arguments.first().cloned().expect("call argument"),
+                instruction.id.clone(),
+            )),
+            _ => None,
+        })
+        .expect("borrowed direct call");
+    let has_move = main.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. } if result == &call_argument
+            )
+        })
+    });
+    assert!(
+        !has_move,
+        "view parameter must not consume the source local"
+    );
+    assert!(call_point.as_str().starts_with("inst:call:"));
+}
+
+#[test]
+fn call_move_receipt_rejects_argument_identity_drift() {
+    let source = r#"
+func take(value: Option<string>) -> i32 {
+    drop(value)
+    41
+}
+func main() -> i32 {
+    let value = Some("owned")
+    take(value)
+}
+"#;
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("concrete owned call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let (call_instruction, original_argument) = forged
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call { arguments, .. } => Some((
+                instruction.id.clone(),
+                arguments.first().cloned().expect("call argument"),
+            )),
+            _ => None,
+        })
+        .expect("direct call");
+    let call_point = call_instruction
+        .as_str()
+        .split_once(':')
+        .and_then(|(_, rest)| rest.split_once(':'))
+        .map(|(_, point)| crate::core::NodeId(point.to_owned()))
+        .expect("call instruction point");
+    let replacement = forged
+        .values
+        .keys()
+        .find(|value| **value != original_argument)
+        .cloned()
+        .expect("replacement value");
+    for block in forged.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            if instruction.id == call_instruction {
+                let MirInstructionKind::Call { arguments, .. } = &mut instruction.kind else {
+                    unreachable!("call instruction identity changed");
+                };
+                arguments[0] = replacement.clone();
+            }
+        }
+    }
+    let source_value = forged
+        .values
+        .keys()
+        .find(|value| {
+            value
+                .as_str()
+                .starts_with("local:function:main/node:pattern.variable:value")
+        })
+        .cloned()
+        .expect("source local identity");
+    forged.ownership.events.push(MirOwnershipEvent {
+        kind: MirOwnershipEventKind::Move,
+        resource: "function:main/node:pattern.variable:value/local".into(),
+        value: Some(source_value),
+        source: Some("value".into()),
+        target: None,
+        point: call_point,
+    });
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            BTreeMap::from([(owner, forged)]),
+            canonical.type_catalog().clone(),
+            BTreeMap::new(),
+            canonical.transitions().clone(),
+        )
+        .expect_err("call argument identity drift must fail before consumers");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("does not reach a canonical call/flow argument at point")
+    }));
+}
+
+#[test]
 fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
     let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { x: 1, y: true }.x }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

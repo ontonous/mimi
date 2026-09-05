@@ -142,6 +142,16 @@ impl MirProgram {
     ) -> Result<Self, MirProgramBuildError> {
         let type_catalog =
             MirTypeCatalog::from_checked_program(program).map_err(MirProgramBuildError::Types)?;
+        let call_parameter_permissions = program
+            .resolved_signatures()
+            .values()
+            .flat_map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| (parameter.id.0.clone(), parameter.permission))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut functions = BTreeMap::new();
         let mut lowering_errors = Vec::new();
         for (owner, callable) in program.callables() {
@@ -157,7 +167,11 @@ impl MirProgram {
             if !callable.signature.generic_parameters.is_empty() {
                 continue;
             }
-            match super::lower::lower_callable_with_type_catalog(callable, &type_catalog) {
+            match super::lower::lower_callable_with_type_catalog_and_permissions(
+                callable,
+                &type_catalog,
+                Some(&call_parameter_permissions),
+            ) {
                 Ok(function) => {
                     functions.insert(owner.clone(), function);
                 }
