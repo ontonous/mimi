@@ -6696,6 +6696,40 @@ mod tests {
     }
 
     #[test]
+    fn managed_generic_result_unwrap_or_matches_reference_and_bytecode() {
+        for (source, expected) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_string.mimi"
+                ),
+                41,
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_string_err.mimi"
+                ),
+                7,
+            ),
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            let mir = MirProgram::from_checked_program(&checked)
+                .expect("managed generic Result unwrap_or MIR");
+            let reference = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference managed Result unwrap_or execution");
+            let bytecode = compile_mir_program(&mir).expect("managed Result unwrap_or bytecode");
+            assert!(bytecode.ast.is_none());
+            let value = BytecodeVM::new(bytecode)
+                .run_value()
+                .expect("bytecode managed Result unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(expected));
+            assert!(matches!(value, Value::Int(actual) if actual == expected));
+        }
+    }
+
+    #[test]
     fn executes_copy_result_i32_i32_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

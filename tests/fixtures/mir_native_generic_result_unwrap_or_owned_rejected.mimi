@@ -1,0 +1,13 @@
+// Result<List<string>, i32> remains outside the managed payload island:
+// nested managed List elements do not yet have a canonical fallback glue proof.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    let value: Result<List<string>, i32> = Ok(["owned"])
+    let fallback: List<string> = ["fallback"]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    0
+}

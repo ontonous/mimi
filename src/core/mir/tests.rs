@@ -2390,6 +2390,69 @@ fn materializes_generic_distinct_result_unwrap_or_with_two_payload_slots() {
 }
 
 #[test]
+fn materializes_managed_generic_result_unwrap_or_with_move_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_string.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("managed Result unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+            )
+        })
+        .expect("managed Result fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.projection.nominal.as_str(), "builtin:type:Result");
+    assert_eq!(contract.variant_name, "Ok");
+    assert_eq!(contract.fallback_variant_name, "Err");
+    assert_eq!(contract.fallback_arity, 1);
+    assert_eq!(contract.projection.ownership, MirOwnership::Move);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::OwnedString);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference managed Result unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn managed_generic_result_unwrap_or_moves_the_fallback_on_err() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_string_err.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("managed Result Err unwrap_or must lower to canonical MIR");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference managed Result Err unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(7));
+}
+
+#[test]
+fn rejects_managed_generic_result_unwrap_or_outside_move_payload_contract() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let errors = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("unsupported managed Result payload must fail closed");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("generic Result fallback projection")
+            || error.message.contains("generic MIR instance argument")
+    }));
+}
+
+#[test]
 fn generic_result_unwrap_or_stale_receipt_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
     let checked = checked_program(source);

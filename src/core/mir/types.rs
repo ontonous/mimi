@@ -2731,6 +2731,87 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize the consuming `Result<T, i32>.unwrap_or(T)` receipt for
+    /// the narrow managed-payload island.  The Result aggregate and the
+    /// explicit fallback are both consumed; `Ok` carries the selected
+    /// managed payload while the canonical `Err(i32)` slot is Copy and has no
+    /// residual ownership obligation.
+    pub fn validated_move_result_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let (inner, payload_glue) = self.validate_result_move_variant(source_ty)?;
+        if inner != *result_ty || result_ty != fallback_ty {
+            return Err(
+                "managed Result unwrap_or requires matching Ok, result and fallback TypeDesc identities"
+                    .into(),
+            );
+        }
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Move
+            || projection.move_out_glue != payload_glue
+            || projection.field_index != 0
+            || projection.arity != 1
+            || projection.variant.0 != "builtin:variant:Result::Ok"
+            || projection.field.0 != "builtin:variant:Result::Ok/payload:0"
+        {
+            return Err(
+                "managed Result unwrap_or requires the canonical single move-owned Ok payload"
+                    .into(),
+            );
+        }
+        self.validate_move_owned_payload(result_ty)?;
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Result { variants, .. } = &descriptor.layout else {
+            return Err("managed Result unwrap_or source has no canonical Result layout".into());
+        };
+        let selected = variants
+            .iter()
+            .find(|variant| variant.id == projection.variant)
+            .ok_or_else(|| "managed Result unwrap_or Ok variant is absent".to_string())?;
+        if selected.name != "Ok" || selected.discriminant != 0 {
+            return Err("managed Result unwrap_or Ok discriminant disagrees with TypeDesc".into());
+        }
+        let fallback = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Result::Err"
+                    && variant.name == "Err"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+                    && self.get(&variant.fields[0].ty).is_some_and(|error| {
+                        error.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                            && error.ownership == MirOwnership::Copy
+                    })
+            })
+            .ok_or_else(|| {
+                "managed Result unwrap_or requires the canonical Copy Err(i32) variant".to_string()
+            })?;
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection,
+            variant_name: selected.name.clone(),
+            discriminant: selected.discriminant,
+            fallback_variant: fallback.id.clone(),
+            fallback_variant_name: fallback.name.clone(),
+            fallback_discriminant: fallback.discriminant,
+            fallback_arity: fallback.fields.len(),
+        })
+    }
+
     /// Validate a materialized `unwrap_or` receipt at the MIR/consumer
     /// boundary.  This replays the checker-owned contract exactly and does
     /// not derive an ABI from a backend representation.
@@ -2801,13 +2882,26 @@ impl MirTypeCatalog {
                     )
                 }) =>
             {
-                self.validated_result_scalar_projection_fallback_contract(
-                    source_ty,
-                    &receipt.projection.variant,
-                    &receipt.projection.field,
-                    result_ty,
-                    fallback_ty,
-                )?
+                if self
+                    .get(source_ty)
+                    .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Move)
+                {
+                    self.validated_move_result_projection_fallback_contract(
+                        source_ty,
+                        &receipt.projection.variant,
+                        &receipt.projection.field,
+                        result_ty,
+                        fallback_ty,
+                    )?
+                } else {
+                    self.validated_result_scalar_projection_fallback_contract(
+                        source_ty,
+                        &receipt.projection.variant,
+                        &receipt.projection.field,
+                        result_ty,
+                        fallback_ty,
+                    )?
+                }
             }
             Some(MirTypeKind::Result)
                 if self.get(source_ty).is_some_and(|descriptor| {

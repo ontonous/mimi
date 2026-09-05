@@ -1582,9 +1582,48 @@ fn materialize_generic_instance(
                 type_catalog.validate_move_owned_payload(&concrete).is_ok()
             }
     };
+    // `Result<T, i32>.unwrap_or(T)` consumes both operands for a managed
+    // concrete payload.  The Err slot stays a canonical Copy i32, so the
+    // Move receipt only transfers the Ok payload or the explicit fallback.
+    let is_owned_result_projection_fallback = callable.signature.parameters.len() == 2
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Result { ok, error }
+                        if ok == &generic_id
+                            && matches!(
+                                program.resolved_types().get(error),
+                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                            )
+                )
+            })
+        && callable.signature.parameters[1].ty == generic_id
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.result.unwrap_or"
+                        ) && call.arguments.len() == 2
+                )
+            })
+        && type_catalog.validate_move_owned_payload(&concrete).is_ok();
     let is_owned_variant_projection = is_owned_option_projection
         || is_owned_option_projection_fallback
-        || is_owned_result_projection;
+        || is_owned_result_projection
+        || is_owned_result_projection_fallback;
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
     // executable parameter/result are the specialized record and String.
@@ -2388,6 +2427,24 @@ fn materialize_generic_instance(
                     &fallback_ty,
                 ),
             Some(super::types::MirTypeKind::Result)
+                if is_owned_result_projection_fallback
+                    && type_catalog.get(&base_ty).is_some_and(|descriptor| {
+                        matches!(
+                            &descriptor.layout,
+                            super::types::MirLayout::Result { ok, error, .. }
+                                if ok == &result_ty && ok != error
+                        )
+                    }) =>
+            {
+                type_catalog.validated_move_result_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
+            Some(super::types::MirTypeKind::Result)
                 if type_catalog.get(&base_ty).is_some_and(|descriptor| {
                     matches!(
                         &descriptor.layout,
@@ -2425,11 +2482,11 @@ fn materialize_generic_instance(
                 ),
             }]
         })?;
-        if is_owned_option_projection_fallback {
+        if is_owned_option_projection_fallback || is_owned_result_projection_fallback {
             let block = function.blocks.get_mut(&block_id).ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
-                    message: "managed Option fallback entry block is absent during specialization"
+                    message: "managed variant fallback entry block is absent during specialization"
                         .into(),
                 }]
             })?;
@@ -2437,7 +2494,7 @@ fn materialize_generic_instance(
                 return Err(vec![MirLoweringError {
                     node_id: subject(),
                     message:
-                        "managed Option fallback body must contain two Clones and one ProjectOr"
+                        "managed variant fallback body must contain two Clones and one ProjectOr"
                             .into(),
                 }]);
             }
@@ -2451,7 +2508,7 @@ fn materialize_generic_instance(
             else {
                 return Err(vec![MirLoweringError {
                     node_id: subject(),
-                    message: "managed Option fallback body changed during specialization".into(),
+                    message: "managed variant fallback body changed during specialization".into(),
                 }]);
             };
             *project_base = function.parameters[0].clone();
@@ -3203,7 +3260,7 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
         };
         if base != &function.parameters[0] || fallback != &function.parameters[1] {
             return Err(
-                "managed generic variant fallback projection must consume its Option and fallback parameters"
+                "managed generic variant fallback projection must consume its variant and fallback parameters"
                     .into(),
             );
         }
@@ -3257,22 +3314,32 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
                 "managed generic variant fallback return value is not the ProjectOr result".into(),
             );
         }
-        if receipt.projection.nominal.as_str() != "builtin:type:Option"
-            || receipt.variant_name != "Some"
-            || receipt.discriminant != 1
-            || receipt.fallback_variant_name != "None"
-            || receipt.fallback_discriminant != 0
-            || receipt.fallback_arity != 0
-            || receipt.projection.field_index != 0
-            || receipt.projection.arity != 1
-            || receipt.projection.ownership != super::types::MirOwnership::Move
-            || !matches!(
+        let valid_move_shape = match receipt.projection.nominal.as_str() {
+            "builtin:type:Option" => {
+                receipt.variant_name == "Some"
+                    && receipt.discriminant == 1
+                    && receipt.fallback_variant_name == "None"
+                    && receipt.fallback_discriminant == 0
+                    && receipt.fallback_arity == 0
+            }
+            "builtin:type:Result" => {
+                receipt.variant_name == "Ok"
+                    && receipt.discriminant == 0
+                    && receipt.fallback_variant_name == "Err"
+                    && receipt.fallback_discriminant == 1
+                    && receipt.fallback_arity == 1
+            }
+            _ => false,
+        } && receipt.projection.field_index == 0
+            && receipt.projection.arity == 1
+            && receipt.projection.ownership == super::types::MirOwnership::Move
+            && matches!(
                 receipt.projection.move_out_glue,
                 super::types::MirGlueKind::OwnedString | super::types::MirGlueKind::List
-            )
-        {
+            );
+        if !valid_move_shape {
             return Err(
-                "managed generic variant fallback receipt is outside the Move Option contract"
+                "managed generic variant fallback receipt is outside the Move Option/Result contract"
                     .into(),
             );
         }

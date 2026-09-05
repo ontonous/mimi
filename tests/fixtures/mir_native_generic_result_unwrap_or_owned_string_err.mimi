@@ -1,0 +1,13 @@
+// The Err tag selects and consumes the explicit managed fallback while the
+// canonical Copy i32 Err payload is consumed as part of the Result aggregate.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Result<string, i32> = Err(7)
+    let out = unwrap_or(value, "fallback")
+    drop(out)
+    7
+}
