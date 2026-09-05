@@ -1027,6 +1027,7 @@ impl MirProgram {
                         super::MirInstructionKind::SessionCall {
                             result,
                             endpoint,
+                            payload,
                             contract,
                             ..
                         } => {
@@ -1045,6 +1046,22 @@ impl MirProgram {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
+                                });
+                            }
+                            if let Some(payload) = payload {
+                                let payload_ty =
+                                    function.values.get(payload).map(|value| &value.ty);
+                                if payload_ty != receipt.payload_ty.as_ref() {
+                                    errors.push(super::MirValidationError {
+                                        subject: instruction.id.to_string(),
+                                        message: "SessionCall payload value disagrees with its receipt TypeDesc identity".into(),
+                                    });
+                                }
+                            } else if receipt.payload_ty.is_some() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "SessionCall receipt requires a payload MIR value"
+                                        .into(),
                                 });
                             }
                         }
@@ -2734,7 +2751,27 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         | super::MirInstructionKind::Construct {
             fields: arguments, ..
         } => arguments.clone(),
-        super::MirInstructionKind::SessionCall { endpoint, .. } => vec![endpoint.clone()],
+        super::MirInstructionKind::SessionCall {
+            operation,
+            endpoint,
+            payload,
+            ..
+        } => {
+            // A non-terminal Send advances the checker residual in place; the
+            // endpoint identity remains available for the next action. Close
+            // is terminal and consumes it. Payloads are currently Copy, but
+            // retain them here so a future linear payload receipt cannot be
+            // silently omitted.
+            let mut sources = if *operation == super::types::MirSessionOperation::Send {
+                Vec::new()
+            } else {
+                vec![endpoint.clone()]
+            };
+            if let Some(payload) = payload {
+                sources.push(payload.clone());
+            }
+            sources
+        }
         super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
         super::MirInstructionKind::ListOp {
             operation: super::MirListOperation::Concat,
@@ -2929,7 +2966,9 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         | super::MirInstructionKind::BuiltinCall { arguments, .. } => {
             arguments.iter().any(|v| v == needle)
         }
-        super::MirInstructionKind::SessionCall { endpoint, .. } => endpoint == needle,
+        super::MirInstructionKind::SessionCall {
+            endpoint, payload, ..
+        } => endpoint == needle || payload.as_ref() == Some(needle),
     }
 }
 
@@ -4257,6 +4296,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 operation,
                 endpoint,
+                payload,
                 contract,
             } => {
                 let endpoint_ty = function
@@ -4283,10 +4323,24 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .type_catalog()
                     .validate_session_call_contract(&endpoint_ty, &result_ty, contract)
                     .map_err(|message| self.error(&function.owner, message))?;
-                if *operation != super::types::MirSessionOperation::Close {
+                if *operation == super::types::MirSessionOperation::Send {
+                    let payload = payload.as_ref().ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "session_send receipt has no payload MIR value",
+                        )
+                    })?;
+                    let payload = self.take_transfer_value(function, values, payload)?;
+                    if !matches!(payload, MirRuntimeValue::Int(_)) {
+                        return Err(self.error(
+                            &function.owner,
+                            "session_send received a non-integer payload runtime value",
+                        ));
+                    }
+                } else if *operation != super::types::MirSessionOperation::Close {
                     return Err(self.error(
                         &function.owner,
-                        "SessionCall operation is outside the reference close contract",
+                        "SessionCall operation is outside the materialized reference contract",
                     ));
                 }
                 // The deterministic oracle models an endpoint as an opaque
@@ -4294,7 +4348,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 // unit; the native/VM runtime performs the actual channel
                 // table removal, but no backend-specific state is allowed to
                 // alter the canonical result/trap contract.
-                let endpoint = self.take_transfer_value(function, values, endpoint)?;
+                let endpoint = if *operation == super::types::MirSessionOperation::Send {
+                    self.read_value(function, values, endpoint)?
+                } else {
+                    self.take_transfer_value(function, values, endpoint)?
+                };
                 if !matches!(endpoint, MirRuntimeValue::Int(_)) {
                     return Err(self.error(
                         &function.owner,

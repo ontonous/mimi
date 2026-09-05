@@ -533,6 +533,10 @@ impl MirGlueContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirSessionOperation {
     Close,
+    /// Send one checker-typed signed integer payload. The residual receipt
+    /// carries the expected `!i32 .`/`!i64 .` action; receive remains closed until
+    /// the reference oracle has a channel-state model.
+    Send,
 }
 
 /// Checker-owned residual, TypeDesc and ABI receipt for one SessionChan
@@ -544,6 +548,7 @@ pub struct MirSessionCallContract {
     pub operation: MirSessionOperation,
     pub endpoint_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
+    pub payload_ty: Option<ResolvedTypeId>,
     pub before: SessionResidualId,
     pub after: SessionResidualId,
     pub terminal: bool,
@@ -2790,15 +2795,17 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Materialize the narrow canonical SessionCall receipt. The first
-    /// production operation is terminal `session_close`; send/recv payload
-    /// contracts remain deliberately outside this method and therefore fail
-    /// closed in lowering rather than being represented as an ordinary call.
+    /// Materialize the narrow canonical SessionCall receipt. Terminal
+    /// `session_close` and integer-payload `session_send` are executable;
+    /// `session_recv` remains deliberately outside this method and therefore
+    /// fails closed in lowering rather than being represented as an ordinary
+    /// call.
     pub fn validated_session_call_contract(
         &self,
         operation: MirSessionOperation,
         endpoint_ty: &ResolvedTypeId,
         result_ty: &ResolvedTypeId,
+        payload_ty: Option<&ResolvedTypeId>,
         before: &SessionResidualId,
         after: &SessionResidualId,
         terminal: bool,
@@ -2815,28 +2822,83 @@ impl MirTypeCatalog {
             clone: MirGlueKind::Noop,
             drop: MirGlueKind::Noop,
         };
-        if result.layout != MirLayout::Unit
-            || result.abi != MirAbiClass::Unit
-            || result.ownership != MirOwnership::Copy
-            || result.glue != unit_glue
-        {
-            return Err("session_close result must be the canonical Copy unit TypeDesc".into());
-        }
-        if operation != MirSessionOperation::Close {
-            return Err("SessionCall operation is outside the canonical close contract".into());
-        }
         if before == after {
             return Err("SessionCall residual transition does not advance state".into());
         }
-        if !terminal || after.as_str() != "closed" {
-            return Err(
-                "session_close must be terminal and end in the canonical 'closed' residual".into(),
-            );
+        match operation {
+            MirSessionOperation::Close => {
+                if result.layout != MirLayout::Unit
+                    || result.abi != MirAbiClass::Unit
+                    || result.ownership != MirOwnership::Copy
+                    || result.glue != unit_glue
+                {
+                    return Err(
+                        "session_close result must be the canonical Copy unit TypeDesc".into(),
+                    );
+                }
+                if payload_ty.is_some() {
+                    return Err("session_close cannot carry a payload TypeDesc".into());
+                }
+                if !terminal || after.as_str() != "closed" {
+                    return Err(
+                        "session_close must be terminal and end in the canonical 'closed' residual"
+                            .into(),
+                    );
+                }
+            }
+            MirSessionOperation::Send => {
+                if terminal || after.as_str() == "closed" {
+                    return Err("session_send must be a non-terminal residual transition".into());
+                }
+                if result.layout != MirLayout::Unit
+                    || result.abi != MirAbiClass::Unit
+                    || result.ownership != MirOwnership::Copy
+                    || result.glue != unit_glue
+                {
+                    return Err(
+                        "session_send result must be the canonical Copy unit TypeDesc".into(),
+                    );
+                }
+                let payload_ty = payload_ty.ok_or_else(|| {
+                    "session_send requires one canonical integer payload TypeDesc".to_string()
+                })?;
+                let payload = self.get(payload_ty).ok_or_else(|| {
+                    format!(
+                        "session_send payload type '{}' is absent from MIR TypeDesc catalog",
+                        payload_ty.as_str()
+                    )
+                })?;
+                let MirAbiClass::Integer { bits, signed: true } = payload.abi else {
+                    return Err("session_send payload must use a signed integer ABI".into());
+                };
+                if !matches!(bits, 32 | 64)
+                    || payload.layout != MirLayout::Scalar
+                    || payload.ownership != MirOwnership::Copy
+                    || payload.glue != unit_glue
+                {
+                    return Err(
+                        "session_send payload must be a Copy scalar i32/i64 TypeDesc".into(),
+                    );
+                }
+                let prefix = if before.as_str().starts_with("!i32 .") {
+                    32
+                } else if before.as_str().starts_with("!i64 .") {
+                    64
+                } else {
+                    return Err("session_send residual must begin with '!i32 .' or '!i64 .'".into());
+                };
+                if bits != prefix {
+                    return Err(
+                        "session_send payload ABI disagrees with its checker residual".into(),
+                    );
+                }
+            }
         }
         Ok(MirSessionCallContract {
             operation,
             endpoint_ty: endpoint_ty.clone(),
             result_ty: result_ty.clone(),
+            payload_ty: payload_ty.cloned(),
             before: before.clone(),
             after: after.clone(),
             terminal,
@@ -2859,6 +2921,7 @@ impl MirTypeCatalog {
             contract.operation,
             endpoint_ty,
             result_ty,
+            contract.payload_ty.as_ref(),
             &contract.before,
             &contract.after,
             contract.terminal,

@@ -620,13 +620,14 @@ pub enum MirInstructionKind {
         arguments: Vec<MirValueId>,
     },
     /// Consume a checker-resolved SessionChan endpoint through an explicit
-    /// residual/effect receipt. This first island admits only terminal
-    /// `session_close`; send/recv stay outside the canonical executable shape
-    /// until their payload/channel-state contract is materialized.
+    /// residual/effect receipt. Session payloads are present only when the
+    /// receipt materializes their TypeDesc/ABI; unsupported shapes fail closed
+    /// before any backend sees them.
     SessionCall {
         result: MirValueId,
         operation: types::MirSessionOperation,
         endpoint: MirValueId,
+        payload: Option<MirValueId>,
         contract: Option<types::MirSessionCallContract>,
     },
     /// A checked conversion. Source/target facts live in the value catalog
@@ -2231,7 +2232,14 @@ fn instruction_consumes_owned_string(
             elements: arguments,
             ..
         } => sources.extend(arguments.iter().cloned()),
-        MirInstructionKind::SessionCall { endpoint, .. } => sources.push(endpoint.clone()),
+        MirInstructionKind::SessionCall {
+            endpoint, payload, ..
+        } => {
+            sources.push(endpoint.clone());
+            if let Some(payload) = payload {
+                sources.push(payload.clone());
+            }
+        }
         MirInstructionKind::ListOp { list, argument, .. } => {
             sources.push(list.clone());
             if let Some(argument) = argument {
@@ -2536,9 +2544,14 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             result,
             operation,
             endpoint,
+            payload,
             contract,
         } => format!(
-            "session_call {result} {operation:?} {endpoint}{}",
+            "session_call {result} {operation:?} {endpoint}{}{}",
+            payload
+                .as_ref()
+                .map(|payload| format!(" payload={payload}"))
+                .unwrap_or_default(),
             contract
                 .as_ref()
                 .map(|contract| format!(" [session_contract={contract:?}]"))
@@ -3103,10 +3116,14 @@ impl<'a> MirValidator<'a> {
             SessionCall {
                 result,
                 endpoint,
+                payload,
                 operation,
                 contract,
             } => {
                 self.use_value(endpoint);
+                if let Some(payload) = payload {
+                    self.use_value(payload);
+                }
                 if contract.is_none() {
                     self.error(
                         result.to_string(),
@@ -3121,6 +3138,21 @@ impl<'a> MirValidator<'a> {
                         result.to_string(),
                         "SessionCall receipt disagrees with MIR operation",
                     );
+                }
+                if let Some(receipt) = contract.as_ref() {
+                    if payload
+                        .as_ref()
+                        .and_then(|value| self.function.values.get(value))
+                        .map(|value| &value.ty)
+                        != receipt.payload_ty.as_ref()
+                    {
+                        if payload.is_some() || receipt.payload_ty.is_some() {
+                            self.error(
+                                result.to_string(),
+                                "SessionCall payload value disagrees with its receipt TypeDesc identity",
+                            );
+                        }
+                    }
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
@@ -3520,7 +3552,14 @@ impl<'a> MirValidator<'a> {
             | MirInstructionKind::BuiltinCall { arguments, .. } => {
                 uses.extend(arguments.iter().cloned())
             }
-            MirInstructionKind::SessionCall { endpoint, .. } => uses.push(endpoint.clone()),
+            MirInstructionKind::SessionCall {
+                endpoint, payload, ..
+            } => {
+                uses.push(endpoint.clone());
+                if let Some(payload) = payload {
+                    uses.push(payload.clone());
+                }
+            }
         }
         for value in uses {
             self.check_use_site(&value, block, index, dominators, reachable);

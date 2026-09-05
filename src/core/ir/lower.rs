@@ -2699,6 +2699,7 @@ impl BodyLowerer<'_> {
             }
             let builtin =
                 super::BuiltinId::new(site.callee.clone()).map_err(|error| vec![error])?;
+            let session_action = self.session_actions.get(node_id).cloned();
             let mut lowered = Vec::with_capacity(arguments.len());
             let sibling_roles_2 = expr_sibling_roles(&format!("{role}.argument"), arguments);
             for index in 0..arguments.len() {
@@ -2707,20 +2708,34 @@ impl BodyLowerer<'_> {
                 }
                 let argument_role = &sibling_roles_2[index];
                 let value = self.lower_expr(&arguments[index], &argument_role)?;
+                let conversion = if site.callee == "session_send" && index == 1 {
+                    session_action
+                        .as_ref()
+                        .and_then(|action| self.session_payload_type(action.before.as_str()))
+                        .map(|target| self.implicit_conversion(node_id, &value.ty, &target))
+                        .transpose()?
+                        .unwrap_or_else(|| CheckedConversion {
+                            kind: CheckedConversionKind::Identity,
+                            from: value.ty.clone(),
+                            to: value.ty.clone(),
+                        })
+                } else {
+                    CheckedConversion {
+                        kind: CheckedConversionKind::Identity,
+                        from: value.ty.clone(),
+                        to: value.ty.clone(),
+                    }
+                };
                 lowered.push(ResolvedArgument {
                     parameter: super::ResolvedParameterId(NodeId(format!(
                         "builtin:{}/parameter:{index}",
                         site.callee
                     ))),
-                    conversion: CheckedConversion {
-                        kind: CheckedConversionKind::Identity,
-                        from: value.ty.clone(),
-                        to: value.ty.clone(),
-                    },
+                    conversion,
                     value,
                 });
             }
-            let session = if let Some(action) = self.session_actions.get(node_id).cloned() {
+            let session = if let Some(action) = session_action {
                 let endpoint = self.lookup_local(&action.endpoint).ok_or_else(|| {
                     vec![ResolvedBodyError::new(
                         node_id.clone(),
@@ -4688,6 +4703,7 @@ impl BodyLowerer<'_> {
         let receiver_parameter =
             super::ResolvedParameterId(NodeId(format!("{}/parameter:self", builtin.as_str())));
         let receiver_ty = receiver.ty.clone();
+        let session_action = self.session_actions.get(node_id).cloned();
         let mut lowered = vec![ResolvedArgument {
             parameter: receiver_parameter,
             value: receiver,
@@ -4706,17 +4722,31 @@ impl BodyLowerer<'_> {
             let argument_role = sibling_roles_9[index].clone();
             let value = self.lower_expr(&arguments[index], &argument_role)?;
             let value_ty = value.ty.clone();
+            let conversion = if method_name == "send" && index == 0 {
+                session_action
+                    .as_ref()
+                    .and_then(|action| self.session_payload_type(action.before.as_str()))
+                    .map(|target| self.implicit_conversion(node_id, &value_ty, &target))
+                    .transpose()?
+                    .unwrap_or_else(|| CheckedConversion {
+                        kind: CheckedConversionKind::Identity,
+                        from: value_ty.clone(),
+                        to: value_ty.clone(),
+                    })
+            } else {
+                CheckedConversion {
+                    kind: CheckedConversionKind::Identity,
+                    from: value_ty.clone(),
+                    to: value_ty.clone(),
+                }
+            };
             lowered.push(ResolvedArgument {
                 parameter: super::ResolvedParameterId(NodeId(format!(
                     "{}/parameter:{index}",
                     builtin.as_str()
                 ))),
                 value,
-                conversion: CheckedConversion {
-                    kind: CheckedConversionKind::Identity,
-                    from: value_ty.clone(),
-                    to: value_ty,
-                },
+                conversion,
             });
         }
         // 0.1.8 Phase E: SessionChan method calls (`ch.send(v)` etc.) carry a
@@ -4724,7 +4754,7 @@ impl BodyLowerer<'_> {
         // Propagate it into ResolvedCall.session so resource lowering treats
         // the first argument as a session transfer/drop instead of a generic
         // consume/receiver move.
-        let session = if let Some(action) = self.session_actions.get(node_id).cloned() {
+        let session = if let Some(action) = session_action {
             let endpoint = self.lookup_local(&action.endpoint).ok_or_else(|| {
                 vec![ResolvedBodyError::new(
                     node_id.clone(),
@@ -7020,6 +7050,22 @@ impl BodyLowerer<'_> {
                     "stable node identity is absent from NodeMeta",
                 )]
             })
+    }
+
+    /// Select the checker-interned primitive TypeDesc named by a Session send
+    /// residual. The residual is already a checker-owned identity; this does
+    /// not infer from the surface expression or run a second type check.
+    fn session_payload_type(&self, residual: &str) -> Option<ResolvedTypeId> {
+        let expected = if residual.starts_with("!i32 .") {
+            PrimitiveType::I32
+        } else if residual.starts_with("!i64 .") {
+            PrimitiveType::I64
+        } else {
+            return None;
+        };
+        self.types.iter().find_map(|(id, ty)| {
+            matches!(ty, ResolvedType::Primitive(actual) if *actual == expected).then(|| id.clone())
+        })
     }
 
     fn unsupported<T>(

@@ -1369,6 +1369,7 @@ fn eval_instruction(
             result,
             operation,
             endpoint,
+            payload,
             contract,
         } => {
             let endpoint_ty = instruction_value_type(function, endpoint, "SessionCall endpoint")?;
@@ -1377,17 +1378,46 @@ fn eval_instruction(
                 "MIR SessionCall has no canonical residual/ABI receipt".to_string()
             })?;
             catalog.validate_session_call_contract(&endpoint_ty, &result_ty, receipt)?;
-            if *operation != crate::core::mir::types::MirSessionOperation::Close {
-                return Err(
-                    "MIR verifier SessionCall operation is outside the close contract".into(),
-                );
+            if receipt.operation != *operation {
+                return Err("MIR SessionCall receipt disagrees with MIR operation".into());
             }
-            let endpoint_value = state
-                .values
-                .remove(endpoint)
-                .ok_or_else(|| format!("MIR SessionCall endpoint '{}' is not defined", endpoint))?;
+            if payload.is_some() != receipt.payload_ty.is_some() {
+                return Err("MIR verifier SessionCall payload disagrees with its receipt".into());
+            }
+            if let Some(payload) = payload {
+                let payload_ty = instruction_value_type(function, payload, "SessionCall payload")?;
+                if receipt.payload_ty.as_ref() != Some(&payload_ty) {
+                    return Err(
+                        "MIR verifier SessionCall payload disagrees with its receipt TypeDesc identity"
+                            .into(),
+                    );
+                }
+            }
+            // A non-terminal send keeps the endpoint identity alive for the
+            // checker-proven residual continuation. Terminal close consumes it
+            // exactly once. This mirrors the reference and production backend
+            // ownership contract instead of treating every SessionCall as a
+            // terminal move.
+            let endpoint_value = if *operation == crate::core::mir::types::MirSessionOperation::Send
+            {
+                state.values.get(endpoint).cloned().ok_or_else(|| {
+                    format!("MIR SessionCall endpoint '{}' is not defined", endpoint)
+                })?
+            } else {
+                state.values.remove(endpoint).ok_or_else(|| {
+                    format!("MIR SessionCall endpoint '{}' is not defined", endpoint)
+                })?
+            };
             if !matches!(endpoint_value, SymbolicValue::Opaque { .. }) {
                 return Err("MIR verifier SessionCall endpoint is not an opaque handle".into());
+            }
+            if let Some(payload) = payload {
+                let payload_value = state.values.remove(payload).ok_or_else(|| {
+                    format!("MIR SessionCall payload '{}' is not defined", payload)
+                })?;
+                if !matches!(payload_value, SymbolicValue::Int(_)) {
+                    return Err("MIR verifier SessionCall payload is not an integer".into());
+                }
             }
             let value = SymbolicValue::Unit;
             ensure_result_shape(function, catalog, result, &value)?;

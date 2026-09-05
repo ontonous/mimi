@@ -345,12 +345,36 @@ impl<'a> CapabilityGate<'a> {
             self.validate_terminator(function, &block.terminator, block.id.as_str());
         }
         for event in &function.ownership.events {
-            if matches!(
-                event.kind,
-                crate::core::mir::MirOwnershipEventKind::TransferSession
-                    | crate::core::mir::MirOwnershipEventKind::TransferChild
-                    | crate::core::mir::MirOwnershipEventKind::BorrowMut
-            ) {
+            let unsupported =
+                if event.kind == crate::core::mir::MirOwnershipEventKind::TransferSession {
+                    !function.blocks.values().any(|block| {
+                        block.instructions.iter().any(|instruction| {
+                            let point = instruction
+                                .id
+                                .as_str()
+                                .split_once(':')
+                                .and_then(|(_, rest)| rest.split_once(':'))
+                                .map(|(_, point)| point);
+                            matches!(
+                                &instruction.kind,
+                                MirInstructionKind::SessionCall {
+                                    endpoint,
+                                    contract: Some(contract),
+                                    ..
+                                } if point == Some(event.point.0.as_str())
+                                    && event.value.as_ref() == Some(endpoint)
+                                    && !contract.terminal
+                            )
+                        })
+                    })
+                } else {
+                    matches!(
+                        event.kind,
+                        crate::core::mir::MirOwnershipEventKind::TransferChild
+                            | crate::core::mir::MirOwnershipEventKind::BorrowMut
+                    )
+                };
+            if unsupported {
                 self.error(format!(
                     "function '{}' ownership effect '{}' is outside the MIR verifier capability",
                     function.owner.0,
@@ -1098,9 +1122,10 @@ impl<'a> CapabilityGate<'a> {
             }
             MirInstructionKind::SessionCall {
                 result,
+                operation,
                 endpoint,
+                payload,
                 contract,
-                ..
             } => {
                 let (Some(endpoint_ty), Some(result_ty)) =
                     (value_type(function, endpoint), value_type(function, result))
@@ -1117,6 +1142,27 @@ impl<'a> CapabilityGate<'a> {
                     catalog.validate_session_call_contract(&endpoint_ty, &result_ty, receipt)
                 {
                     self.error(format!("{subject} SessionCall rejected: {message}"));
+                }
+                if payload.is_some() != receipt.payload_ty.is_some() {
+                    self.error(format!(
+                        "{subject} SessionCall payload disagrees with its receipt TypeDesc"
+                    ));
+                }
+                if let Some(payload) = payload {
+                    if let (Some(payload_ty), Some(receipt_ty)) =
+                        (value_type(function, payload), receipt.payload_ty.as_ref())
+                    {
+                        if payload_ty != *receipt_ty {
+                            self.error(format!(
+                                "{subject} SessionCall payload value disagrees with its receipt TypeDesc identity"
+                            ));
+                        }
+                    }
+                }
+                if receipt.operation != *operation {
+                    self.error(format!(
+                        "{subject} SessionCall receipt disagrees with MIR operation"
+                    ));
                 }
             }
             MirInstructionKind::VariantPredicate {

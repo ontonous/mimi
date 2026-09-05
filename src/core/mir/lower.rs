@@ -14,8 +14,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::core::ir::{
-    NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
-    ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind, ResolvedType, ResolvedUnaryOp,
+    CheckedConversionKind, NominalTypeId, ResolvedBlock, ResolvedCall, ResolvedCallee,
+    ResolvedExpr, ResolvedExprKind, ResolvedPattern, ResolvedPatternKind, ResolvedStmtKind,
+    ResolvedType, ResolvedUnaryOp,
 };
 use crate::core::{
     CanonicalActionKind, CheckedProgram, NodeId, PrimitiveType, ResolvedBody, ResolvedLocalId,
@@ -4851,32 +4852,64 @@ impl<'a> Lowerer<'a> {
         });
     }
 
-    fn session_close_contract(
+    fn session_call_contract(
         &self,
         call: &ResolvedCall,
         result: &MirValueId,
         arguments: &[MirValueId],
         type_catalog: Option<&MirTypeCatalog>,
-    ) -> Result<(MirValueId, super::types::MirSessionCallContract), String> {
-        let is_close = matches!(
+    ) -> Result<
+        (
+            MirValueId,
+            Option<MirValueId>,
+            super::types::MirSessionCallContract,
+        ),
+        String,
+    > {
+        let operation = if matches!(
             &call.callee,
             ResolvedCallee::Builtin(builtin)
                 if matches!(
                     builtin.as_str(),
                     "session_close" | "builtin.method.session.close"
                 )
-        );
-        if !is_close {
+        ) {
+            super::types::MirSessionOperation::Close
+        } else if matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(builtin)
+                if matches!(
+                    builtin.as_str(),
+                    "session_send" | "builtin.method.session.send"
+                )
+        ) {
+            super::types::MirSessionOperation::Send
+        } else {
             return Err(
-                "SessionCall currently admits only terminal session_close; session_send/session_recv remain outside the canonical MIR contract".into(),
+                "SessionCall admits only the materialized session_close/session_send contracts; session_recv remains outside the canonical MIR contract".into(),
             );
-        }
-        let [endpoint] = arguments else {
-            return Err("session_close canonical MIR operation requires one endpoint".into());
+        };
+        let (endpoint, payload) = match operation {
+            super::types::MirSessionOperation::Close => {
+                let [endpoint] = arguments else {
+                    return Err(
+                        "session_close canonical MIR operation requires one endpoint".into(),
+                    );
+                };
+                (endpoint, None)
+            }
+            super::types::MirSessionOperation::Send => {
+                let [endpoint, payload] = arguments else {
+                    return Err(
+                        "session_send canonical MIR operation requires endpoint and payload".into(),
+                    );
+                };
+                (endpoint, Some(payload))
+            }
         };
         let [transition] = call.session.as_slice() else {
             return Err(
-                "session_close canonical MIR operation requires exactly one residual transition"
+                "SessionCall canonical MIR operation requires exactly one residual transition"
                     .into(),
             );
         };
@@ -4884,23 +4917,29 @@ impl<'a> Lowerer<'a> {
             .values
             .get(endpoint)
             .map(|value| value.ty.clone())
-            .ok_or_else(|| "session_close endpoint MIR value has no canonical type".to_string())?;
+            .ok_or_else(|| "SessionCall endpoint MIR value has no canonical type".to_string())?;
         let result_ty = self
             .values
             .get(result)
             .map(|value| value.ty.clone())
-            .ok_or_else(|| "session_close result MIR value has no canonical type".to_string())?;
+            .ok_or_else(|| "SessionCall result MIR value has no canonical type".to_string())?;
+        let payload_ty =
+            payload.and_then(|payload| self.values.get(payload).map(|value| value.ty.clone()));
+        if payload.is_some() && payload_ty.is_none() {
+            return Err("SessionCall payload MIR value has no canonical type".into());
+        }
         let catalog = type_catalog
-            .ok_or_else(|| "session_close requires the canonical TypeDesc catalog".to_string())?;
+            .ok_or_else(|| "SessionCall requires the canonical TypeDesc catalog".to_string())?;
         let contract = catalog.validated_session_call_contract(
-            super::types::MirSessionOperation::Close,
+            operation,
             &endpoint_ty,
             &result_ty,
+            payload_ty.as_ref(),
             &transition.before,
             &transition.after,
             transition.terminal,
         )?;
-        Ok((endpoint.clone(), contract))
+        Ok((endpoint.clone(), payload.cloned(), contract))
     }
 
     fn id(&mut self, prefix: &str, node_id: &NodeId) -> Option<MirValueId> {
@@ -5447,7 +5486,12 @@ impl<'a> Lowerer<'a> {
                 let consuming_variant_projection =
                     variant_projection_is_consuming(call, self.type_catalog);
                 let session_call = !call.session.is_empty();
-                let arguments: Vec<MirValueId> = call
+                let session_send_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(builtin)
+                        if matches!(builtin.as_str(), "session_send" | "builtin.method.session.send")
+                );
+                let mut arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
                     .enumerate()
@@ -5486,6 +5530,7 @@ impl<'a> Lowerer<'a> {
                             && parameter_is_owned
                             && argument_needs_drop;
                         let session_endpoint = session_call
+                            && !session_send_call
                             && call.session.iter().any(|transition| {
                                 matches!(
                                     &argument.value.kind,
@@ -5494,6 +5539,15 @@ impl<'a> Lowerer<'a> {
                                             && place.projections.is_empty()
                                 )
                             });
+                        if session_send_call && session_call && index == 0 {
+                            if let ResolvedExprKind::Load(place) = &argument.value.kind {
+                                if place.projections.is_empty() {
+                                    return self.local_value(&place.base).unwrap_or_else(|_| {
+                                        self.lower_consuming_expr(&argument.value)
+                                    });
+                                }
+                            }
+                        }
                         if consuming_transition
                             || session_endpoint
                             || consuming_list_concat
@@ -5506,6 +5560,40 @@ impl<'a> Lowerer<'a> {
                         }
                     })
                     .collect();
+                // Builtin lowering normally receives checker-finalized values,
+                // but session_send's numeric literal widening is represented
+                // by the argument conversion receipt rather than a new
+                // ResolvedExpr node. Materialize that receipt before the
+                // SessionCall payload is validated so `21` for `!i64` cannot
+                // silently disagree with the residual ABI.
+                if session_send_call && session_call {
+                    if let (Some(argument), Some(source)) =
+                        (call.arguments.get(1), arguments.get(1).cloned())
+                    {
+                        if argument.conversion.kind != CheckedConversionKind::Identity {
+                            let conversion_node = NodeId(format!(
+                                "{}/session-send-payload-conversion",
+                                argument.value.node_id.0
+                            ));
+                            if let Some(converted) = self.id("convert", &conversion_node) {
+                                self.insert_value(
+                                    converted.clone(),
+                                    argument.conversion.to.clone(),
+                                    &conversion_node,
+                                );
+                                self.emit(
+                                    &conversion_node,
+                                    "session_send_payload_convert",
+                                    MirInstructionKind::Convert {
+                                        result: converted.clone(),
+                                        source,
+                                    },
+                                );
+                                arguments[1] = converted;
+                            }
+                        }
+                    }
+                }
                 if let ResolvedCallee::Transition(transition) = &call.callee {
                     self.emit(
                         &expression.node_id,
@@ -5517,15 +5605,15 @@ impl<'a> Lowerer<'a> {
                         },
                     );
                 } else if session_call {
-                    match self.session_close_contract(call, &result, &arguments, self.type_catalog)
-                    {
-                        Ok((endpoint, contract)) => self.emit(
+                    match self.session_call_contract(call, &result, &arguments, self.type_catalog) {
+                        Ok((endpoint, payload, contract)) => self.emit(
                             &expression.node_id,
                             "session_call",
                             MirInstructionKind::SessionCall {
                                 result: result.clone(),
                                 operation: contract.operation,
                                 endpoint,
+                                payload,
                                 contract: Some(contract),
                             },
                         ),
@@ -5980,10 +6068,10 @@ impl<'a> Lowerer<'a> {
     /// wider aggregate/control-flow contract. The TypeDesc is the only source
     /// of the ownership decision.
     fn lower_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
-        if self
-            .type_catalog
-            .is_some_and(|catalog| catalog.validate_owned_string(&expression.ty).is_ok())
-        {
+        if self.type_catalog.is_some_and(|catalog| {
+            catalog.validate_owned_string(&expression.ty).is_ok()
+                || catalog.validate_session_channel(&expression.ty).is_ok()
+        }) {
             self.lower_consuming_expr(expression)
         } else {
             self.lower_expr(expression)

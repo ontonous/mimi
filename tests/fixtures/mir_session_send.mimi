@@ -1,0 +1,10 @@
+session Send = !i64 . end
+
+func send_once(ch: SessionChan<Send>) -> SessionChan<Send> {
+    session_send(ch, 21)
+    ch
+}
+
+func main() -> i32 {
+    0
+}

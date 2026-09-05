@@ -305,13 +305,42 @@ impl<'a> FunctionEmitter<'a> {
                         ));
                     }
                 }
-                MirOwnershipEventKind::TransferSession
-                | MirOwnershipEventKind::TransferChild
-                | MirOwnershipEventKind::BorrowMut => self.error(format!(
-                    "ownership event '{}' for '{}' is outside the scalar bytecode glue slice",
-                    event.kind.as_str(),
-                    value
-                )),
+                MirOwnershipEventKind::TransferSession => {
+                    let matched = self.function.blocks.values().any(|block| {
+                        block.instructions.iter().any(|instruction| {
+                            let point = instruction
+                                .id
+                                .as_str()
+                                .split_once(':')
+                                .and_then(|(_, rest)| rest.split_once(':'))
+                                .map(|(_, point)| point);
+                            matches!(
+                                &instruction.kind,
+                                MirInstructionKind::SessionCall {
+                                    endpoint,
+                                    contract: Some(contract),
+                                    ..
+                                } if endpoint == value
+                                    && !contract.terminal
+                                    && point == Some(event.point.0.as_str())
+                            )
+                        })
+                    });
+                    if !matched {
+                        self.error(format!(
+                            "ownership event '{}' for '{}' is outside the scalar bytecode glue slice",
+                            event.kind.as_str(),
+                            value
+                        ));
+                    }
+                }
+                MirOwnershipEventKind::TransferChild | MirOwnershipEventKind::BorrowMut => {
+                    self.error(format!(
+                        "ownership event '{}' for '{}' is outside the scalar bytecode glue slice",
+                        event.kind.as_str(),
+                        value
+                    ));
+                }
                 MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowEnd => {}
             }
         }
@@ -670,8 +699,15 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 operation,
                 endpoint,
+                payload,
                 contract,
-            } => self.emit_session_call(result, *operation, endpoint, contract.as_ref()),
+            } => self.emit_session_call(
+                result,
+                *operation,
+                endpoint,
+                payload.as_ref(),
+                contract.as_ref(),
+            ),
             MirInstructionKind::Convert { result, source } => self.emit_convert(result, source),
             MirInstructionKind::Nop => {}
         }
@@ -822,6 +858,7 @@ impl<'a> FunctionEmitter<'a> {
         result: &MirValueId,
         operation: crate::core::mir::types::MirSessionOperation,
         endpoint: &MirValueId,
+        payload: Option<&MirValueId>,
         contract: Option<&crate::core::mir::types::MirSessionCallContract>,
     ) {
         let Some(contract) = contract else {
@@ -850,9 +887,34 @@ impl<'a> FunctionEmitter<'a> {
             self.error(message);
             return;
         }
-        if operation != crate::core::mir::types::MirSessionOperation::Close {
-            self.error("SessionCall operation is outside the bytecode close contract");
+        if operation != contract.operation {
+            self.error("SessionCall receipt disagrees with MIR operation");
             return;
+        }
+        if payload.is_some() != contract.payload_ty.is_some() {
+            self.error("SessionCall payload value disagrees with its receipt TypeDesc");
+            return;
+        }
+        if let Some(payload) = payload {
+            let Some(payload_ty) = self
+                .function
+                .values
+                .get(payload)
+                .map(|value| value.ty.clone())
+            else {
+                self.error("SessionCall payload is absent from MIR value catalog");
+                return;
+            };
+            if contract.payload_ty.as_ref() != Some(&payload_ty) {
+                self.error(
+                    "SessionCall payload value disagrees with its receipt TypeDesc identity",
+                );
+                return;
+            }
+            if let Err(message) = self.supported_type(&payload_ty) {
+                self.error(format!("SessionCall payload is unsupported: {message}"));
+                return;
+            }
         }
         if let Err(message) = self.supported_type(&endpoint_ty) {
             self.error(format!("SessionCall endpoint is unsupported: {message}"));
@@ -867,16 +929,32 @@ impl<'a> FunctionEmitter<'a> {
             rd: args_base,
             rs: source,
         });
+        let (builtin_name, argc) = match operation {
+            crate::core::mir::types::MirSessionOperation::Close => ("session_close", 1),
+            crate::core::mir::types::MirSessionOperation::Send => ("session_send", 2),
+        };
+        if let Some(payload) = payload {
+            let Some(payload_reg) = self.reg(payload) else {
+                return;
+            };
+            let payload_slot = self.proto.alloc_reg();
+            self.proto.emit(Op::Mov {
+                rd: payload_slot,
+                rs: payload_reg,
+            });
+        }
         let registry = super::registry::create_registry();
-        let Some(builtin) = registry.lookup("session_close") else {
-            self.error("session_close has no bytecode registry implementation");
+        let Some(builtin) = registry.lookup(builtin_name) else {
+            self.error(format!(
+                "{builtin_name} has no bytecode registry implementation"
+            ));
             return;
         };
         self.proto.emit(Op::CallBuiltin {
             rd,
             builtin,
             args_base,
-            argc: 1,
+            argc,
         });
     }
 

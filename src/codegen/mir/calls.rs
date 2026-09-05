@@ -559,6 +559,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         operation: crate::core::mir::types::MirSessionOperation,
         endpoint: &MirValueId,
+        payload: Option<&MirValueId>,
         contract: Option<&crate::core::mir::types::MirSessionCallContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
@@ -571,25 +572,83 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validate_session_call_contract(&endpoint_ty, &result_ty, contract)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        if operation != crate::core::mir::types::MirSessionOperation::Close {
+        if operation != contract.operation {
             return Err(NativeMirError::new(
                 subject,
-                "SessionCall operation is outside the native close contract",
+                "SessionCall receipt disagrees with MIR operation",
+            ));
+        }
+        if payload.is_some() != contract.payload_ty.is_some() {
+            return Err(NativeMirError::new(
+                subject,
+                "SessionCall payload value disagrees with its receipt TypeDesc",
             ));
         }
         let endpoint = self.value(endpoint, subject)?.into_int_value();
-        let function = self
-            .generator
-            .get_runtime_fn("mimi_channel_drop")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_call(
-                function,
-                &[BasicMetadataValueEnum::IntValue(endpoint)],
-                "mir_session_close",
-            )
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        match operation {
+            crate::core::mir::types::MirSessionOperation::Close => {
+                let function = self
+                    .generator
+                    .get_runtime_fn("mimi_channel_drop")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.generator
+                    .builder
+                    .build_call(
+                        function,
+                        &[BasicMetadataValueEnum::IntValue(endpoint)],
+                        "mir_session_close",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            }
+            crate::core::mir::types::MirSessionOperation::Send => {
+                let payload = payload.ok_or_else(|| {
+                    NativeMirError::new(subject, "session_send receipt has no payload MIR value")
+                })?;
+                let payload_ty = self.value_type(payload, subject)?;
+                if contract.payload_ty.as_ref() != Some(&payload_ty) {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "SessionCall payload value disagrees with its receipt TypeDesc identity",
+                    ));
+                }
+                let payload_desc =
+                    self.program
+                        .type_catalog()
+                        .get(&payload_ty)
+                        .ok_or_else(|| {
+                            NativeMirError::new(subject, "SessionCall payload TypeDesc is absent")
+                        })?;
+                let payload = self.value(payload, subject)?.into_int_value();
+                let payload = if matches!(payload_desc.abi, MirAbiClass::Integer { bits, .. } if bits < 64)
+                {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(
+                            payload,
+                            self.generator.context.i64_type(),
+                            "mir_session_send_sext",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                } else {
+                    payload
+                };
+                let function = self
+                    .generator
+                    .get_runtime_fn("mimi_channel_send")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.generator
+                    .builder
+                    .build_call(
+                        function,
+                        &[
+                            BasicMetadataValueEnum::IntValue(endpoint),
+                            BasicMetadataValueEnum::IntValue(payload),
+                        ],
+                        "mir_session_send",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            }
+        }
         Ok(self.generator.context.i64_type().const_zero().into())
     }
 

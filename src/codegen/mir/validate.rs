@@ -77,10 +77,39 @@ impl<'a> NativeMirValidator<'a> {
         }
 
         for event in &function.ownership.events {
-            if matches!(
+            if event.kind == crate::core::mir::MirOwnershipEventKind::TransferSession {
+                let matched = function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        let point = instruction
+                            .id
+                            .as_str()
+                            .split_once(':')
+                            .and_then(|(_, rest)| rest.split_once(':'))
+                            .map(|(_, point)| point);
+                        matches!(
+                            &instruction.kind,
+                            MirInstructionKind::SessionCall {
+                                endpoint,
+                                contract: Some(contract),
+                                ..
+                            } if Some(event.point.0.as_str()) == point
+                                && Some(endpoint) == event.value.as_ref()
+                                && !contract.terminal
+                        )
+                    })
+                });
+                if !matched {
+                    self.errors.push(NativeMirError::new(
+                        function.owner.0.clone(),
+                        format!(
+                            "ownership effect '{}' has no scalar native MIR contract",
+                            event.kind.as_str()
+                        ),
+                    ));
+                }
+            } else if matches!(
                 event.kind,
-                crate::core::mir::MirOwnershipEventKind::TransferSession
-                    | crate::core::mir::MirOwnershipEventKind::TransferChild
+                crate::core::mir::MirOwnershipEventKind::TransferChild
                     | crate::core::mir::MirOwnershipEventKind::BorrowMut
             ) {
                 self.errors.push(NativeMirError::new(
@@ -987,10 +1016,14 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 operation,
                 endpoint,
+                payload,
                 contract,
             } => {
                 self.validate_value(function, endpoint, "SessionCall endpoint");
                 self.validate_value(function, result, "SessionCall result");
+                if let Some(payload) = payload {
+                    self.validate_value(function, payload, "SessionCall payload");
+                }
                 let (Some(endpoint_ty), Some(result_ty)) = (
                     function.values.get(endpoint).map(|value| value.ty.clone()),
                     function.values.get(result).map(|value| value.ty.clone()),
@@ -1009,10 +1042,29 @@ impl<'a> NativeMirValidator<'a> {
                 {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
-                if *operation != crate::core::mir::types::MirSessionOperation::Close {
+                if payload.is_some() != receipt.payload_ty.is_some() {
                     self.errors.push(NativeMirError::new(
                         subject,
-                        "SessionCall operation is outside the native close contract",
+                        "SessionCall payload value disagrees with its receipt TypeDesc",
+                    ));
+                }
+                if let Some(payload) = payload {
+                    if let (Some(payload_ty), Some(receipt_ty)) = (
+                        function.values.get(payload).map(|value| &value.ty),
+                        receipt.payload_ty.as_ref(),
+                    ) {
+                        if payload_ty != receipt_ty {
+                            self.errors.push(NativeMirError::new(
+                                subject,
+                                "SessionCall payload value disagrees with its receipt TypeDesc identity",
+                            ));
+                        }
+                    }
+                }
+                if *operation != receipt.operation {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "SessionCall receipt disagrees with MIR operation",
                     ));
                 }
             }

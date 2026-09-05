@@ -54,6 +54,7 @@ fn materializes_terminal_session_close_with_backend_neutral_receipt() {
         .ty
         .clone();
     assert_eq!(contract.endpoint_ty, endpoint_ty);
+    assert!(contract.payload_ty.is_none());
     assert!(contract.terminal);
     assert_eq!(contract.after.as_str(), "closed");
     program
@@ -67,6 +68,88 @@ fn materializes_terminal_session_close_with_backend_neutral_receipt() {
         )
         .expect("reference SessionCall execution");
     assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume the same canonical SessionCall");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume the same canonical SessionCall");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume the same canonical SessionCall");
+}
+
+#[test]
+fn materializes_integer_session_send_with_backend_neutral_receipt() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_send.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("integer SessionChan send must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:send_once".into());
+    let function = program.functions().get(&owner).expect("send_once MIR");
+    let session_calls = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::SessionCall {
+                operation,
+                endpoint,
+                payload: Some(payload),
+                contract: Some(contract),
+                ..
+            } => Some((
+                *operation,
+                endpoint.clone(),
+                payload.clone(),
+                contract.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        session_calls.len(),
+        1,
+        "send must be one explicit SessionCall"
+    );
+    let (operation, endpoint, payload, contract) = &session_calls[0];
+    assert_eq!(
+        *operation,
+        crate::core::mir::types::MirSessionOperation::Send
+    );
+    let endpoint_ty = function
+        .values
+        .get(endpoint)
+        .expect("endpoint value")
+        .ty
+        .clone();
+    let payload_ty = function
+        .values
+        .get(payload)
+        .expect("payload value")
+        .ty
+        .clone();
+    assert_eq!(contract.endpoint_ty, endpoint_ty);
+    assert_eq!(contract.payload_ty.as_ref(), Some(&payload_ty));
+    assert!(!contract.terminal);
+    assert!(contract.before.as_str().starts_with("!i64"));
+    assert_eq!(contract.after.as_str(), "end");
+    let payload_conversions = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| matches!(instruction.kind, MirInstructionKind::Convert { .. }))
+        .count();
+    assert_eq!(
+        payload_conversions, 1,
+        "literal i32 payload must carry one explicit checker-approved i64 conversion"
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(17)],
+        )
+        .expect("reference SessionCall execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(17));
 
     crate::interp::bytecode::compile_mir_program(&program)
         .expect("bytecode must consume the same canonical SessionCall");
@@ -112,15 +195,58 @@ fn rejects_forged_session_close_receipt_before_consumers() {
 }
 
 #[test]
+fn rejects_forged_session_send_payload_receipt_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_send.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical SessionCall");
+    let owner = crate::core::NodeId("function:send_once".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("send_once MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::SessionCall {
+                    operation: crate::core::mir::types::MirSessionOperation::Send,
+                    ..
+                }
+            )
+        })
+        .expect("SessionCall instruction");
+    let MirInstructionKind::SessionCall { contract, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    let receipt = contract.as_mut().expect("receipt");
+    receipt.payload_ty = Some(receipt.result_ty.clone());
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged SessionCall payload receipt must be rejected");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("session_send payload")
+            || error.message.contains("SessionCall payload")
+    }));
+}
+
+#[test]
 fn rejects_session_send_and_recv_until_payload_state_contract_exists() {
     let checked = checked_program(include_str!(
         "../../../tests/real_world/session_literal_coercion.mimi"
     ));
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect_err("session_send/session_recv must remain fail-closed");
-    assert!(format!("{error:?}").contains(
-        "SessionCall currently admits only terminal session_close; session_send/session_recv remain outside"
-    ));
+    assert!(
+        format!("{error:?}").contains("session_recv remains outside the canonical MIR contract")
+    );
 }
 
 #[test]

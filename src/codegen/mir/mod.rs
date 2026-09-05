@@ -122,6 +122,25 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_channel_send")
+            .is_none()
+        {
+            let i64 = self.generator.context.i64_type();
+            self.generator.module.add_function(
+                "mimi_channel_send",
+                self.generator.context.void_type().fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_trap_float_not_finite")
             .is_none()
         {
@@ -664,12 +683,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 operation,
                 endpoint,
+                payload,
                 contract,
             } => {
                 let value = self.emit_session_call(
                     result,
                     *operation,
                     endpoint,
+                    payload.as_ref(),
                     contract.as_ref(),
                     subject,
                 )?;
