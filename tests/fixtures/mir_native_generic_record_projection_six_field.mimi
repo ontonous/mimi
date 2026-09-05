@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// six-field Record<T>; all fixed siblings remain Copy and retain their ABI slots.
+type Sext<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool }
+
+func get_value<T>(sext: Sext<T>) -> T {
+    sext.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let sext = Sext { value: 41, tag: 7, enabled: true, extra: 9, tail: 11, spare: false }
+    let picked = get_value(sext)
+    picked
+}

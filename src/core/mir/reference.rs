@@ -8131,7 +8131,7 @@ mod tests {
     }
 
     #[test]
-    fn six_field_generic_record_projection_fails_closed() {
+    fn seven_field_generic_record_projection_fails_closed() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"
         );
@@ -8139,7 +8139,7 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("six-field generic record projection must remain fail-closed");
+            .expect_err("seven-field generic record projection must remain fail-closed");
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(
                 errors
@@ -8149,6 +8149,33 @@ mod tests {
             ),
             other => panic!("unsupported generic record shape crossed MIR gate: {other:?}"),
         }
+    }
+
+    #[test]
+    fn concrete_six_field_generic_record_projection_executes_with_copy_residuals() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_six_field.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("six-field generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("six-field generic record projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("six-field generic record projection must carry a record receipt");
+        };
+        assert_eq!(contract.arity, 6);
+        assert_eq!(contract.name, "value");
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference six-field generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
     }
 
     #[test]

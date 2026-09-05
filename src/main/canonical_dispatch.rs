@@ -2345,6 +2345,23 @@ mod tests {
     }
 
     #[test]
+    fn six_field_generic_record_projection_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_six_field.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("six-field generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 6 && contract.name == "value"
+        )));
+    }
+
+    #[test]
     fn generic_copy_record_update_enters_canonical_default_route() {
         let source = include_str!("../../tests/fixtures/mir_native_generic_record_update.mimi");
         let (checked, file) = checked(source);
@@ -2517,13 +2534,13 @@ mod tests {
     }
 
     #[test]
-    fn six_field_generic_record_projection_is_rejected_before_legacy_route() {
+    fn seven_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("six-field generic record projection must fail closed");
+            panic!("seven-field generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
         assert!(

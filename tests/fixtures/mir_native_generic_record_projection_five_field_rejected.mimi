@@ -1,13 +1,13 @@
-// Outside S181: generic Copy record projection with six fields remains
+// Outside S189: generic Copy record projection with seven fields remains
 // rejected before any backend or legacy route.
-type Sext<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool }
+type Sept<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool, extra2: i32 }
 
-func get_value<T>(sext: Sext<T>) -> T {
-    sext.value
+func get_value<T>(sept: Sept<T>) -> T {
+    sept.value
 }
 
 func main() -> i32 {
     ensures: result == result
-    let sext = Sext { value: 41, tag: 7, enabled: true, extra: 9, tail: 11, spare: false }
-    get_value(sext)
+    let sept = Sept { value: 41, tag: 7, enabled: true, extra: 9, tail: 11, spare: false, extra2: 13 }
+    get_value(sept)
 }

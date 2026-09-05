@@ -1108,7 +1108,7 @@ pub(crate) fn validate_owned_record_call_argument(
 /// call ABI still needs an explicit producer proof: either a direct local
 /// `Clone` or a fresh `Record Construct` immediately precedes the call, and
 /// both producer/result TypeDesc identities agree with the specialized
-/// one-, two-, three-, four-, or five-field record parameter, including a non-zero
+/// one-, two-, three-, four-, five-, or six-field record parameter, including a non-zero
 /// declaration-order field index.  Conditional and indirect producers therefore
 /// remain fail-closed before every backend.
 pub(crate) fn validate_scalar_record_call_argument(
@@ -4084,11 +4084,11 @@ fn detect_scalar_record_projection_contract(
                 super::types::MirLayout::Record { fields, .. } => Some(fields.len()),
                 _ => None,
             })
-            .is_some_and(|arity| !matches!(arity, 1 | 2 | 3 | 4 | 5));
+            .is_some_and(|arity| !matches!(arity, 1 | 2 | 3 | 4 | 5 | 6));
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: if unsupported_arity {
-                "generic record projection requires a one-, two-, three-, four-, or five-field Copy record contract".into()
+                "generic record projection requires a one-, two-, three-, four-, five-, or six-field Copy record contract".into()
             } else {
                 "generic record projection must contain exactly one field Project".into()
             },
@@ -4151,11 +4151,11 @@ fn detect_scalar_record_projection_contract(
                 ),
             }]
         })?;
-    if !matches!(receipt.arity, 1 | 2 | 3 | 4 | 5) || function.result != result_ty {
+    if !matches!(receipt.arity, 1 | 2 | 3 | 4 | 5 | 6) || function.result != result_ty {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message:
-                "generic record projection requires one, two, three, four, or five fields and a direct result identity"
+                "generic record projection requires one, two, three, four, five, or six fields and a direct result identity"
                     .into(),
         }]);
     }
@@ -4739,9 +4739,9 @@ pub(crate) fn validate_scalar_record_projection_mir(
     if &expected != contract {
         return Err("generic record projection receipt disagrees with TypeDesc".into());
     }
-    if !matches!(contract.arity, 1 | 2 | 3 | 4 | 5) || function.result != result_ty {
+    if !matches!(contract.arity, 1 | 2 | 3 | 4 | 5 | 6) || function.result != result_ty {
         return Err(
-            "generic record projection requires one, two, three, four, or five fields and a direct result identity"
+            "generic record projection requires one, two, three, four, five, or six fields and a direct result identity"
                 .into(),
         );
     }

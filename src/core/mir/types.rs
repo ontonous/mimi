@@ -5521,7 +5521,7 @@ impl MirTypeCatalog {
     }
 
     /// Build the non-executable placeholder receipt for the generic record
-    /// projection shapes currently admitted: a one-, two-, three-, four-, or five-field `Record<T>`
+    /// projection shapes currently admitted: a one-, two-, three-, four-, five-, or six-field `Record<T>`
     /// whose selected field and result are the same GenericParameter; any
     /// sibling is either that binder or a concrete Copy scalar. Concrete
     /// specialization must call `validated_record_field_projection_contract`
@@ -5555,10 +5555,10 @@ impl MirTypeCatalog {
                     clone: MirGlueKind::Noop,
                     drop: MirGlueKind::Noop,
                 })
-            || !matches!(fields.len(), 1 | 2 | 3 | 4 | 5)
+            || !matches!(fields.len(), 1 | 2 | 3 | 4 | 5 | 6)
         {
             return Err(
-                "generic record projection requires a one-, two-, three-, four-, or five-field Copy record contract"
+                "generic record projection requires a one-, two-, three-, four-, five-, or six-field Copy record contract"
                     .into(),
             );
         }
