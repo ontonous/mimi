@@ -2710,6 +2710,97 @@ fn consuming_variant_payload_identity_drift_is_rejected_before_consumers() {
 }
 
 #[test]
+fn flow_move_receipt_reaches_the_consuming_transition_argument() {
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
+            include_str!("../../../tests/fixtures/mir_native_flow_transition.mimi"),
+        ))
+        .expect("silent-local Flow transition must remain admitted");
+    let owner = crate::core::NodeId("function:main".into());
+    let main = canonical.functions().get(&owner).expect("main MIR");
+    assert!(validate_transfer_event_boundaries(main, canonical.transitions()).is_empty());
+    let flow = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::FlowTransition { .. }
+            )
+        })
+        .expect("FlowTransition instruction");
+    let crate::core::mir::MirInstructionKind::FlowTransition { arguments, .. } = &flow.kind else {
+        unreachable!();
+    };
+    assert!(main.values.contains_key(&arguments[0]));
+}
+
+#[test]
+fn flow_move_receipt_point_drift_is_rejected_before_consumers() {
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
+            include_str!("../../../tests/fixtures/mir_native_flow_transition.mimi"),
+        ))
+        .expect("silent-local Flow transition must remain admitted");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let event = forged
+        .ownership
+        .events
+        .iter_mut()
+        .find(|event| event.kind == MirOwnershipEventKind::Move)
+        .expect("Flow move receipt");
+    event.point = crate::core::NodeId("function:main/node:forged-flow-point".into());
+    let errors = validate_transfer_event_boundaries(&forged, canonical.transitions());
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("has no canonical call/flow boundary at point")
+    }));
+}
+
+#[test]
+fn flow_session_effect_receipt_cannot_be_attached_to_silent_local_transition() {
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(
+            include_str!("../../../tests/fixtures/mir_native_flow_transition.mimi"),
+        ))
+        .expect("silent-local Flow transition must remain admitted");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let source_event = forged
+        .ownership
+        .events
+        .iter()
+        .find(|event| event.kind == MirOwnershipEventKind::Move)
+        .cloned()
+        .expect("Flow move receipt");
+    forged.ownership.events.push(MirOwnershipEvent {
+        kind: MirOwnershipEventKind::TransferSession,
+        resource: source_event.resource,
+        value: source_event.value,
+        source: source_event.source,
+        target: source_event.target,
+        point: source_event.point,
+    });
+    let errors = validate_transfer_event_boundaries(&forged, canonical.transitions());
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("disagrees with SilentLocal FlowTransition effect")
+    }));
+}
+
+#[test]
 fn record_projection_contract_rejects_unknown_field_and_wrong_result_type() {
     let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { Point { x: 1, y: true }.x }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

@@ -298,6 +298,10 @@ impl MirProgram {
             errors.extend(validate_linear_consumption(function, &type_catalog));
             errors.extend(validate_borrow_usage(function));
             errors.extend(super::validate_ownership_event_receipts(function));
+            errors.extend(super::validate_transfer_event_boundaries(
+                function,
+                &transitions,
+            ));
             errors.extend(super::validate_variant_move_payloads(
                 function,
                 &type_catalog,

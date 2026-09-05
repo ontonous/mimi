@@ -1781,6 +1781,208 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
     errors
 }
 
+/// Prove that a call/Flow ownership transfer is attached to the exact
+/// canonical instruction point and argument identity.  The checker action
+/// keeps a stable local resource value while lowering may introduce an
+/// explicit consuming `Move` value; `consuming_edges` is the only permitted
+/// bridge between those identities.  Flow effect is checked from the
+/// materialized transition contract, never from a surface name or backend.
+pub(crate) fn validate_transfer_event_boundaries(
+    function: &MirFunction,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
+) -> Vec<MirValidationError> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BoundaryKind {
+        Call,
+        Flow,
+    }
+
+    let mut consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
+    let mut boundaries = Vec::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let point = instruction
+                .id
+                .as_str()
+                .split_once(':')
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map(|(_, point)| NodeId(point.to_owned()));
+            match &instruction.kind {
+                MirInstructionKind::Move { result, source }
+                | MirInstructionKind::MoveProject {
+                    result,
+                    base: source,
+                    ..
+                }
+                | MirInstructionKind::MoveProjectDrop {
+                    result,
+                    base: source,
+                    ..
+                }
+                | MirInstructionKind::VariantProjectMove {
+                    result,
+                    base: source,
+                    ..
+                } => {
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(source.clone());
+                }
+                MirInstructionKind::ConstructVariantMove { result, fields, .. } => {
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .extend(fields.iter().map(|(_, value)| value.clone()));
+                }
+                MirInstructionKind::ListOp {
+                    result,
+                    operation: MirListOperation::Concat,
+                    list,
+                    argument: Some(argument),
+                    ..
+                } => {
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .extend([list.clone(), argument.clone()]);
+                }
+                MirInstructionKind::SetOp {
+                    result,
+                    operation: MirSetOperation::Insert | MirSetOperation::Remove,
+                    set,
+                    ..
+                } => {
+                    consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(set.clone());
+                }
+                MirInstructionKind::FlowTransition {
+                    transition,
+                    arguments,
+                    ..
+                } => boundaries.push((
+                    BoundaryKind::Flow,
+                    point,
+                    arguments.as_slice(),
+                    transitions.get(transition).map(|contract| contract.effect),
+                )),
+                MirInstructionKind::Call { arguments, .. }
+                | MirInstructionKind::BuiltinCall { arguments, .. } => {
+                    boundaries.push((BoundaryKind::Call, point, arguments.as_slice(), None))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let reaches_argument = |value: &MirValueId, arguments: &[MirValueId]| {
+        let mut seen = BTreeSet::new();
+        let mut pending = arguments.iter().cloned().collect::<Vec<_>>();
+        while let Some(candidate) = pending.pop() {
+            if candidate == *value || !seen.insert(candidate.clone()) {
+                if candidate == *value {
+                    return true;
+                }
+                continue;
+            }
+            if let Some(sources) = consuming_edges.get(&candidate) {
+                pending.extend(sources.iter().cloned());
+            }
+        }
+        false
+    };
+
+    let mut errors = Vec::new();
+    for (index, event) in function.ownership.events.iter().enumerate() {
+        let is_transfer = matches!(
+            event.kind,
+            MirOwnershipEventKind::Move
+                | MirOwnershipEventKind::TransferSession
+                | MirOwnershipEventKind::TransferChild
+        );
+        if !is_transfer {
+            continue;
+        }
+        let Some(value) = &event.value else { continue };
+        let matching_points = boundaries
+            .iter()
+            .filter(|(_, point, _, _)| point.as_ref() == Some(&event.point))
+            .collect::<Vec<_>>();
+        if matching_points.is_empty() {
+            if boundaries
+                .iter()
+                .any(|(_, _, arguments, _)| reaches_argument(value, arguments))
+            {
+                errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: format!(
+                        "{} event value '{}' has no canonical call/flow boundary at point '{}'",
+                        event.kind.as_str(),
+                        value,
+                        event.point.0
+                    ),
+                });
+            }
+            continue;
+        }
+        let Some((kind, _, arguments, effect)) = matching_points
+            .iter()
+            .copied()
+            .find(|(_, _, arguments, _)| reaches_argument(value, arguments))
+        else {
+            errors.push(MirValidationError {
+                subject: format!("ownership[{index}]"),
+                message: format!(
+                    "{} event value '{}' does not reach a canonical call/flow argument at point '{}'",
+                    event.kind.as_str(), value, event.point.0
+                ),
+            });
+            continue;
+        };
+        if matches!(
+            event.kind,
+            MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
+        ) && *kind == BoundaryKind::Call
+        {
+            errors.push(MirValidationError {
+                subject: format!("ownership[{index}]"),
+                message: format!(
+                    "{} event at point '{}' has no canonical call effect identity",
+                    event.kind.as_str(),
+                    event.point.0
+                ),
+            });
+        }
+        if matches!(effect, Some(MirTransitionEffect::Boundary)) {
+            errors.push(MirValidationError {
+                subject: format!("ownership[{index}]"),
+                message: format!(
+                    "{} event at point '{}' crosses a Boundary transition without an effect receipt",
+                    event.kind.as_str(), event.point.0
+                ),
+            });
+        }
+        if matches!(effect, Some(MirTransitionEffect::SilentLocal))
+            && matches!(
+                event.kind,
+                MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
+            )
+        {
+            errors.push(MirValidationError {
+                subject: format!("ownership[{index}]"),
+                message: format!(
+                    "{} event at point '{}' disagrees with SilentLocal FlowTransition effect",
+                    event.kind.as_str(),
+                    event.point.0
+                ),
+            });
+        }
+    }
+    errors
+}
+
 /// Validate every consuming variant constructor against the active variant's
 /// TypeDesc/drop-plan identity.  This is intentionally a program-boundary
 /// pass: reference, bytecode, native and verifier consumers all receive the

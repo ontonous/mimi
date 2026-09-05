@@ -5336,6 +5336,7 @@ impl<'a> Lowerer<'a> {
                 // their normal lowering because their fresh result is already
                 // the owned operation input.
                 let consuming_list_concat = is_list_concat_builtin(call, self.type_catalog);
+                let consuming_transition = matches!(call.callee, ResolvedCallee::Transition(_));
                 let consuming_variant_projection =
                     variant_projection_is_consuming(call, self.type_catalog);
                 let arguments: Vec<MirValueId> = call
@@ -5343,7 +5344,10 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
-                        if consuming_list_concat || (consuming_variant_projection && index == 0) {
+                        if consuming_transition
+                            || consuming_list_concat
+                            || (consuming_variant_projection && index == 0)
+                        {
                             self.lower_consuming_expr(&argument.value)
                         } else {
                             self.lower_expr(&argument.value)
