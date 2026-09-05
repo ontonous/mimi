@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::core::ir::{
     BuiltinId, FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedBinaryOp,
     ResolvedProjection, ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResolvedUnaryOp,
+    SessionResidualId,
 };
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
@@ -424,6 +425,10 @@ pub enum MirGlueKind {
     List,
     Set,
     Aggregate,
+    /// Transfer-only SessionChan endpoint glue. A session endpoint has no
+    /// generic Clone/Drop operation; its only legal ownership boundary is an
+    /// explicit SessionCall receipt (for example `session_close`).
+    Session,
     Unsupported,
 }
 
@@ -519,6 +524,29 @@ impl MirGlueContract {
     pub fn supports_drop(self) -> bool {
         self.drop != MirGlueKind::Unsupported
     }
+}
+
+/// Closed operation family for the first canonical SessionChan production
+/// island. `send`/`recv` remain outside the executable MIR contract until
+/// their payload/channel state machine is materialized; `Close` is terminal
+/// and consumes the endpoint through the runtime channel-drop ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirSessionOperation {
+    Close,
+}
+
+/// Checker-owned residual, TypeDesc and ABI receipt for one SessionChan
+/// operation. The endpoint/result identities are resolved MIR values; the
+/// residual transition is never reconstructed from a source session name or
+/// a backend handle. A terminal close must end in the stable `closed` state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirSessionCallContract {
+    pub operation: MirSessionOperation,
+    pub endpoint_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub before: SessionResidualId,
+    pub after: SessionResidualId,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -918,6 +946,17 @@ impl MirTypeDesc {
                     element: arguments[0].clone(),
                 },
             ),
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:SessionChan" && arguments.len() == 1 => (
+                // SessionChan is a checker-linear opaque endpoint. Its
+                // physical handle is deliberately kept behind the canonical
+                // Handle layout; residual/protocol identity lives in the
+                // SessionCall receipt, not in this ABI class.
+                MirTypeKind::Nominal,
+                MirAbiClass::OpaqueHandle,
+                MirLayout::Handle,
+            ),
             ResolvedType::Nominal { .. } => (
                 MirTypeKind::Nominal,
                 MirAbiClass::OpaqueHandle,
@@ -1031,15 +1070,28 @@ impl MirTypeDesc {
                 MirLayout::Opaque,
             ),
         };
-        let glue = MirGlueContract::for_type(&kind, ownership);
+        let is_session_channel = matches!(
+            ty,
+            ResolvedType::Nominal { item, arguments, .. }
+                if item.as_str() == "builtin:type:SessionChan" && arguments.len() == 1
+        );
+        let glue = if is_session_channel && ownership == MirOwnership::Linear {
+            MirGlueContract {
+                move_out: MirGlueKind::Session,
+                clone: MirGlueKind::Unsupported,
+                drop: MirGlueKind::Unsupported,
+            }
+        } else {
+            MirGlueContract::for_type(&kind, ownership)
+        };
         Self {
             id: id.clone(),
             kind,
             layout,
             ownership,
             abi,
-            needs_drop_glue: ownership.needs_drop(),
-            needs_clone_glue: ownership.needs_clone(),
+            needs_drop_glue: ownership.needs_drop() && !is_session_channel,
+            needs_clone_glue: ownership.needs_clone() && !is_session_channel,
             glue,
             drop_plan: None,
             variant_drop_plan: None,
@@ -2703,6 +2755,116 @@ impl MirTypeCatalog {
         }
         if operation_glue == MirGlueKind::Set {
             self.validate_set_glue(ty, operation)?;
+        }
+        Ok(())
+    }
+
+    /// Validate the transfer-only SessionChan endpoint ABI. SessionChan is
+    /// intentionally not a generic droppable/cloneable handle: the only
+    /// legal ownership operation is a checker-proven SessionCall transition.
+    pub fn validate_session_channel(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "SessionChan endpoint type '{}' is absent from MIR TypeDesc catalog",
+                ty.as_str()
+            )
+        })?;
+        if descriptor.kind != MirTypeKind::Nominal
+            || descriptor.layout != MirLayout::Handle
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Linear
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Session,
+                    clone: MirGlueKind::Unsupported,
+                    drop: MirGlueKind::Unsupported,
+                })
+        {
+            return Err(format!(
+                "SessionChan endpoint type '{}' has an inconsistent transfer-only TypeDesc/ABI/glue contract",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Materialize the narrow canonical SessionCall receipt. The first
+    /// production operation is terminal `session_close`; send/recv payload
+    /// contracts remain deliberately outside this method and therefore fail
+    /// closed in lowering rather than being represented as an ordinary call.
+    pub fn validated_session_call_contract(
+        &self,
+        operation: MirSessionOperation,
+        endpoint_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        before: &SessionResidualId,
+        after: &SessionResidualId,
+        terminal: bool,
+    ) -> Result<MirSessionCallContract, String> {
+        self.validate_session_channel(endpoint_ty)?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "SessionCall result type '{}' is absent from MIR TypeDesc catalog",
+                result_ty.as_str()
+            )
+        })?;
+        let unit_glue = MirGlueContract {
+            move_out: MirGlueKind::Noop,
+            clone: MirGlueKind::Noop,
+            drop: MirGlueKind::Noop,
+        };
+        if result.layout != MirLayout::Unit
+            || result.abi != MirAbiClass::Unit
+            || result.ownership != MirOwnership::Copy
+            || result.glue != unit_glue
+        {
+            return Err("session_close result must be the canonical Copy unit TypeDesc".into());
+        }
+        if operation != MirSessionOperation::Close {
+            return Err("SessionCall operation is outside the canonical close contract".into());
+        }
+        if before == after {
+            return Err("SessionCall residual transition does not advance state".into());
+        }
+        if !terminal || after.as_str() != "closed" {
+            return Err(
+                "session_close must be terminal and end in the canonical 'closed' residual".into(),
+            );
+        }
+        Ok(MirSessionCallContract {
+            operation,
+            endpoint_ty: endpoint_ty.clone(),
+            result_ty: result_ty.clone(),
+            before: before.clone(),
+            after: after.clone(),
+            terminal,
+        })
+    }
+
+    /// Validate an immutable SessionCall receipt already attached to MIR.
+    pub fn validate_session_call_contract(
+        &self,
+        endpoint_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        contract: &MirSessionCallContract,
+    ) -> Result<(), String> {
+        if contract.endpoint_ty != *endpoint_ty || contract.result_ty != *result_ty {
+            return Err(
+                "SessionCall receipt disagrees with MIR endpoint/result TypeDesc identities".into(),
+            );
+        }
+        let expected = self.validated_session_call_contract(
+            contract.operation,
+            endpoint_ty,
+            result_ty,
+            &contract.before,
+            &contract.after,
+            contract.terminal,
+        )?;
+        if contract != &expected {
+            return Err("SessionCall receipt disagrees with TypeDesc/residual contract".into());
         }
         Ok(())
     }

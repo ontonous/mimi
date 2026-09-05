@@ -280,6 +280,15 @@ impl MirProgram {
                 ) {
                     continue;
                 }
+                if descriptor.glue.move_out == super::types::MirGlueKind::Session {
+                    if let Err(message) = type_catalog.validate_session_channel(&value.ty) {
+                        errors.push(super::MirValidationError {
+                            subject: value.id.to_string(),
+                            message,
+                        });
+                    }
+                    continue;
+                }
                 for operation in [
                     MirGlueOperation::MoveOut,
                     MirGlueOperation::Clone,
@@ -1008,6 +1017,30 @@ impl MirProgram {
                                 &source_value.ty,
                                 &result_value.ty,
                                 *mutable,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
+                        super::MirInstructionKind::SessionCall {
+                            result,
+                            endpoint,
+                            contract,
+                            ..
+                        } => {
+                            let (Some(endpoint_ty), Some(result_ty), Some(receipt)) = (
+                                function.values.get(endpoint).map(|value| value.ty.clone()),
+                                function.values.get(result).map(|value| value.ty.clone()),
+                                contract.as_ref(),
+                            ) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_session_call_contract(
+                                &endpoint_ty,
+                                &result_ty,
+                                receipt,
                             ) {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
@@ -2104,6 +2137,7 @@ fn validate_call_argument_directions(
                     }
                     | super::MirInstructionKind::FlowTransition { result, .. }
                     | super::MirInstructionKind::BuiltinCall { result, .. }
+                    | super::MirInstructionKind::SessionCall { result, .. }
                     | super::MirInstructionKind::Convert { result, .. }
                     | super::MirInstructionKind::ConstructVariant { result, .. }
                     | super::MirInstructionKind::ConstructVariantMove { result, .. } => {
@@ -2700,6 +2734,7 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         | super::MirInstructionKind::Construct {
             fields: arguments, ..
         } => arguments.clone(),
+        super::MirInstructionKind::SessionCall { endpoint, .. } => vec![endpoint.clone()],
         super::MirInstructionKind::ConstructList { elements, .. } => elements.clone(),
         super::MirInstructionKind::ListOp {
             operation: super::MirListOperation::Concat,
@@ -2894,6 +2929,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         | super::MirInstructionKind::BuiltinCall { arguments, .. } => {
             arguments.iter().any(|v| v == needle)
         }
+        super::MirInstructionKind::SessionCall { endpoint, .. } => endpoint == needle,
     }
 }
 
@@ -2950,6 +2986,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Binary { result, .. }
         | super::MirInstructionKind::Unary { result, .. }
         | super::MirInstructionKind::BuiltinCall { result, .. }
+        | super::MirInstructionKind::SessionCall { result, .. }
         | super::MirInstructionKind::Convert { result, .. } => Some(result),
         super::MirInstructionKind::Call { result, .. } => result.as_ref(),
         super::MirInstructionKind::FlowTransition { result, .. } => Some(result),
@@ -4215,6 +4252,56 @@ impl<'a> MirReferenceInterpreter<'a> {
                     }
                 };
                 values.insert(result.clone(), output);
+            }
+            MirInstructionKind::SessionCall {
+                result,
+                operation,
+                endpoint,
+                contract,
+            } => {
+                let endpoint_ty = function
+                    .values
+                    .get(endpoint)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "SessionCall endpoint has no MIR type")
+                    })?;
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "SessionCall result has no MIR type")
+                    })?;
+                let contract = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "SessionCall has no canonical residual/ABI receipt",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_session_call_contract(&endpoint_ty, &result_ty, contract)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if *operation != super::types::MirSessionOperation::Close {
+                    return Err(self.error(
+                        &function.owner,
+                        "SessionCall operation is outside the reference close contract",
+                    ));
+                }
+                // The deterministic oracle models an endpoint as an opaque
+                // integer handle. Closing consumes that handle and returns
+                // unit; the native/VM runtime performs the actual channel
+                // table removal, but no backend-specific state is allowed to
+                // alter the canonical result/trap contract.
+                let endpoint = self.take_transfer_value(function, values, endpoint)?;
+                if !matches!(endpoint, MirRuntimeValue::Int(_)) {
+                    return Err(self.error(
+                        &function.owner,
+                        "session_close received a non-opaque endpoint runtime value",
+                    ));
+                }
+                values.insert(result.clone(), MirRuntimeValue::Unit);
             }
             MirInstructionKind::Call {
                 result,

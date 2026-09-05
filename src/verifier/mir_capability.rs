@@ -402,7 +402,9 @@ impl<'a> CapabilityGate<'a> {
                 }
             }
             MirLayout::Handle => {
-                if catalog.validate_owned_string(ty).is_ok() {
+                if catalog.validate_session_channel(ty).is_ok()
+                    || catalog.validate_owned_string(ty).is_ok()
+                {
                     Ok(())
                 } else {
                     Err("handle TypeDesc is not the canonical owned String contract".into())
@@ -1092,6 +1094,29 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!(
                         "{subject} builtin is outside the verifier capability"
                     ));
+                }
+            }
+            MirInstructionKind::SessionCall {
+                result,
+                endpoint,
+                contract,
+                ..
+            } => {
+                let (Some(endpoint_ty), Some(result_ty)) =
+                    (value_type(function, endpoint), value_type(function, result))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} SessionCall has no canonical residual/ABI receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) =
+                    catalog.validate_session_call_contract(&endpoint_ty, &result_ty, receipt)
+                {
+                    self.error(format!("{subject} SessionCall rejected: {message}"));
                 }
             }
             MirInstructionKind::VariantPredicate {

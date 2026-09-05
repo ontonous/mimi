@@ -106,6 +106,22 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_channel_drop")
+            .is_none()
+        {
+            let i64 = self.generator.context.i64_type();
+            self.generator.module.add_function(
+                "mimi_channel_drop",
+                self.generator
+                    .context
+                    .void_type()
+                    .fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_trap_float_not_finite")
             .is_none()
         {
@@ -643,6 +659,31 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             } => {
                 let value = self.emit_builtin(result, *kind, arguments, subject)?;
                 self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::SessionCall {
+                result,
+                operation,
+                endpoint,
+                contract,
+            } => {
+                let value = self.emit_session_call(
+                    result,
+                    *operation,
+                    endpoint,
+                    contract.as_ref(),
+                    subject,
+                )?;
+                // Unit has no physical LLVM value. Keep the receipt's result
+                // at the MIR level only; any later use then fails closed in
+                // `value()` instead of observing an ABI placeholder.
+                if !self
+                    .program
+                    .type_catalog()
+                    .get(&self.value_type(result, subject)?)
+                    .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
+                {
+                    self.values.insert(result.clone(), value);
+                }
             }
             MirInstructionKind::Call {
                 result,

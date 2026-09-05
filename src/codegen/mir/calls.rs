@@ -554,6 +554,45 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         })
     }
 
+    pub(super) fn emit_session_call(
+        &mut self,
+        result: &MirValueId,
+        operation: crate::core::mir::types::MirSessionOperation,
+        endpoint: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirSessionCallContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let contract = contract.ok_or_else(|| {
+            NativeMirError::new(subject, "SessionCall has no canonical residual/ABI receipt")
+        })?;
+        let endpoint_ty = self.value_type(endpoint, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        self.program
+            .type_catalog()
+            .validate_session_call_contract(&endpoint_ty, &result_ty, contract)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        if operation != crate::core::mir::types::MirSessionOperation::Close {
+            return Err(NativeMirError::new(
+                subject,
+                "SessionCall operation is outside the native close contract",
+            ));
+        }
+        let endpoint = self.value(endpoint, subject)?.into_int_value();
+        let function = self
+            .generator
+            .get_runtime_fn("mimi_channel_drop")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                function,
+                &[BasicMetadataValueEnum::IntValue(endpoint)],
+                "mir_session_close",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(self.generator.context.i64_type().const_zero().into())
+    }
+
     pub(super) fn emit_call(
         &mut self,
         result: Option<&MirValueId>,

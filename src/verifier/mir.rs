@@ -350,6 +350,10 @@ fn symbolic_value_for_type(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.glue.move_out == crate::core::mir::types::MirGlueKind::Session {
+        catalog.validate_session_channel(ty)?;
+        return Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()));
+    }
     if descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String) {
         catalog.validate_owned_string(ty)?;
         return Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()));
@@ -1360,6 +1364,34 @@ fn eval_instruction(
             };
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
+        }
+        MirInstructionKind::SessionCall {
+            result,
+            operation,
+            endpoint,
+            contract,
+        } => {
+            let endpoint_ty = instruction_value_type(function, endpoint, "SessionCall endpoint")?;
+            let result_ty = instruction_value_type(function, result, "SessionCall result")?;
+            let receipt = contract.as_ref().ok_or_else(|| {
+                "MIR SessionCall has no canonical residual/ABI receipt".to_string()
+            })?;
+            catalog.validate_session_call_contract(&endpoint_ty, &result_ty, receipt)?;
+            if *operation != crate::core::mir::types::MirSessionOperation::Close {
+                return Err(
+                    "MIR verifier SessionCall operation is outside the close contract".into(),
+                );
+            }
+            let endpoint_value = state
+                .values
+                .remove(endpoint)
+                .ok_or_else(|| format!("MIR SessionCall endpoint '{}' is not defined", endpoint))?;
+            if !matches!(endpoint_value, SymbolicValue::Opaque { .. }) {
+                return Err("MIR verifier SessionCall endpoint is not an opaque handle".into());
+            }
+            let value = SymbolicValue::Unit;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Convert { result, source } => {
             let value = state

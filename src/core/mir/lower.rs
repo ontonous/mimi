@@ -4851,6 +4851,58 @@ impl<'a> Lowerer<'a> {
         });
     }
 
+    fn session_close_contract(
+        &self,
+        call: &ResolvedCall,
+        result: &MirValueId,
+        arguments: &[MirValueId],
+        type_catalog: Option<&MirTypeCatalog>,
+    ) -> Result<(MirValueId, super::types::MirSessionCallContract), String> {
+        let is_close = matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(builtin)
+                if matches!(
+                    builtin.as_str(),
+                    "session_close" | "builtin.method.session.close"
+                )
+        );
+        if !is_close {
+            return Err(
+                "SessionCall currently admits only terminal session_close; session_send/session_recv remain outside the canonical MIR contract".into(),
+            );
+        }
+        let [endpoint] = arguments else {
+            return Err("session_close canonical MIR operation requires one endpoint".into());
+        };
+        let [transition] = call.session.as_slice() else {
+            return Err(
+                "session_close canonical MIR operation requires exactly one residual transition"
+                    .into(),
+            );
+        };
+        let endpoint_ty = self
+            .values
+            .get(endpoint)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| "session_close endpoint MIR value has no canonical type".to_string())?;
+        let result_ty = self
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| "session_close result MIR value has no canonical type".to_string())?;
+        let catalog = type_catalog
+            .ok_or_else(|| "session_close requires the canonical TypeDesc catalog".to_string())?;
+        let contract = catalog.validated_session_call_contract(
+            super::types::MirSessionOperation::Close,
+            &endpoint_ty,
+            &result_ty,
+            &transition.before,
+            &transition.after,
+            transition.terminal,
+        )?;
+        Ok((endpoint.clone(), contract))
+    }
+
     fn id(&mut self, prefix: &str, node_id: &NodeId) -> Option<MirValueId> {
         match super::MirValueId::new(format!("{prefix}:{}", node_id.0)) {
             Ok(id) => Some(id),
@@ -5394,6 +5446,7 @@ impl<'a> Lowerer<'a> {
                 );
                 let consuming_variant_projection =
                     variant_projection_is_consuming(call, self.type_catalog);
+                let session_call = !call.session.is_empty();
                 let arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
@@ -5432,7 +5485,17 @@ impl<'a> Lowerer<'a> {
                             && !(borrowed_receiver && index == 0)
                             && parameter_is_owned
                             && argument_needs_drop;
+                        let session_endpoint = session_call
+                            && call.session.iter().any(|transition| {
+                                matches!(
+                                    &argument.value.kind,
+                                    ResolvedExprKind::Load(place)
+                                        if place.base == transition.endpoint
+                                            && place.projections.is_empty()
+                                )
+                            });
                         if consuming_transition
+                            || session_endpoint
                             || consuming_list_concat
                             || (consuming_variant_projection && index == 0)
                             || argument_needs_move
@@ -5453,6 +5516,21 @@ impl<'a> Lowerer<'a> {
                             arguments,
                         },
                     );
+                } else if session_call {
+                    match self.session_close_contract(call, &result, &arguments, self.type_catalog)
+                    {
+                        Ok((endpoint, contract)) => self.emit(
+                            &expression.node_id,
+                            "session_call",
+                            MirInstructionKind::SessionCall {
+                                result: result.clone(),
+                                operation: contract.operation,
+                                endpoint,
+                                contract: Some(contract),
+                            },
+                        ),
+                        Err(message) => self.error(&expression.node_id, message),
+                    }
                 } else if let Some((nominal, variant, field_ids)) =
                     builtin_variant(call).or_else(|| user_variant(call, self.type_catalog))
                 {

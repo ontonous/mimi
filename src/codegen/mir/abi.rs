@@ -471,6 +471,12 @@ pub(super) fn native_basic_type<'ctx>(
         }
         MirAbiClass::OpaqueHandle => match &desc.layout {
             MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+            MirLayout::Handle if desc.glue.move_out == MirGlueKind::Session => {
+                catalog
+                    .validate_session_channel(ty)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                Ok(context.i64_type().into())
+            }
             layout => Err(NativeMirError::new(
                 ty.as_str(),
                 format!("opaque-handle layout {layout:?} is outside native contract"),

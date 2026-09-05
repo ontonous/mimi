@@ -1,0 +1,10 @@
+session Close = end
+
+func close_endpoint(ch: SessionChan<Close>) -> i32 {
+    session_close(ch)
+    41
+}
+
+func main() -> i32 {
+    0
+}

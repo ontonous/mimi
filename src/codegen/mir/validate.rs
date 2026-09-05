@@ -154,6 +154,7 @@ impl<'a> NativeMirValidator<'a> {
         };
         let is_list = matches!(desc.layout, MirLayout::List { .. });
         let is_set = matches!(desc.layout, MirLayout::Set { .. });
+        let is_session = desc.glue.move_out == MirGlueKind::Session;
         let is_reference = matches!(&desc.kind, MirTypeKind::Reference { mutable: false });
         let is_owned_string = matches!(
             &desc.kind,
@@ -174,7 +175,15 @@ impl<'a> NativeMirValidator<'a> {
                     clone: MirGlueKind::Noop,
                     drop: MirGlueKind::Noop,
                 });
-        let supported = if is_reference {
+        let supported = if is_session {
+            match self.program.type_catalog().validate_session_channel(ty) {
+                Ok(()) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
+        } else if is_reference {
             match self.program.type_catalog().validate_reference_type(ty) {
                 Ok(_) => true,
                 Err(message) => {
@@ -320,6 +329,7 @@ impl<'a> NativeMirValidator<'a> {
             && !matches!(desc.layout, MirLayout::Tuple(_))
             && !is_record
             && !is_variant
+            && !is_session
         {
             if desc.ownership != MirOwnership::Copy {
                 self.errors.push(NativeMirError::new(
@@ -970,6 +980,39 @@ impl<'a> NativeMirValidator<'a> {
                             "builtin '{}' result TypeDesc/ABI is outside native scalar contract",
                             contract.name
                         ),
+                    ));
+                }
+            }
+            MirInstructionKind::SessionCall {
+                result,
+                operation,
+                endpoint,
+                contract,
+            } => {
+                self.validate_value(function, endpoint, "SessionCall endpoint");
+                self.validate_value(function, result, "SessionCall result");
+                let (Some(endpoint_ty), Some(result_ty)) = (
+                    function.values.get(endpoint).map(|value| value.ty.clone()),
+                    function.values.get(result).map(|value| value.ty.clone()),
+                ) else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "SessionCall has no canonical residual/ABI receipt",
+                    ));
+                    return;
+                };
+                if let Err(message) =
+                    catalog.validate_session_call_contract(&endpoint_ty, &result_ty, receipt)
+                {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+                if *operation != crate::core::mir::types::MirSessionOperation::Close {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "SessionCall operation is outside the native close contract",
                     ));
                 }
             }

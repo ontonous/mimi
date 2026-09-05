@@ -3447,6 +3447,9 @@ impl<'a> ScalarCollectionValidator<'a> {
                 }
                 self.require_unit(&result_ty, subject);
             }
+            MirInstructionKind::SessionCall { .. } => self.error(format!(
+                "{subject} SessionCall is outside {SCALAR_COLLECTION_ISLAND}"
+            )),
             MirInstructionKind::Nop => {}
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }

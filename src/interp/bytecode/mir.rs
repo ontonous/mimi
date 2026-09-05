@@ -276,6 +276,27 @@ impl<'a> FunctionEmitter<'a> {
                 MirOwnershipEventKind::Drop => {
                     if desc.ownership != MirOwnership::Copy
                         && desc.glue.drop == MirGlueKind::Unsupported
+                        && !(desc.glue.move_out == MirGlueKind::Session
+                            && self.function.blocks.values().any(|block| {
+                                block.instructions.iter().any(|instruction| {
+                                    let point = instruction
+                                        .id
+                                        .as_str()
+                                        .split_once(':')
+                                        .and_then(|(_, rest)| rest.split_once(':'))
+                                        .map(|(_, point)| point);
+                                    matches!(
+                                        &instruction.kind,
+                                        MirInstructionKind::SessionCall {
+                                            endpoint,
+                                            contract: Some(contract),
+                                            ..
+                                        } if endpoint == value
+                                            && contract.terminal
+                                            && point == Some(event.point.0.as_str())
+                                    )
+                                })
+                            }))
                     {
                         self.error(format!(
                             "ownership event '{}' for '{}' needs canonical drop glue",
@@ -408,6 +429,7 @@ impl<'a> FunctionEmitter<'a> {
                         | MirGlueKind::List
                         | MirGlueKind::Set
                         | MirGlueKind::Aggregate
+                        | MirGlueKind::Session
                 ) {
                     self.proto.emit(Op::Move { rd, rs });
                 } else {
@@ -644,6 +666,12 @@ impl<'a> FunctionEmitter<'a> {
                 kind,
                 arguments,
             } => self.emit_builtin_call(result, *kind, arguments),
+            MirInstructionKind::SessionCall {
+                result,
+                operation,
+                endpoint,
+                contract,
+            } => self.emit_session_call(result, *operation, endpoint, contract.as_ref()),
             MirInstructionKind::Convert { result, source } => self.emit_convert(result, source),
             MirInstructionKind::Nop => {}
         }
@@ -786,6 +814,69 @@ impl<'a> FunctionEmitter<'a> {
             builtin,
             args_base,
             argc: contract.arity as u16,
+        });
+    }
+
+    fn emit_session_call(
+        &mut self,
+        result: &MirValueId,
+        operation: crate::core::mir::types::MirSessionOperation,
+        endpoint: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirSessionCallContract>,
+    ) {
+        let Some(contract) = contract else {
+            self.error("SessionCall has no canonical residual/ABI receipt");
+            return;
+        };
+        let endpoint_ty = self
+            .function
+            .values
+            .get(endpoint)
+            .map(|value| value.ty.clone());
+        let result_ty = self
+            .function
+            .values
+            .get(result)
+            .map(|value| value.ty.clone());
+        let (Some(endpoint_ty), Some(result_ty)) = (endpoint_ty, result_ty) else {
+            self.error("SessionCall endpoint/result is absent from MIR value catalog");
+            return;
+        };
+        if let Err(message) = self.program.type_catalog().validate_session_call_contract(
+            &endpoint_ty,
+            &result_ty,
+            contract,
+        ) {
+            self.error(message);
+            return;
+        }
+        if operation != crate::core::mir::types::MirSessionOperation::Close {
+            self.error("SessionCall operation is outside the bytecode close contract");
+            return;
+        }
+        if let Err(message) = self.supported_type(&endpoint_ty) {
+            self.error(format!("SessionCall endpoint is unsupported: {message}"));
+            return;
+        }
+        let Some(rd) = self.reg(result) else { return };
+        let Some(source) = self.reg(endpoint) else {
+            return;
+        };
+        let args_base = self.proto.alloc_reg();
+        self.proto.emit(Op::Mov {
+            rd: args_base,
+            rs: source,
+        });
+        let registry = super::registry::create_registry();
+        let Some(builtin) = registry.lookup("session_close") else {
+            self.error("session_close has no bytecode registry implementation");
+            return;
+        };
+        self.proto.emit(Op::CallBuiltin {
+            rd,
+            builtin,
+            args_base,
+            argc: 1,
         });
     }
 
@@ -2904,6 +2995,12 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 self.supported_type(element)
             }
+            MirAbiClass::OpaqueHandle
+                if desc.glue.move_out == MirGlueKind::Session
+                    && desc.layout == MirLayout::Handle =>
+            {
+                self.program.type_catalog().validate_session_channel(ty)
+            }
             MirAbiClass::SetHandle => {
                 self.program
                     .type_catalog()
@@ -3401,6 +3498,10 @@ impl<'a> FunctionEmitter<'a> {
                 )),
             },
             MirGlueKind::Noop => {}
+            MirGlueKind::Session => self.error(format!(
+                "drop register type '{}' requires an explicit SessionCall",
+                ty.as_str()
+            )),
             MirGlueKind::Unsupported => self.error(format!(
                 "drop register type '{}' has no canonical drop glue",
                 ty.as_str()

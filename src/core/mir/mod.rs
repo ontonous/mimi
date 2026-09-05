@@ -619,6 +619,16 @@ pub enum MirInstructionKind {
         kind: types::MirBuiltinKind,
         arguments: Vec<MirValueId>,
     },
+    /// Consume a checker-resolved SessionChan endpoint through an explicit
+    /// residual/effect receipt. This first island admits only terminal
+    /// `session_close`; send/recv stay outside the canonical executable shape
+    /// until their payload/channel-state contract is materialized.
+    SessionCall {
+        result: MirValueId,
+        operation: types::MirSessionOperation,
+        endpoint: MirValueId,
+        contract: Option<types::MirSessionCallContract>,
+    },
     /// A checked conversion. Source/target facts live in the value catalog
     /// and the eventual lowering contract.
     Convert {
@@ -1737,6 +1747,17 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                 MirInstructionKind::BuiltinCall { arguments, .. } => {
                     moves.extend(arguments.iter().cloned());
                 }
+                MirInstructionKind::SessionCall {
+                    endpoint,
+                    contract: Some(contract),
+                    ..
+                } => {
+                    if contract.terminal {
+                        drops.insert(endpoint.clone());
+                    } else {
+                        transfers.insert(endpoint.clone());
+                    }
+                }
                 MirInstructionKind::Borrow { source, .. } => {
                     borrows.insert(source.clone());
                 }
@@ -1762,6 +1783,17 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
             };
             for source in sources {
                 if returns.insert(source.clone()) {
+                    changed = true;
+                }
+            }
+        }
+        let current_drops = drops.iter().cloned().collect::<Vec<_>>();
+        for dropped in current_drops {
+            let Some(sources) = consuming_edges.get(&dropped) else {
+                continue;
+            };
+            for source in sources {
+                if drops.insert(source.clone()) {
                     changed = true;
                 }
             }
@@ -1811,9 +1843,10 @@ pub(crate) fn validate_transfer_event_boundaries(
     transitions: &BTreeMap<NodeId, MirTransitionContract>,
 ) -> Vec<MirValidationError> {
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum BoundaryKind {
+    enum BoundaryKind<'a> {
         Call,
-        Flow,
+        Flow(Option<MirTransitionEffect>),
+        Session(Option<&'a types::MirSessionCallContract>),
     }
 
     let mut consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
@@ -1882,15 +1915,21 @@ pub(crate) fn validate_transfer_event_boundaries(
                     arguments,
                     ..
                 } => boundaries.push((
-                    BoundaryKind::Flow,
+                    BoundaryKind::Flow(transitions.get(transition).map(|contract| contract.effect)),
                     point,
                     arguments.as_slice(),
-                    transitions.get(transition).map(|contract| contract.effect),
                 )),
                 MirInstructionKind::Call { arguments, .. }
                 | MirInstructionKind::BuiltinCall { arguments, .. } => {
-                    boundaries.push((BoundaryKind::Call, point, arguments.as_slice(), None))
+                    boundaries.push((BoundaryKind::Call, point, arguments.as_slice()))
                 }
+                MirInstructionKind::SessionCall {
+                    endpoint, contract, ..
+                } => boundaries.push((
+                    BoundaryKind::Session(contract.as_ref()),
+                    point,
+                    std::slice::from_ref(endpoint),
+                )),
                 _ => {}
             }
         }
@@ -1921,18 +1960,23 @@ pub(crate) fn validate_transfer_event_boundaries(
                 | MirOwnershipEventKind::TransferSession
                 | MirOwnershipEventKind::TransferChild
         );
-        if !is_transfer {
+        let has_session_boundary = boundaries.iter().any(|(kind, point, _)| {
+            matches!(kind, BoundaryKind::Session(_)) && point.as_ref() == Some(&event.point)
+        });
+        let is_terminal_session_drop =
+            event.kind == MirOwnershipEventKind::Drop && has_session_boundary;
+        if !is_transfer && !is_terminal_session_drop {
             continue;
         }
         let Some(value) = &event.value else { continue };
         let matching_points = boundaries
             .iter()
-            .filter(|(_, point, _, _)| point.as_ref() == Some(&event.point))
+            .filter(|(_, point, _)| point.as_ref() == Some(&event.point))
             .collect::<Vec<_>>();
         if matching_points.is_empty() {
             if boundaries
                 .iter()
-                .any(|(_, _, arguments, _)| reaches_argument(value, arguments))
+                .any(|(_, _, arguments)| reaches_argument(value, arguments))
             {
                 errors.push(MirValidationError {
                     subject: format!("ownership[{index}]"),
@@ -1946,10 +1990,10 @@ pub(crate) fn validate_transfer_event_boundaries(
             }
             continue;
         }
-        let Some((kind, _, arguments, effect)) = matching_points
+        let Some((kind, _, _arguments)) = matching_points
             .iter()
             .copied()
-            .find(|(_, _, arguments, _)| reaches_argument(value, arguments))
+            .find(|(_, _, arguments)| reaches_argument(value, arguments))
         else {
             errors.push(MirValidationError {
                 subject: format!("ownership[{index}]"),
@@ -1960,43 +2004,79 @@ pub(crate) fn validate_transfer_event_boundaries(
             });
             continue;
         };
-        if matches!(
-            event.kind,
-            MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
-        ) && *kind == BoundaryKind::Call
-        {
-            errors.push(MirValidationError {
-                subject: format!("ownership[{index}]"),
-                message: format!(
-                    "{} event at point '{}' has no canonical call effect identity",
-                    event.kind.as_str(),
-                    event.point.0
-                ),
-            });
-        }
-        if matches!(effect, Some(MirTransitionEffect::Boundary)) {
-            errors.push(MirValidationError {
-                subject: format!("ownership[{index}]"),
-                message: format!(
-                    "{} event at point '{}' crosses a Boundary transition without an effect receipt",
-                    event.kind.as_str(), event.point.0
-                ),
-            });
-        }
-        if matches!(effect, Some(MirTransitionEffect::SilentLocal))
-            && matches!(
-                event.kind,
-                MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
-            )
-        {
-            errors.push(MirValidationError {
-                subject: format!("ownership[{index}]"),
-                message: format!(
-                    "{} event at point '{}' disagrees with SilentLocal FlowTransition effect",
-                    event.kind.as_str(),
-                    event.point.0
-                ),
-            });
+        match kind {
+            BoundaryKind::Call
+                if matches!(
+                    event.kind,
+                    MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
+                ) =>
+            {
+                errors.push(MirValidationError {
+                    subject: format!("ownership[{index}]"),
+                    message: format!(
+                        "{} event at point '{}' has no canonical call effect identity",
+                        event.kind.as_str(),
+                        event.point.0
+                    ),
+                });
+            }
+            BoundaryKind::Flow(effect) => {
+                if matches!(effect, Some(MirTransitionEffect::Boundary)) {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event at point '{}' crosses a Boundary transition without an effect receipt",
+                            event.kind.as_str(), event.point.0
+                        ),
+                    });
+                }
+                if matches!(effect, Some(MirTransitionEffect::SilentLocal))
+                    && matches!(
+                        event.kind,
+                        MirOwnershipEventKind::TransferSession
+                            | MirOwnershipEventKind::TransferChild
+                    )
+                {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event at point '{}' disagrees with SilentLocal FlowTransition effect",
+                            event.kind.as_str(),
+                            event.point.0
+                        ),
+                    });
+                }
+            }
+            BoundaryKind::Session(contract) => {
+                let Some(contract) = contract else {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event at point '{}' has no canonical SessionCall effect identity",
+                            event.kind.as_str(),
+                            event.point.0
+                        ),
+                    });
+                    continue;
+                };
+                let expected_terminal =
+                    contract.terminal && event.kind == MirOwnershipEventKind::Drop;
+                let expected_transfer =
+                    !contract.terminal && event.kind == MirOwnershipEventKind::TransferSession;
+                if !expected_terminal && !expected_transfer {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event at point '{}' disagrees with SessionCall {:?} terminal={}",
+                            event.kind.as_str(),
+                            event.point.0,
+                            contract.operation,
+                            contract.terminal
+                        ),
+                    });
+                }
+            }
+            BoundaryKind::Call => {}
         }
     }
     errors
@@ -2091,6 +2171,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Binary { result, .. }
         | MirInstructionKind::Unary { result, .. }
         | MirInstructionKind::BuiltinCall { result, .. }
+        | MirInstructionKind::SessionCall { result, .. }
         | MirInstructionKind::FlowTransition { result, .. } => Some(result),
         MirInstructionKind::Call { result, .. } => result.as_ref(),
         MirInstructionKind::Const { .. }
@@ -2150,6 +2231,7 @@ fn instruction_consumes_owned_string(
             elements: arguments,
             ..
         } => sources.extend(arguments.iter().cloned()),
+        MirInstructionKind::SessionCall { endpoint, .. } => sources.push(endpoint.clone()),
         MirInstructionKind::ListOp { list, argument, .. } => {
             sources.push(list.clone());
             if let Some(argument) = argument {
@@ -2449,6 +2531,18 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
+        ),
+        MirInstructionKind::SessionCall {
+            result,
+            operation,
+            endpoint,
+            contract,
+        } => format!(
+            "session_call {result} {operation:?} {endpoint}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [session_contract={contract:?}]"))
+                .unwrap_or_default()
         ),
         MirInstructionKind::Convert { result, source } => {
             format!("convert {result} <- {source}")
@@ -3006,6 +3100,30 @@ impl<'a> MirValidator<'a> {
                 self.values(arguments);
                 self.result_at(result, &instruction.id, block, index);
             }
+            SessionCall {
+                result,
+                endpoint,
+                operation,
+                contract,
+            } => {
+                self.use_value(endpoint);
+                if contract.is_none() {
+                    self.error(
+                        result.to_string(),
+                        "SessionCall has no canonical residual/ABI receipt",
+                    );
+                }
+                if contract
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.operation != *operation)
+                {
+                    self.error(
+                        result.to_string(),
+                        "SessionCall receipt disagrees with MIR operation",
+                    );
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
             Nop => {}
         }
     }
@@ -3402,6 +3520,7 @@ impl<'a> MirValidator<'a> {
             | MirInstructionKind::BuiltinCall { arguments, .. } => {
                 uses.extend(arguments.iter().cloned())
             }
+            MirInstructionKind::SessionCall { endpoint, .. } => uses.push(endpoint.clone()),
         }
         for value in uses {
             self.check_use_site(&value, block, index, dominators, reachable);
