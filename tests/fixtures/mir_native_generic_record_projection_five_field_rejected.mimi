@@ -1,5 +1,5 @@
-// Retained negative boundary after S170: generic Copy record projection with
-// five fields remains rejected before any backend or legacy route.
+// Outside S170: generic Copy record projection with five fields remains
+// rejected before any backend or legacy route.
 type Quint<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32 }
 
 func get_value<T>(quint: Quint<T>) -> T {

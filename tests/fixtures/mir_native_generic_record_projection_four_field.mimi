@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// four-field Record<T>; the selected generic field remains at declaration index 0.
+type Quad<T> { value: T, tag: i32, enabled: bool, extra: i64 }
+
+func get_value<T>(quad: Quad<T>) -> T {
+    quad.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let quad = Quad { value: 41, tag: 7, enabled: true, extra: 9 }
+    let picked = get_value(quad)
+    picked
+}

@@ -1900,7 +1900,7 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 
 /// Return whether a checker-resolved generic record projection looks like the
 /// S108 candidate but its declaration/body shape is outside the admitted
-/// one-, two-, or three-field Copy contract, the two/three-field homogeneous owned
+/// one-, two-, three-, or four-field Copy contract, the two/three-field homogeneous owned
 /// residual contract, or the two-field `T + string` owned residual contract.
 /// Default dispatch uses this only on the mixed compatibility path to reject
 /// instead of silently handing the candidate to legacy code.
@@ -1980,11 +1980,11 @@ fn is_flat_copy_record_definition(
     })
 }
 
-/// The generic record island admits one, two, or three fields. At least one field must
+/// The generic record island admits one, two, three, or four fields. At least one field must
 /// be the sole generic binder; any sibling is either that same binder or a
 /// concrete Copy scalar. Concrete `T` is supplied by the nominal use and
 /// materialized into TypeDesc before any backend consumes the layout. The
-/// two- and three-field forms are intentionally the smallest heterogeneous
+/// two-, three-, and four-field forms are intentionally bounded heterogeneous
 /// aggregate extensions; managed/nested and larger records remain outside this island.
 fn is_scalar_generic_record_definition(
     program: &CheckedProgram,
@@ -1992,7 +1992,7 @@ fn is_scalar_generic_record_definition(
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 1 | 2 | 3)
+        || !matches!(definition.fields.len(), 1 | 2 | 3 | 4)
     {
         return false;
     }

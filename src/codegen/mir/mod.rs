@@ -4126,6 +4126,39 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_four_field_generic_record_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_four_field.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("four-field generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 4 && contract.name == "value"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference four-field generic record projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_projection_four_field");
+        generator
+            .compile_mir_native(&program)
+            .expect("native four-field generic record projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native four-field generic record projection module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_three_field_generic_record_tail_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"

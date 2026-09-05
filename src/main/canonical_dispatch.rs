@@ -117,7 +117,7 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, a one-, two-, or three-field generic Copy record projection, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
+/// record value, a one-, two-, three-, or four-field generic Copy record projection, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
@@ -2216,13 +2216,30 @@ mod tests {
     }
 
     #[test]
-    fn four_field_generic_record_projection_is_rejected_before_legacy_route() {
+    fn four_field_generic_record_projection_enters_canonical_default_route() {
         let source = include_str!(
-            "../../tests/fixtures/mir_native_generic_record_projection_four_field_rejected.mimi"
+            "../../tests/fixtures/mir_native_generic_record_projection_four_field.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("four-field generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 4 && contract.name == "value"
+        )));
+    }
+
+    #[test]
+    fn five_field_generic_record_projection_is_rejected_before_legacy_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("four-field generic record projection must fail closed");
+            panic!("five-field generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
         assert!(
