@@ -1950,6 +1950,64 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_materializes_move_owned_result_i64_bool_list_calls() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_result_list_i64_bool_call_return.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result<List<i64|bool>, i32> call execution");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program)
+                .expect("move-owned Result<List<i64|bool>, i32> MIR bytecode"),
+        )
+        .run_value()
+        .expect("move-owned Result<List<i64|bool>, i32> MIR-bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(bytecode, Value::Int(48)));
+
+        let calls = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                && receipt.return_mode
+                    == crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_move_owned_result_i64_bool_list_call_test",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native Result<List<i64|bool>, i32> call must consume its ABI receipt");
+        generator
+            .module
+            .verify()
+            .expect("native Result<List<i64|bool>, i32> call module verifies");
+        for function in ["make_i64", "make_bool", "use_i64", "use_bool", "main"] {
+            assert!(
+                generator.module.get_function(function).is_some(),
+                "{function}"
+            );
+        }
+    }
+
+    #[test]
     fn native_emitter_merges_move_owned_result_call_return_paths() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_result_string_i32_call_return_multipath.mimi"

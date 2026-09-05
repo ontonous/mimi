@@ -7324,6 +7324,54 @@ mod tests {
     }
 
     #[test]
+    fn executes_move_owned_result_list_i64_bool_calls_through_both_oracles() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_result_list_i64_bool_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("Result<List<i64|bool>, i32> calls must lower");
+        let receipts = mir
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                && receipt.return_mode
+                    == crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+                && receipt
+                    .payload_types
+                    .first()
+                    .and_then(|ty| mir.type_catalog().get(ty))
+                    .is_some_and(|desc| {
+                        matches!(desc.kind, crate::core::mir::types::MirTypeKind::List)
+                    })
+        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference Result<List<i64|bool>, i32> call execution");
+        let value = BytecodeVM::new(
+            compile_mir_program(&mir).expect("MIR bytecode Result<List<i64|bool>, i32> calls"),
+        )
+        .run_value()
+        .expect("bytecode Result<List<i64|bool>, i32> call execution");
+        assert_eq!(reference, MirRuntimeValue::Int(48));
+        assert!(matches!(value, Value::Int(48)));
+    }
+
+    #[test]
     fn executes_result_string_i32_consuming_switch_through_both_oracles() {
         let source =
             include_str!("../../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi");

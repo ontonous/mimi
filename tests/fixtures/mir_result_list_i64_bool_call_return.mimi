@@ -1,0 +1,27 @@
+func make_i64() -> Result<List<i64>, i32> {
+    Ok([10, 20])
+}
+
+func make_bool() -> Result<List<bool>, i32> {
+    Ok([true, false, true])
+}
+
+func use_i64() -> i32 {
+    let value = make_i64()
+    match value {
+        Ok(_) => 20,
+        Err(code) => code
+    }
+}
+
+func use_bool() -> i32 {
+    let value = make_bool()
+    match value {
+        Ok(_) => 28,
+        Err(code) => code
+    }
+}
+
+func main() -> i32 {
+    use_i64() + use_bool()
+}

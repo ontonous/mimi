@@ -1184,6 +1184,22 @@ mod tests {
     }
 
     #[test]
+    fn managed_result_call_materialization_accepts_i64_and_bool_list_payloads() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_result_list_i64_bool_call_return.mimi"
+        ));
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("List<i64|bool> managed Result route must materialize");
+        assert_eq!(
+            route.admission.managed_result_call,
+            ManagedResultCallAdmission::CompleteCoverage
+        );
+        assert!(route.materialized_managed_result_call_candidate);
+        crate::core::mir::validate_managed_result_call_island(&route.program)
+            .expect("List<i64|bool> managed Result island validator");
+    }
+
+    #[test]
     fn unsupported_managed_result_call_admission_is_fail_closed() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_result_list_f64_call_rejected.mimi"

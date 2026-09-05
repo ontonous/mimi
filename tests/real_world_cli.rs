@@ -3658,6 +3658,62 @@ fn default_route_result_string_i32_call_return_matches_canonical_backends() {
 }
 
 #[test]
+fn default_route_result_i64_bool_list_calls_match_canonical_backends() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_result_list_i64_bool_call_return.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<List<i64|bool>, i32> run");
+    assert_eq!(run.status.code(), Some(48));
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-result-list-i64-bool-call-return-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default managed Result<List<i64|bool>, i32> build");
+    assert!(
+        build.status.success(),
+        "default managed Result<List<i64|bool>, i32> build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default managed Result<List<i64|bool>, i32> binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(48));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default managed Result<List<i64|bool>, i32> verifier");
+    assert!(
+        verify.status.success(),
+        "default managed Result<List<i64|bool>, i32> verification failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(output.contains("2/2 verified"), "{output}");
+}
+
+#[test]
 fn canonical_mir_result_list_f64_call_fails_closed_before_backends() {
     let fixture = project_root()
         .join("tests")
