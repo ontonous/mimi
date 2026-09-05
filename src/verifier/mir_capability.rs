@@ -167,6 +167,20 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarTupleProjection { contract } => {
+                    if let Err(message) =
+                        crate::core::mir::lower::validate_scalar_tuple_projection_mir(
+                            function,
+                            self.program.type_catalog(),
+                            contract,
+                        )
+                    {
+                        self.error(format!(
+                            "instance '{}' tuple projection contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
                 MirGenericInstanceContract::OwnedRecordProjection { contract } => {
                     if let Some(concrete) = instance.arguments.first() {
                         if let Err(message) =
@@ -1356,6 +1370,7 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
+                | MirGenericInstanceContract::ScalarTupleProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }

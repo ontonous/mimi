@@ -2719,6 +2719,19 @@ fn eval_materialized_call(
                 contract,
             )
         }
+        crate::core::mir::MirGenericInstanceContract::ScalarTupleProjection { contract } => {
+            eval_materialized_tuple_projection_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                &target_owner,
+                type_arguments,
+                arguments,
+                contract,
+            )
+        }
         crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { contract } => {
             eval_materialized_owned_record_projection_call(
                 function,
@@ -4072,6 +4085,76 @@ fn eval_materialized_record_projection_call(
         return Err("MIR verifier record projection argument has the wrong symbolic shape".into());
     }
     let output = symbolic_project(value, &MirProjection::Field(contract.field.clone()))?;
+    ensure_result_shape(function, catalog, result, &output)?;
+    state.values.insert(result.clone(), output);
+    Ok(())
+}
+
+/// Symbolically consume a materialized generic two-element tuple projection.
+/// The tuple argument is Copy/borrowed; the structural index and result type
+/// come exclusively from the canonical tuple receipt.
+fn eval_materialized_tuple_projection_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirTupleProjectionContract,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier tuple projection target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_scalar_tuple_projection_mir(target, catalog, contract)?;
+    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if arguments.len() != 1 || target.parameters.len() != 1 {
+        return Err("MIR verifier tuple projection call requires one argument".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier tuple projection call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result)
+    {
+        return Err(
+            "MIR verifier tuple projection call result disagrees with target TypeDesc".into(),
+        );
+    }
+    if target.result != contract.field_ty {
+        return Err("MIR verifier tuple projection result disagrees with receipt".into());
+    }
+    let argument = &arguments[0];
+    let argument_info = function.values.get(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier tuple projection argument '{}' is absent",
+            argument
+        )
+    })?;
+    let parameter = &target.parameters[0];
+    let parameter_info = target
+        .values
+        .get(parameter)
+        .ok_or_else(|| "MIR verifier tuple projection parameter TypeDesc is absent".to_string())?;
+    if argument_info.ty != parameter_info.ty {
+        return Err("MIR verifier tuple projection argument disagrees with TypeDesc".into());
+    }
+    let value = state.values.get(argument).cloned().ok_or_else(|| {
+        format!(
+            "MIR verifier tuple projection argument '{}' is not defined",
+            argument
+        )
+    })?;
+    if !symbolic_matches_type(catalog, &argument_info.ty, &value) {
+        return Err("MIR verifier tuple projection argument has the wrong symbolic shape".into());
+    }
+    let output = symbolic_project(value, &MirProjection::Tuple(contract.field_index))?;
     ensure_result_shape(function, catalog, result, &output)?;
     state.values.insert(result.clone(), output);
     Ok(())

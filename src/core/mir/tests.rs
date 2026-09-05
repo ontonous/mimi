@@ -349,6 +349,77 @@ func main() -> i32 {
 }
 
 #[test]
+fn materializes_generic_tuple_copy_projection_for_all_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_native_generic_tuple_projection.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic tuple projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::ScalarTupleProjection { .. }
+            )
+        })
+        .expect("generic tuple projection instance");
+    let MirGenericInstanceContract::ScalarTupleProjection { contract } = &instance.contract else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.arity, 2);
+    assert_eq!(contract.field_index, 0);
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("materialized tuple projection target");
+    assert_eq!(contract.field_ty, target.result);
+    assert!(target.canonical_text().contains("project"));
+    let parameter = target.parameters.first().expect("tuple parameter");
+    let parameter_ty = target
+        .values
+        .get(parameter)
+        .expect("tuple parameter value")
+        .ty
+        .clone();
+    program
+        .type_catalog()
+        .validate_flat_copy_tuple(&parameter_ty)
+        .expect("specialized tuple must be flat Copy");
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic tuple projection execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume generic tuple projection MIR");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume generic tuple projection MIR");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume generic tuple projection MIR");
+}
+
+#[test]
+fn rejects_generic_tuple_projection_outside_two_element_copy_island() {
+    let checked = checked_program(
+        r#"
+func first<T>(pair: (T, T, T)) -> T { pair.0 }
+func main() -> i32 { first((1, 2, 3)) }
+"#,
+    );
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("three-element generic tuple projection must remain fail-closed");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("two-element")
+            || rendered.contains("generic tuple projection")
+            || rendered.contains("scalar contract"),
+        "unsupported generic tuple projection must have a stable diagnostic: {rendered}"
+    );
+}
+
+#[test]
 fn materializes_integer_session_send_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_send.mimi"

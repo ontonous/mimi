@@ -424,6 +424,18 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                 .map(|value| value.ty.clone())
         })
         .flatten();
+        let scalar_tuple_target_parameter = matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarTupleProjection { .. }
+        )
+        .then(|| {
+            function
+                .parameters
+                .first()
+                .and_then(|parameter| function.values.get(parameter))
+                .map(|value| value.ty.clone())
+        })
+        .flatten();
         let scalar_record_target_parameter = matches!(
             instance.contract,
             MirGenericInstanceContract::ScalarRecordProjection { .. }
@@ -521,6 +533,27 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                         node_id: NodeId(instruction_id.as_str().to_owned()),
                         message: format!(
                             "generic scalar record projection call transfer is invalid: {message}"
+                        ),
+                    }]
+                })?;
+            } else if let Some(target_parameter_ty) = scalar_tuple_target_parameter.as_ref() {
+                validate_scalar_tuple_call_argument(
+                    function,
+                    function.blocks.get(&block_id).ok_or_else(|| {
+                        vec![MirLoweringError {
+                            node_id: NodeId(instruction_id.as_str().to_owned()),
+                            message: "generic scalar tuple call block is absent".into(),
+                        }]
+                    })?,
+                    index,
+                    target_parameter_ty,
+                    type_catalog,
+                )
+                .map_err(|message| {
+                    vec![MirLoweringError {
+                        node_id: NodeId(instruction_id.as_str().to_owned()),
+                        message: format!(
+                            "generic scalar tuple projection call transfer is invalid: {message}"
                         ),
                     }]
                 })?;
@@ -1163,6 +1196,99 @@ pub(crate) fn validate_scalar_record_call_argument(
     )
 }
 
+/// Validate the caller-side producer for a generic Copy tuple projection.
+/// Only a direct local Clone or fresh Tuple Construct may feed the specialized
+/// two-element tuple parameter; this prevents a generic tuple ABI from being
+/// inferred from an indirect or conditional producer.
+pub(crate) fn validate_scalar_tuple_call_argument(
+    caller: &MirFunction,
+    block: &MirBlock,
+    call_index: usize,
+    target_parameter_ty: &crate::core::ResolvedTypeId,
+    type_catalog: &MirTypeCatalog,
+) -> Result<(), String> {
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err("generic scalar tuple projection call instruction is absent".into());
+    };
+    let [argument] = arguments.as_slice() else {
+        return Err("generic scalar tuple projection call requires one argument".into());
+    };
+    let producer_index = call_index.checked_sub(1).ok_or_else(|| {
+        "generic scalar tuple projection call requires a direct local Clone or fresh Tuple Construct producer".to_string()
+    })?;
+    if let Some(MirInstruction {
+        kind:
+            MirInstructionKind::Construct {
+                result,
+                kind: MirAggregateKind::Tuple,
+                ..
+            },
+        ..
+    }) = block.instructions.get(producer_index)
+    {
+        if result != argument {
+            return Err(
+                "generic scalar tuple projection call argument is not the direct Tuple Construct result".into(),
+            );
+        }
+        let result_ty = caller
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                "generic scalar tuple projection call Construct result TypeDesc is absent"
+                    .to_string()
+            })?;
+        if result_ty != *target_parameter_ty {
+            return Err(
+                "generic scalar tuple projection call Construct type disagrees with target parameter".into(),
+            );
+        }
+        type_catalog.validate_flat_copy_tuple(&result_ty)?;
+        return type_catalog.validate_glue(&result_ty, super::types::MirGlueOperation::MoveOut);
+    }
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Clone { result, source },
+        ..
+    }) = block.instructions.get(producer_index)
+    else {
+        return Err(
+            "generic scalar tuple projection call requires a direct local Clone or fresh Tuple Construct producer".into(),
+        );
+    };
+    if result != argument {
+        return Err(
+            "generic scalar tuple projection call argument is not the direct Clone result".into(),
+        );
+    }
+    if !source.as_str().starts_with("local:") {
+        return Err("generic scalar tuple projection call Clone source is not a local".into());
+    }
+    let source_ty = caller
+        .values
+        .get(source)
+        .map(|value| value.ty.clone())
+        .ok_or_else(|| {
+            "generic scalar tuple projection call Clone source TypeDesc is absent".to_string()
+        })?;
+    if source_ty != *target_parameter_ty {
+        return Err(
+            "generic scalar tuple projection call source type disagrees with target parameter"
+                .into(),
+        );
+    }
+    type_catalog.validate_flat_copy_tuple(&source_ty)?;
+    type_catalog.validate_value_operation(
+        target_parameter_ty,
+        &source_ty,
+        super::types::MirGlueOperation::Clone,
+    )
+}
+
 /// Recognize the smallest generic record shapes that need an explicit
 /// residual-drop receipt: two or three homogeneous fields bound to the
 /// callable's sole generic parameter, or the two-field heterogeneous form
@@ -1292,6 +1418,14 @@ fn materialize_generic_instance(
     let generic_record_facade = callable.signature.parameters.iter().any(|parameter| {
         mentions_generic_record_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
     }) || mentions_generic_record_type(
+        program,
+        &callable.signature.result,
+        &generic_id,
+        &mut HashSet::new(),
+    );
+    let generic_tuple_facade = callable.signature.parameters.iter().any(|parameter| {
+        mentions_generic_tuple_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
+    }) || mentions_generic_tuple_type(
         program,
         &callable.signature.result,
         &generic_id,
@@ -2404,6 +2538,14 @@ fn materialize_generic_instance(
         let contract =
             detect_owned_record_projection_contract(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::OwnedRecordProjection { contract }
+    } else if generic_tuple_facade {
+        let contract = detect_scalar_tuple_projection_contract(
+            &function,
+            type_catalog,
+            &generic_id,
+            &subject(),
+        )?;
+        MirGenericInstanceContract::ScalarTupleProjection { contract }
     } else if generic_record_facade {
         let contract = detect_scalar_record_projection_contract(
             &function,
@@ -3391,6 +3533,122 @@ fn detect_scalar_set_facade_operation(
     Ok(*operation)
 }
 
+fn detect_scalar_tuple_projection_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    generic_id: &crate::core::ResolvedTypeId,
+    subject: &NodeId,
+) -> Result<super::types::MirTupleProjectionContract, Vec<MirLoweringError>> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection must have exactly one parameter".into(),
+        }]);
+    };
+    if function.blocks.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection must have exactly one MIR block".into(),
+        }]);
+    }
+    let block = function.blocks.get(&function.entry).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection entry block is absent".into(),
+        }]
+    })?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Tuple(field_index),
+                ..
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection must contain exactly one tuple Project".into(),
+        }]);
+    };
+    if base != parameter {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection must project its tuple parameter".into(),
+        }]);
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection base value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection result value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    if base_ty == *generic_id || result_ty == *generic_id {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection was not concretely specialized".into(),
+        }]);
+    }
+    type_catalog
+        .validate_flat_copy_tuple(&base_ty)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!("generic tuple projection base is unsupported: {message}"),
+            }]
+        })?;
+    let receipt = type_catalog
+        .validated_tuple_field_projection_contract(&base_ty, *field_index, &result_ty)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!(
+                    "generic tuple projection receipt specialization failed: {message}"
+                ),
+            }]
+        })?;
+    if receipt.arity != 2 || function.result != result_ty {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "generic tuple projection requires a two-element tuple and direct result identity"
+                    .into(),
+        }]);
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection must directly return its Project result".into(),
+        }]);
+    };
+    if returned != result {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic tuple projection return value is not the Project result".into(),
+        }]);
+    }
+    Ok(receipt)
+}
+
 fn detect_scalar_record_projection_contract(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -3826,6 +4084,82 @@ pub(crate) fn validate_scalar_record_projection_mir(
     };
     if returned != result {
         return Err("generic record projection return value is not the Project result".into());
+    }
+    Ok(())
+}
+
+/// Validate the materialized body behind a `ScalarTupleProjection` generic
+/// instance. The concrete receipt is the only source of tuple index/arity;
+/// this body gate admits one direct read projection and no hidden tuple move.
+pub(crate) fn validate_scalar_tuple_projection_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirTupleProjectionContract,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("generic tuple projection must have exactly one parameter".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("generic tuple projection must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic tuple projection entry block is absent".to_string())?;
+    if block.instructions.len() != 1 {
+        return Err("generic tuple projection body may contain only one tuple Project".into());
+    }
+    let MirInstruction {
+        kind:
+            MirInstructionKind::Project {
+                result,
+                base,
+                projection: MirProjection::Tuple(field_index),
+                ..
+            },
+        ..
+    } = &block.instructions[0]
+    else {
+        return Err("generic tuple projection must contain exactly one tuple Project".into());
+    };
+    if base != parameter {
+        return Err("generic tuple projection must project its tuple parameter".into());
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| "generic tuple projection base value is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| "generic tuple projection result value is absent".to_string())?
+        .ty
+        .clone();
+    type_catalog.validate_flat_copy_tuple(&base_ty)?;
+    let expected = type_catalog.validated_tuple_field_projection_contract(
+        &base_ty,
+        *field_index,
+        &result_ty,
+    )?;
+    if &expected != contract {
+        return Err("generic tuple projection receipt disagrees with TypeDesc".into());
+    }
+    if contract.arity != 2 || function.result != result_ty {
+        return Err(
+            "generic tuple projection requires a two-element tuple and direct result identity"
+                .into(),
+        );
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err("generic tuple projection must directly return its Project result".into());
+    };
+    if returned != result {
+        return Err("generic tuple projection return value is not the Project result".into());
     }
     Ok(())
 }
@@ -4668,6 +5002,49 @@ fn mentions_generic_record_type(
                 .iter()
                 .any(|parameter| mentions_generic_record_type(program, parameter, generic_id, seen))
                 || mentions_generic_record_type(program, result, generic_id, seen)
+        }
+        _ => false,
+    }
+}
+
+fn mentions_generic_tuple_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+    generic_id: &crate::core::ResolvedTypeId,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(id.clone()) {
+        return false;
+    }
+    match program.resolved_types().get(id) {
+        Some(ResolvedType::Tuple(items)) => items
+            .iter()
+            .any(|item| contains_generic_type(program, item, generic_id, &mut HashSet::new())),
+        Some(ResolvedType::Nominal { arguments, .. }) => arguments
+            .iter()
+            .any(|argument| mentions_generic_tuple_type(program, argument, generic_id, seen)),
+        Some(ResolvedType::Option(inner))
+        | Some(ResolvedType::CBuffer(inner))
+        | Some(ResolvedType::Ownership { target: inner, .. })
+        | Some(ResolvedType::Newtype { inner, .. })
+        | Some(ResolvedType::Slice(inner))
+        | Some(ResolvedType::RawPointer { target: inner, .. }) => {
+            mentions_generic_tuple_type(program, inner, generic_id, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            mentions_generic_tuple_type(program, ok, generic_id, seen)
+                || mentions_generic_tuple_type(program, error, generic_id, seen)
+        }
+        Some(ResolvedType::Array { element, .. }) => {
+            mentions_generic_tuple_type(program, element, generic_id, seen)
+        }
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters
+                .iter()
+                .any(|parameter| mentions_generic_tuple_type(program, parameter, generic_id, seen))
+                || mentions_generic_tuple_type(program, result, generic_id, seen)
         }
         _ => false,
     }
@@ -7225,24 +7602,28 @@ impl<'a> Lowerer<'a> {
             descriptor.kind == super::types::MirTypeKind::GenericParameter
         });
         if result_is_generic {
-            let super::MirProjection::Field(field) = &projection else {
-                return None;
-            };
-            type_catalog
-                .validated_generic_record_field_projection_contract(&base_ty, field, result_ty)
-                .or_else(|_| {
-                    type_catalog.validated_generic_owned_record_field_projection_contract(
-                        &base_ty, field, result_ty,
-                    )
-                })
-                .or_else(|_| {
-                    type_catalog
-                        .validated_generic_heterogeneous_owned_record_field_projection_contract(
+            match &projection {
+                super::MirProjection::Field(field) => type_catalog
+                    .validated_generic_record_field_projection_contract(&base_ty, field, result_ty)
+                    .or_else(|_| {
+                        type_catalog.validated_generic_owned_record_field_projection_contract(
                             &base_ty, field, result_ty,
                         )
-                })
-                .is_ok()
-                .then_some(projection)
+                    })
+                    .or_else(|_| {
+                        type_catalog
+                            .validated_generic_heterogeneous_owned_record_field_projection_contract(
+                                &base_ty, field, result_ty,
+                            )
+                    })
+                    .is_ok()
+                    .then_some(projection),
+                super::MirProjection::Tuple(index) => type_catalog
+                    .validated_generic_tuple_field_projection_contract(&base_ty, *index, result_ty)
+                    .is_ok()
+                    .then_some(projection),
+                _ => None,
+            }
         } else {
             type_catalog
                 .validate_projection(&base_ty, result_ty, &projection)

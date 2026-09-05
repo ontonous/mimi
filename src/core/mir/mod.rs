@@ -602,6 +602,13 @@ pub enum MirGenericInstanceContract {
     ScalarRecordProjection {
         contract: types::MirRecordProjectionContract,
     },
+    /// A generic two-element tuple projection specialized to a concrete
+    /// Copy-scalar element. The tuple receipt fixes the structural index and
+    /// arity so consumers cannot infer a generic tuple ABI from a backend
+    /// aggregate or runtime vector.
+    ScalarTupleProjection {
+        contract: types::MirTupleProjectionContract,
+    },
     /// A generic one- or two-field record projection specialized to an owned
     /// String field. The executable body is a consuming `MoveProject`; the
     /// receipt fixes nominal/field identity and the TypeDesc proves any

@@ -1,0 +1,11 @@
+// Canonical generic MIR candidate: borrow one Copy scalar element from a
+// two-element generic tuple. The tuple itself stays Copy at the call boundary.
+func first<T>(pair: (T, T)) -> T {
+    pair.0
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let picked = first((41, 7))
+    picked
+}

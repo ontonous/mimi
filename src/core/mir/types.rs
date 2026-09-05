@@ -837,7 +837,7 @@ pub struct MirRecordProjectionContract {
 /// source TypeDesc, declaration-order index, arity, and selected element type
 /// therefore travel together so a consumer cannot infer tuple shape from a
 /// physical vector or LLVM struct alone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirTupleProjectionContract {
     pub tuple_ty: ResolvedTypeId,
     pub field_index: usize,
@@ -1674,6 +1674,49 @@ impl MirTypeCatalog {
                     "record type '{}' field '{}' is outside the flat Copy record contract: {message}",
                     ty.as_str(),
                     field.name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Validate the bounded flat Copy tuple production contract used by the
+    /// generic tuple projection island.  The tuple must be a two-element
+    /// aggregate whose children are signed scalar/bool leaves with no-op
+    /// glue; generic or managed children remain outside this contract.
+    pub fn validate_flat_copy_tuple(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        let MirLayout::Tuple(elements) = &descriptor.layout else {
+            return Err(format!(
+                "type '{}' has no canonical tuple layout",
+                ty.as_str()
+            ));
+        };
+        if descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || elements.len() != 2
+        {
+            return Err(format!(
+                "tuple type '{}' is outside the two-element flat Copy tuple contract",
+                ty.as_str()
+            ));
+        }
+        for (index, element) in elements.iter().enumerate() {
+            self.validate_copy_scalar(element).map_err(|message| {
+                format!(
+                    "tuple type '{}' element {index} is outside the flat Copy tuple contract: {message}",
+                    ty.as_str()
                 )
             })?;
         }
@@ -5239,6 +5282,84 @@ impl MirTypeCatalog {
             field_index,
             arity: fields.len(),
             field_ty: field.ty.clone(),
+        })
+    }
+
+    /// Build the non-executable placeholder receipt for a generic two-element
+    /// tuple projection. The selected element/result must be the callable's
+    /// GenericParameter; the sibling may be that same binder or a concrete
+    /// Copy scalar. Concrete specialization must replay the canonical tuple
+    /// layout through `validated_tuple_field_projection_contract`.
+    pub(crate) fn validated_generic_tuple_field_projection_contract(
+        &self,
+        base_ty: &ResolvedTypeId,
+        field_index: usize,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirTupleProjectionContract, String> {
+        let descriptor = self.get(base_ty).ok_or_else(|| {
+            format!(
+                "generic tuple projection base type '{}' is absent",
+                base_ty.as_str()
+            )
+        })?;
+        let MirLayout::Tuple(elements) = &descriptor.layout else {
+            return Err(format!(
+                "generic tuple projection base type '{}' has no canonical tuple layout",
+                base_ty.as_str()
+            ));
+        };
+        if descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            || elements.len() != 2
+        {
+            return Err(
+                "generic tuple projection requires a two-element Copy tuple contract".into(),
+            );
+        }
+        let selected = elements.get(field_index).ok_or_else(|| {
+            format!(
+                "generic tuple projection index {} is out of bounds",
+                field_index
+            )
+        })?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic tuple projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let siblings_valid = elements
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != field_index)
+            .all(|(_, candidate)| {
+                candidate == result_ty || self.validate_copy_scalar(candidate).is_ok()
+            });
+        if result.kind != MirTypeKind::GenericParameter
+            || selected != result_ty
+            || self
+                .get(selected)
+                .is_none_or(|element| element.kind != MirTypeKind::GenericParameter)
+            || !siblings_valid
+        {
+            return Err(
+                "generic tuple projection placeholder requires selected element/result GenericParameter identity and a Copy-scalar sibling".into(),
+            );
+        }
+        Ok(MirTupleProjectionContract {
+            tuple_ty: base_ty.clone(),
+            field_index,
+            arity: elements.len(),
+            field_ty: selected.clone(),
         })
     }
 

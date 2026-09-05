@@ -1500,6 +1500,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarRecordProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarTupleProjection { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
             MirGenericInstanceContract::OwnedRecordProjection { .. } => {
                 if instance.arguments.len() != 1 {
                     Err(format!(
@@ -1666,6 +1669,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR record projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarTupleProjection { ref contract } => {
+                if let Err(message) = super::lower::validate_scalar_tuple_projection_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR tuple projection contract is invalid: {message}"
                         ),
                     });
                 }
@@ -2111,6 +2128,42 @@ fn validate_call_graph(
                                 subject: instruction.id.to_string(),
                                 message: format!(
                                     "generic scalar record projection call transfer is invalid: {message}"
+                                ),
+                            });
+                        }
+                    } else if let MirGenericInstanceContract::ScalarTupleProjection { .. } =
+                        &instance.contract
+                    {
+                        let Some(target_parameter) = target.parameters.first() else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "generic scalar tuple projection target has no parameter"
+                                    .into(),
+                            });
+                            continue;
+                        };
+                        let Some(target_parameter_ty) = target
+                            .values
+                            .get(target_parameter)
+                            .map(|value| value.ty.clone())
+                        else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "generic scalar tuple projection target parameter TypeDesc is absent".into(),
+                            });
+                            continue;
+                        };
+                        if let Err(message) = super::lower::validate_scalar_tuple_call_argument(
+                            function,
+                            block,
+                            instruction_index,
+                            &target_parameter_ty,
+                            type_catalog,
+                        ) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "generic scalar tuple projection call transfer is invalid: {message}"
                                 ),
                             });
                         }
