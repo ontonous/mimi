@@ -6934,6 +6934,47 @@ mod tests {
     }
 
     #[test]
+    fn executes_three_field_heterogeneous_owned_generic_record_projection_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_heterogeneous_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("three-field heterogeneous owned projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("three-field heterogeneous owned projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                ref contract
+            } if contract.projection.arity == 3
+                && contract.projection.name == "value"
+                && contract.residual.len() == 2
+                && contract.residual[0].name == "tail"
+                && contract.residual[1].name == "note"
+                && contract.residual.iter().all(|residual| {
+                    residual.glue == crate::core::mir::types::MirGlueKind::OwnedString
+                })
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference three-field heterogeneous owned projection execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("three-field heterogeneous owned projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode three-field heterogeneous owned projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_owned_generic_record_projection_rvalue_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_rvalue_call.mimi"

@@ -1295,10 +1295,11 @@ pub(crate) fn validate_scalar_tuple_call_argument(
 
 /// Recognize the smallest generic record shapes that need an explicit
 /// residual-drop receipt: two or three homogeneous fields bound to the
-/// callable's sole generic parameter, or the two-field heterogeneous form
-/// with one generic field and one owned `String` sibling. One field is
-/// projected and the remaining siblings are retained only so their ownership
-/// can be discharged by `MoveProjectDrop` after specialization.
+/// callable's sole generic parameter, or the bounded two- or three-field
+/// heterogeneous forms with one generic field and one or two owned `String`
+/// siblings. One field is projected and the remaining siblings are retained
+/// only so their ownership can be discharged by `MoveProjectDrop` after
+/// specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
 /// concrete String/Move/glue proof is replayed from TypeDesc below.
 fn is_owned_record_projection_drop_callable(
@@ -1366,7 +1367,8 @@ fn is_owned_record_projection_drop_callable(
         }
     }) && ((generic_fields == definition.fields.len()
         && matches!(definition.fields.len(), 2 | 3))
-        || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1));
+        || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1)
+        || (definition.fields.len() == 3 && generic_fields == 1 && owned_string_fields == 2));
     fields_admitted
         && matches!(
             callable.body.root.result.as_deref().map(|expr| &expr.kind),

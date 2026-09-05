@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: move one owned String field while two
+// fixed owned String siblings are discharged by the residual receipt.
+type TripleTagged<T> { value: T, note: string, tail: string }
+
+func take_value<T>(triple: TripleTagged<T>) -> T {
+    triple.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let triple = TripleTagged { value: "selected", note: "residual", tail: "tail" }
+    let picked = take_value(triple)
+    drop(picked)
+    41
+}

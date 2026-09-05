@@ -1,0 +1,15 @@
+// Negative canonical candidate: four-field heterogeneous owned projection is
+// outside the bounded three-field residual projection contract.
+type QuadTagged<T> { value: T, note: string, tail: string, spare: string }
+
+func take_value<T>(quad: QuadTagged<T>) -> T {
+    quad.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let quad = QuadTagged { value: "selected", note: "note", tail: "tail", spare: "spare" }
+    let picked = take_value(quad)
+    drop(picked)
+    41
+}

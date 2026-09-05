@@ -7409,6 +7409,47 @@ mod tests {
     }
 
     #[test]
+    fn concrete_three_field_heterogeneous_owned_generic_record_projection_tracks_two_residuals() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_heterogeneous_residual.mimi"
+        );
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("three-field heterogeneous owned residual projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("three-field heterogeneous owned residual instance");
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            panic!("three-field heterogeneous generic record must carry a residual receipt");
+        };
+        assert_eq!(contract.projection.arity, 3);
+        assert_eq!(contract.projection.name, "value");
+        assert_eq!(
+            contract
+                .residual
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tail", "note"]
+        );
+        assert!(contract
+            .residual
+            .iter()
+            .all(|field| field.glue == crate::core::mir::types::MirGlueKind::OwnedString));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference three-field heterogeneous owned residual execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn three_field_owned_generic_record_projection_rejects_truncated_residual_schedule() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_three_field_residual.mimi"

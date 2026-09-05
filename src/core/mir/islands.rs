@@ -1902,7 +1902,8 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 /// Return whether a checker-resolved generic record projection looks like the
 /// S108 candidate but its declaration/body shape is outside the admitted
 /// one-, two-, three-, or four-field Copy contract, the two/three-field homogeneous owned
-/// residual contract, or the two-field `T + string` owned residual contract.
+/// residual contract, or the bounded two/three-field `T + string`/`T + string + string`
+/// owned residual contracts.
 /// Default dispatch uses this only on the mixed compatibility path to reject
 /// instead of silently handing the candidate to legacy code.
 pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
@@ -2034,12 +2035,12 @@ fn is_scalar_generic_record_definition(
 }
 
 /// The managed generic record residual island admits exactly two or three
-/// homogeneous fields, or the smallest heterogeneous two-field form with one
-/// generic field and one concrete `String` sibling. Concrete `String`
-/// specialization and Move/Drop glue are proved later by TypeDesc. Keeping
-/// this checker-side predicate separate from the Copy-record shape prevents a
-/// larger or otherwise mixed managed record from entering the scalar
-/// projection island.
+/// homogeneous fields, or the bounded heterogeneous two- or three-field
+/// forms with one generic field and one or two concrete `String` siblings.
+/// Concrete `String` specialization and Move/Drop glue are proved later by
+/// TypeDesc. Keeping this checker-side predicate separate from the Copy-record
+/// shape prevents a larger or otherwise mixed managed record from entering
+/// the scalar projection island.
 fn is_owned_generic_record_definition(
     program: &CheckedProgram,
     definition: &crate::core::ResolvedTypeDef,
@@ -2076,7 +2077,9 @@ fn is_owned_generic_record_definition(
     });
     fields_admitted
         && ((generic_fields == definition.fields.len() && matches!(definition.fields.len(), 2 | 3))
-            || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1))
+            || (generic_fields == 1
+                && matches!(definition.fields.len(), 2 | 3)
+                && owned_string_fields + generic_fields == definition.fields.len()))
 }
 
 /// Recognize the additional heterogeneous declarations admitted only by the
