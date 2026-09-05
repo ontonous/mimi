@@ -4328,11 +4328,9 @@ mod tests {
             crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
                 if contract.arity == 3
                     && contract.residual.len() == 2
-                    && contract
-                        .residual
-                        .iter()
-                        .all(|residual| residual.glue
-                            == crate::core::mir::types::MirGlueKind::OwnedString)
+                    && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Noop
+                    && contract.residual[1].glue
+                        == crate::core::mir::types::MirGlueKind::OwnedString
         ));
         let reference = MirReferenceInterpreter::new(&program)
             .execute(&crate::core::NodeId("function:main".into()), &[])

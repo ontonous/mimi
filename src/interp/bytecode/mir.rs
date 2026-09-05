@@ -5723,10 +5723,14 @@ mod tests {
         };
         assert_eq!(contract.arity, 3);
         assert_eq!(contract.residual.len(), 2);
-        assert!(contract
-            .residual
-            .iter()
-            .all(|residual| residual.glue == crate::core::mir::types::MirGlueKind::OwnedString));
+        assert_eq!(
+            contract.residual[0].glue,
+            crate::core::mir::types::MirGlueKind::Noop
+        );
+        assert_eq!(
+            contract.residual[1].glue,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
         let reference = MirReferenceInterpreter::new(&mir)
             .execute(&crate::core::NodeId("function:main".into()), &[])
             .expect("reference multi-residual update execution");

@@ -2386,8 +2386,7 @@ mod tests {
                 if contract.arity == 3
                     && contract.updates.len() == 1
                     && contract.residual.len() == 2
-                    && contract.residual[0].glue
-                        == mimi::core::mir::types::MirGlueKind::OwnedString
+                    && contract.residual[0].glue == mimi::core::mir::types::MirGlueKind::Noop
                     && contract.residual[1].glue
                         == mimi::core::mir::types::MirGlueKind::OwnedString
         )));

@@ -1257,11 +1257,9 @@ fn owned_generic_record_update_with_two_residuals_is_consumed_by_mir_verifier() 
         crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
             if contract.arity == 3
                 && contract.residual.len() == 2
-                && contract
-                    .residual
-                    .iter()
-                    .all(|residual| residual.glue
-                        == crate::core::mir::types::MirGlueKind::OwnedString)
+                && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Noop
+                && contract.residual[1].glue
+                    == crate::core::mir::types::MirGlueKind::OwnedString
     )));
     crate::verifier::validate_mir_capabilities(&canonical)
         .expect("multi-residual owned generic record update verifier capability");
