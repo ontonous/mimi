@@ -932,6 +932,7 @@ impl<'a> FunctionEmitter<'a> {
         let (builtin_name, argc) = match operation {
             crate::core::mir::types::MirSessionOperation::Close => ("session_close", 1),
             crate::core::mir::types::MirSessionOperation::Send => ("session_send", 2),
+            crate::core::mir::types::MirSessionOperation::Recv => ("session_recv", 1),
         };
         if let Some(payload) = payload {
             let Some(payload_reg) = self.reg(payload) else {

@@ -1,0 +1,11 @@
+session Recv = ?i64 . end
+
+func recv_once(ch: SessionChan<Recv>) -> i64 {
+    let value = session_recv(ch)
+    session_close(ch)
+    value
+}
+
+func main() -> i32 {
+    0
+}

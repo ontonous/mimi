@@ -65,6 +65,16 @@ pub struct MirExecutionObservation {
     pub output: String,
 }
 
+/// Deterministic input queue for the canonical `session_recv` oracle.  The
+/// production runtime owns channel scheduling; reference execution instead
+/// requires callers to seed every receive endpoint explicitly so tests never
+/// block or observe backend-specific thread timing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirSessionQueueInput {
+    pub endpoint: i64,
+    pub values: Vec<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirProgramBuildError {
     Lowering(Vec<super::lower::MirLoweringError>),
@@ -2757,12 +2767,15 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
             payload,
             ..
         } => {
-            // A non-terminal Send advances the checker residual in place; the
-            // endpoint identity remains available for the next action. Close
-            // is terminal and consumes it. Payloads are currently Copy, but
-            // retain them here so a future linear payload receipt cannot be
-            // silently omitted.
-            let mut sources = if *operation == super::types::MirSessionOperation::Send {
+            // A non-terminal Send/Recv advances the checker residual in place;
+            // the endpoint identity remains available for the next action.
+            // Close is terminal and consumes it. Payloads are currently Copy,
+            // but retain them here so a future linear payload receipt cannot
+            // be silently omitted.
+            let mut sources = if matches!(
+                *operation,
+                super::types::MirSessionOperation::Send | super::types::MirSessionOperation::Recv
+            ) {
                 Vec::new()
             } else {
                 vec![endpoint.clone()]
@@ -3119,6 +3132,7 @@ pub struct MirReferenceInterpreter<'a> {
     program: &'a MirProgram,
     max_steps: usize,
     output: RefCell<String>,
+    session_queues: RefCell<BTreeMap<i64, VecDeque<i64>>>,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -3127,6 +3141,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             program,
             max_steps: 1_000_000,
             output: RefCell::new(String::new()),
+            session_queues: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -3149,7 +3164,46 @@ impl<'a> MirReferenceInterpreter<'a> {
         owner: &NodeId,
         arguments: &[MirRuntimeValue],
     ) -> Result<MirExecutionObservation, MirExecutionError> {
+        self.execute_with_output_and_session_queues(owner, arguments, &[])
+    }
+
+    /// Execute using explicit deterministic receive queues.  Queue state is
+    /// reset for every invocation; duplicate endpoint entries are rejected so
+    /// the oracle cannot hide an ambiguous channel schedule.
+    pub fn execute_with_session_queues(
+        &self,
+        owner: &NodeId,
+        arguments: &[MirRuntimeValue],
+        queues: &[MirSessionQueueInput],
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        self.execute_with_output_and_session_queues(owner, arguments, queues)
+            .map(|observation| observation.value)
+    }
+
+    fn execute_with_output_and_session_queues(
+        &self,
+        owner: &NodeId,
+        arguments: &[MirRuntimeValue],
+        queues: &[MirSessionQueueInput],
+    ) -> Result<MirExecutionObservation, MirExecutionError> {
         self.output.borrow_mut().clear();
+        let mut session_queues = self.session_queues.borrow_mut();
+        session_queues.clear();
+        for queue in queues {
+            if session_queues
+                .insert(queue.endpoint, queue.values.iter().copied().collect())
+                .is_some()
+            {
+                return Err(self.error(
+                    owner,
+                    format!(
+                        "duplicate deterministic session queue for endpoint {}",
+                        queue.endpoint
+                    ),
+                ));
+            }
+        }
+        drop(session_queues);
         let function = self
             .program
             .functions
@@ -4337,6 +4391,13 @@ impl<'a> MirReferenceInterpreter<'a> {
                             "session_send received a non-integer payload runtime value",
                         ));
                     }
+                } else if *operation == super::types::MirSessionOperation::Recv {
+                    if payload.is_some() {
+                        return Err(self.error(
+                            &function.owner,
+                            "session_recv cannot carry a payload MIR value",
+                        ));
+                    }
                 } else if *operation != super::types::MirSessionOperation::Close {
                     return Err(self.error(
                         &function.owner,
@@ -4348,7 +4409,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 // unit; the native/VM runtime performs the actual channel
                 // table removal, but no backend-specific state is allowed to
                 // alter the canonical result/trap contract.
-                let endpoint = if *operation == super::types::MirSessionOperation::Send {
+                let endpoint = if matches!(
+                    *operation,
+                    super::types::MirSessionOperation::Send
+                        | super::types::MirSessionOperation::Recv
+                ) {
                     self.read_value(function, values, endpoint)?
                 } else {
                     self.take_transfer_value(function, values, endpoint)?
@@ -4356,10 +4421,47 @@ impl<'a> MirReferenceInterpreter<'a> {
                 if !matches!(endpoint, MirRuntimeValue::Int(_)) {
                     return Err(self.error(
                         &function.owner,
-                        "session_close received a non-opaque endpoint runtime value",
+                        "SessionCall received a non-opaque endpoint runtime value",
                     ));
                 }
-                values.insert(result.clone(), MirRuntimeValue::Unit);
+                if *operation == super::types::MirSessionOperation::Recv {
+                    let MirRuntimeValue::Int(endpoint) = endpoint else {
+                        unreachable!("validated SessionChan endpoint checked above")
+                    };
+                    let received = self
+                        .session_queues
+                        .borrow_mut()
+                        .get_mut(&endpoint)
+                        .and_then(VecDeque::pop_front)
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                format!(
+                                    "session_recv queue is missing or exhausted for endpoint {}",
+                                    endpoint
+                                ),
+                            )
+                        })?;
+                    let result_desc =
+                        self.program.type_catalog().get(&result_ty).ok_or_else(|| {
+                            self.error(&function.owner, "session_recv result TypeDesc is absent")
+                        })?;
+                    if let super::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    } = result_desc.abi
+                    {
+                        if i32::try_from(received).is_err() {
+                            return Err(self.error(
+                                &function.owner,
+                                "session_recv i32 queue value is outside the canonical signed range",
+                            ));
+                        }
+                    }
+                    values.insert(result.clone(), MirRuntimeValue::Int(received));
+                } else {
+                    values.insert(result.clone(), MirRuntimeValue::Unit);
+                }
             }
             MirInstructionKind::Call {
                 result,

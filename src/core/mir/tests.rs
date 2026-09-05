@@ -160,6 +160,149 @@ fn materializes_integer_session_send_with_backend_neutral_receipt() {
 }
 
 #[test]
+fn materializes_integer_session_recv_with_deterministic_queue_oracle() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_recv.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("integer SessionChan recv must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:recv_once".into());
+    let function = program.functions().get(&owner).expect("recv_once MIR");
+    let session_calls = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::SessionCall {
+                operation,
+                contract: Some(contract),
+                payload,
+                ..
+            } => Some((*operation, contract.clone(), payload.is_some())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        session_calls.len(),
+        2,
+        "recv followed by close is explicit MIR"
+    );
+    let (operation, recv_contract, has_payload) = session_calls
+        .iter()
+        .find(|(operation, _, _)| *operation == crate::core::mir::types::MirSessionOperation::Recv)
+        .expect("recv receipt");
+    assert_eq!(
+        *operation,
+        crate::core::mir::types::MirSessionOperation::Recv
+    );
+    assert!(!has_payload);
+    assert!(recv_contract.before.as_str().starts_with("?i64"));
+    assert_eq!(recv_contract.after.as_str(), "end");
+    assert!(!recv_contract.terminal);
+    assert!(recv_contract.payload_ty.is_none());
+
+    let interpreter = crate::core::mir::reference::MirReferenceInterpreter::new(&program);
+    let value = interpreter
+        .execute_with_session_queues(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(17)],
+            &[crate::core::mir::reference::MirSessionQueueInput {
+                endpoint: 17,
+                values: vec![73],
+            }],
+        )
+        .expect("reference SessionCall recv execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(73));
+    let missing = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(17)],
+        )
+        .expect_err("recv without an explicit queue must fail closed");
+    assert!(missing.message.contains("queue is missing or exhausted"));
+
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume the same canonical SessionCall");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume the same canonical SessionCall");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume the same canonical SessionCall");
+}
+
+#[test]
+fn materializes_i32_session_recv_with_range_checked_queue_oracle() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_recv_i32.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("i32 SessionChan recv must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:recv_once".into());
+    let function = program.functions().get(&owner).expect("recv_once MIR");
+    let (result, contract) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::SessionCall {
+                operation: crate::core::mir::types::MirSessionOperation::Recv,
+                result,
+                contract: Some(contract),
+                ..
+            } => Some((result.clone(), contract.clone())),
+            _ => None,
+        })
+        .expect("i32 recv receipt");
+    assert!(contract.before.as_str().starts_with("?i32"));
+    assert_eq!(
+        function
+            .values
+            .get(&result)
+            .expect("recv result")
+            .ty
+            .clone(),
+        contract.result_ty
+    );
+    assert_eq!(
+        program
+            .type_catalog()
+            .get(&contract.result_ty)
+            .expect("i32 result TypeDesc")
+            .abi,
+        crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true
+        }
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute_with_session_queues(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(
+                2_147_483_647,
+            )],
+            &[crate::core::mir::reference::MirSessionQueueInput {
+                endpoint: 17,
+                values: vec![2_147_483_647],
+            }],
+        )
+        .expect("i32 queue value in range");
+    assert_eq!(
+        value,
+        crate::core::mir::reference::MirRuntimeValue::Int(2_147_483_647)
+    );
+    let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute_with_session_queues(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(17)],
+            &[crate::core::mir::reference::MirSessionQueueInput {
+                endpoint: 17,
+                values: vec![2_147_483_648],
+            }],
+        )
+        .expect_err("i32 queue overflow must trap");
+    assert!(error.message.contains("outside the canonical signed range"));
+}
+
+#[test]
 fn rejects_forged_session_close_receipt_before_consumers() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"
@@ -238,15 +381,46 @@ fn rejects_forged_session_send_payload_receipt_before_consumers() {
 }
 
 #[test]
-fn rejects_session_send_and_recv_until_payload_state_contract_exists() {
+fn rejects_forged_session_recv_result_receipt_before_consumers() {
     let checked = checked_program(include_str!(
-        "../../../tests/real_world/session_literal_coercion.mimi"
+        "../../../tests/fixtures/mir_session_recv.mimi"
     ));
-    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("session_send/session_recv must remain fail-closed");
-    assert!(
-        format!("{error:?}").contains("session_recv remains outside the canonical MIR contract")
-    );
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical SessionCall");
+    let owner = crate::core::NodeId("function:recv_once".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("recv_once MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::SessionCall {
+                    operation: crate::core::mir::types::MirSessionOperation::Recv,
+                    ..
+                }
+            )
+        })
+        .expect("SessionCall instruction");
+    let MirInstructionKind::SessionCall { contract, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    let endpoint_ty = contract.as_ref().expect("receipt").endpoint_ty.clone();
+    contract.as_mut().expect("receipt").result_ty = endpoint_ty;
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged SessionCall result receipt must be rejected");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("session_recv result")
+            || error.message.contains("SessionCall receipt disagrees")
+    }));
 }
 
 #[test]

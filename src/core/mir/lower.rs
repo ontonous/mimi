@@ -4884,9 +4884,18 @@ impl<'a> Lowerer<'a> {
                 )
         ) {
             super::types::MirSessionOperation::Send
+        } else if matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(builtin)
+                if matches!(
+                    builtin.as_str(),
+                    "session_recv" | "builtin.method.session.recv"
+                )
+        ) {
+            super::types::MirSessionOperation::Recv
         } else {
             return Err(
-                "SessionCall admits only the materialized session_close/session_send contracts; session_recv remains outside the canonical MIR contract".into(),
+                "SessionCall admits only the materialized integer session_close/session_send/session_recv contracts".into(),
             );
         };
         let (endpoint, payload) = match operation {
@@ -4905,6 +4914,12 @@ impl<'a> Lowerer<'a> {
                     );
                 };
                 (endpoint, Some(payload))
+            }
+            super::types::MirSessionOperation::Recv => {
+                let [endpoint] = arguments else {
+                    return Err("session_recv canonical MIR operation requires one endpoint".into());
+                };
+                (endpoint, None)
             }
         };
         let [transition] = call.session.as_slice() else {
@@ -5491,6 +5506,11 @@ impl<'a> Lowerer<'a> {
                     ResolvedCallee::Builtin(builtin)
                         if matches!(builtin.as_str(), "session_send" | "builtin.method.session.send")
                 );
+                let session_recv_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(builtin)
+                        if matches!(builtin.as_str(), "session_recv" | "builtin.method.session.recv")
+                );
                 let mut arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
@@ -5530,7 +5550,7 @@ impl<'a> Lowerer<'a> {
                             && parameter_is_owned
                             && argument_needs_drop;
                         let session_endpoint = session_call
-                            && !session_send_call
+                            && !(session_send_call || session_recv_call)
                             && call.session.iter().any(|transition| {
                                 matches!(
                                     &argument.value.kind,

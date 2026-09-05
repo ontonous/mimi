@@ -1393,13 +1393,16 @@ fn eval_instruction(
                     );
                 }
             }
-            // A non-terminal send keeps the endpoint identity alive for the
+            // A non-terminal send/recv keeps the endpoint identity alive for the
             // checker-proven residual continuation. Terminal close consumes it
             // exactly once. This mirrors the reference and production backend
             // ownership contract instead of treating every SessionCall as a
             // terminal move.
-            let endpoint_value = if *operation == crate::core::mir::types::MirSessionOperation::Send
-            {
+            let endpoint_value = if matches!(
+                operation,
+                crate::core::mir::types::MirSessionOperation::Send
+                    | crate::core::mir::types::MirSessionOperation::Recv
+            ) {
                 state.values.get(endpoint).cloned().ok_or_else(|| {
                     format!("MIR SessionCall endpoint '{}' is not defined", endpoint)
                 })?
@@ -1419,7 +1422,28 @@ fn eval_instruction(
                     return Err("MIR verifier SessionCall payload is not an integer".into());
                 }
             }
-            let value = SymbolicValue::Unit;
+            let value = match operation {
+                crate::core::mir::types::MirSessionOperation::Recv => {
+                    let result_desc = catalog.get(&result_ty).ok_or_else(|| {
+                        "MIR verifier SessionCall result TypeDesc is absent".to_string()
+                    })?;
+                    let MirAbiClass::Integer {
+                        bits: _,
+                        signed: true,
+                    } = result_desc.abi
+                    else {
+                        return Err(
+                            "MIR verifier session_recv result is not a signed integer".into()
+                        );
+                    };
+                    SymbolicValue::Int(Int::new_const(format!(
+                        "mir.session_recv.{}.{}",
+                        function.owner.0, result
+                    )))
+                }
+                crate::core::mir::types::MirSessionOperation::Close
+                | crate::core::mir::types::MirSessionOperation::Send => SymbolicValue::Unit,
+            };
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }

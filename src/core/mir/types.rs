@@ -16,7 +16,7 @@ use crate::core::ir::{
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-12";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-13";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -527,16 +527,19 @@ impl MirGlueContract {
 }
 
 /// Closed operation family for the first canonical SessionChan production
-/// island. `send`/`recv` remain outside the executable MIR contract until
-/// their payload/channel state machine is materialized; `Close` is terminal
-/// and consumes the endpoint through the runtime channel-drop ABI.
+/// island. `Send` and `Recv` are non-terminal residual transitions over the
+/// same opaque endpoint; `Close` is terminal and consumes the endpoint
+/// through the runtime channel-drop ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirSessionOperation {
     Close,
     /// Send one checker-typed signed integer payload. The residual receipt
-    /// carries the expected `!i32 .`/`!i64 .` action; receive remains closed until
-    /// the reference oracle has a channel-state model.
+    /// carries the expected `!i32 .`/`!i64 .` action.
     Send,
+    /// Receive one checker-typed signed integer payload. The result TypeDesc
+    /// carries the `?i32 .`/`?i64 .` ABI and the reference executor obtains the
+    /// value from an explicit deterministic queue oracle.
+    Recv,
 }
 
 /// Checker-owned residual, TypeDesc and ABI receipt for one SessionChan
@@ -2796,10 +2799,9 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the narrow canonical SessionCall receipt. Terminal
-    /// `session_close` and integer-payload `session_send` are executable;
-    /// `session_recv` remains deliberately outside this method and therefore
-    /// fails closed in lowering rather than being represented as an ordinary
-    /// call.
+    /// `session_close`, integer-payload `session_send`, and signed-integer
+    /// `session_recv` are executable. All other residual payload shapes remain
+    /// outside this method and therefore fail closed in lowering.
     pub fn validated_session_call_contract(
         &self,
         operation: MirSessionOperation,
@@ -2890,6 +2892,36 @@ impl MirTypeCatalog {
                 if bits != prefix {
                     return Err(
                         "session_send payload ABI disagrees with its checker residual".into(),
+                    );
+                }
+            }
+            MirSessionOperation::Recv => {
+                if terminal || after.as_str() == "closed" {
+                    return Err("session_recv must be a non-terminal residual transition".into());
+                }
+                if payload_ty.is_some() {
+                    return Err("session_recv cannot carry a payload TypeDesc".into());
+                }
+                let MirAbiClass::Integer { bits, signed: true } = result.abi else {
+                    return Err("session_recv result must use a signed integer ABI".into());
+                };
+                if !matches!(bits, 32 | 64)
+                    || result.layout != MirLayout::Scalar
+                    || result.ownership != MirOwnership::Copy
+                    || result.glue != unit_glue
+                {
+                    return Err("session_recv result must be a Copy scalar i32/i64 TypeDesc".into());
+                }
+                let prefix = if before.as_str().starts_with("?i32 .") {
+                    32
+                } else if before.as_str().starts_with("?i64 .") {
+                    64
+                } else {
+                    return Err("session_recv residual must begin with '?i32 .' or '?i64 .'".into());
+                };
+                if bits != prefix {
+                    return Err(
+                        "session_recv result ABI disagrees with its checker residual".into(),
                     );
                 }
             }

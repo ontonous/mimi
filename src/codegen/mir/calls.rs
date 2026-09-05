@@ -599,6 +599,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         "mir_session_close",
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                Ok(self.generator.context.i64_type().const_zero().into())
             }
             crate::core::mir::types::MirSessionOperation::Send => {
                 let payload = payload.ok_or_else(|| {
@@ -647,9 +648,63 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         "mir_session_send",
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                Ok(self.generator.context.i64_type().const_zero().into())
+            }
+            crate::core::mir::types::MirSessionOperation::Recv => {
+                if payload.is_some() {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "session_recv cannot carry a payload MIR value",
+                    ));
+                }
+                let result_desc = self.program.type_catalog().get(&result_ty).ok_or_else(|| {
+                    NativeMirError::new(subject, "SessionCall result TypeDesc is absent")
+                })?;
+                let function = self
+                    .generator
+                    .get_runtime_fn("mimi_channel_recv")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let value = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            function,
+                            &[BasicMetadataValueEnum::IntValue(endpoint)],
+                            "mir_session_recv",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| NativeMirError::new(subject, "session_recv returned void"))?
+                .into_int_value();
+                let value = match result_desc.abi {
+                    MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    } => self
+                        .generator
+                        .builder
+                        .build_int_truncate(
+                            value,
+                            self.generator.context.i32_type(),
+                            "mir_session_recv_trunc",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        .into(),
+                    MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    } => value.into(),
+                    _ => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "session_recv result is outside the signed integer ABI",
+                        ))
+                    }
+                };
+                Ok(value)
             }
         }
-        Ok(self.generator.context.i64_type().const_zero().into())
     }
 
     pub(super) fn emit_call(
