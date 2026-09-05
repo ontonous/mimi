@@ -1817,6 +1817,25 @@ fn managed_generic_bool_result_unwrap_or_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn managed_generic_bool_result_unwrap_or_rejects_nested_managed_payload_before_legacy() {
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_owned_rejected.mimi"
+    );
+    let file =
+        parse_memory_source(source, "mir-managed-generic-result-bool-rejected").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let error = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect_err("nested managed bool Result fallback must fail before legacy verifier");
+    assert!(
+        error.contains("generic MIR instance") || error.contains("generic Result"),
+        "{error}"
+    );
+}
+
+#[test]
 fn managed_generic_result_unwrap_or_owned_list_is_verified_from_canonical_mir() {
     require_z3!();
     for source in [

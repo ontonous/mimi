@@ -2460,6 +2460,18 @@ fn materializes_managed_generic_bool_result_unwrap_or_with_move_receipt() {
 }
 
 #[test]
+fn rejects_managed_generic_bool_result_unwrap_or_outside_move_payload_contract() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_owned_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("Result<List<string>, bool> fallback must fail closed");
+    let message = error.to_string();
+    assert!(message.contains("generic MIR instance") || message.contains("generic Result"));
+}
+
+#[test]
 fn managed_generic_result_unwrap_or_moves_the_fallback_on_err() {
     let source = include_str!(
         "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_string_err.mimi"

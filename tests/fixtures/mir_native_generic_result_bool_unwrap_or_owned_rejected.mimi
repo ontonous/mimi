@@ -1,0 +1,14 @@
+// Result<List<string>, bool> remains outside the managed payload contract,
+// even though the projection-only bool-error fallback island is admitted.
+func unwrap_or<T>(value: Result<T, bool>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    let values: List<string> = ["owned"]
+    let value: Result<List<string>, bool> = Ok(values)
+    let fallback: List<string> = ["fallback"]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    0
+}
