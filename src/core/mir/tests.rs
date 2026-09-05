@@ -898,6 +898,63 @@ fn protocol_method_abi_contract_is_shared_and_rejects_arity_drift() {
 }
 
 #[test]
+fn direct_function_abi_contract_is_shared_and_rejects_arity_drift() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_native_f64_add.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("direct function must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let caller = program.functions().get(&owner).expect("main MIR");
+    let (callee, arguments, result) = caller
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                arguments,
+                result,
+                ..
+            } if callee.0 == "function:add" => Some((
+                crate::core::ir::ResolvedCallee::Function(callee.clone()),
+                arguments.clone(),
+                result.clone(),
+            )),
+            _ => None,
+        })
+        .expect("direct function MIR call");
+    let target_owner = crate::core::mir::canonical_protocol_call_target(&callee)
+        .expect("Function has canonical target");
+    let target = program
+        .functions()
+        .get(&target_owner)
+        .expect("direct function target MIR");
+    assert!(crate::core::mir::validate_materialized_call_abi(
+        &callee,
+        caller,
+        target,
+        result.as_ref(),
+        &arguments,
+    )
+    .is_empty());
+
+    let mut malformed_arguments = arguments;
+    malformed_arguments.pop();
+    let errors = crate::core::mir::validate_materialized_call_abi(
+        &callee,
+        caller,
+        target,
+        result.as_ref(),
+        &malformed_arguments,
+    );
+    assert_eq!(
+        errors,
+        vec!["call to 'function:add' supplies 1 arguments but its MIR signature requires 2"]
+    );
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

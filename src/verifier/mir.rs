@@ -2534,7 +2534,7 @@ fn eval_materialized_call(
             target_owner.0
         )
     })?;
-    if let Some(message) = crate::core::mir::validate_protocol_method_abi(
+    if let Some(message) = crate::core::mir::validate_materialized_call_abi(
         callee,
         function,
         target,

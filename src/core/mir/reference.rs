@@ -1811,7 +1811,7 @@ fn validate_call_graph(
                 // identity.  Prove the complete TypeDesc/ABI boundary once at
                 // the canonical program gate so no consumer can silently
                 // reinterpret a receiver or drop an argument.
-                for message in super::validate_protocol_method_abi(
+                for message in super::validate_materialized_call_abi(
                     callee,
                     function,
                     target,
@@ -2052,52 +2052,6 @@ fn validate_call_graph(
                     }
                 }
 
-                if arguments.len() != target.parameters.len() {
-                    errors.push(super::MirValidationError {
-                        subject: instruction.id.to_string(),
-                        message: format!(
-                            "call to '{}' supplies {} arguments but its MIR signature requires {}",
-                            target_owner.0,
-                            arguments.len(),
-                            target.parameters.len()
-                        ),
-                    });
-                }
-                for (index, (argument, parameter)) in
-                    arguments.iter().zip(target.parameters.iter()).enumerate()
-                {
-                    let Some(argument_value) = function.values.get(argument) else {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "call argument {index} value '{}' is absent from the caller",
-                                argument
-                            ),
-                        });
-                        continue;
-                    };
-                    let Some(parameter_value) = target.values.get(parameter) else {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "callee '{}' parameter {index} value '{}' is absent from its MIR value catalog",
-                                target_owner.0, parameter
-                            ),
-                        });
-                        continue;
-                    };
-                    if argument_value.ty != parameter_value.ty {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "call argument {index} type '{}' disagrees with callee '{}' parameter type '{}'",
-                                argument_value.ty.as_str(),
-                                target_owner.0,
-                                parameter_value.ty.as_str()
-                            ),
-                        });
-                    }
-                }
                 errors.extend(validate_call_argument_directions(
                     function,
                     target,
@@ -2105,30 +2059,6 @@ fn validate_call_graph(
                     type_catalog,
                     &instruction.id.to_string(),
                 ));
-
-                if let Some(result) = result {
-                    let Some(result_value) = function.values.get(result) else {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "call result value '{}' is absent from the caller",
-                                result
-                            ),
-                        });
-                        continue;
-                    };
-                    if result_value.ty != target.result {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "call result type '{}' disagrees with callee '{}' result type '{}'",
-                                result_value.ty.as_str(),
-                                target_owner.0,
-                                target.result.as_str()
-                            ),
-                        });
-                    }
-                }
             }
         }
     }

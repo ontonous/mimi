@@ -134,6 +134,92 @@ pub(crate) fn validate_protocol_method_abi(
     errors
 }
 
+/// Validate the ABI edge for a materialized direct `Function` call.  This is
+/// the ordinary-call counterpart to [`validate_protocol_method_abi`]; it is
+/// deliberately restricted to checker-resolved function owners so dynamic
+/// callable families remain fail-closed at their existing boundary.
+pub(crate) fn validate_function_call_abi(
+    callee: &ResolvedCallee,
+    caller: &MirFunction,
+    target: &MirFunction,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+) -> Vec<String> {
+    let ResolvedCallee::Function(_) = callee else {
+        return Vec::new();
+    };
+
+    let mut errors = Vec::new();
+    if arguments.len() != target.parameters.len() {
+        errors.push(format!(
+            "call to '{}' supplies {} arguments but its MIR signature requires {}",
+            target.owner.0,
+            arguments.len(),
+            target.parameters.len()
+        ));
+    }
+    for (index, (argument, parameter)) in arguments.iter().zip(&target.parameters).enumerate() {
+        let Some(argument_value) = caller.values.get(argument) else {
+            errors.push(format!(
+                "call argument {index} value '{}' is absent from the caller",
+                argument
+            ));
+            continue;
+        };
+        let Some(parameter_value) = target.values.get(parameter) else {
+            errors.push(format!(
+                "callee '{}' parameter {index} value '{}' is absent from its MIR value catalog",
+                target.owner.0, parameter
+            ));
+            continue;
+        };
+        if argument_value.ty != parameter_value.ty {
+            errors.push(format!(
+                "call argument {index} type '{}' disagrees with callee '{}' parameter type '{}'",
+                argument_value.ty.as_str(),
+                target.owner.0,
+                parameter_value.ty.as_str()
+            ));
+        }
+    }
+    if let Some(result) = result {
+        let Some(result_value) = caller.values.get(result) else {
+            errors.push(format!(
+                "call result value '{}' is absent from the caller",
+                result
+            ));
+            return errors;
+        };
+        if result_value.ty != target.result {
+            errors.push(format!(
+                "call result type '{}' disagrees with callee '{}' result type '{}'",
+                result_value.ty.as_str(),
+                target.owner.0,
+                target.result.as_str()
+            ));
+        }
+    }
+    errors
+}
+
+/// Dispatch the canonical direct-call ABI proof for every statically
+/// materialized call family.  Keeping protocol and ordinary function checks
+/// behind one entry point prevents backend adapters from accidentally growing
+/// different call-shape predicates.
+pub(crate) fn validate_materialized_call_abi(
+    callee: &ResolvedCallee,
+    caller: &MirFunction,
+    target: &MirFunction,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+) -> Vec<String> {
+    if matches!(callee, ResolvedCallee::ProtocolMethod { .. }) {
+        validate_protocol_method_abi(callee, caller, target, result, arguments)
+    } else {
+        validate_function_call_abi(callee, caller, target, result, arguments)
+    }
+}
+
 mod contracts;
 mod copy_option_island;
 mod copy_result_island;

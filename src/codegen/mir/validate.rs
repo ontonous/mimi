@@ -1991,16 +1991,10 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        for message in crate::core::mir::validate_protocol_method_abi(
+        for message in crate::core::mir::validate_materialized_call_abi(
             callee, function, target, result, arguments,
         ) {
             self.errors.push(NativeMirError::new(subject, message));
-        }
-        if arguments.len() != target.parameters.len() {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "call arity disagrees with canonical callee",
-            ));
         }
         let parameter_types = target
             .parameters
@@ -2069,34 +2063,12 @@ impl<'a> NativeMirValidator<'a> {
                 "non-Copy Result call result is outside the canonical call ABI contract",
             ));
         }
-        for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        for argument in arguments.iter().take(target.parameters.len()) {
             self.validate_value(function, argument, "call argument");
-            let Some(argument) = function.values.get(argument) else {
-                continue;
-            };
-            let Some(parameter) = target.values.get(parameter) else {
-                continue;
-            };
-            if argument.ty != parameter.ty {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    "call argument ABI type disagrees with callee parameter",
-                ));
-            }
         }
         match (result, target.result.as_str()) {
             (Some(result), _) => {
                 self.validate_value(function, result, "call result");
-                if function
-                    .values
-                    .get(result)
-                    .is_some_and(|value| value.ty != target.result)
-                {
-                    self.errors.push(NativeMirError::new(
-                        subject,
-                        "call result ABI type disagrees with callee result",
-                    ));
-                }
             }
             (None, ty)
                 if self
