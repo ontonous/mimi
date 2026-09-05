@@ -1955,6 +1955,7 @@ pub fn has_unsupported_generic_record_update_candidate(program: &CheckedProgram)
     program.callables().values().any(|callable| {
         generic_record_update_envelope(program, callable).is_some()
             && !is_scalar_generic_record_update_callable(program, callable)
+            && !is_owned_generic_record_update_callable(program, callable)
     })
 }
 
@@ -2258,6 +2259,58 @@ fn is_scalar_generic_record_update_callable(
     })
 }
 
+/// Recognize the S173 ownership-bearing update envelope: a two-field
+/// `Record<T>` with one generic field and one owned `String` sibling, a single
+/// direct String-literal override, and a record-rest expression. The concrete
+/// TypeDesc/glue receipt is still materialized only after specialization.
+pub(crate) fn is_owned_generic_record_update_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    let Some((generic_ty, definition)) = generic_record_update_envelope(program, callable) else {
+        return false;
+    };
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || definition.fields.len() != 2
+    {
+        return false;
+    }
+    let binder = &definition.generic_parameters[0].1;
+    let mut generic_fields = 0usize;
+    let mut string_fields = 0usize;
+    for (name, _) in &definition.fields {
+        let Some(field_ty) = definition
+            .field_ids
+            .get(name)
+            .and_then(|field_id| program.resolved_field_type(field_id))
+            .and_then(|field_id| program.resolved_types().get(field_id))
+        else {
+            return false;
+        };
+        match field_ty {
+            ResolvedType::GenericParameter(candidate) if candidate == binder => {
+                generic_fields += 1;
+            }
+            ResolvedType::Primitive(PrimitiveType::String) => string_fields += 1,
+            _ => return false,
+        }
+    }
+    let Some(ResolvedExprKind::Record { fields, .. }) =
+        callable.body.root.result.as_deref().map(|expr| &expr.kind)
+    else {
+        return false;
+    };
+    generic_fields == 1
+        && string_fields == 1
+        && fields.len() == 1
+        && fields[0].value.ty != generic_ty
+        && matches!(
+            &fields[0].value.kind,
+            ResolvedExprKind::Literal(crate::core::ir::ResolvedLiteral::String(_))
+        )
+}
+
 /// Keep the flat-record island closed over the complete typed body, not only
 /// over the record declaration.  MIR Phase 0 currently admits scalar
 /// expressions, record construction/projection, direct user calls, and
@@ -2440,6 +2493,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                         is_scalar_generic_record_projection_callable(program, callable)
                             || is_scalar_generic_record_update_callable(program, callable)
                             || is_owned_generic_record_projection_callable(program, callable)
+                            || is_owned_generic_record_update_callable(program, callable)
                     });
                 let generic_variant_callable = program
                     .callables()
@@ -2468,6 +2522,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
                 (!is_scalar_generic_record_projection_callable(program, callable)
                     && !is_scalar_generic_record_update_callable(program, callable)
                     && !is_owned_generic_record_projection_callable(program, callable)
+                    && !is_owned_generic_record_update_callable(program, callable)
                     && !is_generic_variant_predicate_callable(program, callable)
                     && !is_generic_option_projection_callable(program, callable)
                     && !is_generic_option_projection_fallback_callable(program, callable)
@@ -2668,6 +2723,7 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
                 | MirGenericInstanceContract::ScalarRecordUpdate { .. }
         )
     }) || program.functions().values().any(|function| {
@@ -3005,10 +3061,12 @@ impl<'a> ScalarCollectionValidator<'a> {
                 ));
             } else if let Err(message) = match instance.contract {
                 MirGenericInstanceContract::OwnedRecordProjection { .. }
-                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => self
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. } => self
                     .program
                     .type_catalog()
-                    .validate_owned_string(&instance.arguments[0]),
+                    .validate_move_owned_payload(&instance.arguments[0])
+                    .map(|_| ()),
                 _ => self
                     .program
                     .type_catalog()
@@ -3031,6 +3089,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarTupleProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}

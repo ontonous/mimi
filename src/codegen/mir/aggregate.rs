@@ -132,6 +132,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         base: &MirValueId,
         kind: &MirAggregateKind,
         fields: &[MirValueId],
+        record_update_move_contract: Option<&crate::core::mir::types::MirRecordUpdateMoveContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let MirAggregateKind::Record {
@@ -173,7 +174,37 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "record update does not match its TypeDesc layout",
             ));
         }
-        let mut aggregate = self.value(base, subject)?.into_struct_value();
+        let base_value = self.value(base, subject)?.into_struct_value();
+        if let Some(receipt) = record_update_move_contract {
+            self.program
+                .type_catalog()
+                .validate_record_update_move_receipt(
+                    &result_ty,
+                    &base_ty,
+                    kind,
+                    &fields
+                        .iter()
+                        .map(|value| self.value_type(value, subject))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    receipt,
+                )
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            for update in &receipt.updates {
+                let old = self
+                    .generator
+                    .builder
+                    .build_extract_value(
+                        base_value,
+                        update.projection.field_index as u32,
+                        "mir_record_update_old",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.emit_drop_value(old, &update.projection.field_ty, subject)?;
+            }
+        }
+        let mut aggregate = base_value;
         for (field_id, source) in field_ids.iter().zip(fields) {
             let field = layout_fields
                 .iter()

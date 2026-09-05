@@ -850,6 +850,38 @@ pub struct MirRecordUpdateContract {
     pub fields: Vec<MirRecordProjectionContract>,
 }
 
+/// One explicit overlay in an ownership-bearing record update. The old field
+/// is dropped, while the new field value crosses the MoveOut glue boundary.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirRecordUpdateMoveField {
+    pub projection: MirRecordProjectionContract,
+    pub old_drop: MirGlueKind,
+    pub new_move: MirGlueKind,
+}
+
+/// Complete ownership receipt for consuming a record base and rebuilding the
+/// same nominal record. Updated slots drop their old payload; every residual
+/// slot is moved into the result. No backend may implement this as a shallow
+/// aggregate copy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirRecordUpdateMoveContract {
+    pub source_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub nominal: NominalTypeId,
+    pub arity: usize,
+    pub updates: Vec<MirRecordUpdateMoveField>,
+    pub residual: Vec<MirRecordResidualMove>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirRecordResidualMove {
+    pub id: NodeId,
+    pub name: String,
+    pub index: usize,
+    pub ty: ResolvedTypeId,
+    pub glue: MirGlueKind,
+}
+
 /// Backend-independent receipt for one canonical tuple field projection.
 ///
 /// Tuples have structural identity rather than a nominal field ID. The
@@ -6146,6 +6178,124 @@ impl MirTypeCatalog {
             self.validated_record_update_contract(result_ty, base_ty, kind, field_types)?;
         if receipt != &expected {
             return Err("generic record update receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
+    /// Materialize the narrow ownership-bearing update contract used by S173:
+    /// a Move-owned two-field record, one owned overlay, and one residual
+    /// field moved through the result. Both old/new field glue operations are
+    /// explicit so a backend cannot clone the base or leak the overwritten
+    /// payload.
+    pub fn validated_record_update_move_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        base_ty: &ResolvedTypeId,
+        kind: &crate::core::mir::MirAggregateKind,
+        field_types: &[ResolvedTypeId],
+    ) -> Result<MirRecordUpdateMoveContract, String> {
+        self.validate_record_update(result_ty, base_ty, kind, field_types)?;
+        if result_ty != base_ty {
+            return Err(
+                "generic record move update requires identical source/result TypeDesc identities"
+                    .into(),
+            );
+        }
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic record move update result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if descriptor.ownership != MirOwnership::Move {
+            return Err("generic record move update requires a Move-owned record".into());
+        }
+        self.validate_glue(result_ty, MirGlueOperation::MoveOut)?;
+        self.validate_glue(result_ty, MirGlueOperation::Drop)?;
+        let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
+            return Err("generic record move update requires a record aggregate kind".into());
+        };
+        if fields.len() != 2 || field_types.len() != 1 {
+            return Err(
+                "generic record move update requires a two-field record with one override".into(),
+            );
+        }
+        let MirLayout::Record {
+            nominal: layout_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err("generic record move update result has no record layout".into());
+        };
+        if nominal != layout_nominal || layout_fields.len() != 2 {
+            return Err("generic record move update nominal/layout disagrees with TypeDesc".into());
+        }
+        let update_field = fields
+            .first()
+            .ok_or_else(|| "generic record move update override field is absent".to_string())?;
+        let projection = self.validated_record_field_projection_contract(
+            result_ty,
+            update_field,
+            &field_types[0],
+        )?;
+        let updated_desc = self.get(&projection.field_ty).ok_or_else(|| {
+            format!(
+                "generic record move update field '{}' TypeDesc is absent",
+                projection.name
+            )
+        })?;
+        self.validate_glue(&projection.field_ty, MirGlueOperation::Drop)?;
+        self.validate_glue(&projection.field_ty, MirGlueOperation::MoveOut)?;
+        let residual = layout_fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.id != projection.field)
+            .map(|(index, field)| {
+                self.validate_glue(&field.ty, MirGlueOperation::MoveOut)?;
+                let child = self.get(&field.ty).ok_or_else(|| {
+                    format!(
+                        "generic record move update residual field '{}' TypeDesc is absent",
+                        field.name
+                    )
+                })?;
+                Ok(MirRecordResidualMove {
+                    id: field.id.clone(),
+                    name: field.name.clone(),
+                    index,
+                    ty: field.ty.clone(),
+                    glue: child.glue.move_out,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if residual.len() != 1 {
+            return Err("generic record move update requires one residual field".into());
+        }
+        Ok(MirRecordUpdateMoveContract {
+            source_ty: base_ty.clone(),
+            result_ty: result_ty.clone(),
+            nominal: nominal.clone(),
+            arity: layout_fields.len(),
+            updates: vec![MirRecordUpdateMoveField {
+                projection,
+                old_drop: updated_desc.glue.drop,
+                new_move: updated_desc.glue.move_out,
+            }],
+            residual,
+        })
+    }
+
+    pub fn validate_record_update_move_receipt(
+        &self,
+        result_ty: &ResolvedTypeId,
+        base_ty: &ResolvedTypeId,
+        kind: &crate::core::mir::MirAggregateKind,
+        field_types: &[ResolvedTypeId],
+        receipt: &MirRecordUpdateMoveContract,
+    ) -> Result<(), String> {
+        let expected =
+            self.validated_record_update_move_contract(result_ty, base_ty, kind, field_types)?;
+        if receipt != &expected {
+            return Err("generic record move update receipt disagrees with TypeDesc/glue".into());
         }
         Ok(())
     }

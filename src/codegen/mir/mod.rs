@@ -625,8 +625,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 kind,
                 fields,
                 record_update_contract: _,
+                record_update_move_contract,
             } => {
-                let value = self.emit_update_record(result, base, kind, fields, subject)?;
+                let value = self.emit_update_record(
+                    result,
+                    base,
+                    kind,
+                    fields,
+                    record_update_move_contract.as_ref(),
+                    subject,
+                )?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::ConstructVariant {
@@ -4221,6 +4229,43 @@ mod tests {
             .module
             .verify()
             .expect("native two-override generic record update module verifies");
+    }
+
+    #[test]
+    fn native_emitter_consumes_materialized_owned_generic_record_update() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_owned.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                )
+            })
+            .expect("owned generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.arity == 2
+                    && contract.updates.len() == 1
+                    && contract.residual.len() == 1
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic record update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_record_update_owned");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic record update must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic record update module verifies");
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::core::{
     ResourceAnalysis,
 };
 
+use super::islands::is_owned_generic_record_update_callable;
 use super::types::MirTypeCatalog;
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
@@ -415,6 +416,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
         )
         .then(|| {
             function
@@ -468,6 +470,7 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
         ) && owned_record_target_parameter.is_none()
         {
             return Err(vec![MirLoweringError {
@@ -1535,6 +1538,20 @@ fn materialize_generic_instance(
     let is_owned_record_projection = generic_record_facade
         && !is_identity
         && !is_owned_record_projection_drop
+        && !callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Record { rest: Some(_), .. }
+                )
+            })
+        && type_catalog.validate_owned_string(&concrete).is_ok();
+    let is_owned_record_update = generic_record_facade
+        && is_owned_generic_record_update_callable(program, callable)
         && type_catalog.validate_owned_string(&concrete).is_ok();
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
@@ -1542,6 +1559,7 @@ fn materialize_generic_instance(
                 catalog.validate_generic_identity_arguments(arguments)
             } else if is_owned_record_projection_drop
                 || is_owned_record_projection
+                || is_owned_record_update
                 || is_owned_variant_projection
             {
                 if arguments.len() != 1 {
@@ -2506,33 +2524,81 @@ fn materialize_generic_instance(
             .iter()
             .any(|instruction| matches!(instruction.kind, MirInstructionKind::UpdateRecord { .. }))
     });
-    let scalar_record_update_contract = if generic_record_facade && has_record_update {
-        let contract = detect_scalar_record_update_contract(&function, type_catalog, &subject())?;
-        let mut specialized_function = function.clone();
-        let mut found = false;
-        for block in specialized_function.blocks.values_mut() {
-            for instruction in &mut block.instructions {
-                if let MirInstructionKind::UpdateRecord {
-                    record_update_contract,
-                    ..
-                } = &mut instruction.kind
-                {
-                    *record_update_contract = Some(contract.clone());
-                    found = true;
+    let owned_record_update_contract =
+        if generic_record_facade && has_record_update && is_owned_record_update {
+            let contract =
+                detect_owned_record_update_contract(&function, type_catalog, &subject())?;
+            let mut specialized_function = function.clone();
+            let mut found = false;
+            for block in specialized_function.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let MirInstructionKind::UpdateRecord {
+                        record_update_move_contract,
+                        record_update_contract,
+                        ..
+                    } = &mut instruction.kind
+                    {
+                        if record_update_contract.is_some() {
+                            return Err(vec![MirLoweringError {
+                                node_id: subject(),
+                                message: "owned generic record update cannot carry a Copy receipt"
+                                    .into(),
+                            }]);
+                        }
+                        *record_update_move_contract = Some(contract.clone());
+                        found = true;
+                    }
                 }
             }
-        }
-        if !found {
-            return Err(vec![MirLoweringError {
-                node_id: subject(),
-                message: "generic record update receipt has no UpdateRecord instruction".into(),
-            }]);
-        }
-        function = specialized_function;
-        Some(contract)
-    } else {
-        None
-    };
+            if !found {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "owned generic record update receipt has no UpdateRecord instruction"
+                        .into(),
+                }]);
+            }
+            function = specialized_function;
+            Some(contract)
+        } else {
+            None
+        };
+    let scalar_record_update_contract =
+        if generic_record_facade && has_record_update && !is_owned_record_update {
+            let contract =
+                detect_scalar_record_update_contract(&function, type_catalog, &subject())?;
+            let mut specialized_function = function.clone();
+            let mut found = false;
+            for block in specialized_function.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let MirInstructionKind::UpdateRecord {
+                        record_update_contract,
+                        record_update_move_contract,
+                        ..
+                    } = &mut instruction.kind
+                    {
+                        if record_update_move_contract.is_some() {
+                            return Err(vec![MirLoweringError {
+                                node_id: subject(),
+                                message: "Copy generic record update cannot carry a Move receipt"
+                                    .into(),
+                            }]);
+                        }
+                        *record_update_contract = Some(contract.clone());
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                return Err(vec![MirLoweringError {
+                    node_id: subject(),
+                    message: "generic record update receipt has no UpdateRecord instruction".into(),
+                }]);
+            }
+            function = specialized_function;
+            Some(contract)
+        } else {
+            None
+        };
     let contract = if is_identity {
         if type_catalog.validate_owned_string(&concrete).is_ok() {
             MirGenericInstanceContract::OwnedStringIdentity
@@ -2572,6 +2638,8 @@ fn materialize_generic_instance(
         let contract =
             detect_owned_record_projection_contract(&function, type_catalog, &subject())?;
         MirGenericInstanceContract::OwnedRecordProjection { contract }
+    } else if let Some(contract) = owned_record_update_contract {
+        MirGenericInstanceContract::OwnedRecordUpdate { contract }
     } else if let Some(contract) = scalar_record_update_contract {
         MirGenericInstanceContract::ScalarRecordUpdate { contract }
     } else if generic_tuple_facade {
@@ -4085,6 +4153,7 @@ fn detect_scalar_record_update_contract(
                 kind: MirAggregateKind::Record { .. },
                 fields,
                 record_update_contract: None,
+                record_update_move_contract: None,
             },
         ..
     }] = block.instructions.as_slice()
@@ -4199,6 +4268,136 @@ fn detect_scalar_record_update_contract(
     Ok(contract)
 }
 
+/// Materialize the S173 ownership-bearing record update receipt. The MIR body
+/// must consume its sole record parameter, overwrite exactly one owned field,
+/// and return the rebuilt record directly; TypeDesc supplies old-drop,
+/// residual-move, and new-value MoveOut glue.
+fn detect_owned_record_update_contract(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    subject: &NodeId,
+) -> Result<super::types::MirRecordUpdateMoveContract, Vec<MirLoweringError>> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update must have exactly one parameter".into(),
+        }]);
+    };
+    if function.blocks.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update must have exactly one MIR block".into(),
+        }]);
+    }
+    let block = function.blocks.get(&function.entry).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update entry block is absent".into(),
+        }]
+    })?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind: MirAggregateKind::Record { .. },
+                fields,
+                record_update_contract: None,
+                record_update_move_contract: None,
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message:
+                "generic record move update must contain exactly one receipt-free UpdateRecord"
+                    .into(),
+        }]);
+    };
+    if base != parameter || fields.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update must update its parameter with one field".into(),
+        }]);
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update base value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update result value is absent".into(),
+        })
+        .map_err(|error| vec![error])?
+        .ty
+        .clone();
+    let field_types = fields
+        .iter()
+        .map(|value| {
+            function
+                .values
+                .get(value)
+                .map(|info| info.ty.clone())
+                .ok_or_else(|| MirLoweringError {
+                    node_id: subject.clone(),
+                    message: format!("generic record move update field '{}' is absent", value.0),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| vec![error])?;
+    let MirInstructionKind::UpdateRecord {
+        kind,
+        fields: update_values,
+        ..
+    } = &block.instructions[0].kind
+    else {
+        unreachable!("shape matched above");
+    };
+    let contract = type_catalog
+        .validated_record_update_move_contract(&result_ty, &base_ty, kind, &field_types)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject.clone(),
+                message: format!(
+                    "generic record move update receipt specialization failed: {message}"
+                ),
+            }]
+        })?;
+    if function.result != result_ty {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update requires a direct result identity".into(),
+        }]);
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update must directly return its UpdateRecord result"
+                .into(),
+        }]);
+    };
+    if returned != result || update_values.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject.clone(),
+            message: "generic record move update return/update shape disagrees with receipt".into(),
+        }]);
+    }
+    Ok(contract)
+}
+
 /// Validate the materialized body behind a `ScalarRecordProjection` generic
 /// instance.  The receipt is already concrete, so this validator only accepts
 /// the one-block/one-field-project/direct-return shape and proves that every
@@ -4299,6 +4498,7 @@ pub(crate) fn validate_scalar_record_update_mir(
                 kind,
                 fields,
                 record_update_contract: Some(receipt),
+                record_update_move_contract: None,
             },
         ..
     }] = block.instructions.as_slice()
@@ -4350,6 +4550,94 @@ pub(crate) fn validate_scalar_record_update_mir(
     };
     if returned != result {
         return Err("generic record update return value is not the UpdateRecord result".into());
+    }
+    Ok(())
+}
+
+/// Validate the materialized S173 ownership-bearing update. The receipt must
+/// prove one old-field Drop, one new-field MoveOut, and one residual MoveOut.
+pub(crate) fn validate_owned_record_update_mir(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    contract: &super::types::MirRecordUpdateMoveContract,
+) -> Result<(), String> {
+    let [parameter] = function.parameters.as_slice() else {
+        return Err("generic record move update must have exactly one parameter".into());
+    };
+    if function.blocks.len() != 1 {
+        return Err("generic record move update must have exactly one MIR block".into());
+    }
+    let block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "generic record move update entry block is absent".to_string())?;
+    let [MirInstruction {
+        kind:
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind,
+                fields,
+                record_update_contract: None,
+                record_update_move_contract: Some(receipt),
+            },
+        ..
+    }] = block.instructions.as_slice()
+    else {
+        return Err(
+            "generic record move update must contain exactly one Move receipt-bearing UpdateRecord"
+                .into(),
+        );
+    };
+    if base != parameter || fields.len() != 1 {
+        return Err("generic record move update must update its parameter with one field".into());
+    }
+    let base_ty = function
+        .values
+        .get(base)
+        .ok_or_else(|| "generic record move update base value is absent".to_string())?
+        .ty
+        .clone();
+    let result_ty = function
+        .values
+        .get(result)
+        .ok_or_else(|| "generic record move update result value is absent".to_string())?
+        .ty
+        .clone();
+    let field_types = fields
+        .iter()
+        .map(|field| {
+            function
+                .values
+                .get(field)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("generic record move update field '{}' is absent", field.0))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    type_catalog.validate_record_update_move_receipt(
+        &result_ty,
+        &base_ty,
+        kind,
+        &field_types,
+        receipt,
+    )?;
+    if receipt != contract || function.result != result_ty {
+        return Err(
+            "generic record move update receipt disagrees with instance/result identity".into(),
+        );
+    }
+    let MirTerminator::Return {
+        value: Some(returned),
+    } = &block.terminator
+    else {
+        return Err(
+            "generic record move update must directly return its UpdateRecord result".into(),
+        );
+    };
+    if returned != result {
+        return Err(
+            "generic record move update return value is not the UpdateRecord result".into(),
+        );
     }
     Ok(())
 }
@@ -6209,6 +6497,7 @@ impl<'a> Lowerer<'a> {
                             kind,
                             fields: values,
                             record_update_contract: None,
+                            record_update_move_contract: None,
                         },
                     );
                 } else {

@@ -952,6 +952,7 @@ impl MirProgram {
                             kind,
                             fields,
                             record_update_contract,
+                            record_update_move_contract,
                         } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
@@ -973,7 +974,15 @@ impl MirProgram {
                                 });
                                 continue;
                             }
-                            let validation = if let Some(receipt) = record_update_contract {
+                            let validation = if let Some(receipt) = record_update_move_contract {
+                                type_catalog.validate_record_update_move_receipt(
+                                    &result_value.ty,
+                                    &base_value.ty,
+                                    kind,
+                                    &field_types,
+                                    receipt,
+                                )
+                            } else if let Some(receipt) = record_update_contract {
                                 type_catalog.validate_record_update_receipt(
                                     &result_value.ty,
                                     &base_value.ty,
@@ -1538,6 +1547,18 @@ fn validate_instance_table(
                     type_catalog.validate_owned_string(&instance.arguments[0])
                 }
             }
+            MirGenericInstanceContract::OwnedRecordUpdate { .. } => {
+                if instance.arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic record update contract requires one type argument, got {}",
+                        instance.arguments.len()
+                    ))
+                } else {
+                    type_catalog
+                        .validate_move_owned_payload(&instance.arguments[0])
+                        .map(|_| ())
+                }
+            }
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
@@ -1740,6 +1761,18 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR owned record move/drop projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::OwnedRecordUpdate { ref contract } => {
+                if let Err(message) =
+                    super::lower::validate_owned_record_update_mir(function, type_catalog, contract)
+                {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR owned record update contract is invalid: {message}"
                         ),
                     });
                 }
@@ -2046,6 +2079,7 @@ fn validate_call_graph(
                         &instance.contract,
                         MirGenericInstanceContract::OwnedRecordProjection { .. }
                             | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                            | MirGenericInstanceContract::OwnedRecordUpdate { .. }
                     ) {
                         let Some(target_parameter) = target.parameters.first() else {
                             errors.push(super::MirValidationError {
@@ -4260,6 +4294,67 @@ impl<'a> MirReferenceInterpreter<'a> {
                 kind: MirAggregateKind::Record { nominal, fields },
                 fields: update_values,
                 record_update_contract: _,
+                record_update_move_contract: Some(receipt),
+            } => {
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "record move update result is absent")
+                    })?;
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(&function.owner, "record move update base is absent")
+                    })?;
+                let field_types = update_values
+                    .iter()
+                    .map(|value| {
+                        function
+                            .values
+                            .get(value)
+                            .map(|info| info.ty.clone())
+                            .ok_or_else(|| {
+                                self.error(&function.owner, "record move update field is absent")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.program
+                    .type_catalog()
+                    .validate_record_update_move_receipt(
+                        &result_ty,
+                        &base_ty,
+                        &MirAggregateKind::Record {
+                            nominal: nominal.clone(),
+                            fields: fields.clone(),
+                        },
+                        &field_types,
+                        receipt,
+                    )
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let base_value = self.take_transfer_value(function, values, base)?;
+                let update_values = self.take_transfer_values(function, values, update_values)?;
+                let value = self.update_record_move(
+                    function,
+                    result,
+                    base_value,
+                    nominal,
+                    fields,
+                    update_values,
+                    receipt,
+                )?;
+                values.insert(result.clone(), value);
+            }
+            MirInstructionKind::UpdateRecord {
+                result,
+                base,
+                kind: MirAggregateKind::Record { nominal, fields },
+                fields: update_values,
+                record_update_contract: _,
+                record_update_move_contract: None,
             } => {
                 let base_value = self.take_transfer_value(function, values, base)?;
                 let update_values = self.take_transfer_values(function, values, update_values)?;
@@ -5024,6 +5119,91 @@ impl<'a> MirReferenceInterpreter<'a> {
             if index >= fields.len() {
                 return Err(self.error(&function.owner, "record base is shorter than TypeDesc"));
             }
+            fields[index] = value;
+        }
+        Ok(MirRuntimeValue::Record {
+            nominal: expected_nominal.clone(),
+            fields,
+        })
+    }
+
+    fn update_record_move(
+        &self,
+        function: &MirFunction,
+        result: &MirValueId,
+        base: MirRuntimeValue,
+        nominal: &crate::core::ir::NominalTypeId,
+        field_ids: &[NodeId],
+        update_values: Vec<MirRuntimeValue>,
+        receipt: &super::types::MirRecordUpdateMoveContract,
+    ) -> Result<MirRuntimeValue, MirExecutionError> {
+        let MirRuntimeValue::Record {
+            nominal: base_nominal,
+            mut fields,
+        } = base
+        else {
+            return Err(self.error(&function.owner, "record move update base is not a record"));
+        };
+        let result_ty = function
+            .values
+            .get(result)
+            .map(|value| &value.ty)
+            .ok_or_else(|| {
+                self.error(&function.owner, "record move update result has no MIR type")
+            })?;
+        let descriptor = self
+            .program
+            .type_catalog()
+            .get(result_ty)
+            .ok_or_else(|| self.error(&function.owner, "record move update has no TypeDesc"))?;
+        let MirLayout::Record {
+            nominal: expected_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err(self.error(&function.owner, "record move update has no record layout"));
+        };
+        if nominal != expected_nominal || &base_nominal != expected_nominal {
+            return Err(self.error(
+                &function.owner,
+                "record move update nominal disagrees with TypeDesc",
+            ));
+        }
+        if field_ids.len() != update_values.len() || receipt.updates.len() != 1 {
+            return Err(self.error(
+                &function.owner,
+                "record move update field/value arity disagrees with receipt",
+            ));
+        }
+        for (field, value) in field_ids.iter().zip(update_values) {
+            let update = receipt
+                .updates
+                .iter()
+                .find(|candidate| candidate.projection.field == *field)
+                .ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!(
+                            "record move update field '{}' is absent from receipt",
+                            field.0
+                        ),
+                    )
+                })?;
+            let index = update.projection.field_index;
+            let field_desc = layout_fields.get(index).ok_or_else(|| {
+                self.error(
+                    &function.owner,
+                    "record move update field index is outside layout",
+                )
+            })?;
+            if field_desc.id != *field {
+                return Err(self.error(
+                    &function.owner,
+                    "record move update receipt field disagrees with layout",
+                ));
+            }
+            let old = std::mem::replace(&mut fields[index], MirRuntimeValue::Unit);
+            self.drop_runtime_value(function, &field_desc.ty, old)?;
             fields[index] = value;
         }
         Ok(MirRuntimeValue::Record {

@@ -97,6 +97,35 @@ impl<'a> CapabilityGate<'a> {
                     }
                     self.validate_identity_instance(function, instance.id.as_str());
                 }
+                MirGenericInstanceContract::OwnedRecordUpdate { contract } => {
+                    if let Some(concrete) = instance.arguments.first() {
+                        if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_move_owned_payload(concrete)
+                        {
+                            self.error(format!(
+                                "instance '{}' owned record update argument is unsupported: {message}",
+                                instance.id
+                            ));
+                        }
+                    } else {
+                        self.error(format!(
+                            "instance '{}' owned record update has no concrete argument",
+                            instance.id
+                        ));
+                    }
+                    if let Err(message) = crate::core::mir::lower::validate_owned_record_update_mir(
+                        function,
+                        self.program.type_catalog(),
+                        contract,
+                    ) {
+                        self.error(format!(
+                            "instance '{}' owned record update contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
                 MirGenericInstanceContract::ScalarSetFacade { operation } => {
                     if let Err(message) = crate::core::mir::lower::validate_scalar_set_facade_mir(
                         function,
@@ -1100,6 +1129,7 @@ impl<'a> CapabilityGate<'a> {
                 kind,
                 fields,
                 record_update_contract,
+                record_update_move_contract,
             } => {
                 let (Some(result_ty), Some(base_ty)) =
                     (value_type(function, result), value_type(function, base))
@@ -1113,7 +1143,15 @@ impl<'a> CapabilityGate<'a> {
                 if field_types.len() != fields.len() {
                     self.error(format!("{subject} record update field is absent"));
                 } else {
-                    let validation = if let Some(receipt) = record_update_contract {
+                    let validation = if let Some(receipt) = record_update_move_contract {
+                        catalog.validate_record_update_move_receipt(
+                            &result_ty,
+                            &base_ty,
+                            kind,
+                            &field_types,
+                            receipt,
+                        )
+                    } else if let Some(receipt) = record_update_contract {
                         catalog.validate_record_update_receipt(
                             &result_ty,
                             &base_ty,
@@ -1398,6 +1436,7 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarTupleProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}

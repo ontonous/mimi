@@ -2403,6 +2403,55 @@ impl BytecodeVM {
                     }
                     self.set_reg(rd, Value::Record(type_name_str, fields));
                 }
+                Op::UpdateRecordMove {
+                    rd,
+                    type_name,
+                    ra,
+                    base,
+                    count,
+                } => {
+                    let type_name_str = match &proto.constants.get(type_name as usize) {
+                        Some(ConstValue::Str(s)) => {
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s.clone())
+                            }
+                        }
+                        _ => None,
+                    };
+                    let field_names = (0..count)
+                        .map(|i| {
+                            let idx = (type_name + 1 + i as u32) as usize;
+                            match proto.constants.get(idx) {
+                                Some(ConstValue::Str(s)) => Ok(s.clone()),
+                                _ if idx < proto.constants.len() => Ok(format!("_{}", i)),
+                                _ => Err(InterpError::new(format!(
+                                    "UpdateRecordMove: field constant {} out of bounds (len {})",
+                                    idx,
+                                    proto.constants.len()
+                                ))),
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let frame = self.cur_frame_mut();
+                    let mut fields =
+                        match std::mem::replace(&mut frame.regs[ra as usize], Value::Unit) {
+                            Value::Record(_, fields) => fields,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "UpdateRecordMove: expected record rest value, got {:?}",
+                                    other
+                                )));
+                            }
+                        };
+                    for (i, field_name) in field_names.into_iter().enumerate() {
+                        let value =
+                            std::mem::replace(&mut frame.regs[(base as usize) + i], Value::Unit);
+                        fields.insert(field_name, value);
+                    }
+                    frame.regs[rd as usize] = Value::Record(type_name_str, fields);
+                }
                 Op::RecordGet {
                     rd,
                     ra,

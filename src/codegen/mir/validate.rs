@@ -734,6 +734,7 @@ impl<'a> NativeMirValidator<'a> {
                 kind,
                 fields,
                 record_update_contract,
+                record_update_move_contract,
             } => self.validate_update_record(
                 function,
                 result,
@@ -741,6 +742,7 @@ impl<'a> NativeMirValidator<'a> {
                 kind,
                 fields,
                 record_update_contract.as_ref(),
+                record_update_move_contract.as_ref(),
                 subject,
             ),
             MirInstructionKind::ConstructVariant {
@@ -1493,6 +1495,7 @@ impl<'a> NativeMirValidator<'a> {
         kind: &MirAggregateKind,
         fields: &[MirValueId],
         record_update_contract: Option<&crate::core::mir::types::MirRecordUpdateContract>,
+        record_update_move_contract: Option<&crate::core::mir::types::MirRecordUpdateMoveContract>,
         subject: &str,
     ) {
         self.validate_value(function, result, "record update result");
@@ -1505,11 +1508,13 @@ impl<'a> NativeMirValidator<'a> {
         else {
             return;
         };
-        if self
-            .program
-            .type_catalog()
-            .get(&result_value.ty)
-            .is_some_and(|desc| desc.ownership != MirOwnership::Copy)
+        if record_update_contract.is_none()
+            && record_update_move_contract.is_none()
+            && self
+                .program
+                .type_catalog()
+                .get(&result_value.ty)
+                .is_some_and(|desc| desc.ownership != MirOwnership::Copy)
         {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -1532,7 +1537,17 @@ impl<'a> NativeMirValidator<'a> {
         if field_types.len() != fields.len() {
             return;
         }
-        let validation = if let Some(receipt) = record_update_contract {
+        let validation = if let Some(receipt) = record_update_move_contract {
+            self.program
+                .type_catalog()
+                .validate_record_update_move_receipt(
+                    &result_value.ty,
+                    &base_value.ty,
+                    kind,
+                    &field_types,
+                    receipt,
+                )
+        } else if let Some(receipt) = record_update_contract {
             self.program.type_catalog().validate_record_update_receipt(
                 &result_value.ty,
                 &base_value.ty,

@@ -1183,6 +1183,34 @@ fn two_override_generic_record_update_is_consumed_by_mir_verifier() {
 }
 
 #[test]
+fn owned_generic_record_update_is_consumed_by_mir_verifier() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_native_generic_record_update_owned.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-update-owned").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical owned generic record update MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+            if contract.updates.len() == 1 && contract.residual.len() == 1
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("owned generic record update verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn generic_option_predicate_is_verified_from_canonical_mir_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_option_predicate.mimi");

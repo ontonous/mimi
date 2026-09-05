@@ -1,0 +1,14 @@
+// S173 negative: owned generic updates stay bounded to one residual field.
+type WidePatch<T> { value: T, label: string, extra: string }
+
+func replace<T>(patch: WidePatch<T>) -> WidePatch<T> {
+    WidePatch { label: "replaced", ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = WidePatch { value: "payload", label: "old", extra: "extra" }
+    let updated = replace(patch)
+    drop(updated)
+    41
+}

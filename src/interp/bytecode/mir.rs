@@ -658,6 +658,7 @@ impl<'a> FunctionEmitter<'a> {
                 kind: MirAggregateKind::Record { nominal, fields },
                 fields: values,
                 record_update_contract,
+                record_update_move_contract,
             } => self.emit_record_update(
                 result,
                 base,
@@ -665,6 +666,7 @@ impl<'a> FunctionEmitter<'a> {
                 fields,
                 values,
                 record_update_contract.as_ref(),
+                record_update_move_contract.as_ref(),
             ),
             MirInstructionKind::UpdateRecord { .. } => {
                 self.error("record update instruction requires a record aggregate kind")
@@ -3056,6 +3058,7 @@ impl<'a> FunctionEmitter<'a> {
         field_ids: &[crate::core::NodeId],
         values: &[MirValueId],
         record_update_contract: Option<&crate::core::mir::types::MirRecordUpdateContract>,
+        record_update_move_contract: Option<&crate::core::mir::types::MirRecordUpdateMoveContract>,
     ) {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
@@ -3109,7 +3112,25 @@ impl<'a> FunctionEmitter<'a> {
             self.error("record update field value lacks a TypeDesc");
             return;
         }
-        if let Some(receipt) = record_update_contract {
+        if let Some(receipt) = record_update_move_contract {
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_record_update_move_receipt(
+                    &result_desc.id,
+                    &base_desc.id,
+                    &crate::core::mir::MirAggregateKind::Record {
+                        nominal: nominal.clone(),
+                        fields: field_ids.to_vec(),
+                    },
+                    &field_types,
+                    receipt,
+                )
+            {
+                self.error(format!("record update move receipt rejected: {message}"));
+                return;
+            }
+        } else if let Some(receipt) = record_update_contract {
             if let Err(message) = self.program.type_catalog().validate_record_update_receipt(
                 &result_desc.id,
                 &base_desc.id,
@@ -3175,10 +3196,16 @@ impl<'a> FunctionEmitter<'a> {
             } else {
                 self.proto.alloc_reg()
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
-            });
+            if record_update_move_contract.is_some() {
+                if !self.emit_value_transfer(destination, source, &field_desc.ty) {
+                    return;
+                }
+            } else {
+                self.proto.emit(Op::Mov {
+                    rd: destination,
+                    rs: source,
+                });
+            }
         }
         let type_name = self
             .proto
@@ -3190,13 +3217,23 @@ impl<'a> FunctionEmitter<'a> {
             self.proto
                 .add_const_raw(ConstValue::Str(field.name.clone()));
         }
-        self.proto.emit(Op::UpdateRecord {
-            rd,
-            type_name,
-            ra,
-            base: update_base,
-            count: supplied.len() as u16,
-        });
+        if record_update_move_contract.is_some() {
+            self.proto.emit(Op::UpdateRecordMove {
+                rd,
+                type_name,
+                ra,
+                base: update_base,
+                count: supplied.len() as u16,
+            });
+        } else {
+            self.proto.emit(Op::UpdateRecord {
+                rd,
+                type_name,
+                ra,
+                base: update_base,
+                count: supplied.len() as u16,
+            });
+        }
     }
 
     fn supported_type_for_value(&self, value: &MirValueId) -> Result<(), String> {
@@ -5564,6 +5601,51 @@ mod tests {
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("two-override record update bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn executes_materialized_owned_generic_record_update_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_update_owned.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("owned update MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                )
+            })
+            .expect("owned generic record update instance");
+        let crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract } =
+            instance.contract
+        else {
+            unreachable!()
+        };
+        assert_eq!(contract.updates.len(), 1);
+        assert_eq!(contract.residual.len(), 1);
+        assert_eq!(
+            contract.updates[0].old_drop,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
+        assert_eq!(
+            contract.residual[0].glue,
+            crate::core::mir::types::MirGlueKind::OwnedString
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic record update execution");
+        let bytecode = compile_mir_program(&mir).expect("owned update bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("owned update bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(41));
         assert!(matches!(value, Value::Int(41)));
     }

@@ -661,6 +661,15 @@ pub enum Op {
         base: Reg,
         count: u16,
     },
+    /// rd = consumes ra and moves fields from [base..base+count) by name.
+    /// Unlike `UpdateRecord`, no source record or update value is cloned.
+    UpdateRecordMove {
+        rd: Reg,
+        type_name: ConstIdx,
+        ra: Reg,
+        base: Reg,
+        count: u16,
+    },
     /// rd = ra.field[field_name] — field name is a string constant
     RecordGet {
         rd: Reg,
@@ -1143,6 +1152,7 @@ impl Op {
             | NewTuple { rd, .. }
             | NewRecord { rd, .. }
             | UpdateRecord { rd, .. }
+            | UpdateRecordMove { rd, .. }
             | NewVariant { rd, .. }
             | NewVariantMove { rd, .. }
             | NewMap { rd, .. }
@@ -1249,6 +1259,7 @@ impl Op {
             | Op::NewTuple { rd, .. }
             | Op::NewRecord { rd, .. }
             | Op::UpdateRecord { rd, .. }
+            | Op::UpdateRecordMove { rd, .. }
             | Op::NewVariant { rd, .. }
             | Op::NewVariantMove { rd, .. }
             | Op::NewMap { rd, .. }
@@ -1463,6 +1474,9 @@ impl Op {
                 reads_range(*base, *count, reg)
             }
             UpdateRecord {
+                ra, base, count, ..
+            } => *ra == reg || reads_range(*base, *count, reg),
+            UpdateRecordMove {
                 ra, base, count, ..
             } => *ra == reg || reads_range(*base, *count, reg),
             // Conservative: any op not enumerated above may read the register.

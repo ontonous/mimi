@@ -609,6 +609,12 @@ pub enum MirGenericInstanceContract {
     ScalarRecordUpdate {
         contract: types::MirRecordUpdateContract,
     },
+    /// A generic Move-owned two-field record update with one overwritten
+    /// payload. The receipt proves Drop for the old slot and MoveOut for the
+    /// new slot plus the residual field moved into the result.
+    OwnedRecordUpdate {
+        contract: types::MirRecordUpdateMoveContract,
+    },
     /// A generic two-element tuple projection specialized to a concrete
     /// Copy-scalar element. The tuple receipt fixes the structural index and
     /// arity so consumers cannot infer a generic tuple ABI from a backend
@@ -839,6 +845,10 @@ pub enum MirInstructionKind {
         /// concrete non-generic update remains validated by the ordinary
         /// TypeDesc contract and leaves this absent.
         record_update_contract: Option<types::MirRecordUpdateContract>,
+        /// Ownership-bearing updates consume the base and carry explicit
+        /// old-drop/new-move/residual-move glue. This is mutually exclusive
+        /// with `record_update_contract`.
+        record_update_move_contract: Option<types::MirRecordUpdateMoveContract>,
     },
     Binary {
         result: MirValueId,
@@ -2858,10 +2868,16 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             kind,
             fields,
             record_update_contract,
+            record_update_move_contract,
         } => {
             let receipt = record_update_contract
                 .as_ref()
                 .map(|contract| format!(" receipt={contract:?}"))
+                .or_else(|| {
+                    record_update_move_contract
+                        .as_ref()
+                        .map(|contract| format!(" move_receipt={contract:?}"))
+                })
                 .unwrap_or_default();
             format!(
                 "update_record {result} = {base} {kind:?}({}){receipt}",
@@ -3472,10 +3488,17 @@ impl<'a> MirValidator<'a> {
                 base,
                 fields,
                 kind,
-                ..
+                record_update_contract,
+                record_update_move_contract,
             } => {
                 self.use_value(base);
                 self.values(fields);
+                if record_update_contract.is_some() && record_update_move_contract.is_some() {
+                    self.error(
+                        result.to_string(),
+                        "record update cannot carry both Copy and Move receipts",
+                    );
+                }
                 if let MirAggregateKind::Record { fields, .. } = kind {
                     for field in fields {
                         if field.0.trim().is_empty() {

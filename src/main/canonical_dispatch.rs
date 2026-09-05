@@ -2308,6 +2308,39 @@ mod tests {
     }
 
     #[test]
+    fn owned_generic_record_update_enters_canonical_default_route() {
+        let source =
+            include_str!("../../tests/fixtures/mir_native_generic_record_update_owned.mimi");
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("owned generic record update must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.arity == 2
+                    && contract.updates.len() == 1
+                    && contract.residual.len() == 1
+                    && contract.updates[0].new_move
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+                    && contract.residual[0].glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+        )));
+    }
+
+    #[test]
+    fn owned_generic_record_update_three_field_shape_is_rejected_before_legacy_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_update_owned_three_field_rejected.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("three-field owned generic record update must fail closed");
+        };
+        assert!(reason.contains("canonical generic record update candidate did not materialize"));
+    }
+
+    #[test]
     fn five_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"

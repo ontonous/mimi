@@ -1,0 +1,15 @@
+// S173 positive: a two-field generic record update consumes the base record.
+// `value: T` is residual-moved while the overwritten String field is dropped.
+type Patch<T> { value: T, label: string }
+
+func replace<T>(patch: Patch<T>) -> Patch<T> {
+    Patch { label: "replaced", ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = Patch { value: "payload", label: "old" }
+    let updated = replace(patch)
+    drop(updated)
+    41
+}

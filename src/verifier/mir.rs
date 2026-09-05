@@ -2327,10 +2327,13 @@ fn eval_instruction(
             kind: MirAggregateKind::Record { nominal, fields },
             fields: update_values,
             record_update_contract,
+            record_update_move_contract,
         } => {
-            ensure_copy_value(function, catalog, base)?;
-            for value in update_values {
-                ensure_copy_value(function, catalog, value)?;
+            if record_update_move_contract.is_none() {
+                ensure_copy_value(function, catalog, base)?;
+                for value in update_values {
+                    ensure_copy_value(function, catalog, value)?;
+                }
             }
             let field_types = update_values
                 .iter()
@@ -2342,7 +2345,26 @@ fn eval_instruction(
                         .ok_or_else(|| format!("MIR record update value '{}' is absent", value))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(receipt) = record_update_contract {
+            if let Some(receipt) = record_update_move_contract {
+                catalog.validate_record_update_move_receipt(
+                    &function
+                        .values
+                        .get(result)
+                        .ok_or_else(|| format!("MIR record update result '{}' is absent", result))?
+                        .ty,
+                    &function
+                        .values
+                        .get(base)
+                        .ok_or_else(|| format!("MIR record update base '{}' is absent", base))?
+                        .ty,
+                    &MirAggregateKind::Record {
+                        nominal: nominal.clone(),
+                        fields: fields.clone(),
+                    },
+                    &field_types,
+                    receipt,
+                )?;
+            } else if let Some(receipt) = record_update_contract {
                 catalog.validate_record_update_receipt(
                     &function
                         .values
@@ -2362,17 +2384,28 @@ fn eval_instruction(
                     receipt,
                 )?;
             }
-            let base_value = state
-                .values
-                .get(base)
-                .cloned()
-                .ok_or_else(|| format!("MIR record update base '{}' is not defined", base))?;
+            let base_value =
+                if record_update_move_contract.is_some() {
+                    state.values.remove(base).ok_or_else(|| {
+                        format!("MIR record update base '{}' is not defined", base)
+                    })?
+                } else {
+                    state.values.get(base).cloned().ok_or_else(|| {
+                        format!("MIR record update base '{}' is not defined", base)
+                    })?
+                };
             let update_values = update_values
                 .iter()
                 .map(|value| {
-                    state.values.get(value).cloned().ok_or_else(|| {
-                        format!("MIR record update value '{}' is not defined", value)
-                    })
+                    if record_update_move_contract.is_some() {
+                        state.values.remove(value).ok_or_else(|| {
+                            format!("MIR record update value '{}' is not defined", value)
+                        })
+                    } else {
+                        state.values.get(value).cloned().ok_or_else(|| {
+                            format!("MIR record update value '{}' is not defined", value)
+                        })
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let value = symbolic_update_record(
@@ -2791,6 +2824,19 @@ fn eval_materialized_call(
         }
         crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } => {
             eval_materialized_owned_record_projection_drop_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                &target_owner,
+                type_arguments,
+                arguments,
+                contract,
+            )
+        }
+        crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { contract } => {
+            eval_materialized_owned_record_update_call(
                 function,
                 program,
                 catalog,
@@ -4220,6 +4266,123 @@ fn eval_materialized_record_update_call(
                 .clone();
             let (symbolic, constraints) =
                 symbolic_value_for_type(catalog, &ty, &format!("mir.record_update.{}", value))?;
+            state.constraints.extend(constraints);
+            Ok(symbolic)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let updated = symbolic_update_record(
+        function,
+        catalog,
+        result,
+        base,
+        &nominal,
+        &fields,
+        symbolic_updates,
+    )?;
+    ensure_result_shape(function, catalog, result, &updated)?;
+    state.values.insert(result.clone(), updated);
+    Ok(())
+}
+
+/// Symbolically consume a materialized generic owned-record update.  The
+/// update receipt is the ownership proof: the base record is consumed, the
+/// overwritten field is dropped, and the residual field is moved into the
+/// result.  The symbolic aggregate shape is shared with the Copy update
+/// helper only after the move receipt has been revalidated.
+fn eval_materialized_owned_record_update_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    contract: &crate::core::mir::types::MirRecordUpdateMoveContract,
+) -> Result<(), String> {
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record update target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    crate::core::mir::lower::validate_owned_record_update_mir(target, catalog, contract)?;
+    if type_arguments.len() != 1 {
+        return Err("MIR verifier owned record update requires one type argument".into());
+    }
+    catalog.validate_move_owned_payload(&type_arguments[0])?;
+    if arguments.len() != 1 || target.parameters.len() != 1 {
+        return Err("MIR verifier owned record update call requires one argument".into());
+    }
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "MIR verifier owned record update call must produce a result".to_string())?;
+    if function
+        .values
+        .get(result)
+        .is_none_or(|value| value.ty != target.result || value.ty != contract.result_ty)
+    {
+        return Err("MIR verifier owned record update result disagrees with TypeDesc".into());
+    }
+    let argument = &arguments[0];
+    let argument_info = function.values.get(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record update argument '{}' is absent",
+            argument
+        )
+    })?;
+    let parameter = &target.parameters[0];
+    let parameter_info = target.values.get(parameter).ok_or_else(|| {
+        "MIR verifier owned record update parameter TypeDesc is absent".to_string()
+    })?;
+    if argument_info.ty != parameter_info.ty || argument_info.ty != contract.source_ty {
+        return Err("MIR verifier owned record update argument disagrees with TypeDesc".into());
+    }
+    let base = state.values.remove(argument).ok_or_else(|| {
+        format!(
+            "MIR verifier owned record update argument '{}' is not defined",
+            argument
+        )
+    })?;
+    if !symbolic_matches_type(catalog, &argument_info.ty, &base) {
+        return Err(
+            "MIR verifier owned record update argument has the wrong symbolic shape".into(),
+        );
+    }
+    let MirInstructionKind::UpdateRecord {
+        kind: MirAggregateKind::Record { nominal, fields },
+        fields: update_values,
+        ..
+    } = target
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::UpdateRecord { .. }))
+        .ok_or_else(|| "MIR verifier owned record update target has no UpdateRecord".to_string())?
+        .kind
+        .clone()
+    else {
+        return Err("MIR verifier owned record update target has a non-record UpdateRecord".into());
+    };
+    let symbolic_updates = update_values
+        .iter()
+        .map(|value| {
+            let ty = target
+                .values
+                .get(value)
+                .ok_or_else(|| {
+                    format!(
+                        "MIR verifier owned record update value '{}' is absent",
+                        value
+                    )
+                })?
+                .ty
+                .clone();
+            let (symbolic, constraints) = symbolic_value_for_type(
+                catalog,
+                &ty,
+                &format!("mir.owned_record_update.{}", value),
+            )?;
             state.constraints.extend(constraints);
             Ok(symbolic)
         })
