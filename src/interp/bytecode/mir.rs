@@ -739,6 +739,22 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        if kind == crate::core::mir::types::MirBuiltinKind::SessionOpen {
+            let Some(result_info) = self.function.values.get(result) else {
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_session_channel(&result_info.ty)
+            {
+                self.error(format!(
+                    "builtin '{}' result is outside the canonical SessionChan contract: {message}",
+                    contract.name
+                ));
+                return;
+            }
+        }
         let mut first_type = None;
         for (index, argument) in arguments.iter().enumerate() {
             let Some(argument_desc) = self.type_of(argument) else {
@@ -782,13 +798,14 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
-        let Some(first_type) = first_type else {
-            return;
-        };
         let Some(result_info) = self.function.values.get(result) else {
             return;
         };
-        if contract.preserves_type && result_info.ty != first_type {
+        if contract.preserves_type
+            && first_type
+                .as_ref()
+                .is_some_and(|first_type| result_info.ty != *first_type)
+        {
             self.error(format!(
                 "builtin '{}' result does not preserve the canonical argument type",
                 contract.name

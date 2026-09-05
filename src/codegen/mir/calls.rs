@@ -372,6 +372,49 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         arguments: &[MirValueId],
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if kind == MirBuiltinKind::SessionOpen {
+            if !arguments.is_empty() {
+                return Err(NativeMirError::new(
+                    subject,
+                    "builtin 'session_open' has no value arguments",
+                ));
+            }
+            let result_ty = self.value_type(result, subject)?;
+            self.program
+                .type_catalog()
+                .validate_session_channel(&result_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let pair = self
+                .generator
+                .get_runtime_fn("mimi_session_pair")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let packed = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(pair, &[], "mir_session_open_pair")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "session_pair returned void"))?
+            .into_int_value();
+            let lo = self
+                .generator
+                .get_runtime_fn("mimi_session_lo")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let value = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        lo,
+                        &[BasicMetadataValueEnum::IntValue(packed)],
+                        "mir_session_open_endpoint",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "session_lo returned void"))?;
+            return Ok(value);
+        }
         let left = self
             .value(
                 arguments
@@ -457,6 +500,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             MirBuiltinKind::Abs => unreachable!(),
                             MirBuiltinKind::PrintlnBool => unreachable!(),
                             MirBuiltinKind::PrintlnInt => unreachable!(),
+                            MirBuiltinKind::SessionOpen => unreachable!(),
                         },
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
@@ -546,6 +590,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 // Unit has no physical LLVM value. Keep the same inert
                 // placeholder convention as PrintlnBool for the value map.
                 Ok(self.generator.context.i64_type().const_zero().into())
+            }
+            MirBuiltinKind::SessionOpen => {
+                unreachable!("SessionOpen handled before scalar dispatch")
             }
         }
         .map(|value| {

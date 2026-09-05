@@ -1360,6 +1360,16 @@ fn eval_instruction(
                 }
                 (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
                 (MirBuiltinKind::PrintlnInt, [SymbolicValue::Int(_)]) => SymbolicValue::Unit,
+                (MirBuiltinKind::SessionOpen, []) => {
+                    let result_ty = function
+                        .values
+                        .get(result)
+                        .ok_or_else(|| "MIR SessionOpen result is absent".to_string())?
+                        .ty
+                        .clone();
+                    catalog.validate_session_channel(&result_ty)?;
+                    SymbolicValue::Opaque { ty: result_ty }
+                }
                 _ => return Err("MIR builtin is outside scalar verifier contract".into()),
             };
             ensure_result_shape(function, catalog, result, &output)?;
@@ -4477,6 +4487,9 @@ fn symbolic_matches_type(
         | (MirLayout::Scalar, MirAbiClass::Bool, SymbolicValue::Bool(_)) => true,
         (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_owned_string(ty).is_ok()
+        }
+        (MirLayout::Handle, MirAbiClass::OpaqueHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
+            actual_ty == ty && catalog.validate_session_channel(ty).is_ok()
         }
         (MirLayout::Tuple(elements), _, SymbolicValue::Tuple(values)) => {
             elements.len() == values.len()

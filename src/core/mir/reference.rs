@@ -1290,6 +1290,20 @@ fn validate_builtin_calls(
                     message: format!("builtin result '{}' is absent from MIR values", result),
                 });
             };
+            if *kind == super::types::MirBuiltinKind::SessionOpen {
+                if let Some(result_value) = result_value {
+                    if let Err(message) = type_catalog.validate_session_channel(&result_value.ty) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "builtin '{}' result is outside the canonical SessionChan contract: {message}",
+                                contract.name
+                            ),
+                        });
+                    }
+                }
+                continue;
+            }
             let mut first_type = None;
             for (index, argument) in arguments.iter().enumerate() {
                 let Some(argument_value) = function.values.get(argument) else {
@@ -3102,6 +3116,7 @@ pub struct MirReferenceInterpreter<'a> {
     max_steps: usize,
     output: RefCell<String>,
     session_queues: RefCell<BTreeMap<i64, VecDeque<i64>>>,
+    next_session_handle: RefCell<i64>,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -3111,6 +3126,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             max_steps: 1_000_000,
             output: RefCell::new(String::new()),
             session_queues: RefCell::new(BTreeMap::new()),
+            next_session_handle: RefCell::new(1),
         }
     }
 
@@ -3156,6 +3172,7 @@ impl<'a> MirReferenceInterpreter<'a> {
         queues: &[MirSessionQueueInput],
     ) -> Result<MirExecutionObservation, MirExecutionError> {
         self.output.borrow_mut().clear();
+        *self.next_session_handle.borrow_mut() = 1;
         let mut session_queues = self.session_queues.borrow_mut();
         session_queues.clear();
         for queue in queues {
@@ -4311,6 +4328,26 @@ impl<'a> MirReferenceInterpreter<'a> {
                         };
                         self.output.borrow_mut().push_str(&format!("{value}\n"));
                         MirRuntimeValue::Unit
+                    }
+                    super::types::MirBuiltinKind::SessionOpen => {
+                        let result_ty = match function.values.get(result) {
+                            Some(value) => value.ty.clone(),
+                            None => {
+                                return Err(self
+                                    .error(&function.owner, "session_open result has no MIR type"))
+                            }
+                        };
+                        self.program
+                            .type_catalog()
+                            .validate_session_channel(&result_ty)
+                            .map_err(|message| self.error(&function.owner, message))?;
+                        let mut next = self.next_session_handle.borrow_mut();
+                        let handle = *next;
+                        let next_handle = handle.checked_add(1).ok_or_else(|| {
+                            self.error(&function.owner, "session_open handle space exhausted")
+                        })?;
+                        *next = next_handle;
+                        MirRuntimeValue::Int(handle)
                     }
                 };
                 values.insert(result.clone(), output);

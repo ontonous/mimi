@@ -7252,6 +7252,11 @@ fn call_builtin_contract(
             },
         );
     }
+    if builtin.as_str() == "session_open" {
+        return Some(super::types::MirBuiltinContract::for_kind(
+            super::types::MirBuiltinKind::SessionOpen,
+        ));
+    }
     super::types::MirBuiltinContract::from_builtin(builtin)
 }
 

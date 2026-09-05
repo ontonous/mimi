@@ -141,6 +141,32 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .generator
             .module
+            .get_function("mimi_session_pair")
+            .is_none()
+        {
+            let i64 = self.generator.context.i64_type();
+            self.generator.module.add_function(
+                "mimi_session_pair",
+                i64.fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
+            .get_function("mimi_session_lo")
+            .is_none()
+        {
+            let i64 = self.generator.context.i64_type();
+            self.generator.module.add_function(
+                "mimi_session_lo",
+                i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                Some(Linkage::External),
+            );
+        }
+        if self
+            .generator
+            .module
             .get_function("mimi_trap_float_not_finite")
             .is_none()
         {

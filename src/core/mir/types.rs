@@ -142,6 +142,10 @@ pub enum MirBuiltinKind {
     /// width is checker-owned by the argument TypeDesc: signed i32 and i64
     /// are the only concrete integer ABIs in this contract.
     PrintlnInt,
+    /// Produce one fresh transfer-only SessionChan endpoint from the runtime
+    /// session pair. The protocol residual and endpoint ABI are carried by
+    /// the result TypeDesc; the builtin itself has no value arguments.
+    SessionOpen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -239,6 +243,18 @@ impl MirBuiltinContract {
                 result_must_be_unit: true,
                 effect: MirBuiltinEffect::StdoutLine,
             },
+            MirBuiltinKind::SessionOpen => Self {
+                kind,
+                name: "session_open",
+                arity: 0,
+                input_abi: MirAbiClass::OpaqueHandle,
+                preserves_type: false,
+                requires_copy: false,
+                requires_same_input_type: false,
+                overflow_trap: None,
+                result_must_be_unit: false,
+                effect: MirBuiltinEffect::Pure,
+            },
         }
     }
 
@@ -250,6 +266,7 @@ impl MirBuiltinContract {
             "abs" => Some(Self::for_kind(MirBuiltinKind::Abs)),
             "min" => Some(Self::for_kind(MirBuiltinKind::Min)),
             "max" => Some(Self::for_kind(MirBuiltinKind::Max)),
+            "session_open" => Some(Self::for_kind(MirBuiltinKind::SessionOpen)),
             _ => None,
         }
     }
@@ -299,19 +316,19 @@ impl MirBuiltinContract {
                     signed: true,
                 }
             ),
+            MirBuiltinKind::SessionOpen => abi == MirAbiClass::OpaqueHandle,
         }
     }
 
     pub fn accepts_layout(self, layout: &MirLayout) -> bool {
-        matches!(layout, MirLayout::Scalar)
-            && matches!(
-                self.kind,
-                MirBuiltinKind::Abs
-                    | MirBuiltinKind::Min
-                    | MirBuiltinKind::Max
-                    | MirBuiltinKind::PrintlnBool
-                    | MirBuiltinKind::PrintlnInt
-            )
+        match self.kind {
+            MirBuiltinKind::SessionOpen => matches!(layout, MirLayout::Handle),
+            MirBuiltinKind::Abs
+            | MirBuiltinKind::Min
+            | MirBuiltinKind::Max
+            | MirBuiltinKind::PrintlnBool
+            | MirBuiltinKind::PrintlnInt => matches!(layout, MirLayout::Scalar),
+        }
     }
 
     pub fn accepted_abi_description(self) -> &'static str {
@@ -320,6 +337,7 @@ impl MirBuiltinContract {
             MirBuiltinKind::Min | MirBuiltinKind::Max => "signed i64",
             MirBuiltinKind::PrintlnBool => "bool",
             MirBuiltinKind::PrintlnInt => "signed i32 or i64",
+            MirBuiltinKind::SessionOpen => "SessionChan handle",
         }
     }
 }

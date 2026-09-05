@@ -78,6 +78,102 @@ fn materializes_terminal_session_close_with_backend_neutral_receipt() {
 }
 
 #[test]
+fn materializes_session_open_as_canonical_builtin_with_backend_neutral_oracle() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_open.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("session_open must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:open_close".into());
+    let function = program.functions().get(&owner).expect("open_close MIR");
+    let (result, kind) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::BuiltinCall {
+                result,
+                kind: crate::core::mir::types::MirBuiltinKind::SessionOpen,
+                arguments,
+            } => Some((result.clone(), arguments.len())),
+            _ => None,
+        })
+        .expect("session_open builtin instruction");
+    assert_eq!(kind, 0, "session_open has no value arguments");
+    let result_ty = function
+        .values
+        .get(&result)
+        .expect("session_open result value")
+        .ty
+        .clone();
+    program
+        .type_catalog()
+        .validate_session_channel(&result_ty)
+        .expect("session_open result must be transfer-only SessionChan");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .expect("reference session_open/session_close execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume canonical SessionOpen");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume canonical SessionOpen");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume canonical SessionOpen");
+}
+
+#[test]
+fn rejects_forged_session_open_result_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_open.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical session_open MIR");
+    let owner = crate::core::NodeId("function:open_close".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("open_close MIR");
+    let result = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::BuiltinCall {
+                kind: crate::core::mir::types::MirBuiltinKind::SessionOpen,
+                result,
+                ..
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("session_open result");
+    let scalar_i32 = program
+        .type_catalog()
+        .iter()
+        .find_map(|(ty, descriptor)| {
+            (descriptor.abi
+                == crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| ty.clone())
+        })
+        .expect("canonical i32 TypeDesc");
+    function.values.get_mut(&result).expect("result value").ty = scalar_i32;
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("non-SessionChan SessionOpen result must be rejected");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("canonical SessionChan contract")
+            || error.message.contains("SessionChan endpoint type")
+    }));
+}
+
+#[test]
 fn materializes_integer_session_send_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_send.mimi"

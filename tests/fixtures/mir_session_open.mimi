@@ -1,0 +1,11 @@
+session Open = end
+
+func open_close() -> i32 {
+    let ch = session_open::<Open>()
+    session_close(ch)
+    41
+}
+
+func main() -> i32 {
+    0
+}
