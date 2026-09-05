@@ -6764,6 +6764,28 @@ mod tests {
     }
 
     #[test]
+    fn managed_generic_result_unwrap_or_owned_list_copy_scalar_family_matches_bytecode() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list_scalars.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("Result<List<i64|bool>> unwrap_or MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference Result<List<i64|bool>> unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("Result List scalar fallback bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode Result<List<i64|bool>> unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(49));
+        assert!(matches!(value, Value::Int(49)));
+    }
+
+    #[test]
     fn executes_copy_result_i32_i32_unwrap_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_result_i32_unwrap.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");

@@ -1,0 +1,21 @@
+// Result List fallback coverage for the remaining admitted Copy scalar
+// element ABIs: i64 and bool.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let i64_values: List<i64> = [10, 20, 30]
+    let i64_value: Result<List<i64>, i32> = Ok(i64_values)
+    let i64_fallback: List<i64> = [40, 50]
+    let i64_out = unwrap_or(i64_value, i64_fallback)
+    drop(i64_out)
+
+    let bool_values: List<bool> = [true, false, true]
+    let bool_value: Result<List<bool>, i32> = Err(7)
+    let bool_fallback: List<bool> = bool_values
+    let bool_out = unwrap_or(bool_value, bool_fallback)
+    drop(bool_out)
+    49
+}

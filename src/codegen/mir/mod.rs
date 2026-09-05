@@ -4074,6 +4074,48 @@ mod tests {
     }
 
     #[test]
+    fn native_managed_generic_result_unwrap_or_owned_list_copy_scalar_family() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list_scalars.mimi"
+        );
+        let program = canonical_program(source);
+        let contracts = program
+            .instances()
+            .values()
+            .filter_map(|instance| match &instance.contract {
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract,
+                } if contract.projection.nominal.as_str() == "builtin:type:Result" => {
+                    Some(contract)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contracts.len(), 2, "i64 and bool specializations");
+        assert!(contracts.iter().all(|contract| {
+            contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                && contract.projection.move_out_glue == crate::core::mir::types::MirGlueKind::List
+        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Result List scalar fallback execution");
+        assert_eq!(reference, MirRuntimeValue::Int(49));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_result_unwrap_or_owned_list_scalars",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native Result List scalar fallback must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native Result List scalar fallback module verifies");
+    }
+
+    #[test]
     fn native_generic_result_unwrap_err_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi"

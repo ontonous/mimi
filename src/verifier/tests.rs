@@ -1823,6 +1823,47 @@ fn managed_generic_result_unwrap_or_owned_list_is_verified_from_canonical_mir() 
 }
 
 #[test]
+fn managed_generic_result_unwrap_or_owned_list_copy_scalar_family_is_verified() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list_scalars.mimi"
+    );
+    let file = parse_memory_source(source, "mir-managed-generic-result-list-scalars-unwrap-or")
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical Result<List<i64|bool>> unwrap_or MIR");
+    let contracts = canonical
+        .instances()
+        .values()
+        .filter_map(|instance| match &instance.contract {
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract,
+            } if contract.projection.nominal.as_str() == "builtin:type:Result" => Some(contract),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contracts.len(), 2, "i64 and bool specializations");
+    assert!(contracts.iter().all(|contract| {
+        contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+            && contract.projection.move_out_glue == crate::core::mir::types::MirGlueKind::List
+    }));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("Result List scalar fallback verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        )
+    }));
+}
+
+#[test]
 fn generic_result_unwrap_or_is_rejected_before_legacy_verifier_fallback() {
     let source =
         include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi");

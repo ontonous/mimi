@@ -2512,6 +2512,37 @@ fn rejects_generic_result_unwrap_or_owned_list_with_non_copy_element_before_cons
 }
 
 #[test]
+fn materializes_generic_result_unwrap_or_owned_list_copy_scalar_family() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list_scalars.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("Result<List<i64|bool>> unwrap_or must lower to canonical MIR");
+    let contracts = program
+        .instances()
+        .values()
+        .filter_map(|instance| match &instance.contract {
+            MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                if contract.projection.nominal.as_str() == "builtin:type:Result" =>
+            {
+                Some(contract)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contracts.len(), 2, "i64 and bool specializations");
+    assert!(contracts.iter().all(|contract| {
+        contract.projection.ownership == MirOwnership::Move
+            && contract.projection.move_out_glue == MirGlueKind::List
+    }));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Result<List<i64|bool>> unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(49));
+}
+
+#[test]
 fn generic_result_unwrap_or_stale_receipt_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or.mimi");
     let checked = checked_program(source);
