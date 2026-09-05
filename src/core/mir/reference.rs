@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral, ResolvedType, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
-use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
+use super::types::{MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId,
     MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
@@ -3828,17 +3828,31 @@ impl<'a> MirReferenceInterpreter<'a> {
                         receipt,
                     )
                     .map_err(|message| self.error(&function.owner, message))?;
-                let value = self.read_value(function, values, base)?;
-                let fallback_value = self.read_value(function, values, fallback)?;
-                let projected = project_variant_fallback_value(
-                    &function.owner,
-                    value,
-                    fallback_value,
-                    &base_ty,
-                    &result_ty,
-                    receipt,
-                    self.program.type_catalog(),
-                )?;
+                let projected = if receipt.projection.ownership == MirOwnership::Move {
+                    let value = self.take_transfer_value(function, values, base)?;
+                    let fallback_value = self.take_transfer_value(function, values, fallback)?;
+                    move_project_variant_fallback_value(
+                        &function.owner,
+                        value,
+                        fallback_value,
+                        &base_ty,
+                        &result_ty,
+                        receipt,
+                        self.program.type_catalog(),
+                    )?
+                } else {
+                    let value = self.read_value(function, values, base)?;
+                    let fallback_value = self.read_value(function, values, fallback)?;
+                    project_variant_fallback_value(
+                        &function.owner,
+                        value,
+                        fallback_value,
+                        &base_ty,
+                        &result_ty,
+                        receipt,
+                        self.program.type_catalog(),
+                    )?
+                };
                 values.insert(result.clone(), projected);
             }
             MirInstructionKind::VariantProjectMove {
@@ -5873,6 +5887,72 @@ fn project_variant_fallback_value(
     Err(execution_error(
         function,
         "variant projection fallback runtime tag disagrees with TypeDesc",
+    ))
+}
+
+fn move_project_variant_fallback_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    fallback: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirVariantProjectionFallbackContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    type_catalog
+        .validate_variant_projection_fallback_receipt(
+            base_ty,
+            result_ty,
+            &receipt.fallback_ty,
+            receipt,
+        )
+        .map_err(|message| execution_error(function, message))?;
+    let MirRuntimeValue::Variant {
+        nominal,
+        variant,
+        mut payload,
+    } = value
+    else {
+        return Err(execution_error(
+            function,
+            "consuming variant projection fallback base is not a canonical Variant",
+        ));
+    };
+    if nominal != receipt.projection.nominal {
+        return Err(execution_error(
+            function,
+            "consuming variant projection fallback runtime nominal disagrees with TypeDesc",
+        ));
+    }
+    if variant == receipt.projection.variant {
+        if payload.len() != receipt.projection.arity {
+            return Err(execution_error(
+                function,
+                "consuming variant projection fallback selected arity disagrees with TypeDesc",
+            ));
+        }
+        return payload
+            .get_mut(receipt.projection.field_index)
+            .map(|value| std::mem::replace(value, MirRuntimeValue::Unit))
+            .ok_or_else(|| {
+                execution_error(
+                    function,
+                    "consuming variant projection fallback field is absent",
+                )
+            });
+    }
+    if variant == receipt.fallback_variant {
+        if payload.len() != receipt.fallback_arity {
+            return Err(execution_error(
+                function,
+                "consuming variant projection fallback alternate arity disagrees with TypeDesc",
+            ));
+        }
+        return Ok(fallback);
+    }
+    Err(execution_error(
+        function,
+        "consuming variant projection fallback runtime tag disagrees with TypeDesc",
     ))
 }
 

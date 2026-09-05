@@ -1919,6 +1919,81 @@ fn generic_option_unwrap_or_none_selects_the_explicit_fallback() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_or_owned_string_with_consuming_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_string.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic managed Option unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Move
+            )
+        })
+        .expect("managed generic Option fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::OwnedString);
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("managed generic Option fallback target");
+    assert!(target.blocks.values().any(|block| {
+        matches!(
+            block.instructions.as_slice(),
+            [MirInstruction {
+                kind: MirInstructionKind::VariantProjectOr {
+                    base,
+                    fallback,
+                    contract: Some(_),
+                    ..
+                },
+                ..
+            }] if base == &target.parameters[0] && fallback == &target.parameters[1]
+        )
+    }));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference managed Option unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+}
+
+#[test]
+fn generic_option_unwrap_or_owned_string_none_transfers_fallback() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_string_none.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic managed Option unwrap_or None must lower to canonical MIR");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference managed Option unwrap_or None execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(7));
+}
+
+#[test]
+fn rejects_generic_option_unwrap_or_unsupported_managed_payload_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("unsupported managed Option fallback must remain fail-closed");
+    assert!(error.to_string().contains("generic MIR instance"));
+}
+
+#[test]
 fn generic_option_unwrap_or_stale_receipt_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or.mimi");
     let checked = checked_program(source);

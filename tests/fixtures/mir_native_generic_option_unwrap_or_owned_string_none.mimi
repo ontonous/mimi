@@ -1,0 +1,12 @@
+// The None branch transfers the explicit managed fallback into the result.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Option<string> = None
+    let out = unwrap_or(value, "fallback")
+    drop(out)
+    7
+}

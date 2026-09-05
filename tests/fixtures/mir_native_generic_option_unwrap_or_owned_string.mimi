@@ -1,0 +1,13 @@
+// Generic Option<T>.unwrap_or specialized to the canonical consuming
+// Option<string> fallback contract.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Option<string> = Some("owned")
+    let out = unwrap_or(value, "fallback")
+    drop(out)
+    41
+}

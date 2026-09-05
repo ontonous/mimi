@@ -793,13 +793,13 @@ pub struct MirVariantProjectionTrapContract {
     pub trap_code: String,
 }
 
-/// Complete contract for a read-only variant payload projection with a
-/// checker-selected fallback value.  Unlike `MirVariantProjectionTrapContract`
-/// this operation is total over the admitted Option/Result tags: the selected
-/// `Some`/`Ok` payload is returned for its discriminant and the explicit
-/// fallback operand is returned for the alternate tag.  The receipt carries
-/// both tag identities so a backend cannot infer the alternate arm from a
-/// physical aggregate or VM handle.
+/// Complete contract for a variant payload projection with a checker-selected
+/// fallback value. Unlike `MirVariantProjectionTrapContract` this operation is
+/// total over the admitted Option/Result tags. `projection.ownership` records
+/// whether the selected payload/fallback are read-only Copy values or a
+/// managed consuming transfer. The receipt carries both tag identities so a
+/// backend cannot infer the alternate arm from a physical aggregate or VM
+/// handle.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirVariantProjectionFallbackContract {
     pub source_ty: ResolvedTypeId,
@@ -2653,6 +2653,84 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize the consuming `Option<T>.unwrap_or(T)` receipt for the
+    /// narrow managed-payload island.  Both the Option aggregate and the
+    /// explicit fallback are consumed; the selected Some payload is moved
+    /// out with the exact child glue proven by `Option`'s TypeDesc.
+    pub fn validated_move_option_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        let (inner, payload_glue) = self.validate_option_move_variant(source_ty)?;
+        if inner != *result_ty || result_ty != fallback_ty {
+            return Err(
+                "managed Option unwrap_or requires matching inner, result and fallback TypeDesc identities"
+                    .into(),
+            );
+        }
+        let projection = self.validated_variant_payload_projection_contract(
+            source_ty, variant_id, field_id, result_ty,
+        )?;
+        if projection.ownership != MirOwnership::Move
+            || projection.move_out_glue != payload_glue
+            || projection.field_index != 0
+            || projection.arity != 1
+            || projection.variant.0 != "builtin:variant:Option::Some"
+            || projection.field.0 != "builtin:variant:Option::Some/payload:0"
+        {
+            return Err(
+                "managed Option unwrap_or requires the canonical single move-owned Some payload"
+                    .into(),
+            );
+        }
+        self.validate_move_owned_payload(result_ty)?;
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Option { variants, .. } = &descriptor.layout else {
+            return Err("managed Option unwrap_or source has no canonical Option layout".into());
+        };
+        let selected = variants
+            .iter()
+            .find(|variant| variant.id == projection.variant)
+            .ok_or_else(|| "managed Option unwrap_or Some variant is absent".to_string())?;
+        if selected.name != "Some" || selected.discriminant != 1 {
+            return Err(
+                "managed Option unwrap_or Some discriminant disagrees with TypeDesc".into(),
+            );
+        }
+        let fallback = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Option::None"
+                    && variant.name == "None"
+                    && variant.discriminant == 0
+                    && variant.fields.is_empty()
+            })
+            .ok_or_else(|| {
+                "managed Option unwrap_or requires the canonical None variant".to_string()
+            })?;
+        Ok(MirVariantProjectionFallbackContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            fallback_ty: fallback_ty.clone(),
+            projection,
+            variant_name: selected.name.clone(),
+            discriminant: selected.discriminant,
+            fallback_variant: fallback.id.clone(),
+            fallback_variant_name: fallback.name.clone(),
+            fallback_discriminant: fallback.discriminant,
+            fallback_arity: fallback.fields.len(),
+        })
+    }
+
     /// Validate a materialized `unwrap_or` receipt at the MIR/consumer
     /// boundary.  This replays the checker-owned contract exactly and does
     /// not derive an ABI from a backend representation.
@@ -2687,6 +2765,19 @@ impl MirTypeCatalog {
                 }) =>
             {
                 self.validated_generic_option_projection_fallback_contract(
+                    source_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    result_ty,
+                    fallback_ty,
+                )?
+            }
+            Some(MirTypeKind::Option)
+                if self
+                    .get(source_ty)
+                    .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Move) =>
+            {
+                self.validated_move_option_projection_fallback_contract(
                     source_ty,
                     &receipt.projection.variant,
                     &receipt.projection.field,

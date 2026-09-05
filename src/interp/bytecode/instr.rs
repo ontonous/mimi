@@ -822,8 +822,9 @@ pub enum Op {
         contract: Option<ConstIdx>,
     },
     /// rd = canonical Option/Result.unwrap_or(ra, rb). The receipt carries
-    /// both active tag identities and the Copy payload ABI; no legacy tag
-    /// lookup is permitted for this MIR opcode.
+    /// both active tag identities and either the Copy payload ABI or the
+    /// explicit consuming managed-payload contract; no legacy tag lookup is
+    /// permitted for this MIR opcode.
     MirVariantProjectOr {
         rd: Reg,
         ra: Reg,
@@ -1620,6 +1621,10 @@ pub struct VariantProjectionFallbackShape {
     pub field: crate::core::NodeId,
     pub field_index: u16,
     pub arity: u16,
+    /// `true` for the managed Move fallback island.  The VM must consume the
+    /// source aggregate and fallback register and may not clone either
+    /// payload; Copy receipts keep the historical read-only behavior.
+    pub consuming: bool,
 }
 
 /// One canonical record field projection in the bytecode physical contract.

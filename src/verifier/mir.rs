@@ -3043,7 +3043,11 @@ fn eval_materialized_variant_projection_fallback_call(
                 .into(),
         );
     }
-    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if contract.projection.ownership == MirOwnership::Move {
+        catalog.validate_move_owned_payload(&type_arguments[0])?;
+    } else {
+        catalog.validate_scalar_generic_arguments(type_arguments)?;
+    }
     let target = program.functions().get(target_owner).ok_or_else(|| {
         format!(
             "MIR verifier generic variant fallback projection target '{}' is absent",
@@ -3132,8 +3136,20 @@ fn eval_materialized_variant_projection_fallback_call(
         (SymbolicValue::Bool(selected), SymbolicValue::Bool(fallback)) => {
             SymbolicValue::Bool(active_some.ite(&selected, &fallback))
         }
+        (
+            SymbolicValue::List { length: selected },
+            SymbolicValue::List { length: fallback },
+        ) if contract.projection.ownership == MirOwnership::Move => SymbolicValue::List {
+            length: active_some.ite(&selected, &fallback),
+        },
+        (
+            SymbolicValue::Opaque { ty: selected },
+            SymbolicValue::Opaque { ty: fallback },
+        ) if selected == fallback && contract.projection.ownership == MirOwnership::Move => {
+            SymbolicValue::Opaque { ty: selected }
+        }
         _ => return Err(
-            "MIR verifier generic variant fallback projection values disagree with Copy scalar ABI"
+            "MIR verifier generic variant fallback projection values disagree with the canonical ABI"
                 .into(),
         ),
     };

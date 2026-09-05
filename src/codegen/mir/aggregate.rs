@@ -721,9 +721,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
-    /// Read the canonical `Ok` payload or select the explicit fallback value
-    /// for `Err`. The TypeDesc receipt proves both variant identities and the
-    /// scalar ABI before native LLVM sees the aggregate.
+    /// Read the canonical `Ok` payload or select/consume the explicit fallback
+    /// value for the alternate variant. The TypeDesc receipt proves both
+    /// variant identities, ABI, and ownership before native LLVM sees the
+    /// aggregate.
     pub(super) fn emit_variant_project_or(
         &mut self,
         result: &MirValueId,
@@ -750,7 +751,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 receipt,
             )
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &base_ty, false)?;
+        let (variant_abi, _) = native_variant_abi(
+            self.program.type_catalog(),
+            &base_ty,
+            receipt.projection.ownership == MirOwnership::Move,
+        )?;
         let payload_slot = variant_abi
             .payload_slot(&receipt.projection.variant)
             .ok_or_else(|| {
@@ -822,6 +827,128 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let fallback_value = self.value(fallback, subject)?;
+        if receipt.projection.ownership == MirOwnership::Move {
+            // The managed fallback is a consuming operation: whichever arm
+            // wins owns the result, while the inactive fallback must be
+            // dropped on the Some path.  A select would copy the pointer
+            // fields of an owned String/List and violate the glue contract.
+            let merge = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_project_or_move_merge");
+            let active = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_project_or_move_active");
+            let alternate = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_project_or_move_alternate");
+            let invalid = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_project_or_move_invalid");
+            let aggregate = self.value(base, subject)?.into_struct_value();
+            let tag = self
+                .generator
+                .builder
+                .build_extract_value(
+                    aggregate,
+                    variant_abi.tag_field,
+                    "mir_variant_project_or_move_tag",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_int_value();
+            let active_ok = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(receipt.discriminant), false),
+                    "mir_variant_project_or_move_is_some",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let alternate_tag = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.generator
+                        .context
+                        .i8_type()
+                        .const_int(u64::from(receipt.fallback_discriminant), false),
+                    "mir_variant_project_or_move_is_none",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let check_alternate = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_variant_project_or_move_check_none");
+            self.generator
+                .builder
+                .build_conditional_branch(active_ok, active, check_alternate)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator.builder.position_at_end(check_alternate);
+            self.generator
+                .builder
+                .build_conditional_branch(alternate_tag, alternate, invalid)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+            self.generator.builder.position_at_end(active);
+            let projected = self
+                .generator
+                .builder
+                .build_extract_value(
+                    aggregate,
+                    payload_slot.physical_field,
+                    "mir_variant_project_or_move_payload",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_drop_value(fallback_value, &fallback_ty, subject)?;
+            let active_block = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject, "managed fallback active block is absent")
+            })?;
+            self.generator
+                .builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+            self.generator.builder.position_at_end(alternate);
+            let alternate_block = self.generator.builder.get_insert_block().ok_or_else(|| {
+                NativeMirError::new(subject, "managed fallback alternate block is absent")
+            })?;
+            self.generator
+                .builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+            self.generator.builder.position_at_end(invalid);
+            self.emit_abort_with_message(
+                &format!(
+                    "[{}] canonical MIR variant fallback expected '{}' or '{}'",
+                    crate::core::mir::types::MIR_VARIANT_PROJECTION_TRAP_CODE,
+                    receipt.variant_name,
+                    receipt.fallback_variant_name,
+                ),
+                subject,
+            )?;
+            self.generator.builder.position_at_end(merge);
+            let phi = self
+                .generator
+                .builder
+                .build_phi(projected.get_type(), "mir_variant_project_or_move_result")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            phi.add_incoming(&[
+                (&projected, active_block),
+                (&fallback_value, alternate_block),
+            ]);
+            return Ok(phi.as_basic_value());
+        }
         self.generator
             .builder
             .build_select(

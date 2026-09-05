@@ -1,0 +1,12 @@
+// Managed fallback admission is deliberately closed to the proven String and
+// List<Copy scalar> payload families; nested aggregates remain fail-closed.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    let value: Option<(string, i32)> = Some(("owned", 41))
+    let out = unwrap_or(value, ("fallback", 7))
+    drop(out)
+    0
+}

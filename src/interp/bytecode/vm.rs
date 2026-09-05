@@ -2951,6 +2951,83 @@ impl BytecodeVM {
                                 "variant projection fallback: canonical operation has no receipt",
                             )
                         })?;
+                    if shape.consuming {
+                        let (nominal, variant, tag, arity) = match self.get_reg(ra) {
+                            Value::CanonicalVariant {
+                                nominal,
+                                variant,
+                                tag,
+                                payload,
+                            } => (nominal.clone(), variant.clone(), tag.clone(), payload.len()),
+                            _ => {
+                                return Err(InterpError::new(
+                                    "consuming variant projection fallback: expected canonical Variant source",
+                                ))
+                            }
+                        };
+                        if nominal != shape.nominal {
+                            return Err(InterpError::new(
+                                "consuming variant projection fallback: runtime nominal disagrees with receipt",
+                            ));
+                        }
+                        let output = if variant == shape.variant {
+                            if tag != shape.variant_name {
+                                return Err(InterpError::new(
+                                    "consuming variant projection fallback: selected tag disagrees with receipt",
+                                ));
+                            }
+                            if arity != shape.arity as usize {
+                                return Err(InterpError::new(
+                                    "consuming variant projection fallback: selected payload arity disagrees with receipt",
+                                ));
+                            }
+                            let source = {
+                                let frame = self.cur_frame_mut();
+                                std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                            };
+                            let fallback = {
+                                let frame = self.cur_frame_mut();
+                                std::mem::replace(&mut frame.regs[rb as usize], Value::Unit)
+                            };
+                            drop(fallback);
+                            match source {
+                                Value::CanonicalVariant { mut payload, .. } => std::mem::replace(
+                                    &mut payload[shape.field_index as usize],
+                                    Value::Unit,
+                                ),
+                                _ => unreachable!(
+                                    "variant source changed during consuming projection"
+                                ),
+                            }
+                        } else if variant == shape.fallback_variant {
+                            if tag != shape.fallback_variant_name {
+                                return Err(InterpError::new(
+                                    "consuming variant projection fallback: alternate tag disagrees with receipt",
+                                ));
+                            }
+                            if arity != shape.fallback_arity as usize {
+                                return Err(InterpError::new(
+                                    "consuming variant projection fallback: alternate payload arity disagrees with receipt",
+                                ));
+                            }
+                            let source = {
+                                let frame = self.cur_frame_mut();
+                                std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                            };
+                            drop(source);
+                            let fallback = {
+                                let frame = self.cur_frame_mut();
+                                std::mem::replace(&mut frame.regs[rb as usize], Value::Unit)
+                            };
+                            fallback
+                        } else {
+                            return Err(InterpError::new(
+                                "consuming variant projection fallback: runtime variant disagrees with receipt",
+                            ));
+                        };
+                        self.set_reg(rd, output);
+                        continue;
+                    }
                     let value = self.get_reg(ra).clone();
                     let fallback = self.get_reg(rb).clone();
                     let (nominal, variant, tag, payload) =
