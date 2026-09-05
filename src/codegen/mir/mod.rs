@@ -4269,6 +4269,46 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_owned_generic_record_update_with_copy_residual() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_owned_copy_residual.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                )
+            })
+            .expect("mixed owned generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.residual.len() == 1
+                    && contract.residual[0].glue
+                        == crate::core::mir::types::MirGlueKind::Noop
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference mixed owned update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_update_owned_copy_residual",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native mixed owned update must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native mixed owned update module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_three_field_generic_record_tail_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_three_field_tail.mimi"

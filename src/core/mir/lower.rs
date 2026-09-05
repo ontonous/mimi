@@ -1552,14 +1552,24 @@ fn materialize_generic_instance(
         && type_catalog.validate_owned_string(&concrete).is_ok();
     let is_owned_record_update = generic_record_facade
         && is_owned_generic_record_update_callable(program, callable)
-        && type_catalog.validate_owned_string(&concrete).is_ok();
+        && type_catalog
+            .validate_owned_record_update_generic_argument(&concrete)
+            .is_ok();
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
                 catalog.validate_generic_identity_arguments(arguments)
+            } else if is_owned_record_update {
+                if arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic record update contract requires one type argument, got {}",
+                        arguments.len()
+                    ))
+                } else {
+                    catalog.validate_owned_record_update_generic_argument(&arguments[0])
+                }
             } else if is_owned_record_projection_drop
                 || is_owned_record_projection
-                || is_owned_record_update
                 || is_owned_variant_projection
             {
                 if arguments.len() != 1 {

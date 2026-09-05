@@ -1555,8 +1555,7 @@ fn validate_instance_table(
                     ))
                 } else {
                     type_catalog
-                        .validate_move_owned_payload(&instance.arguments[0])
-                        .map(|_| ())
+                        .validate_owned_record_update_generic_argument(&instance.arguments[0])
                 }
             }
             MirGenericInstanceContract::ScalarVariantPredicate { .. } => {

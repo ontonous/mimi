@@ -3060,9 +3060,12 @@ impl<'a> ScalarCollectionValidator<'a> {
                     instance.arguments.len()
                 ));
             } else if let Err(message) = match instance.contract {
+                MirGenericInstanceContract::OwnedRecordUpdate { .. } => self
+                    .program
+                    .type_catalog()
+                    .validate_owned_record_update_generic_argument(&instance.arguments[0]),
                 MirGenericInstanceContract::OwnedRecordProjection { .. }
-                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
-                | MirGenericInstanceContract::OwnedRecordUpdate { .. } => self
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => self
                     .program
                     .type_catalog()
                     .validate_move_owned_payload(&instance.arguments[0])

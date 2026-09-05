@@ -4310,7 +4310,7 @@ fn eval_materialized_owned_record_update_call(
     if type_arguments.len() != 1 {
         return Err("MIR verifier owned record update requires one type argument".into());
     }
-    catalog.validate_move_owned_payload(&type_arguments[0])?;
+    catalog.validate_owned_record_update_generic_argument(&type_arguments[0])?;
     if arguments.len() != 1 || target.parameters.len() != 1 {
         return Err("MIR verifier owned record update call requires one argument".into());
     }

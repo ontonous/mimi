@@ -1,0 +1,13 @@
+// S174 positive: the owned String override coexists with a Copy residual T.
+type Patch<T> { value: T, label: string }
+
+func replace<T>(patch: Patch<T>) -> Patch<T> {
+    Patch { label: "replaced", ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = Patch { value: 41, label: "old" }
+    let updated = replace(patch)
+    updated.value
+}

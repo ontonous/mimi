@@ -102,7 +102,7 @@ impl<'a> CapabilityGate<'a> {
                         if let Err(message) = self
                             .program
                             .type_catalog()
-                            .validate_move_owned_payload(concrete)
+                            .validate_owned_record_update_generic_argument(concrete)
                         {
                             self.error(format!(
                                 "instance '{}' owned record update argument is unsupported: {message}",

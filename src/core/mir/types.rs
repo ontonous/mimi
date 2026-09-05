@@ -3352,6 +3352,25 @@ impl MirTypeCatalog {
         Ok(MirGlueKind::List)
     }
 
+    /// Validate the concrete generic argument of the bounded owned-record
+    /// update island. The record itself is Move-owned because at least one
+    /// field is managed, but its generic residual may be either an admitted
+    /// Copy scalar or the existing owned String payload. The receipt carries
+    /// the exact residual glue; callers must not infer this distinction from
+    /// the aggregate ABI.
+    pub fn validate_owned_record_update_generic_argument(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        if self.validate_copy_scalar(ty).is_ok() || self.validate_owned_string(ty).is_ok() {
+            return Ok(());
+        }
+        Err(format!(
+            "type '{}' is neither a canonical Copy scalar nor an owned String payload for generic record update",
+            ty.as_str()
+        ))
+    }
+
     /// Validate the complete move-owned List payload contract used by tagged
     /// variant projections.  Keeping this as a named TypeDesc boundary makes
     /// the admitted scalar family explicit: List handles are Move-owned, all

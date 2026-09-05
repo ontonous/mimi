@@ -1,0 +1,14 @@
+// S174 negative: f64 is outside the admitted mixed owned-update scalar ABI.
+type Patch<T> { value: T, label: string }
+
+func replace<T>(patch: Patch<T>) -> Patch<T> {
+    Patch { label: "replaced", ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = Patch { value: 41.0, label: "old" }
+    let updated = replace(patch)
+    drop(updated)
+    41
+}
