@@ -132,6 +132,7 @@ fn lower_body_impl(
     let function = MirFunction {
         owner: body.owner.clone(),
         parameters,
+        parameter_permissions: None,
         result: body.root.ty.clone(),
         entry: entry.clone(),
         values: lowerer.values,
@@ -159,6 +160,14 @@ pub fn lower_callable(
     callable: &crate::core::ResolvedCallable,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body(&callable.body)?;
+    function.parameter_permissions = Some(
+        callable
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.permission)
+            .collect(),
+    );
     function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.ownership = ownership_summary(&callable.resources);
     function.validate().map_err(|errors| {
@@ -196,6 +205,14 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions(
         Some(type_catalog),
         call_parameter_permissions,
     )?;
+    function.parameter_permissions = Some(
+        callable
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.permission)
+            .collect(),
+    );
     function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.ownership = ownership_summary(&callable.resources);
     function.validate().map_err(|errors| {

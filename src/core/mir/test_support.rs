@@ -95,6 +95,7 @@ pub(crate) fn direct_variant_projection_fixture() -> DirectVariantProjectionFixt
         MirFunction {
             owner: NodeId("function:project".into()),
             parameters: vec![input.clone()],
+            parameter_permissions: None,
             result: result_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([
@@ -230,6 +231,7 @@ pub(crate) fn direct_variant_move_projection_fixture() -> DirectVariantMoveProje
         MirFunction {
             owner: NodeId("function:project".into()),
             parameters: vec![input.clone()],
+            parameter_permissions: None,
             result: result_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([
@@ -344,6 +346,7 @@ pub(crate) fn direct_record_move_drop_fixture() -> DirectRecordMoveDropFixture {
         MirFunction {
             owner: NodeId("function:project".into()),
             parameters: vec![input.clone()],
+            parameter_permissions: None,
             result: result_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([
@@ -480,6 +483,7 @@ pub(crate) fn direct_enum_switch_move_fixture() -> DirectEnumSwitchMoveFixture {
         MirFunction {
             owner: NodeId("function:take".into()),
             parameters: vec![input.clone()],
+            parameter_permissions: None,
             result: result_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([
@@ -658,6 +662,7 @@ pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitch
         MirFunction {
             owner: NodeId("function:take_signal".into()),
             parameters: vec![input.clone()],
+            parameter_permissions: None,
             result: result_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([
@@ -805,6 +810,7 @@ pub(crate) fn direct_flat_copy_enum_construct_fixture() -> DirectFlatCopyEnumCon
         MirFunction {
             owner: owner.clone(),
             parameters: Vec::new(),
+            parameter_permissions: None,
             result: switch.source_ty.clone(),
             entry: entry.clone(),
             values: BTreeMap::from([

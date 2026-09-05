@@ -715,6 +715,10 @@ pub struct MirBlock {
 pub struct MirFunction {
     pub owner: NodeId,
     pub parameters: Vec<MirValueId>,
+    /// Checker-owned parameter directions in declaration order. `Some` is
+    /// required for production MIR; `None` is reserved for hand-built
+    /// structural fixtures that do not carry a callable signature.
+    pub parameter_permissions: Option<Vec<Option<crate::core::ir::Permission>>>,
     pub result: ResolvedTypeId,
     pub entry: MirBlockId,
     pub values: BTreeMap<MirValueId, MirValue>,
@@ -887,6 +891,21 @@ impl MirFunction {
                 .join(", "),
             self.entry
         );
+        if let Some(permissions) = &self.parameter_permissions {
+            let _ = writeln!(
+                output,
+                "  param_permissions [{}]",
+                permissions
+                    .iter()
+                    .map(|permission| match permission {
+                        Some(crate::core::ir::Permission::View) => "view",
+                        Some(crate::core::ir::Permission::Mutate) => "mutate",
+                        Some(crate::core::ir::Permission::Consume) | None => "consume",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         for (id, value) in &self.values {
             let _ = writeln!(output, "  value {}: {}", id, value.ty.as_str());
         }
@@ -2569,6 +2588,18 @@ impl<'a> MirValidator<'a> {
         }
         let mut parameters = BTreeSet::new();
         let function_parameters = self.function.parameters.clone();
+        if let Some(permissions) = &self.function.parameter_permissions {
+            if permissions.len() != function_parameters.len() {
+                self.error(
+                    "function",
+                    format!(
+                        "parameter permission count {} disagrees with parameter count {}",
+                        permissions.len(),
+                        function_parameters.len()
+                    ),
+                );
+            }
+        }
         for parameter in &function_parameters {
             if !parameters.insert(parameter) {
                 self.error(parameter.to_string(), "function parameter is duplicated");

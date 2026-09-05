@@ -2008,6 +2008,13 @@ fn validate_call_graph(
                         });
                     }
                 }
+                errors.extend(validate_call_argument_directions(
+                    function,
+                    target,
+                    arguments,
+                    type_catalog,
+                    &instruction.id.to_string(),
+                ));
 
                 if let Some(result) = result {
                     let Some(result_value) = function.values.get(result) else {
@@ -2033,6 +2040,157 @@ fn validate_call_graph(
                     }
                 }
             }
+        }
+    }
+    errors
+}
+
+/// Validate the ownership direction of each ordinary call argument against
+/// the callee's checker-owned parameter permissions.  The argument producer
+/// is a canonical MIR operation: a local passed to an owned managed parameter
+/// must arrive through `Move`, while a borrowed parameter must not arrive
+/// through a consuming producer.  Fresh rvalues are allowed for either mode
+/// because they have no caller-owned identity to consume.  Missing permission
+/// metadata or an unknown producer is a stable pre-consumer error for managed
+/// values rather than an inferred borrow/ABI fallback.
+fn validate_call_argument_directions(
+    caller: &MirFunction,
+    callee: &MirFunction,
+    arguments: &[MirValueId],
+    type_catalog: &MirTypeCatalog,
+    subject: &str,
+) -> Vec<super::MirValidationError> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Producer {
+        Move,
+        Clone,
+        Fresh,
+        Unknown,
+    }
+
+    let producer_of = |value: &MirValueId| {
+        caller
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| {
+                let (result, producer) = match &instruction.kind {
+                    super::MirInstructionKind::Move { result, .. }
+                    | super::MirInstructionKind::MoveProject { result, .. }
+                    | super::MirInstructionKind::MoveProjectDrop { result, .. }
+                    | super::MirInstructionKind::VariantProjectMove { result, .. } => {
+                        (result, Producer::Move)
+                    }
+                    super::MirInstructionKind::Clone { result, .. } => (result, Producer::Clone),
+                    super::MirInstructionKind::Copy { result, .. }
+                    | super::MirInstructionKind::Const { result, .. }
+                    | super::MirInstructionKind::Load { result, .. }
+                    | super::MirInstructionKind::Borrow { result, .. }
+                    | super::MirInstructionKind::Project { result, .. }
+                    | super::MirInstructionKind::VariantProject { result, .. }
+                    | super::MirInstructionKind::VariantProjectOr { result, .. }
+                    | super::MirInstructionKind::Construct { result, .. }
+                    | super::MirInstructionKind::ConstructList { result, .. }
+                    | super::MirInstructionKind::ListOp { result, .. }
+                    | super::MirInstructionKind::VariantPredicate { result, .. }
+                    | super::MirInstructionKind::ConstructSet { result, .. }
+                    | super::MirInstructionKind::SetOp { result, .. }
+                    | super::MirInstructionKind::UpdateRecord { result, .. }
+                    | super::MirInstructionKind::Binary { result, .. }
+                    | super::MirInstructionKind::Unary { result, .. }
+                    | super::MirInstructionKind::Call {
+                        result: Some(result),
+                        ..
+                    }
+                    | super::MirInstructionKind::FlowTransition { result, .. }
+                    | super::MirInstructionKind::BuiltinCall { result, .. }
+                    | super::MirInstructionKind::Convert { result, .. }
+                    | super::MirInstructionKind::ConstructVariant { result, .. }
+                    | super::MirInstructionKind::ConstructVariantMove { result, .. } => {
+                        (result, Producer::Fresh)
+                    }
+                    super::MirInstructionKind::Call { result: None, .. }
+                    | super::MirInstructionKind::Drop { .. }
+                    | super::MirInstructionKind::EndBorrow { .. }
+                    | super::MirInstructionKind::Nop => return None,
+                };
+                (result == value).then_some(producer)
+            })
+            .or_else(|| {
+                callee
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter == value)
+                    .then_some(Producer::Fresh)
+            })
+            .unwrap_or(Producer::Unknown)
+    };
+
+    let mut errors = Vec::new();
+    let Some(permissions) = callee.parameter_permissions.as_ref() else {
+        if arguments.iter().any(|argument| {
+            caller
+                .values
+                .get(argument)
+                .and_then(|value| type_catalog.get(&value.ty))
+                .is_some_and(|descriptor| descriptor.ownership.needs_drop())
+        }) {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message: format!(
+                    "callee '{}' has no canonical parameter direction receipt for managed arguments",
+                    callee.owner.0
+                ),
+            });
+        }
+        return errors;
+    };
+    if permissions.len() != callee.parameters.len() {
+        errors.push(super::MirValidationError {
+            subject: subject.into(),
+            message: format!(
+                "callee '{}' parameter direction receipt has {} entries but its signature has {} parameters",
+                callee.owner.0,
+                permissions.len(),
+                callee.parameters.len()
+            ),
+        });
+        return errors;
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(permission) = permissions.get(index) else {
+            continue;
+        };
+        let Some(value) = caller.values.get(argument) else {
+            continue;
+        };
+        let managed = type_catalog
+            .get(&value.ty)
+            .is_some_and(|descriptor| descriptor.ownership.needs_drop());
+        if !managed {
+            continue;
+        }
+        let producer = producer_of(argument);
+        let borrowed = matches!(
+            permission,
+            Some(crate::core::ir::Permission::View | crate::core::ir::Permission::Mutate)
+        );
+        if borrowed && producer == Producer::Move {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message: format!(
+                    "borrowed call argument {index} for '{}' arrives through a consuming Move",
+                    callee.owner.0
+                ),
+            });
+        } else if !borrowed && matches!(producer, Producer::Clone | Producer::Unknown) {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message: format!(
+                    "owned call argument {index} for '{}' lacks a canonical Move producer",
+                    callee.owner.0
+                ),
+            });
         }
     }
     errors

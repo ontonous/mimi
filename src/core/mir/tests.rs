@@ -2045,6 +2045,7 @@ fn fixture() -> MirFunction {
     MirFunction {
         owner: NodeId("func:test".into()),
         parameters: vec![arg.clone()],
+        parameter_permissions: None,
         result: i64_ty.clone(),
         entry: entry.clone(),
         values,
@@ -2881,6 +2882,61 @@ func main() -> i32 {
         "view parameter must not consume the source local"
     );
     assert!(call_point.as_str().starts_with("inst:call:"));
+}
+
+#[test]
+fn owned_call_direction_receipt_rejects_a_forged_clone() {
+    let source = r#"
+func take(value: Option<string>) -> i32 {
+    drop(value)
+    41
+}
+func main() -> i32 {
+    let value = Some("owned")
+    take(value)
+}
+"#;
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("concrete owned call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = canonical
+        .functions()
+        .get(&owner)
+        .cloned()
+        .expect("main MIR");
+    let call_argument = forged
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call { arguments, .. } => arguments.first().cloned(),
+            _ => None,
+        })
+        .expect("direct call argument");
+    for block in forged.blocks.values_mut() {
+        for instruction in &mut block.instructions {
+            if let MirInstructionKind::Move { result, source } = &instruction.kind {
+                if result == &call_argument {
+                    instruction.kind = MirInstructionKind::Clone {
+                        result: result.clone(),
+                        source: source.clone(),
+                    };
+                }
+            }
+        }
+    }
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            BTreeMap::from([(owner, forged)]),
+            canonical.type_catalog().clone(),
+            BTreeMap::new(),
+            canonical.transitions().clone(),
+        )
+        .expect_err("owned call Clone must fail the direction receipt");
+    assert!(errors
+        .iter()
+        .any(|error| { error.message.contains("lacks a canonical Move producer") }));
 }
 
 #[test]
