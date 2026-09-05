@@ -1991,6 +1991,11 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
+        for message in crate::core::mir::validate_protocol_method_abi(
+            callee, function, target, result, arguments,
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
         if arguments.len() != target.parameters.len() {
             self.errors.push(NativeMirError::new(
                 subject,

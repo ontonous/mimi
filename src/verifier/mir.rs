@@ -2528,17 +2528,29 @@ fn eval_materialized_call(
     if let Err(message) = crate::core::mir::validate_protocol_method_identity(callee) {
         return Err(format!("MIR verifier {message}"));
     }
+    let target = program.functions().get(&target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier direct call target '{}' is absent from canonical MIR",
+            target_owner.0
+        )
+    })?;
+    if let Some(message) = crate::core::mir::validate_protocol_method_abi(
+        callee,
+        function,
+        target,
+        result.as_ref(),
+        arguments,
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(format!("MIR verifier {message}"));
+    }
     let Some(instance) = program
         .instances()
         .values()
         .find(|instance| instance.function == target_owner)
     else {
-        let target = program.functions().get(&target_owner).ok_or_else(|| {
-            format!(
-                "MIR verifier direct call target '{}' is absent from canonical MIR",
-                target_owner.0
-            )
-        })?;
         if catalog.validate_owned_string(&target.result).is_ok() {
             return eval_direct_owned_string_call(
                 function,

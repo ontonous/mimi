@@ -1811,53 +1811,17 @@ fn validate_call_graph(
                 // identity.  Prove the complete TypeDesc/ABI boundary once at
                 // the canonical program gate so no consumer can silently
                 // reinterpret a receiver or drop an argument.
-                if matches!(callee, ResolvedCallee::ProtocolMethod { .. }) {
-                    if arguments.len() != target.parameters.len() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message:
-                                "protocol method call arity disagrees with canonical method ABI"
-                                    .into(),
-                        });
-                    }
-                    for (index, (argument, parameter)) in
-                        arguments.iter().zip(&target.parameters).enumerate()
-                    {
-                        let Some(argument_value) = function.values.get(argument) else {
-                            continue;
-                        };
-                        let Some(parameter_value) = target.values.get(parameter) else {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: format!(
-                                    "protocol method parameter {} has no canonical TypeDesc",
-                                    index
-                                ),
-                            });
-                            continue;
-                        };
-                        if argument_value.ty != parameter_value.ty {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: format!(
-                                    "protocol method argument {} TypeDesc disagrees with canonical method ABI",
-                                    index
-                                ),
-                            });
-                        }
-                    }
-                    if let Some(result) = result {
-                        if function
-                            .values
-                            .get(result)
-                            .is_none_or(|value| value.ty != target.result)
-                        {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: "protocol method result TypeDesc disagrees with canonical method ABI".into(),
-                            });
-                        }
-                    }
+                for message in super::validate_protocol_method_abi(
+                    callee,
+                    function,
+                    target,
+                    result.as_ref(),
+                    arguments,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message,
+                    });
                 }
 
                 let target_parameter_types = target

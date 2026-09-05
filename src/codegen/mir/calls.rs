@@ -737,6 +737,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 format!("callee '{}' is absent from MIR program", owner.0),
             )
         })?;
+        if let Some(message) = crate::core::mir::validate_protocol_method_abi(
+            callee,
+            self.function,
+            target,
+            result,
+            arguments,
+        )
+        .into_iter()
+        .next()
+        {
+            return Err(NativeMirError::new(subject, message));
+        }
         let parameter_types = target
             .parameters
             .iter()

@@ -78,6 +78,62 @@ pub(crate) fn validate_protocol_method_identity(callee: &ResolvedCallee) -> Resu
     Ok(())
 }
 
+/// Validate the TypeDesc/ABI edge for a checker-resolved protocol method.
+///
+/// This is intentionally a MIR-only helper shared by the canonical program
+/// gate and every backend adapter.  A protocol dispatch node retains its
+/// checker-owned `ProtocolMethod` identity, but its executable owner is a
+/// concrete MIR function; this predicate proves that the caller's argument
+/// and result values still match that owner's signature.  The helper does not
+/// inspect a surface callable, infer a type, or reinterpret a backend value.
+/// Non-protocol calls return no errors so their existing ordinary-call
+/// contract remains unchanged.
+pub(crate) fn validate_protocol_method_abi(
+    callee: &ResolvedCallee,
+    caller: &MirFunction,
+    target: &MirFunction,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+) -> Vec<String> {
+    if !matches!(callee, ResolvedCallee::ProtocolMethod { .. }) {
+        return Vec::new();
+    }
+
+    let mut errors = Vec::new();
+    if arguments.len() != target.parameters.len() {
+        errors.push("protocol method call arity disagrees with canonical method ABI".into());
+    }
+    for (index, (argument, parameter)) in arguments.iter().zip(&target.parameters).enumerate() {
+        let Some(argument_value) = caller.values.get(argument) else {
+            continue;
+        };
+        let Some(parameter_value) = target.values.get(parameter) else {
+            errors.push(format!(
+                "protocol method parameter {} has no canonical TypeDesc",
+                index
+            ));
+            continue;
+        };
+        if argument_value.ty != parameter_value.ty {
+            errors.push(format!(
+                "protocol method argument {} TypeDesc disagrees with canonical method ABI",
+                index
+            ));
+        }
+    }
+    if let Some(result) = result {
+        if caller
+            .values
+            .get(result)
+            .is_none_or(|value| value.ty != target.result)
+        {
+            errors
+                .push("protocol method result TypeDesc disagrees with canonical method ABI".into());
+        }
+    }
+    errors
+}
+
 mod contracts;
 mod copy_option_island;
 mod copy_result_island;

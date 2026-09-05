@@ -838,6 +838,66 @@ fn protocol_method_argument_typedesc_drift_is_rejected_before_consumers() {
 }
 
 #[test]
+fn protocol_method_abi_contract_is_shared_and_rejects_arity_drift() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_protocol_method.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("protocol method must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let caller = program.functions().get(&owner).expect("main MIR");
+    let (callee, arguments, result) = caller
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method },
+                arguments,
+                result,
+                ..
+            } => Some((
+                crate::core::ir::ResolvedCallee::ProtocolMethod {
+                    protocol: protocol.clone(),
+                    method: method.clone(),
+                },
+                arguments.clone(),
+                result.clone(),
+            )),
+            _ => None,
+        })
+        .expect("ProtocolMethod MIR call");
+    let target_owner = crate::core::mir::canonical_protocol_call_target(&callee)
+        .expect("ProtocolMethod has canonical target");
+    let target = program
+        .functions()
+        .get(&target_owner)
+        .expect("protocol method target MIR");
+    assert!(crate::core::mir::validate_protocol_method_abi(
+        &callee,
+        caller,
+        target,
+        result.as_ref(),
+        &arguments,
+    )
+    .is_empty());
+
+    let mut malformed_arguments = arguments;
+    malformed_arguments.pop();
+    let errors = crate::core::mir::validate_protocol_method_abi(
+        &callee,
+        caller,
+        target,
+        result.as_ref(),
+        &malformed_arguments,
+    );
+    assert_eq!(
+        errors,
+        vec!["protocol method call arity disagrees with canonical method ABI"]
+    );
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
