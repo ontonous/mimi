@@ -8051,7 +8051,7 @@ mod tests {
     }
 
     #[test]
-    fn five_field_generic_record_projection_fails_closed() {
+    fn six_field_generic_record_projection_fails_closed() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"
         );
@@ -8059,7 +8059,7 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("five-field generic record projection must remain fail-closed");
+            .expect_err("six-field generic record projection must remain fail-closed");
         match error {
             MirProgramBuildError::Lowering(errors) => assert!(
                 errors
@@ -8117,6 +8117,56 @@ mod tests {
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference four-field generic record projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn concrete_five_field_generic_record_projection_executes_with_copy_residuals() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_five_field.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("five-field generic record projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("five-field generic record projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("five-field generic record projection must carry a record receipt");
+        };
+        assert_eq!(contract.arity, 5);
+        assert_eq!(contract.name, "value");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("five-field generic record projection target");
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("five-field record projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("five-field record projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 5
+                    && fields[0].ty == contract.field_ty
+                    && fields[1].ty != contract.field_ty
+                    && fields[2].ty != contract.field_ty
+                    && fields[3].ty != contract.field_ty
+                    && fields[4].ty != contract.field_ty
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference five-field generic record projection execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
     }
 

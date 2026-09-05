@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// five-field Record<T>; all fixed siblings remain Copy and retain their ABI slots.
+type Penta<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32 }
+
+func get_value<T>(penta: Penta<T>) -> T {
+    penta.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let penta = Penta { value: 41, tag: 7, enabled: true, extra: 9, tail: 11 }
+    let picked = get_value(penta)
+    picked
+}

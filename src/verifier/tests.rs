@@ -2017,6 +2017,47 @@ fn four_field_generic_record_projection_is_consumed_by_mir_verifier() {
 }
 
 #[test]
+fn five_field_generic_record_projection_is_consumed_by_mir_verifier() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_record_projection_five_field.mimi");
+    let file =
+        parse_memory_source(source, "mir-generic-record-projection-five-field").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("five-field generic record projection MIR");
+    let instance = canonical
+        .instances()
+        .values()
+        .next()
+        .expect("five-field generic record projection instance");
+    assert!(matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+            ref contract
+        } if contract.arity == 5 && contract.name == "value"
+    ));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("five-field generic record projection verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn three_field_generic_record_tail_projection_preserves_field_index_in_verifier() {
     require_z3!();
     let source = include_str!(

@@ -5595,6 +5595,40 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_five_field_generic_record_projection_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_five_field.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("five-field generic record projection MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("five-field generic record projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 5 && contract.name == "value"
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference five-field generic record projection execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("five-field generic record projection bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("five-field generic record projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
     fn executes_materialized_generic_record_update_without_ast() {
         let source = include_str!("../../../tests/fixtures/mir_native_generic_record_update.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");
