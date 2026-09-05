@@ -678,6 +678,7 @@ impl<'a> FunctionEmitter<'a> {
                 type_arguments,
                 arguments,
                 variant_call_contract,
+                ..
             } => self.emit_call(
                 result.as_ref(),
                 callee,

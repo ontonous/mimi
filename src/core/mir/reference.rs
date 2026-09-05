@@ -331,6 +331,10 @@ impl MirProgram {
             errors.extend(validate_linear_consumption(function, &type_catalog));
             errors.extend(validate_borrow_usage(function));
             errors.extend(super::validate_ownership_event_receipts(function));
+            errors.extend(super::validate_call_effect_receipts(
+                function,
+                &type_catalog,
+            ));
             errors.extend(super::validate_transfer_event_boundaries(
                 function,
                 &transitions,
@@ -1772,6 +1776,7 @@ fn validate_call_graph(
                     type_arguments,
                     arguments,
                     variant_call_contract,
+                    ..
                 } = &instruction.kind
                 else {
                     continue;
@@ -4469,6 +4474,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 type_arguments,
                 arguments,
                 variant_call_contract,
+                ..
             } => {
                 let ResolvedCallee::Function(owner) = callee else {
                     return Err(self.error(

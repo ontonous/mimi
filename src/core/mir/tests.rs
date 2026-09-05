@@ -424,6 +424,97 @@ fn rejects_forged_session_recv_result_receipt_before_consumers() {
 }
 
 #[test]
+fn ordinary_session_call_materializes_transfer_effect_receipt() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_call_transfer.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("ordinary SessionChan call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:forward".into());
+    let function = program.functions().get(&owner).expect("forward MIR");
+    let (argument, receipts) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                arguments,
+                effect_receipts,
+                ..
+            } if callee.0 == "function:pass" => {
+                Some((arguments[0].clone(), effect_receipts.clone()))
+            }
+            _ => None,
+        })
+        .expect("ordinary SessionChan call");
+    assert_eq!(receipts.len(), 1);
+    let receipt = &receipts[0];
+    assert_eq!(receipt.argument_index, 0);
+    assert_eq!(
+        receipt.kind,
+        crate::core::mir::types::MirCallEffectKind::TransferSession
+    );
+    assert_eq!(
+        receipt.argument_ty,
+        function.values.get(&argument).expect("call argument").ty
+    );
+    program
+        .type_catalog()
+        .validate_session_channel(&receipt.argument_ty)
+        .expect("receipt argument TypeDesc");
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &owner,
+            &[crate::core::mir::reference::MirRuntimeValue::Int(29)],
+        )
+        .expect("reference ordinary SessionChan call");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(29));
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume the canonical call receipt");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume the canonical call receipt");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier must consume the canonical call receipt");
+}
+
+#[test]
+fn missing_session_call_transfer_receipt_is_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_call_transfer.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("ordinary SessionChan call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:forward".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("forward MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+        .expect("ordinary SessionChan call");
+    let MirInstructionKind::Call {
+        effect_receipts, ..
+    } = &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    effect_receipts.clear();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("missing SessionChan call receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("SessionChan call argument 0 has no canonical TransferSession effect receipt")
+    }));
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

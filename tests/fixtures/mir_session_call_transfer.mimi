@@ -1,0 +1,13 @@
+session Forward = end
+
+func pass(ch: SessionChan<Forward>) -> SessionChan<Forward> {
+    ch
+}
+
+func forward(ch: SessionChan<Forward>) -> SessionChan<Forward> {
+    pass(ch)
+}
+
+func main() -> i32 {
+    0
+}

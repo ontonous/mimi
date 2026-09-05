@@ -557,6 +557,25 @@ pub struct MirSessionCallContract {
     pub terminal: bool,
 }
 
+/// Closed effect family for ordinary MIR calls that transfer a linear
+/// SessionChan argument.  A direct call is otherwise an ABI-only boundary;
+/// this receipt makes the checker-owned ownership effect explicit so no
+/// consumer can infer a channel transfer from an opaque handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirCallEffectKind {
+    TransferSession,
+}
+
+/// TypeDesc/argument identity receipt for one ordinary-call effect.  The
+/// argument index is in checker-finalized parameter order and `argument_ty`
+/// must match the MIR value at that index exactly.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirCallEffectContract {
+    pub kind: MirCallEffectKind,
+    pub argument_index: usize,
+    pub argument_ty: ResolvedTypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirTypeKind {
     Primitive(PrimitiveType),
@@ -2796,6 +2815,21 @@ impl MirTypeCatalog {
             ));
         }
         Ok(())
+    }
+
+    /// Validate the TypeDesc side of an ordinary-call effect receipt. The
+    /// argument index/value identity is checked by the MIR function pass;
+    /// this method closes the effect kind over the transfer-only SessionChan
+    /// ABI and glue contract.
+    pub fn validate_call_effect_contract(
+        &self,
+        contract: &MirCallEffectContract,
+    ) -> Result<(), String> {
+        match contract.kind {
+            MirCallEffectKind::TransferSession => {
+                self.validate_session_channel(&contract.argument_ty)
+            }
+        }
     }
 
     /// Materialize the narrow canonical SessionCall receipt. Terminal

@@ -597,6 +597,10 @@ pub enum MirInstructionKind {
         /// list is the canonical marker for a non-generic call.
         type_arguments: Vec<ResolvedTypeId>,
         arguments: Vec<MirValueId>,
+        /// Checker-owned effect receipts for ownership-bearing arguments.
+        /// Every SessionChan argument must carry a `TransferSession` receipt;
+        /// unsupported effect families remain fail-closed.
+        effect_receipts: Vec<types::MirCallEffectContract>,
         /// TypeDesc/ABI receipt for a direct call returning a flat Copy
         /// Option/Result. Other call result shapes remain on their existing
         /// explicit compatibility boundary until their own receipt exists.
@@ -1845,7 +1849,7 @@ pub(crate) fn validate_transfer_event_boundaries(
 ) -> Vec<MirValidationError> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum BoundaryKind<'a> {
-        Call,
+        Call(&'a [types::MirCallEffectContract]),
         Flow(Option<MirTransitionEffect>),
         Session(Option<&'a types::MirSessionCallContract>),
     }
@@ -1920,9 +1924,17 @@ pub(crate) fn validate_transfer_event_boundaries(
                     point,
                     arguments.as_slice(),
                 )),
-                MirInstructionKind::Call { arguments, .. }
-                | MirInstructionKind::BuiltinCall { arguments, .. } => {
-                    boundaries.push((BoundaryKind::Call, point, arguments.as_slice()))
+                MirInstructionKind::Call {
+                    arguments,
+                    effect_receipts,
+                    ..
+                } => boundaries.push((
+                    BoundaryKind::Call(effect_receipts.as_slice()),
+                    point,
+                    arguments.as_slice(),
+                )),
+                MirInstructionKind::BuiltinCall { arguments, .. } => {
+                    boundaries.push((BoundaryKind::Call(&[]), point, arguments.as_slice()))
                 }
                 MirInstructionKind::SessionCall {
                     endpoint, contract, ..
@@ -2006,20 +2018,33 @@ pub(crate) fn validate_transfer_event_boundaries(
             continue;
         };
         match kind {
-            BoundaryKind::Call
+            BoundaryKind::Call(effect_receipts)
                 if matches!(
                     event.kind,
                     MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
                 ) =>
             {
-                errors.push(MirValidationError {
-                    subject: format!("ownership[{index}]"),
-                    message: format!(
-                        "{} event at point '{}' has no canonical call effect identity",
-                        event.kind.as_str(),
-                        event.point.0
-                    ),
-                });
+                let receipt_matches = event.kind == MirOwnershipEventKind::TransferSession
+                    && matching_points.iter().any(|(_, _, arguments)| {
+                        effect_receipts.iter().any(|receipt| {
+                            receipt.kind == types::MirCallEffectKind::TransferSession
+                                && receipt.argument_index < arguments.len()
+                                && reaches_argument(
+                                    value,
+                                    std::slice::from_ref(&arguments[receipt.argument_index]),
+                                )
+                        })
+                    });
+                if !receipt_matches {
+                    errors.push(MirValidationError {
+                        subject: format!("ownership[{index}]"),
+                        message: format!(
+                            "{} event at point '{}' has no matching canonical call effect receipt",
+                            event.kind.as_str(),
+                            event.point.0
+                        ),
+                    });
+                }
             }
             BoundaryKind::Flow(effect) => {
                 if matches!(effect, Some(MirTransitionEffect::Boundary)) {
@@ -2077,7 +2102,93 @@ pub(crate) fn validate_transfer_event_boundaries(
                     });
                 }
             }
-            BoundaryKind::Call => {}
+            BoundaryKind::Call(_) => {}
+        }
+    }
+    errors
+}
+
+/// Validate ordinary-call effect receipts against the MIR value catalog and
+/// TypeDesc. This is a program-boundary pass shared by every consumer; a
+/// SessionChan argument without an explicit receipt is rejected before
+/// bytecode, native, reference or verifier lowering can proceed.
+pub(crate) fn validate_call_effect_receipts(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Vec<MirValidationError> {
+    let mut errors = Vec::new();
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let MirInstructionKind::Call {
+                arguments,
+                effect_receipts,
+                ..
+            } = &instruction.kind
+            else {
+                continue;
+            };
+            let mut seen = BTreeSet::new();
+            for receipt in effect_receipts {
+                if !seen.insert(receipt.argument_index) {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "call effect receipt argument index {} is duplicated",
+                            receipt.argument_index
+                        ),
+                    });
+                    continue;
+                }
+                let Some(argument) = arguments.get(receipt.argument_index) else {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "call effect receipt argument index {} is out of range",
+                            receipt.argument_index
+                        ),
+                    });
+                    continue;
+                };
+                let Some(value) = function.values.get(argument) else {
+                    continue;
+                };
+                if value.ty != receipt.argument_ty {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "call effect receipt argument {} TypeDesc '{}' disagrees with MIR value '{}'",
+                            receipt.argument_index,
+                            receipt.argument_ty.as_str(),
+                            value.ty.as_str()
+                        ),
+                    });
+                }
+                if let Err(message) = type_catalog.validate_call_effect_contract(receipt) {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!("call effect receipt TypeDesc contract failed: {message}"),
+                    });
+                }
+            }
+            for (argument_index, argument) in arguments.iter().enumerate() {
+                let Some(value) = function.values.get(argument) else {
+                    continue;
+                };
+                if type_catalog.validate_session_channel(&value.ty).is_ok()
+                    && !effect_receipts.iter().any(|receipt| {
+                        receipt.argument_index == argument_index
+                            && receipt.kind == types::MirCallEffectKind::TransferSession
+                    })
+                {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "SessionChan call argument {} has no canonical TransferSession effect receipt",
+                            argument_index
+                        ),
+                    });
+                }
+            }
         }
     }
     errors
@@ -2485,36 +2596,44 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             callee,
             type_arguments,
             arguments,
+            effect_receipts,
             variant_call_contract,
-        } => format!(
-            "call {} {:?}{}({}){}",
-            result
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "_".into()),
-            callee,
-            if type_arguments.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "<{}>",
-                    type_arguments
-                        .iter()
-                        .map(|argument| argument.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            },
-            arguments
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
-            variant_call_contract
+        } => {
+            let variant_suffix = variant_call_contract
                 .as_ref()
                 .map(|contract| format!(" [variant_call_contract={contract:?}]"))
-                .unwrap_or_default()
-        ),
+                .unwrap_or_default();
+            let effect_suffix = (!effect_receipts.is_empty())
+                .then(|| format!(" [effect_receipts={effect_receipts:?}]"))
+                .unwrap_or_default();
+            format!(
+                "call {} {:?}{}({}){}{}",
+                result
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "_".into()),
+                callee,
+                if type_arguments.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "<{}>",
+                        type_arguments
+                            .iter()
+                            .map(|argument| argument.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                },
+                arguments
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                variant_suffix,
+                effect_suffix
+            )
+        }
         MirInstructionKind::FlowTransition {
             result,
             transition,

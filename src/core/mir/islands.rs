@@ -2707,6 +2707,7 @@ pub fn validate_managed_result_call_island(program: &MirProgram) -> Result<(), V
                     type_arguments,
                     arguments,
                     variant_call_contract,
+                    ..
                 } = &instruction.kind
                 else {
                     continue;

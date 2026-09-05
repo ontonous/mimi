@@ -5882,6 +5882,7 @@ impl<'a> Lowerer<'a> {
                         &result,
                         &arguments,
                     );
+                    let effect_receipts = self.call_effect_receipts(&arguments);
                     self.emit(
                         &expression.node_id,
                         "call",
@@ -5890,6 +5891,7 @@ impl<'a> Lowerer<'a> {
                             callee: call.callee.clone(),
                             type_arguments: call.type_arguments.clone(),
                             arguments,
+                            effect_receipts,
                             variant_call_contract,
                         },
                     );
@@ -6080,6 +6082,30 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.lower_expr(expression)
+    }
+
+    /// Materialize ordinary-call ownership effects from checker-finalized
+    /// argument TypeDesc identities. SessionChan is transfer-only, so every
+    /// such argument gets an explicit receipt; no backend may infer this from
+    /// its opaque handle ABI.
+    fn call_effect_receipts(
+        &self,
+        arguments: &[MirValueId],
+    ) -> Vec<super::types::MirCallEffectContract> {
+        arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(argument_index, argument)| {
+                let argument_ty = self.values.get(argument)?.ty.clone();
+                self.type_catalog
+                    .is_some_and(|catalog| catalog.validate_session_channel(&argument_ty).is_ok())
+                    .then_some(super::types::MirCallEffectContract {
+                        kind: super::types::MirCallEffectKind::TransferSession,
+                        argument_index,
+                        argument_ty,
+                    })
+            })
+            .collect()
     }
 
     /// Lower an expression in a return position. Direct owned `String` locals

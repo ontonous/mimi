@@ -712,6 +712,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 variant_call_contract,
                 arguments,
                 type_arguments,
+                ..
             } => self.emit_call(
                 result.as_ref(),
                 callee,

@@ -2180,6 +2180,7 @@ fn eval_instruction(
             type_arguments,
             arguments,
             variant_call_contract,
+            ..
         } => eval_materialized_call(
             function,
             program,

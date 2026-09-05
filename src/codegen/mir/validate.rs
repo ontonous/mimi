@@ -1074,6 +1074,7 @@ impl<'a> NativeMirValidator<'a> {
                 type_arguments,
                 arguments,
                 variant_call_contract,
+                ..
             } => self.validate_call(
                 function,
                 result.as_ref(),
