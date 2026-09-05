@@ -1,0 +1,11 @@
+// Canonical nested List positive: outer len borrows only the parent handle.
+// Child Lists stay owned by the nested value and are released by its Drop glue.
+func main() -> i32 {
+    ensures: result == 2
+    let first: List<i32> = [1, 2]
+    let second: List<i32> = [3]
+    let nested: List<List<i32>> = [first, second]
+    let size = len(nested)
+    drop(nested)
+    size
+}

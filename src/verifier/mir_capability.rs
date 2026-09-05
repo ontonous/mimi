@@ -2037,4 +2037,26 @@ mod tests {
             .validate_nested_list_payload(&nested)
             .expect("nested List TypeDesc glue");
     }
+
+    #[test]
+    fn accepts_nested_list_len_without_transfer_or_projection() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_len.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("nested List.len must satisfy verifier capability gate");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::ListOp {
+                            operation: crate::core::mir::MirListOperation::Len,
+                            ..
+                        }
+                    )
+                })
+            })
+        }));
+    }
 }

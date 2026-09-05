@@ -3786,12 +3786,13 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Validate an operation over the canonical scalar List island.
-    /// `Len` borrows the List handle and returns a Copy i32. `Reverse` borrows
-    /// the source and returns a fresh move-owned List produced through Clone
-    /// glue. `Concat` consumes both List handles and returns a fresh List with
-    /// the union of both input obligations. The argument slot is explicit so
-    /// a backend cannot infer arity or ownership from its storage ABI.
+    /// Validate an operation over the canonical bounded List island.
+    /// `Len` borrows a scalar or one-level nested List handle and returns a
+    /// Copy i32. `Reverse` borrows the source and returns a fresh move-owned
+    /// List produced through Clone glue. `Concat` consumes both List handles
+    /// and returns a fresh List with the union of both input obligations. The
+    /// argument slot is explicit so a backend cannot infer arity or ownership
+    /// from its storage ABI.
     pub fn validate_list_operation(
         &self,
         result_ty: &ResolvedTypeId,
@@ -3818,7 +3819,7 @@ impl MirTypeCatalog {
                         .is_some_and(|element| element.kind == MirTypeKind::List)
             )
         });
-        if nested_receiver {
+        if nested_receiver && operation != crate::core::mir::MirListOperation::Len {
             return Err(format!(
                 "List operation {:?} is outside the one-level nested List construction/clone/drop contract",
                 operation
@@ -9227,6 +9228,40 @@ mod tests {
             .validate_list_operation(&concat.result_ty, &concat.list_ty, MirListOperation::Concat)
             .expect_err("List.concat must carry its second input");
         assert!(missing_argument.contains("second List argument"));
+    }
+
+    #[test]
+    fn nested_list_len_contract_borrows_outer_handle_but_rejects_clone_operations() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let child_list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let nested_list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![child_list_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<List<i32>>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("nested List catalog");
+
+        let len = catalog
+            .validated_list_operation_contract(&i32_id, &nested_list_id, MirListOperation::Len)
+            .expect("nested List.len contract");
+        assert_eq!(len.element_ty, child_list_id);
+        assert_eq!(len.argument_ty, None);
+
+        let reverse = catalog
+            .validate_list_operation(&nested_list_id, &nested_list_id, MirListOperation::Reverse)
+            .expect_err("nested List.reverse remains outside S191");
+        assert!(reverse.contains("one-level nested List construction/clone/drop"));
     }
 
     #[test]

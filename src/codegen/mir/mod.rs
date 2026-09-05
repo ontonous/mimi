@@ -1,7 +1,7 @@
 //! AST-free native consumer for the closed scalar/owned-String,
 //! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List
-//! (including bounded nested List construction/clone/drop), and local
-//! immutable-borrow
+//! (including bounded nested List construction/clone/drop/outer-len), and
+//! local immutable-borrow
 //! Canonical MIR slices.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
@@ -4424,6 +4424,35 @@ mod tests {
         assert!(generator
             .module
             .get_function("mimi_mir_list_push_nested")
+            .is_some());
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_drop_nested")
+            .is_some());
+    }
+
+    #[test]
+    fn native_emitter_consumes_nested_list_len_with_borrow_only_abi() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_nested_list_len.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List.len execution");
+        assert_eq!(reference, MirRuntimeValue::Int(2));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_nested_list_len");
+        generator
+            .compile_mir_native(&program)
+            .expect("native nested List.len must consume canonical MIR");
+        generator
+            .module
+            .verify()
+            .expect("native nested List.len module verifies");
+        assert!(generator
+            .module
+            .get_function("mimi_mir_list_len_nested")
             .is_some());
         assert!(generator
             .module

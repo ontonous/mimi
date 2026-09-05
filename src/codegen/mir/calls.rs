@@ -164,6 +164,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .i8_type()
             .const_int(kind as u64, false);
         let runtime_name = match operation {
+            MirListOperation::Len if kind == crate::runtime::ListElementKind::List as i8 => {
+                "mimi_mir_list_len_nested"
+            }
             MirListOperation::Len => "mimi_mir_list_len_scalar",
             MirListOperation::Reverse => "mimi_mir_list_reverse_scalar",
             MirListOperation::Concat => "mimi_mir_list_concat_scalar",
@@ -182,7 +185,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if let Some(argument_handle) = argument_handle {
             call_arguments.push(BasicMetadataValueEnum::from(argument_handle));
         }
-        call_arguments.push(BasicMetadataValueEnum::from(kind_value));
+        if !(operation == MirListOperation::Len
+            && kind == crate::runtime::ListElementKind::List as i8)
+        {
+            call_arguments.push(BasicMetadataValueEnum::from(kind_value));
+        }
         let value = call_try_basic_value(
             &self
                 .generator

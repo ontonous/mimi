@@ -4,7 +4,7 @@
 //! checked program.  A canonical backend is never attempted and then replaced
 //! by legacy code on failure: programs either pass this preflight and use the
 //! canonical route, or remain on the legacy route because their capability
-//! set is not yet migrated. Once the scalar collection or exact non-Copy
+//! set is not yet migrated. Once the bounded collection or exact non-Copy
 //! `Option<string>` or managed direct-Result-call island is recognized, its
 //! failure is an explicit rejection rather than compatibility fallback.
 
@@ -117,7 +117,7 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, a one-, two-, three-, four-, or five-field generic Copy record projection, a concrete scalar List operation (`len`/`reverse`), an exact S8 Flow
+/// record value, a one-, two-, three-, four-, or five-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
@@ -919,7 +919,7 @@ pub(crate) fn select_default_route(
         );
     }
 
-    // S11: the production unit is a complete scalar List/Set executable
+    // S11: the production unit is a complete bounded List/Set executable
     // graph, not an individual opcode.  The island validator consumes only
     // canonical MIR and TypeDesc facts and runs before any verifier/backend
     // preflight.  A real materialized Set facade or List operation is
@@ -2732,6 +2732,33 @@ mod tests {
                     operation: mimi::core::mir::MirListOperation::Len
                 }
             )
+        }));
+    }
+
+    #[test]
+    fn nested_list_len_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_len.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("nested List.len must select the canonical default route");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::ListOp {
+                            operation: mimi::core::mir::MirListOperation::Len,
+                            ..
+                        }
+                    )
+                })
+            })
         }));
     }
 

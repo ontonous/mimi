@@ -65,12 +65,13 @@ pub fn register_runtime<'ctx>(module: &Module<'ctx>, ctx: &'ctx Context) {
     register_arithmetic_trap_fns(module, ctx, i8_ptr, void);
 }
 
-/// Runtime declarations for the canonical native MIR scalar List contract.
+/// Runtime declarations for the canonical native MIR bounded List contract.
 ///
 /// These helpers intentionally use a thin `i8*` handle to the complete
 /// heap-allocated `MimiList` object.  They are separate from the historical
 /// by-value list-prefix ABI and carry the TypeDesc-proven element kind on
-/// every operation.
+/// every operation. Nested outer-length reads use a dedicated no-kind
+/// signature; construction/clone/drop retain their explicit recursive ABI.
 fn register_mir_list_runtime<'ctx>(
     module: &Module<'ctx>,
     ctx: &'ctx Context,
@@ -79,6 +80,7 @@ fn register_mir_list_runtime<'ctx>(
     void: inkwell::types::VoidType<'ctx>,
 ) {
     let i8 = ctx.i8_type();
+    let i32 = ctx.i32_type();
     let ptr = i8_ptr;
     module.add_function(
         "mimi_mir_list_new_scalar",
@@ -134,6 +136,11 @@ fn register_mir_list_runtime<'ctx>(
     module.add_function(
         "mimi_mir_list_new_nested",
         ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_len_nested",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(

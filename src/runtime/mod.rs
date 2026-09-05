@@ -1525,6 +1525,29 @@ pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i
     })
 }
 
+/// Read the outer length of a one-level nested List for canonical native MIR.
+/// This is a borrow-only operation: child handles remain owned by the source
+/// List and are not traversed or transferred. The nested TypeDesc contract is
+/// checked through the dedicated runtime kind tag rather than reinterpreting a
+/// scalar ABI slot.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_len_nested(list: *const MimiList) -> i32 {
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List handle is null\0");
+    }
+    let source = unsafe { &*list };
+    if source.element_kind != ListElementKind::List || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical nested MIR List kind disagrees\0");
+    }
+    let cap = list_cap(source);
+    if (cap > 0 && source.len > cap) || (source.len > 0 && source.data.is_null()) {
+        mir_list_abort(b"[E0800] canonical nested MIR List storage is invalid\0");
+    }
+    i32::try_from(source.len).unwrap_or_else(|_| {
+        mir_list_abort(b"[E0802] canonical nested MIR List.len result overflows i32\0")
+    })
+}
+
 /// Clone and reverse a scalar List for canonical native MIR.
 ///
 /// The source handle remains owned by the caller.  Returning a fresh handle
@@ -1969,6 +1992,29 @@ mod canonical_mir_list_tests {
                 41
             );
             mimi_mir_list_drop_nested(clone);
+            mimi_mir_list_drop_nested(parent);
+        }
+    }
+
+    #[test]
+    fn canonical_nested_list_len_is_borrow_only() {
+        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::Bool as i8) };
+        assert!(!child.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(child, ListElementKind::Bool as i8, 1),
+                1
+            );
+        }
+        let parent = unsafe { mimi_mir_list_new_nested() };
+        assert!(!parent.is_null());
+        unsafe {
+            assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
+            assert_eq!(mimi_mir_list_len_nested(parent), 1);
+            assert_eq!(
+                mimi_mir_list_get_scalar(child, ListElementKind::Bool as i8, 0),
+                1
+            );
             mimi_mir_list_drop_nested(parent);
         }
     }

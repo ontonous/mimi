@@ -6,7 +6,7 @@
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
 //! glued tuple/record products, and concrete Copy-scalar Lists including the
-//! bounded one-level nested List construction/clone/drop shape.
+//! bounded one-level nested List construction/clone/drop/outer-len shape.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -5002,7 +5002,7 @@ mod tests {
     #[test]
     fn canonical_mir_rejects_nested_list_operation_before_backend() {
         let error = run_canonical_differential(
-            "func main() -> i32 { let inner: List<i32> = [1, 2]; let nested: List<List<i32>> = [inner]; let size = len(nested); drop(nested); size }",
+            "func main() -> i32 { let inner: List<i32> = [1, 2]; let nested: List<List<i32>> = [inner]; let reversed = reverse(nested); drop(reversed); drop(nested); 0 }",
         )
         .expect_err("nested List operations remain outside the first nested List slice");
         match error {
@@ -5496,6 +5496,25 @@ mod tests {
             .expect("nested List construction bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(41));
         assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn executes_nested_list_len_through_mir_bytecode_without_child_transfer() {
+        let source = include_str!("../../../tests/fixtures/mir_native_nested_list_len.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("nested List.len MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List.len execution");
+        let bytecode = compile_mir_program(&mir).expect("nested List.len bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("nested List.len bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(2));
+        assert!(matches!(value, Value::Int(2)));
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //! This module contains route eligibility, not backend lowering.  The first
 //! island is intentionally narrower than the individual List/Set adapters:
 //! every executable function in the materialized MIR graph must use only
-//! Copy scalar values, move-owned scalar Lists/Sets, synchronous scalar CFG,
-//! and canonical scalar calls.  The checker type catalog may contain many
+//! Copy scalar values, move-owned bounded Lists/Sets, synchronous scalar CFG,
+//! and canonical scalar calls. The List island includes the one-level nested
+//! outer-length read; the checker type catalog may contain many
 //! unrelated declarations; only types and operations that actually cross the
 //! executable MIR graph are inspected here.
 
@@ -1340,9 +1341,9 @@ fn is_scalar_list_facade_call(
 
 /// Distinguish the small generic List operation facades admitted by this
 /// island from unrelated generic functions that merely mention `List<T>`.
-/// Projection (`first<T>(List<T>)`) and nested container helpers remain
-/// compatibility shapes; direct List `len`/`reverse`/`concat` builtins and
-/// List construction now cross the migrated-candidate hard boundary below.
+/// Projection (`first<T>(List<T>)`) and nested container operation helpers
+/// remain compatibility shapes; direct List `len`/`reverse`/`concat` builtins
+/// and List construction now cross the migrated-candidate hard boundary below.
 fn generic_list_operation_facade_body(
     program: &CheckedProgram,
     call: &crate::core::ir::ResolvedCall,
@@ -3070,7 +3071,7 @@ pub fn contains_s8_flow_transition_candidate(program: &MirProgram) -> bool {
     })
 }
 
-/// Validate the current scalar List/Set whole-program island.
+/// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
 /// validator.  The generic validator proves that each instruction is legal;
@@ -3280,11 +3281,10 @@ impl<'a> ScalarCollectionValidator<'a> {
                 }
             }
             MirLayout::Scalar => self.program.type_catalog().validate_copy_scalar(ty),
-            MirLayout::List { element } => self
+            MirLayout::List { .. } => self
                 .program
                 .type_catalog()
-                .validate_list_glue(ty, MirGlueOperation::MoveOut)
-                .and_then(|()| self.validate_copy_scalar_element(&element)),
+                .validate_list_glue(ty, MirGlueOperation::MoveOut),
             MirLayout::Set { element } => self
                 .program
                 .type_catalog()
