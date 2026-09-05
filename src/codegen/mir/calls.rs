@@ -372,6 +372,84 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         arguments: &[MirValueId],
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if kind == MirBuiltinKind::SessionPair {
+            if !arguments.is_empty() {
+                return Err(NativeMirError::new(
+                    subject,
+                    "builtin 'session_pair' has no value arguments",
+                ));
+            }
+            let result_ty = self.value_type(result, subject)?;
+            self.program
+                .type_catalog()
+                .validate_plain_session_pair(&result_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let pair = self
+                .generator
+                .get_runtime_fn("mimi_session_pair")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let packed = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(pair, &[], "mir_session_pair_packed")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "session_pair returned void"))?
+            .into_int_value();
+            let lo = self
+                .generator
+                .get_runtime_fn("mimi_session_lo")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let hi = self
+                .generator
+                .get_runtime_fn("mimi_session_hi")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let lo = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        lo,
+                        &[BasicMetadataValueEnum::IntValue(packed)],
+                        "mir_session_pair_lo",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "session_lo returned void"))?;
+            let hi = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(
+                        hi,
+                        &[BasicMetadataValueEnum::IntValue(packed)],
+                        "mir_session_pair_hi",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| NativeMirError::new(subject, "session_hi returned void"))?;
+            let struct_ty = native_basic_type(
+                self.generator.context,
+                self.program.type_catalog(),
+                &result_ty,
+            )?
+            .into_struct_type();
+            let aggregate = struct_ty.get_undef();
+            let aggregate = self
+                .generator
+                .builder
+                .build_insert_value(aggregate, lo, 0, "mir_session_pair_insert_lo")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+            let aggregate = self
+                .generator
+                .builder
+                .build_insert_value(aggregate, hi, 1, "mir_session_pair_insert_hi")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_struct_value();
+            return Ok(aggregate.into());
+        }
         if kind == MirBuiltinKind::SessionOpen {
             if !arguments.is_empty() {
                 return Err(NativeMirError::new(
@@ -501,6 +579,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             MirBuiltinKind::PrintlnBool => unreachable!(),
                             MirBuiltinKind::PrintlnInt => unreachable!(),
                             MirBuiltinKind::SessionOpen => unreachable!(),
+                            MirBuiltinKind::SessionPair => unreachable!(),
                         },
                     )
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
@@ -593,6 +672,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             MirBuiltinKind::SessionOpen => {
                 unreachable!("SessionOpen handled before scalar dispatch")
+            }
+            MirBuiltinKind::SessionPair => {
+                unreachable!("SessionPair handled before scalar dispatch")
             }
         }
         .map(|value| {

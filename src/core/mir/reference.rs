@@ -1304,6 +1304,21 @@ fn validate_builtin_calls(
                 }
                 continue;
             }
+            if *kind == super::types::MirBuiltinKind::SessionPair {
+                if let Some(result_value) = result_value {
+                    if let Err(message) = type_catalog.validate_plain_session_pair(&result_value.ty)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "builtin '{}' result is outside the canonical session-pair contract: {message}",
+                                contract.name
+                            ),
+                        });
+                    }
+                }
+                continue;
+            }
             let mut first_type = None;
             for (index, argument) in arguments.iter().enumerate() {
                 let Some(argument_value) = function.values.get(argument) else {
@@ -4348,6 +4363,32 @@ impl<'a> MirReferenceInterpreter<'a> {
                         })?;
                         *next = next_handle;
                         MirRuntimeValue::Int(handle)
+                    }
+                    super::types::MirBuiltinKind::SessionPair => {
+                        let result_ty = match function.values.get(result) {
+                            Some(value) => value.ty.clone(),
+                            None => {
+                                return Err(self
+                                    .error(&function.owner, "session_pair result has no MIR type"))
+                            }
+                        };
+                        self.program
+                            .type_catalog()
+                            .validate_plain_session_pair(&result_ty)
+                            .map_err(|message| self.error(&function.owner, message))?;
+                        let mut next = self.next_session_handle.borrow_mut();
+                        let lo = *next;
+                        let hi = lo.checked_add(1).ok_or_else(|| {
+                            self.error(&function.owner, "session_pair handle space exhausted")
+                        })?;
+                        let next_handle = hi.checked_add(1).ok_or_else(|| {
+                            self.error(&function.owner, "session_pair handle space exhausted")
+                        })?;
+                        *next = next_handle;
+                        MirRuntimeValue::Tuple(vec![
+                            MirRuntimeValue::Int(lo),
+                            MirRuntimeValue::Int(hi),
+                        ])
                     }
                 };
                 values.insert(result.clone(), output);

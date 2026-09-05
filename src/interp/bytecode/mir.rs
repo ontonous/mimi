@@ -755,6 +755,22 @@ impl<'a> FunctionEmitter<'a> {
                 return;
             }
         }
+        if kind == crate::core::mir::types::MirBuiltinKind::SessionPair {
+            let Some(result_info) = self.function.values.get(result) else {
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_plain_session_pair(&result_info.ty)
+            {
+                self.error(format!(
+                    "builtin '{}' result is outside the canonical session-pair contract: {message}",
+                    contract.name
+                ));
+                return;
+            }
+        }
         let mut first_type = None;
         for (index, argument) in arguments.iter().enumerate() {
             let Some(argument_desc) = self.type_of(argument) else {

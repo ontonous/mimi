@@ -146,6 +146,10 @@ pub enum MirBuiltinKind {
     /// session pair. The protocol residual and endpoint ABI are carried by
     /// the result TypeDesc; the builtin itself has no value arguments.
     SessionOpen,
+    /// Produce the untyped `(i64, i64)` session handle pair.  The typed
+    /// `session_pair::<S>()` form remains outside this scalar-handle island
+    /// until tuple ownership/projection receipts are materialized.
+    SessionPair,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -255,6 +259,18 @@ impl MirBuiltinContract {
                 result_must_be_unit: false,
                 effect: MirBuiltinEffect::Pure,
             },
+            MirBuiltinKind::SessionPair => Self {
+                kind,
+                name: "session_pair",
+                arity: 0,
+                input_abi: MirAbiClass::Aggregate,
+                preserves_type: false,
+                requires_copy: false,
+                requires_same_input_type: false,
+                overflow_trap: None,
+                result_must_be_unit: false,
+                effect: MirBuiltinEffect::Pure,
+            },
         }
     }
 
@@ -267,6 +283,7 @@ impl MirBuiltinContract {
             "min" => Some(Self::for_kind(MirBuiltinKind::Min)),
             "max" => Some(Self::for_kind(MirBuiltinKind::Max)),
             "session_open" => Some(Self::for_kind(MirBuiltinKind::SessionOpen)),
+            "session_pair" => Some(Self::for_kind(MirBuiltinKind::SessionPair)),
             _ => None,
         }
     }
@@ -317,12 +334,16 @@ impl MirBuiltinContract {
                 }
             ),
             MirBuiltinKind::SessionOpen => abi == MirAbiClass::OpaqueHandle,
+            MirBuiltinKind::SessionPair => abi == MirAbiClass::Aggregate,
         }
     }
 
     pub fn accepts_layout(self, layout: &MirLayout) -> bool {
         match self.kind {
             MirBuiltinKind::SessionOpen => matches!(layout, MirLayout::Handle),
+            MirBuiltinKind::SessionPair => {
+                matches!(layout, MirLayout::Tuple(elements) if elements.len() == 2)
+            }
             MirBuiltinKind::Abs
             | MirBuiltinKind::Min
             | MirBuiltinKind::Max
@@ -338,6 +359,7 @@ impl MirBuiltinContract {
             MirBuiltinKind::PrintlnBool => "bool",
             MirBuiltinKind::PrintlnInt => "signed i32 or i64",
             MirBuiltinKind::SessionOpen => "SessionChan handle",
+            MirBuiltinKind::SessionPair => "Copy tuple of two signed i64 handles",
         }
     }
 }
@@ -2831,6 +2853,73 @@ impl MirTypeCatalog {
                 "SessionChan endpoint type '{}' has an inconsistent transfer-only TypeDesc/ABI/glue contract",
                 ty.as_str()
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate the ABI receipt for the legacy-compatible, untyped
+    /// `session_pair()` builtin.  This island deliberately admits only the
+    /// checker-produced `(i64, i64)` Copy tuple; a typed pair carrying
+    /// SessionChan residuals must remain fail-closed until tuple move/
+    /// projection ownership receipts are available.
+    pub fn validate_plain_session_pair(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "session_pair result type '{}' is absent from MIR TypeDesc catalog",
+                ty.as_str()
+            )
+        })?;
+        let MirLayout::Tuple(elements) = &descriptor.layout else {
+            return Err(format!(
+                "session_pair result type '{}' must have a canonical two-field tuple layout",
+                ty.as_str()
+            ));
+        };
+        if elements.len() != 2
+            || descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership != MirOwnership::Copy
+            || descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.drop_plan.is_some()
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+        {
+            return Err(format!(
+                "session_pair result type '{}' is not the canonical Copy aggregate contract",
+                ty.as_str()
+            ));
+        }
+        for (index, element) in elements.iter().enumerate() {
+            let child = self.get(element).ok_or_else(|| {
+                format!(
+                    "session_pair result field {index} type '{}' is absent from MIR TypeDesc catalog",
+                    element.as_str()
+                )
+            })?;
+            if child.ownership != MirOwnership::Copy
+                || child.abi
+                    != (MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    })
+                || child.layout != MirLayout::Scalar
+                || child.glue
+                    != (MirGlueContract {
+                        move_out: MirGlueKind::Noop,
+                        clone: MirGlueKind::Noop,
+                        drop: MirGlueKind::Noop,
+                    })
+            {
+                return Err(format!(
+                    "session_pair result field {index} type '{}' is not a Copy signed i64 scalar",
+                    element.as_str()
+                ));
+            }
         }
         Ok(())
     }

@@ -1370,6 +1370,22 @@ fn eval_instruction(
                     catalog.validate_session_channel(&result_ty)?;
                     SymbolicValue::Opaque { ty: result_ty }
                 }
+                (MirBuiltinKind::SessionPair, []) => {
+                    let result_ty = function
+                        .values
+                        .get(result)
+                        .ok_or_else(|| "MIR SessionPair result is absent".to_string())?
+                        .ty
+                        .clone();
+                    catalog.validate_plain_session_pair(&result_ty)?;
+                    let (value, constraints) = symbolic_value_for_type(
+                        catalog,
+                        &result_ty,
+                        &format!("{}.session_pair", result),
+                    )?;
+                    state.constraints.extend(constraints);
+                    value
+                }
                 _ => return Err("MIR builtin is outside scalar verifier contract".into()),
             };
             ensure_result_shape(function, catalog, result, &output)?;

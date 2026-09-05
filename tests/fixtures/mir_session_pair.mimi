@@ -1,0 +1,11 @@
+// Canonical MIR S165: the untyped session_pair() ABI is a Copy (i64, i64)
+// aggregate. Typed session_pair::<S>() remains outside this island until
+// tuple ownership/projection receipts are materialized.
+func pair_order() -> i32 {
+    let pair = session_pair()
+    if pair.0 < pair.1 { 41 } else { 0 }
+}
+
+func main() -> i32 {
+    pair_order()
+}

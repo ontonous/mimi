@@ -948,6 +948,25 @@ impl<'a> NativeMirValidator<'a> {
                     }
                     return;
                 }
+                if *kind == MirBuiltinKind::SessionPair {
+                    let Some(result_value) = function.values.get(result) else {
+                        return;
+                    };
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_plain_session_pair(&result_value.ty)
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            format!(
+                                "builtin '{}' result is outside the canonical session-pair contract: {message}",
+                                contract.name
+                            ),
+                        ));
+                    }
+                    return;
+                }
                 let supported_kind = matches!(
                     kind,
                     MirBuiltinKind::Abs

@@ -174,6 +174,125 @@ fn rejects_forged_session_open_result_before_consumers() {
 }
 
 #[test]
+fn materializes_plain_session_pair_as_copy_tuple_for_all_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_pair.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("plain session_pair must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:pair_order".into());
+    let function = program.functions().get(&owner).expect("pair_order MIR");
+    let result = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::BuiltinCall {
+                result,
+                kind: crate::core::mir::types::MirBuiltinKind::SessionPair,
+                arguments,
+            } => {
+                assert!(arguments.is_empty(), "session_pair has no value arguments");
+                Some(result.clone())
+            }
+            _ => None,
+        })
+        .expect("session_pair builtin instruction");
+    let result_ty = function
+        .values
+        .get(&result)
+        .expect("session_pair result value")
+        .ty
+        .clone();
+    program
+        .type_catalog()
+        .validate_plain_session_pair(&result_ty)
+        .expect("session_pair result Copy tuple contract");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .expect("reference session_pair execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume canonical SessionPair");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume canonical SessionPair");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume canonical SessionPair");
+}
+
+#[test]
+fn rejects_forged_session_pair_result_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_pair.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical session_pair MIR");
+    let owner = crate::core::NodeId("function:pair_order".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("pair_order MIR");
+    let result = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::BuiltinCall {
+                kind: crate::core::mir::types::MirBuiltinKind::SessionPair,
+                result,
+                ..
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("session_pair result");
+    let scalar_i32 = program
+        .type_catalog()
+        .iter()
+        .find_map(|(ty, descriptor)| {
+            (descriptor.abi
+                == crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            .then(|| ty.clone())
+        })
+        .expect("canonical i32 TypeDesc");
+    function.values.get_mut(&result).expect("result value").ty = scalar_i32;
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("non-tuple SessionPair result must be rejected");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("canonical session-pair contract")
+            || error.message.contains("two-field tuple layout")
+    }));
+}
+
+#[test]
+fn rejects_typed_session_pair_until_tuple_ownership_receipt_exists() {
+    let checked = checked_program(
+        r#"
+session S = !i32 . end
+func main() -> i32 {
+    let pair = session_pair::<S>()
+    drop(pair)
+    0
+}
+"#,
+    );
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("typed SessionPair must remain outside the untyped aggregate island");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("no canonical") || rendered.contains("Linear") || rendered.contains("glue"),
+        "typed SessionPair rejection must identify the missing tuple ownership contract: {rendered}"
+    );
+}
+
+#[test]
 fn materializes_integer_session_send_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_send.mimi"
