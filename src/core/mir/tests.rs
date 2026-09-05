@@ -515,6 +515,142 @@ fn missing_session_call_transfer_receipt_is_rejected_before_consumers() {
 }
 
 #[test]
+fn multi_session_call_materializes_ordered_transfer_effect_receipts() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_call_transfer_multi.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("multi-argument SessionChan call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:forward".into());
+    let function = program.functions().get(&owner).expect("forward MIR");
+    let (arguments, receipts) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                arguments,
+                effect_receipts,
+                ..
+            } if callee.0 == "function:sink" => Some((arguments.clone(), effect_receipts.clone())),
+            _ => None,
+        })
+        .expect("multi-argument SessionChan call");
+    assert_eq!(arguments.len(), 2);
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0].argument_index, 0);
+    assert_eq!(receipts[1].argument_index, 1);
+    assert!(receipts
+        .windows(2)
+        .all(|window| { window[0].argument_index < window[1].argument_index }));
+    for receipt in &receipts {
+        assert_eq!(
+            receipt.kind,
+            crate::core::mir::types::MirCallEffectKind::TransferSession
+        );
+        assert_eq!(
+            receipt.argument_ty,
+            function
+                .values
+                .get(&arguments[receipt.argument_index])
+                .expect("call argument")
+                .ty
+        );
+        program
+            .type_catalog()
+            .validate_call_effect_contract(receipt)
+            .expect("SessionChan effect receipt TypeDesc");
+    }
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(
+            &owner,
+            &[
+                crate::core::mir::reference::MirRuntimeValue::Int(11),
+                crate::core::mir::reference::MirRuntimeValue::Int(22),
+            ],
+        )
+        .expect("reference multi-argument SessionChan call");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(11));
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume multi-argument call receipts");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume multi-argument call receipts");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier must consume multi-argument call receipts");
+}
+
+#[test]
+fn missing_second_multi_session_call_receipt_is_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_call_transfer_multi.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("multi-argument SessionChan call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:forward".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("forward MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+        .expect("multi-argument SessionChan call");
+    let MirInstructionKind::Call {
+        effect_receipts, ..
+    } = &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    effect_receipts.retain(|receipt| receipt.argument_index != 1);
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("missing second SessionChan call receipt must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("SessionChan call argument 1 has no canonical TransferSession effect receipt")
+    }));
+}
+
+#[test]
+fn reordered_multi_session_call_receipts_are_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_session_call_transfer_multi.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("multi-argument SessionChan call must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:forward".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("forward MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+        .expect("multi-argument SessionChan call");
+    let MirInstructionKind::Call {
+        effect_receipts, ..
+    } = &mut instruction.kind
+    else {
+        unreachable!();
+    };
+    effect_receipts.reverse();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("reordered SessionChan call receipts must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("call effect receipts are not in canonical argument order")
+    }));
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

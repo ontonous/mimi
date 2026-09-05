@@ -1,0 +1,15 @@
+session First = end
+session Second = end
+
+func sink(first: SessionChan<First>, second: SessionChan<Second>) -> SessionChan<First> {
+    session_close(second)
+    first
+}
+
+func forward(first: SessionChan<First>, second: SessionChan<Second>) -> SessionChan<First> {
+    sink(first, second)
+}
+
+func main() -> i32 {
+    0
+}

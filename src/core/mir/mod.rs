@@ -2128,6 +2128,7 @@ pub(crate) fn validate_call_effect_receipts(
                 continue;
             };
             let mut seen = BTreeSet::new();
+            let mut previous_index = None;
             for receipt in effect_receipts {
                 if !seen.insert(receipt.argument_index) {
                     errors.push(MirValidationError {
@@ -2139,6 +2140,13 @@ pub(crate) fn validate_call_effect_receipts(
                     });
                     continue;
                 }
+                if previous_index.is_some_and(|previous| previous >= receipt.argument_index) {
+                    errors.push(MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: "call effect receipts are not in canonical argument order".into(),
+                    });
+                }
+                previous_index = Some(receipt.argument_index);
                 let Some(argument) = arguments.get(receipt.argument_index) else {
                     errors.push(MirValidationError {
                         subject: instruction.id.to_string(),
