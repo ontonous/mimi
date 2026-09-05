@@ -1473,6 +1473,25 @@ fn eval_instruction(
             ensure_result_shape(function, catalog, result, &value)?;
             state.values.insert(result.clone(), value);
         }
+        MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+            let receipt = contract.as_ref().ok_or_else(|| {
+                "MIR typed session_pair binding has no canonical receipt".to_string()
+            })?;
+            let lo_ty = instruction_value_type(function, lo, "typed session_pair lo")?;
+            let hi_ty = instruction_value_type(function, hi, "typed session_pair hi")?;
+            catalog.validate_session_pair_bind_receipt(
+                &receipt.pair_ty,
+                &lo_ty,
+                &hi_ty,
+                receipt,
+            )?;
+            state
+                .values
+                .insert(lo.clone(), SymbolicValue::Opaque { ty: lo_ty });
+            state
+                .values
+                .insert(hi.clone(), SymbolicValue::Opaque { ty: hi_ty });
+        }
         MirInstructionKind::Convert { result, source } => {
             let value = state
                 .values

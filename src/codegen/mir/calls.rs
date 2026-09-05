@@ -3,6 +3,73 @@
 use super::*;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
+    pub(super) fn emit_session_pair_bind(
+        &mut self,
+        lo: &MirValueId,
+        hi: &MirValueId,
+        receipt: Option<&crate::core::mir::types::MirSessionPairBindContract>,
+        subject: &str,
+    ) -> Result<(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>), NativeMirError> {
+        let receipt = receipt.ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "typed session_pair binding has no canonical TypeDesc receipt",
+            )
+        })?;
+        let lo_ty = self.value_type(lo, subject)?;
+        let hi_ty = self.value_type(hi, subject)?;
+        self.program
+            .type_catalog()
+            .validate_session_pair_bind_receipt(&receipt.pair_ty, &lo_ty, &hi_ty, receipt)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let pair = self
+            .generator
+            .get_runtime_fn("mimi_session_pair")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let packed = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(pair, &[], "mir_typed_session_pair_packed")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "session_pair returned void"))?
+        .into_int_value();
+        let lo_fn = self
+            .generator
+            .get_runtime_fn("mimi_session_lo")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let hi_fn = self
+            .generator
+            .get_runtime_fn("mimi_session_hi")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let lo_value = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    lo_fn,
+                    &[BasicMetadataValueEnum::IntValue(packed)],
+                    "mir_typed_session_pair_lo",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "session_lo returned void"))?;
+        let hi_value = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    hi_fn,
+                    &[BasicMetadataValueEnum::IntValue(packed)],
+                    "mir_typed_session_pair_hi",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "session_hi returned void"))?;
+        Ok((lo_value, hi_value))
+    }
+
     pub(super) fn emit_variant_predicate(
         &mut self,
         result: &MirValueId,

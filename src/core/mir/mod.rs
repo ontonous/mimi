@@ -877,6 +877,16 @@ pub enum MirInstructionKind {
         payload: Option<MirValueId>,
         contract: Option<types::MirSessionCallContract>,
     },
+    /// Materialize the two linear endpoints of a checker-typed
+    /// `session_pair::<S>()` direct tuple bind. The tuple aggregate itself is
+    /// intentionally absent from the MIR value catalog; the receipt proves
+    /// both endpoint TypeDesc identities and prevents accidental clone/drop
+    /// of a hidden linear aggregate.
+    SessionPairBind {
+        lo: MirValueId,
+        hi: MirValueId,
+        contract: Option<types::MirSessionPairBindContract>,
+    },
     /// A checked conversion. Source/target facts live in the value catalog
     /// and the eventual lowering contract.
     Convert {
@@ -2542,6 +2552,7 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
         | MirInstructionKind::EndBorrow { .. }
+        | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => None,
     };
     result.is_some_and(|result| {
@@ -2635,6 +2646,7 @@ fn instruction_consumes_owned_string(
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
         | MirInstructionKind::VariantProject { .. }
+        | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => {}
     }
     sources.into_iter().any(|source| {
@@ -2925,6 +2937,13 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             contract
                 .as_ref()
                 .map(|contract| format!(" [session_contract={contract:?}]"))
+                .unwrap_or_default()
+        ),
+        MirInstructionKind::SessionPairBind { lo, hi, contract } => format!(
+            "session_pair_bind {lo}, {hi}{}",
+            contract
+                .as_ref()
+                .map(|contract| format!(" [session_pair_contract={contract:?}]"))
                 .unwrap_or_default()
         ),
         MirInstructionKind::Convert { result, source } => {
@@ -3526,6 +3545,16 @@ impl<'a> MirValidator<'a> {
                 }
                 self.result_at(result, &instruction.id, block, index);
             }
+            SessionPairBind { lo, hi, contract } => {
+                if contract.is_none() {
+                    self.error(
+                        instruction.id.to_string(),
+                        "typed session_pair binding has no canonical TypeDesc receipt",
+                    );
+                }
+                self.result_at(lo, &instruction.id, block, index);
+                self.result_at(hi, &instruction.id, block, index);
+            }
             Nop => {}
         }
     }
@@ -3930,6 +3959,7 @@ impl<'a> MirValidator<'a> {
                     uses.push(payload.clone());
                 }
             }
+            MirInstructionKind::SessionPairBind { .. } => {}
         }
         for value in uses {
             self.check_use_site(&value, block, index, dominators, reachable);

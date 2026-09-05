@@ -807,6 +807,9 @@ impl<'a> OptionStringVariantValidator<'a> {
             MirInstructionKind::SessionCall { .. } => self.error(format!(
                 "{subject} SessionCall is outside {NON_COPY_OPTION_STRING_VARIANT_ISLAND}"
             )),
+            MirInstructionKind::SessionPairBind { .. } => self.error(format!(
+                "{subject} typed session_pair binding is outside {NON_COPY_OPTION_STRING_VARIANT_ISLAND}"
+            )),
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }
             | MirInstructionKind::Project { .. }

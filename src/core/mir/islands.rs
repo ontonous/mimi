@@ -3451,6 +3451,9 @@ impl<'a> ScalarCollectionValidator<'a> {
             MirInstructionKind::SessionCall { .. } => self.error(format!(
                 "{subject} SessionCall is outside {SCALAR_COLLECTION_ISLAND}"
             )),
+            MirInstructionKind::SessionPairBind { .. } => self.error(format!(
+                "{subject} typed session_pair binding is outside {SCALAR_COLLECTION_ISLAND}"
+            )),
             MirInstructionKind::Nop => {}
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }

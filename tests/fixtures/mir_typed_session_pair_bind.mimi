@@ -1,0 +1,8 @@
+session S = end
+
+func main() -> i32 {
+    let (lo, hi) = session_pair::<S>()
+    session_close(lo)
+    session_close(hi)
+    41
+}

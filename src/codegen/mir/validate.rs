@@ -1106,6 +1106,31 @@ impl<'a> NativeMirValidator<'a> {
                     ));
                 }
             }
+            MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                self.validate_value(function, lo, "typed session_pair lo endpoint");
+                self.validate_value(function, hi, "typed session_pair hi endpoint");
+                let (Some(lo_ty), Some(hi_ty)) = (
+                    function.values.get(lo).map(|value| value.ty.clone()),
+                    function.values.get(hi).map(|value| value.ty.clone()),
+                ) else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "typed session_pair binding has no canonical TypeDesc receipt",
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog.validate_session_pair_bind_receipt(
+                    &receipt.pair_ty,
+                    &lo_ty,
+                    &hi_ty,
+                    receipt,
+                ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
             MirInstructionKind::Call {
                 result,
                 callee,

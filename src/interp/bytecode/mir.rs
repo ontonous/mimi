@@ -709,6 +709,9 @@ impl<'a> FunctionEmitter<'a> {
                 payload.as_ref(),
                 contract.as_ref(),
             ),
+            MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                self.emit_session_pair_bind(lo, hi, contract.as_ref())
+            }
             MirInstructionKind::Convert { result, source } => self.emit_convert(result, source),
             MirInstructionKind::Nop => {}
         }
@@ -884,6 +887,73 @@ impl<'a> FunctionEmitter<'a> {
             builtin,
             args_base,
             argc: contract.arity as u16,
+        });
+    }
+
+    fn emit_session_pair_bind(
+        &mut self,
+        lo: &MirValueId,
+        hi: &MirValueId,
+        contract: Option<&crate::core::mir::types::MirSessionPairBindContract>,
+    ) {
+        let Some(contract) = contract else {
+            self.error("typed session_pair binding has no canonical TypeDesc receipt");
+            return;
+        };
+        let Some(lo_ty) = self.function.values.get(lo).map(|value| value.ty.clone()) else {
+            self.error(format!("typed session_pair lo value '{}' is absent", lo));
+            return;
+        };
+        let Some(hi_ty) = self.function.values.get(hi).map(|value| value.ty.clone()) else {
+            self.error(format!("typed session_pair hi value '{}' is absent", hi));
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_session_pair_bind_receipt(&contract.pair_ty, &lo_ty, &hi_ty, contract)
+        {
+            self.error(format!(
+                "typed session_pair binding is unsupported: {message}"
+            ));
+            return;
+        }
+        let Some(lo_reg) = self.reg(lo) else { return };
+        let Some(hi_reg) = self.reg(hi) else { return };
+        let registry = super::registry::create_registry();
+        let Some(builtin) = registry.lookup("session_pair") else {
+            self.error("builtin 'session_pair' has no bytecode registry implementation");
+            return;
+        };
+        let pair_reg = self.proto.alloc_reg();
+        let args_base = self.proto.alloc_reg();
+        self.proto.emit(Op::CallBuiltin {
+            rd: pair_reg,
+            builtin,
+            args_base,
+            argc: 0,
+        });
+        let Some(lo_contract) =
+            self.add_tuple_projection_contract(&contract.pair_ty, 0, &contract.lo_ty)
+        else {
+            return;
+        };
+        let Some(hi_contract) =
+            self.add_tuple_projection_contract(&contract.pair_ty, 1, &contract.hi_ty)
+        else {
+            return;
+        };
+        self.proto.emit(Op::TupleGet {
+            rd: lo_reg,
+            ra: pair_reg,
+            idx: 0,
+            contract: Some(lo_contract),
+        });
+        self.proto.emit(Op::TupleGet {
+            rd: hi_reg,
+            ra: pair_reg,
+            idx: 1,
+            contract: Some(hi_contract),
         });
     }
 

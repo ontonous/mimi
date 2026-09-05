@@ -272,10 +272,64 @@ fn rejects_forged_session_pair_result_before_consumers() {
 }
 
 #[test]
-fn rejects_typed_session_pair_until_tuple_ownership_receipt_exists() {
+fn materializes_typed_session_pair_direct_binding_for_all_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_typed_session_pair_bind.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("typed SessionPair direct binding must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program
+        .functions()
+        .get(&owner)
+        .expect("typed pair main MIR");
+    let pair = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::SessionPairBind {
+                lo,
+                hi,
+                contract: Some(contract),
+            } => Some((lo.clone(), hi.clone(), contract.clone())),
+            _ => None,
+        })
+        .expect("typed pair binding instruction");
+    let (lo, hi, contract) = pair;
+    let lo_ty = function.values.get(&lo).expect("lo value").ty.clone();
+    let hi_ty = function.values.get(&hi).expect("hi value").ty.clone();
+    program
+        .type_catalog()
+        .validate_session_pair_bind_receipt(&contract.pair_ty, &lo_ty, &hi_ty, &contract)
+        .expect("typed pair binding receipt");
+    program
+        .type_catalog()
+        .validate_session_channel(&lo_ty)
+        .expect("lo endpoint TypeDesc");
+    program
+        .type_catalog()
+        .validate_session_channel(&hi_ty)
+        .expect("hi endpoint TypeDesc");
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .expect("reference typed session_pair execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(41));
+
+    crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume canonical typed SessionPair binding");
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume canonical typed SessionPair binding");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume canonical typed SessionPair binding");
+}
+
+#[test]
+fn rejects_typed_session_pair_non_binding_pattern_before_consumers() {
     let checked = checked_program(
         r#"
-session S = !i32 . end
+session S = end
 func main() -> i32 {
     let pair = session_pair::<S>()
     drop(pair)
@@ -284,11 +338,13 @@ func main() -> i32 {
 "#,
     );
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("typed SessionPair must remain outside the untyped aggregate island");
+        .expect_err("typed SessionPair aggregate binding must remain fail-closed");
     let rendered = format!("{error:?}");
     assert!(
-        rendered.contains("no canonical") || rendered.contains("Linear") || rendered.contains("glue"),
-        "typed SessionPair rejection must identify the missing tuple ownership contract: {rendered}"
+        rendered.contains("direct endpoint bindings")
+            || rendered.contains("canonical aggregate")
+            || rendered.contains("glue"),
+        "typed SessionPair rejection must identify the unsupported aggregate shape: {rendered}"
     );
 }
 

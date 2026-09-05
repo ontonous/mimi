@@ -1167,6 +1167,29 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
             }
+            MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                let (Some(lo_ty), Some(hi_ty)) =
+                    (value_type(function, lo), value_type(function, hi))
+                else {
+                    return;
+                };
+                let Some(receipt) = contract.as_ref() else {
+                    self.error(format!(
+                        "{subject} typed session_pair binding has no canonical receipt"
+                    ));
+                    return;
+                };
+                if let Err(message) = catalog.validate_session_pair_bind_receipt(
+                    &receipt.pair_ty,
+                    &lo_ty,
+                    &hi_ty,
+                    receipt,
+                ) {
+                    self.error(format!(
+                        "{subject} typed session_pair binding rejected: {message}"
+                    ));
+                }
+            }
             MirInstructionKind::VariantPredicate {
                 result,
                 predicate,

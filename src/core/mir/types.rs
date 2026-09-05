@@ -146,9 +146,9 @@ pub enum MirBuiltinKind {
     /// session pair. The protocol residual and endpoint ABI are carried by
     /// the result TypeDesc; the builtin itself has no value arguments.
     SessionOpen,
-    /// Produce the untyped `(i64, i64)` session handle pair.  The typed
-    /// `session_pair::<S>()` form remains outside this scalar-handle island
-    /// until tuple ownership/projection receipts are materialized.
+    /// Produce the untyped `(i64, i64)` session handle pair. The typed
+    /// `session_pair::<S>()` direct tuple-bind shape is represented by the
+    /// dedicated `SessionPairBind` node, not by this Copy aggregate builtin.
     SessionPair,
 }
 
@@ -595,6 +595,17 @@ pub struct MirSessionCallContract {
     pub before: SessionResidualId,
     pub after: SessionResidualId,
     pub terminal: bool,
+}
+
+/// TypeDesc receipt for the narrow typed `session_pair::<S>()` binding island.
+/// The tuple itself never becomes a runtime-owned MIR value: this receipt
+/// proves that the checker-resolved pair has exactly two transfer-only
+/// SessionChan endpoints, which are introduced directly by the bind node.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirSessionPairBindContract {
+    pub pair_ty: ResolvedTypeId,
+    pub lo_ty: ResolvedTypeId,
+    pub hi_ty: ResolvedTypeId,
 }
 
 /// Closed effect family for ordinary MIR calls that transfer a linear
@@ -2853,6 +2864,63 @@ impl MirTypeCatalog {
                 "SessionChan endpoint type '{}' has an inconsistent transfer-only TypeDesc/ABI/glue contract",
                 ty.as_str()
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate the complete TypeDesc side of a typed
+    /// `session_pair::<S>()` direct tuple binding.  The aggregate pair is
+    /// intentionally not required to have product glue: the canonical MIR
+    /// node materializes both linear endpoints as independent values, so no
+    /// backend may clone/drop a hidden tuple aggregate.
+    pub fn validated_session_pair_bind_contract(
+        &self,
+        pair_ty: &ResolvedTypeId,
+        lo_ty: &ResolvedTypeId,
+        hi_ty: &ResolvedTypeId,
+    ) -> Result<MirSessionPairBindContract, String> {
+        let pair = self.get(pair_ty).ok_or_else(|| {
+            format!(
+                "typed session_pair pair type '{}' is absent from MIR TypeDesc catalog",
+                pair_ty.as_str()
+            )
+        })?;
+        let MirLayout::Tuple(elements) = &pair.layout else {
+            return Err(format!(
+                "typed session_pair pair type '{}' must have a canonical two-field tuple layout",
+                pair_ty.as_str()
+            ));
+        };
+        if elements.as_slice() != [lo_ty.clone(), hi_ty.clone()]
+            || pair.kind != (MirTypeKind::Tuple { arity: 2 })
+            || pair.abi != MirAbiClass::Aggregate
+        {
+            return Err(
+                "typed session_pair pair TypeDesc disagrees with its two endpoint identities"
+                    .into(),
+            );
+        }
+        self.validate_session_channel(lo_ty)?;
+        self.validate_session_channel(hi_ty)?;
+        Ok(MirSessionPairBindContract {
+            pair_ty: pair_ty.clone(),
+            lo_ty: lo_ty.clone(),
+            hi_ty: hi_ty.clone(),
+        })
+    }
+
+    /// Validate an already materialized typed pair binding receipt against
+    /// the endpoint value identities and the canonical tuple layout.
+    pub fn validate_session_pair_bind_receipt(
+        &self,
+        pair_ty: &ResolvedTypeId,
+        lo_ty: &ResolvedTypeId,
+        hi_ty: &ResolvedTypeId,
+        receipt: &MirSessionPairBindContract,
+    ) -> Result<(), String> {
+        let expected = self.validated_session_pair_bind_contract(pair_ty, lo_ty, hi_ty)?;
+        if receipt != &expected {
+            return Err("typed session_pair binding receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }

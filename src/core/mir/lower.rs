@@ -5129,6 +5129,10 @@ impl<'a> Lowerer<'a> {
                     pattern,
                     initializer: Some(initializer),
                 } => {
+                    if self.lower_typed_session_pair_bind(&statement.node_id, pattern, initializer)
+                    {
+                        continue;
+                    }
                     let value = self.lower_expr(initializer);
                     if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
                         if let Ok(destination) = self.local_value(local) {
@@ -5200,6 +5204,98 @@ impl<'a> Lowerer<'a> {
                 ),
             }
         }
+    }
+
+    /// Lower only the checker-proven direct tuple binding shape for
+    /// `session_pair::<S>()`. The pair aggregate is never materialized as a
+    /// linear tuple value: both transfer-only endpoints are introduced by one
+    /// explicit MIR node and consumed later by SessionCall instructions.
+    fn lower_typed_session_pair_bind(
+        &mut self,
+        node_id: &NodeId,
+        pattern: &crate::core::ir::ResolvedPattern,
+        initializer: &ResolvedExpr,
+    ) -> bool {
+        let ResolvedPatternKind::Tuple(elements) = &pattern.kind else {
+            return false;
+        };
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            return false;
+        };
+        let is_typed_pair = matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(builtin)
+                if builtin.as_str() == "session_pair"
+                    && call.type_arguments.len() == 1
+                    && call.arguments.is_empty()
+        );
+        if !is_typed_pair {
+            return false;
+        }
+        let [lo_pattern, hi_pattern] = elements.as_slice() else {
+            self.error(
+                node_id,
+                "typed session_pair MIR binding requires exactly two endpoint patterns",
+            );
+            return true;
+        };
+        let (
+            ResolvedPatternKind::Binding {
+                local: lo_local, ..
+            },
+            ResolvedPatternKind::Binding {
+                local: hi_local, ..
+            },
+        ) = (&lo_pattern.kind, &hi_pattern.kind)
+        else {
+            self.error(
+                node_id,
+                "typed session_pair MIR binding requires two direct endpoint bindings",
+            );
+            return true;
+        };
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                node_id,
+                "typed session_pair MIR binding requires the canonical TypeDesc catalog",
+            );
+            return true;
+        };
+        let contract = match catalog.validated_session_pair_bind_contract(
+            &initializer.ty,
+            &lo_pattern.ty,
+            &hi_pattern.ty,
+        ) {
+            Ok(contract) => contract,
+            Err(message) => {
+                self.error(node_id, message);
+                return true;
+            }
+        };
+        let lo = match self.local_value(lo_local) {
+            Ok(value) => value,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        let hi = match self.local_value(hi_local) {
+            Ok(value) => value,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        self.emit(
+            node_id,
+            "session_pair_bind",
+            MirInstructionKind::SessionPairBind {
+                lo,
+                hi,
+                contract: Some(contract),
+            },
+        );
+        true
     }
 
     fn lower_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {

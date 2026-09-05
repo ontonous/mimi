@@ -745,6 +745,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     self.values.insert(result.clone(), value);
                 }
             }
+            MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                let (lo_value, hi_value) =
+                    self.emit_session_pair_bind(lo, hi, contract.as_ref(), subject)?;
+                self.values.insert(lo.clone(), lo_value);
+                self.values.insert(hi.clone(), hi_value);
+            }
             MirInstructionKind::Call {
                 result,
                 callee,

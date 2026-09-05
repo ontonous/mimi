@@ -471,6 +471,33 @@ impl MirProgram {
                                 });
                             }
                         }
+                        super::MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                            let Some(receipt) = contract.as_ref() else {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "typed session_pair binding has no canonical receipt"
+                                        .into(),
+                                });
+                                continue;
+                            };
+                            let Some(lo_value) = function.values.get(lo) else {
+                                continue;
+                            };
+                            let Some(hi_value) = function.values.get(hi) else {
+                                continue;
+                            };
+                            if let Err(message) = type_catalog.validate_session_pair_bind_receipt(
+                                &receipt.pair_ty,
+                                &lo_value.ty,
+                                &hi_value.ty,
+                                receipt,
+                            ) {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message,
+                                });
+                            }
+                        }
                         super::MirInstructionKind::VariantProject {
                             result,
                             base,
@@ -2132,6 +2159,10 @@ fn validate_call_argument_directions(
             .values()
             .flat_map(|block| block.instructions.iter())
             .find_map(|instruction| {
+                if let super::MirInstructionKind::SessionPairBind { lo, hi, .. } = &instruction.kind
+                {
+                    return (lo == value || hi == value).then_some(Producer::Fresh);
+                }
                 let (result, producer) = match &instruction.kind {
                     super::MirInstructionKind::Move { result, .. }
                     | super::MirInstructionKind::MoveProject { result, .. }
@@ -2171,6 +2202,7 @@ fn validate_call_argument_directions(
                     super::MirInstructionKind::Call { result: None, .. }
                     | super::MirInstructionKind::Drop { .. }
                     | super::MirInstructionKind::EndBorrow { .. }
+                    | super::MirInstructionKind::SessionPairBind { .. }
                     | super::MirInstructionKind::Nop => return None,
                 };
                 (result == value).then_some(producer)
@@ -2606,10 +2638,22 @@ fn validate_linear_consumption(
                 &mut errors,
                 &mut seen_errors,
             );
-            if let Some(result) = produced_value(&instruction.kind) {
-                // MIR structural validation guarantees a single definition;
-                // a produced value is live until a later consuming operation.
-                consumed.remove(result);
+            match &instruction.kind {
+                super::MirInstructionKind::SessionPairBind { lo, hi, .. } => {
+                    // Both endpoints are fresh linear values introduced by
+                    // the one bind node; no hidden aggregate enters the
+                    // consumed set.
+                    consumed.remove(lo);
+                    consumed.remove(hi);
+                }
+                _ => {
+                    if let Some(result) = produced_value(&instruction.kind) {
+                        // MIR structural validation guarantees a single
+                        // definition; a produced value is live until a
+                        // later consuming operation.
+                        consumed.remove(result);
+                    }
+                }
             }
         }
 
@@ -2980,6 +3024,7 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::SessionCall {
             endpoint, payload, ..
         } => endpoint == needle || payload.as_ref() == Some(needle),
+        super::MirInstructionKind::SessionPairBind { .. } => false,
     }
 }
 
@@ -3042,6 +3087,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         super::MirInstructionKind::FlowTransition { result, .. } => Some(result),
         super::MirInstructionKind::EndBorrow { .. }
         | super::MirInstructionKind::Drop { .. }
+        | super::MirInstructionKind::SessionPairBind { .. }
         | super::MirInstructionKind::Nop => None,
     }
 }
@@ -4509,6 +4555,49 @@ impl<'a> MirReferenceInterpreter<'a> {
                 } else {
                     values.insert(result.clone(), MirRuntimeValue::Unit);
                 }
+            }
+            MirInstructionKind::SessionPairBind { lo, hi, contract } => {
+                let receipt = contract.as_ref().ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "typed session_pair binding has no canonical TypeDesc receipt",
+                    )
+                })?;
+                let lo_ty = function
+                    .values
+                    .get(lo)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "typed session_pair lo value has no MIR type",
+                        )
+                    })?;
+                let hi_ty = function
+                    .values
+                    .get(hi)
+                    .map(|value| value.ty.clone())
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "typed session_pair hi value has no MIR type",
+                        )
+                    })?;
+                self.program
+                    .type_catalog()
+                    .validate_session_pair_bind_receipt(&receipt.pair_ty, &lo_ty, &hi_ty, receipt)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let mut next = self.next_session_handle.borrow_mut();
+                let lo_handle = *next;
+                let hi_handle = lo_handle.checked_add(1).ok_or_else(|| {
+                    self.error(&function.owner, "typed session_pair handle space exhausted")
+                })?;
+                let next_handle = hi_handle.checked_add(1).ok_or_else(|| {
+                    self.error(&function.owner, "typed session_pair handle space exhausted")
+                })?;
+                *next = next_handle;
+                values.insert(lo.clone(), MirRuntimeValue::Int(lo_handle));
+                values.insert(hi.clone(), MirRuntimeValue::Int(hi_handle));
             }
             MirInstructionKind::Call {
                 result,
