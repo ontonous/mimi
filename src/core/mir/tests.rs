@@ -651,6 +651,92 @@ fn reordered_multi_session_call_receipts_are_rejected_before_consumers() {
 }
 
 #[test]
+fn protocol_method_call_uses_checker_method_identity_across_mir_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_protocol_method.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("protocol method must lower to canonical MIR");
+    let main = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    let method = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method },
+                arguments,
+                ..
+            } => Some((protocol.clone(), method.clone(), arguments.clone())),
+            _ => None,
+        })
+        .expect("ProtocolMethod MIR call");
+    assert_eq!(method.0 .0, "trait:Read");
+    assert!(method
+        .1
+        .as_str()
+        .starts_with("function:Read:for:Counter::read:"));
+    let target = crate::core::mir::canonical_protocol_call_target(
+        &crate::core::ir::ResolvedCallee::ProtocolMethod {
+            protocol: method.0,
+            method: method.1,
+        },
+    )
+    .expect("ProtocolMethod has a concrete MIR target");
+    assert!(program.functions().contains_key(&target));
+    assert_eq!(method.2.len(), 1);
+
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference ProtocolMethod execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+    let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode ProtocolMethod consumer");
+    assert!(!bytecode.functions.is_empty());
+    crate::codegen::mir::validate_mir_native(&program).expect("native ProtocolMethod validator");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier ProtocolMethod capability gate");
+}
+
+#[test]
+fn protocol_method_with_non_function_identity_is_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_protocol_method.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("protocol method must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+        .expect("ProtocolMethod MIR call");
+    let MirInstructionKind::Call { callee, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    *callee = crate::core::ir::ResolvedCallee::ProtocolMethod {
+        protocol: crate::core::NodeId("trait:Read".into()),
+        method: crate::core::ir::MethodId::new("method:Read::read").expect("method id"),
+    };
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("non-function ProtocolMethod identity must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("is not a canonical function identity")
+    }));
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

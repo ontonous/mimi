@@ -16,6 +16,46 @@ use crate::core::ir::{
 };
 use crate::core::{NodeId, ResolvedPlace};
 
+/// Resolve a checker-owned callable identity to the executable MIR function
+/// owner used by all consumers. Protocol/trait method calls retain their
+/// `ProtocolMethod` identity in the MIR node (so dispatch kind is not erased),
+/// while their checker-assigned `MethodId` is also the concrete function owner
+/// materialized in the canonical function table. Actor and other dynamic
+/// callable families intentionally remain outside this helper; they need an
+/// actor/mailbox effect contract before crossing the MIR backend boundary.
+pub(crate) fn canonical_protocol_call_target(callee: &ResolvedCallee) -> Option<NodeId> {
+    match callee {
+        ResolvedCallee::Function(owner) => Some(owner.clone()),
+        ResolvedCallee::ProtocolMethod { method, .. } => Some(NodeId(method.as_str().to_owned())),
+        ResolvedCallee::ActorMethod { .. }
+        | ResolvedCallee::Constructor(_)
+        | ResolvedCallee::Extern(_)
+        | ResolvedCallee::Builtin(_)
+        | ResolvedCallee::LocalClosure(_)
+        | ResolvedCallee::Transition(_) => None,
+    }
+}
+
+/// Validate the checker-owned dispatch identity before a consumer resolves its
+/// concrete function owner. Keeping this predicate beside the target resolver
+/// gives every MIR consumer the same fail-closed diagnostics when called with a
+/// malformed program outside the normal `MirProgram` admission path.
+pub(crate) fn validate_protocol_method_identity(callee: &ResolvedCallee) -> Result<(), String> {
+    let ResolvedCallee::ProtocolMethod { protocol, method } = callee else {
+        return Ok(());
+    };
+    if protocol.0.trim().is_empty() || method.as_str().trim().is_empty() {
+        return Err("protocol method call has an empty dispatch identity".into());
+    }
+    if !method.as_str().starts_with("function:") {
+        return Err(format!(
+            "protocol method '{}' is not a canonical function identity",
+            method.as_str()
+        ));
+    }
+    Ok(())
+}
+
 mod contracts;
 mod copy_option_island;
 mod copy_result_island;

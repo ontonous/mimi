@@ -716,19 +716,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let ResolvedCallee::Function(owner) = callee else {
+        let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
             return Err(NativeMirError::new(
                 subject,
                 format!("callee {callee:?} is not a canonical function"),
             ));
         };
-        let function = *self.functions.get(owner).ok_or_else(|| {
+        if let Err(message) = crate::core::mir::validate_protocol_method_identity(callee) {
+            return Err(NativeMirError::new(subject, message));
+        }
+        let function = *self.functions.get(&owner).ok_or_else(|| {
             NativeMirError::new(
                 subject,
                 format!("callee '{}' is absent from native declarations", owner.0),
             )
         })?;
-        let target = self.program.functions().get(owner).ok_or_else(|| {
+        let target = self.program.functions().get(&owner).ok_or_else(|| {
             NativeMirError::new(
                 subject,
                 format!("callee '{}' is absent from MIR program", owner.0),
@@ -764,7 +767,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             self.program
                 .type_catalog()
                 .validate_variant_call_abi_receipt(
-                    owner,
+                    &owner,
                     type_arguments,
                     &parameter_types,
                     &target.result,

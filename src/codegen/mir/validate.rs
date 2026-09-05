@@ -1973,14 +1973,18 @@ impl<'a> NativeMirValidator<'a> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) {
-        let ResolvedCallee::Function(owner) = callee else {
+        let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
             self.errors.push(NativeMirError::new(
                 subject,
                 format!("callee {callee:?} is not a canonical function"),
             ));
             return;
         };
-        let Some(target) = self.program.functions().get(owner) else {
+        if let Err(message) = crate::core::mir::validate_protocol_method_identity(callee) {
+            self.errors.push(NativeMirError::new(subject, message));
+            return;
+        }
+        let Some(target) = self.program.functions().get(&owner) else {
             self.errors.push(NativeMirError::new(
                 subject,
                 format!("callee '{}' is absent from MIR program", owner.0),
@@ -2025,7 +2029,7 @@ impl<'a> NativeMirValidator<'a> {
                 .program
                 .type_catalog()
                 .validate_variant_call_abi_receipt(
-                    owner,
+                    &owner,
                     type_arguments,
                     &parameter_types,
                     &target.result,

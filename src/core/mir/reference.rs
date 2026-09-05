@@ -1781,14 +1781,21 @@ fn validate_call_graph(
                 else {
                     continue;
                 };
-                let ResolvedCallee::Function(target_owner) = callee else {
+                let Some(target_owner) = super::canonical_protocol_call_target(callee) else {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!("callee '{callee:?}' is not a materialized MIR function"),
                     });
                     continue;
                 };
-                let Some(target) = functions.get(target_owner) else {
+                if let Err(message) = super::validate_protocol_method_identity(callee) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message,
+                    });
+                    continue;
+                }
+                let Some(target) = functions.get(&target_owner) else {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
@@ -1798,6 +1805,60 @@ fn validate_call_graph(
                     });
                     continue;
                 };
+
+                // Protocol dispatch keeps the checker-owned method identity,
+                // but executes the concrete MIR body selected by that
+                // identity.  Prove the complete TypeDesc/ABI boundary once at
+                // the canonical program gate so no consumer can silently
+                // reinterpret a receiver or drop an argument.
+                if matches!(callee, ResolvedCallee::ProtocolMethod { .. }) {
+                    if arguments.len() != target.parameters.len() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message:
+                                "protocol method call arity disagrees with canonical method ABI"
+                                    .into(),
+                        });
+                    }
+                    for (index, (argument, parameter)) in
+                        arguments.iter().zip(&target.parameters).enumerate()
+                    {
+                        let Some(argument_value) = function.values.get(argument) else {
+                            continue;
+                        };
+                        let Some(parameter_value) = target.values.get(parameter) else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "protocol method parameter {} has no canonical TypeDesc",
+                                    index
+                                ),
+                            });
+                            continue;
+                        };
+                        if argument_value.ty != parameter_value.ty {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "protocol method argument {} TypeDesc disagrees with canonical method ABI",
+                                    index
+                                ),
+                            });
+                        }
+                    }
+                    if let Some(result) = result {
+                        if function
+                            .values
+                            .get(result)
+                            .is_none_or(|value| value.ty != target.result)
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "protocol method result TypeDesc disagrees with canonical method ABI".into(),
+                            });
+                        }
+                    }
+                }
 
                 let target_parameter_types = target
                     .parameters
@@ -1825,7 +1886,7 @@ fn validate_call_graph(
                         continue;
                     };
                     if let Err(message) = type_catalog.validate_variant_call_abi_receipt(
-                        target_owner,
+                        &target_owner,
                         type_arguments,
                         &target_parameter_types,
                         &target.result,
@@ -1869,7 +1930,7 @@ fn validate_call_graph(
 
                 let target_instance = instances
                     .values()
-                    .find(|instance| instance.function == *target_owner);
+                    .find(|instance| instance.function == target_owner);
                 if type_arguments.is_empty() {
                     if target_instance.is_some() {
                         errors.push(super::MirValidationError {
@@ -4476,13 +4537,16 @@ impl<'a> MirReferenceInterpreter<'a> {
                 variant_call_contract,
                 ..
             } => {
-                let ResolvedCallee::Function(owner) = callee else {
+                let Some(owner) = super::canonical_protocol_call_target(callee) else {
                     return Err(self.error(
                         &function.owner,
                         format!("callee '{callee:?}' is not a MIR function"),
                     ));
                 };
-                let callee = self.program.functions.get(owner).ok_or_else(|| {
+                if let Err(message) = super::validate_protocol_method_identity(callee) {
+                    return Err(self.error(&function.owner, message));
+                }
+                let callee = self.program.functions.get(&owner).ok_or_else(|| {
                     self.error(&function.owner, format!("callee '{}' is absent", owner.0))
                 })?;
                 let parameter_types = callee
@@ -4520,7 +4584,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     self.program
                         .type_catalog()
                         .validate_variant_call_abi_receipt(
-                            owner,
+                            &owner,
                             type_arguments,
                             &parameter_types,
                             &callee.result,

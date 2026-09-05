@@ -1,0 +1,14 @@
+trait Read {
+    func read() -> i32
+}
+
+type Counter { value: i32 }
+
+impl Read for Counter {
+    func read() -> i32 { self.value }
+}
+
+func main() -> i32 {
+    let counter = Counter { value: 41 }
+    counter.read() + 1
+}

@@ -2522,15 +2522,18 @@ fn eval_materialized_call(
     arguments: &[MirValueId],
     variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
 ) -> Result<(), String> {
-    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+    let Some(target_owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
         return Err("MIR verifier call callee is not a canonical function instance".into());
     };
+    if let Err(message) = crate::core::mir::validate_protocol_method_identity(callee) {
+        return Err(format!("MIR verifier {message}"));
+    }
     let Some(instance) = program
         .instances()
         .values()
-        .find(|instance| instance.function == *target_owner)
+        .find(|instance| instance.function == target_owner)
     else {
-        let target = program.functions().get(target_owner).ok_or_else(|| {
+        let target = program.functions().get(&target_owner).ok_or_else(|| {
             format!(
                 "MIR verifier direct call target '{}' is absent from canonical MIR",
                 target_owner.0
@@ -2543,7 +2546,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
             );
@@ -2554,7 +2557,7 @@ fn eval_materialized_call(
             catalog,
             state,
             result,
-            target_owner,
+            &target_owner,
             type_arguments,
             arguments,
             variant_call_contract,
@@ -2588,7 +2591,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 *operation,
@@ -2601,7 +2604,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 *operation,
@@ -2614,7 +2617,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2629,7 +2632,7 @@ fn eval_materialized_call(
             catalog,
             state,
             result,
-            target_owner,
+            &target_owner,
             type_arguments,
             arguments,
             contract,
@@ -2642,7 +2645,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2655,7 +2658,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2668,7 +2671,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2681,7 +2684,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2694,7 +2697,7 @@ fn eval_materialized_call(
                 catalog,
                 state,
                 result,
-                target_owner,
+                &target_owner,
                 type_arguments,
                 arguments,
                 contract,
@@ -2708,7 +2711,7 @@ fn eval_materialized_call(
             catalog,
             state,
             result,
-            target_owner,
+            &target_owner,
             type_arguments,
             arguments,
             contract,
