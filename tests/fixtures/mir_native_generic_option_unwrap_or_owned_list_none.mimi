@@ -1,0 +1,13 @@
+// None transfers the explicit List<i32> fallback into the result.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Option<List<i32>> = None
+    let fallback: List<i32> = [9, 10]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    7
+}

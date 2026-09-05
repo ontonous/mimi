@@ -1,0 +1,15 @@
+// Generic Option<T>.unwrap_or specialized to the canonical consuming
+// Option<List<i32>> fallback contract.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let values: List<i32> = [1, 2, 3]
+    let value: Option<List<i32>> = Some(values)
+    let fallback: List<i32> = [9, 10]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    41
+}

@@ -1598,6 +1598,66 @@ fn generic_option_unwrap_or_owned_string_none_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_option_unwrap_or_owned_list_is_verified_from_canonical_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_list.mimi");
+    let file =
+        parse_memory_source(source, "mir-generic-option-unwrap-or-owned-list").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical managed Option<List> unwrap_or MIR");
+    assert!(canonical.instances().values().any(|instance| {
+        matches!(
+            &instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract
+            } if contract.projection.ownership == crate::core::mir::types::MirOwnership::Move
+                && contract.projection.move_out_glue == crate::core::mir::types::MirGlueKind::List
+        )
+    }));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("managed Option<List> fallback verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().any(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations
+        )
+    }));
+}
+
+#[test]
+fn generic_option_unwrap_or_owned_list_none_is_verified_from_canonical_mir() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_list_none.mimi"
+    );
+    let file =
+        parse_memory_source(source, "mir-generic-option-unwrap-or-owned-list-none").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical managed Option<List> unwrap_or None MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("managed Option<List> fallback None verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    assert!(results.iter().any(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations
+        )
+    }));
+}
+
+#[test]
 fn generic_result_unwrap_is_verified_from_canonical_mir_without_ast_fallback() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_result_unwrap.mimi");

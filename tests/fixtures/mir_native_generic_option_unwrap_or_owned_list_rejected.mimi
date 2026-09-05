@@ -1,0 +1,14 @@
+// The managed List fallback island admits only List<Copy scalar>; a
+// List<string> payload must remain fail-closed before consumers.
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    let values: List<string> = ["owned"]
+    let value: Option<List<string>> = Some(values)
+    let fallback: List<string> = ["fallback"]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    0
+}

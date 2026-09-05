@@ -6281,6 +6281,70 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_option_unwrap_or_owned_list_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_list.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic managed Option<List> unwrap_or MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.ownership
+                        == crate::core::mir::types::MirOwnership::Move
+                        && contract.projection.move_out_glue
+                            == crate::core::mir::types::MirGlueKind::List
+                )
+            })
+            .expect("managed generic Option<List> fallback projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback { .. }
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference managed Option<List> unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("managed Option<List> fallback bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("managed Option<List> fallback bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn executes_materialized_generic_option_unwrap_or_owned_list_none_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_list_none.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic managed Option<List> unwrap_or None MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference managed Option<List> unwrap_or None execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("managed Option<List> fallback None bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("managed Option<List> fallback None bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(7));
+        assert!(matches!(value, Value::Int(7)));
+    }
+
+    #[test]
     fn executes_materialized_generic_option_unwrap_or_bool_without_ast() {
         let source =
             include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_bool.mimi");
