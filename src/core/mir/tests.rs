@@ -4134,6 +4134,61 @@ fn direct_move_owned_result_list_i64_bool_calls_share_the_same_scalar_contract()
 }
 
 #[test]
+fn direct_move_owned_result_list_i64_bool_err_paths_preserve_residual_ownership() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_result_list_i64_bool_err_call_return.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("move-owned Result<List<i64|bool>, i32> Err paths must lower");
+    let calls = canonical
+        .functions()
+        .values()
+        .flat_map(|function| function.blocks.values())
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                variant_call_contract: Some(receipt),
+                ..
+            } => Some((callee.clone(), receipt.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 4);
+    for (callee, receipt) in calls {
+        assert_eq!(receipt.callee, callee);
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+        );
+        assert_eq!(
+            receipt.return_mode,
+            crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        );
+        canonical
+            .type_catalog()
+            .validate_variant_call_abi_receipt(
+                &receipt.callee,
+                &receipt.type_arguments,
+                &receipt.parameter_types,
+                &receipt.result_ty,
+                &receipt,
+            )
+            .expect("Err-path receipt must be TypeDesc-derived");
+    }
+    crate::core::mir::validate_managed_result_call_island(&canonical)
+        .expect("Err-path managed Result island validation");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&canonical)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference Err-path execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(56));
+}
+
+#[test]
 fn move_owned_result_call_receipt_drift_is_rejected_before_consumers() {
     let source = include_str!("../../../tests/fixtures/mir_result_string_i32_call_return.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");

@@ -5275,6 +5275,43 @@ mod tests {
     }
 
     #[test]
+    fn verifier_proves_move_owned_result_i64_bool_err_calls_from_canonical_mir() {
+        let source =
+            include_str!("../../tests/fixtures/mir_result_list_i64_bool_err_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("move-owned Result<List<i64|bool>, i32> Err calls must be canonical MIR");
+        let results = verify_program(&program, "result-list-i64-bool-err-call-source-hash".into())
+            .expect("move-owned Result Err-path verifier result");
+        for owner in [
+            "function:use_i64_ok",
+            "function:use_i64_err",
+            "function:use_bool_ok",
+            "function:use_bool_err",
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name == owner)
+                .expect("direct managed Result Err-path verification result");
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{owner}: {}",
+                result.message
+            );
+            assert!(result
+                .message
+                .contains("canonical MIR ensures contract proven"));
+        }
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference move-owned Result Err-path execution");
+        assert_eq!(value, MirRuntimeValue::Int(56));
+    }
+
+    #[test]
     fn verifier_proves_move_owned_result_call_with_exclusive_return_paths() {
         let source = r#"
             func choose(flag: bool) -> Result<string, i32> {

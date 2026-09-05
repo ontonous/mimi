@@ -7372,6 +7372,46 @@ mod tests {
     }
 
     #[test]
+    fn executes_move_owned_result_list_i64_bool_err_calls_through_both_oracles() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_result_list_i64_bool_err_call_return.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("Result<List<i64|bool>, i32> Err calls must lower");
+        let receipts = mir
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 4);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                && receipt.return_mode
+                    == crate::core::mir::types::MirVariantCallReturnMode::OwnershipPathExclusiveMerge
+        }));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference Err-path execution");
+        let value =
+            BytecodeVM::new(compile_mir_program(&mir).expect("MIR bytecode Err-path calls"))
+                .run_value()
+                .expect("bytecode Err-path execution");
+        assert_eq!(reference, MirRuntimeValue::Int(56));
+        assert!(matches!(value, Value::Int(56)));
+    }
+
+    #[test]
     fn executes_result_string_i32_consuming_switch_through_both_oracles() {
         let source =
             include_str!("../../../tests/fixtures/mir_verifier_result_string_i32_switch_move.mimi");

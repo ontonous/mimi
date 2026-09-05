@@ -18,7 +18,7 @@ use crate::core::ir::{
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
-    MirTypeKind,
+    MirTypeKind, MirVariantCallAbiMode,
 };
 use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId};
 
@@ -2692,8 +2692,10 @@ pub fn contains_managed_result_call_candidate(program: &MirProgram) -> bool {
 
 /// Validate the complete direct managed Result call island before a backend
 /// consumes the graph.  Every Result-typed direct call must carry the exact
-/// TypeDesc-derived receipt; a missing receipt or drift is a hard MIR error,
-/// not an invitation to re-check the source or call a legacy emitter.
+/// TypeDesc-derived receipt, and every move-owned target must carry the
+/// exclusive-return-path proof attached to that receipt.  A missing receipt,
+/// target/signature drift, or return-merge failure is a hard MIR error, not an
+/// invitation to re-check the source or call a legacy emitter.
 pub fn validate_managed_result_call_island(program: &MirProgram) -> Result<(), Vec<String>> {
     let mut errors = BTreeSet::new();
     for function in program.functions().values() {
@@ -2728,6 +2730,13 @@ pub fn validate_managed_result_call_island(program: &MirProgram) -> Result<(), V
                 if result_desc.kind != MirTypeKind::Result {
                     continue;
                 }
+                let Some(target) = program.functions().get(callee) else {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' target is absent from canonical MIR",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                    continue;
+                };
                 let Some(receipt) = variant_call_contract else {
                     errors.insert(format!(
                         "{} direct Result call '{}' has no ABI receipt",
@@ -2748,17 +2757,54 @@ pub fn validate_managed_result_call_island(program: &MirProgram) -> Result<(), V
                     ));
                     continue;
                 }
+                let target_parameter_types = target
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| target.values.get(parameter))
+                    .map(|value| value.ty.clone())
+                    .collect::<Vec<_>>();
+                if target_parameter_types.len() != target.parameters.len() {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' target parameter type is absent",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                    continue;
+                }
+                if parameter_types != target_parameter_types {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' argument types disagree with callee signature",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                }
+                if result_value.ty != target.result {
+                    errors.insert(format!(
+                        "{} direct Result call '{}' result type disagrees with callee signature",
+                        MANAGED_RESULT_CALL_ISLAND, callee.0
+                    ));
+                    continue;
+                }
                 if let Err(message) = program.type_catalog().validate_variant_call_abi_receipt(
                     callee,
                     type_arguments,
                     &parameter_types,
-                    &result_value.ty,
+                    &target.result,
                     receipt,
                 ) {
                     errors.insert(format!(
                         "{} direct Result call '{}' receipt failed: {message}",
                         MANAGED_RESULT_CALL_ISLAND, callee.0
                     ));
+                }
+                if receipt.mode == MirVariantCallAbiMode::MoveOwned {
+                    if let Err(message) = super::validate_move_owned_result_return_merge(
+                        target,
+                        program.type_catalog(),
+                    ) {
+                        errors.insert(format!(
+                            "{} direct Result call '{}' target return merge failed: {message}",
+                            MANAGED_RESULT_CALL_ISLAND, callee.0
+                        ));
+                    }
                 }
             }
         }
