@@ -6134,12 +6134,26 @@ fn project_value(
                 }
             };
             let index = canonical_list_index(function, raw, values.len())?;
-            values.get(index).cloned().ok_or_else(|| {
+            let selected = values.get(index).ok_or_else(|| {
                 execution_error(
                     function,
                     "List index E0803 bounds check lost selected element",
                 )
-            })
+            })?;
+            if receipt.mode == super::types::MirListIndexProjectionMode::CloneNestedList {
+                let MirRuntimeValue::List(child) = selected else {
+                    return Err(execution_error(
+                        function,
+                        "nested List index projection selected value is not a List",
+                    ));
+                };
+                // Vec::clone recursively clones every runtime value, yielding
+                // a private child List while leaving the borrowed parent
+                // untouched.
+                Ok(MirRuntimeValue::List(child.clone()))
+            } else {
+                Ok(selected.clone())
+            }
         }
         (_, MirProjection::Index(_)) => Err(execution_error(
             function,

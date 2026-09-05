@@ -2059,4 +2059,28 @@ mod tests {
             })
         }));
     }
+
+    #[test]
+    fn accepts_nested_list_index_with_materialized_clone_receipt() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_index.mimi"
+        ));
+        validate_mir_capabilities(&program)
+            .expect("nested List index clone receipt must satisfy verifier capability gate");
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::Project {
+                            projection: crate::core::mir::MirProjection::Index(_),
+                            list_index_contract: Some(ref receipt),
+                            ..
+                        } if receipt.mode
+                            == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+                    )
+                })
+            })
+        }));
+    }
 }

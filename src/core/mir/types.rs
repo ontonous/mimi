@@ -896,16 +896,29 @@ pub struct MirTupleProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Ownership mode for one canonical read-only List index projection.
+/// `CopyScalar` is a value copy; `CloneNestedList` is a deep clone of one
+/// child handle while the outer List remains borrowed/owned by its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirListIndexProjectionMode {
+    /// A scalar element is copied out of the borrowed List.
+    CopyScalar,
+    /// A one-level nested child List is deep-cloned; the parent remains owned
+    /// by the caller and must still be dropped independently.
+    CloneNestedList,
+}
+
 /// Backend-independent receipt for one canonical read-only List index
-/// projection.  The source List, element, index operand, and result identity
-/// are checker-owned facts; consumers must not recover them from a runtime
-/// vector, handle, or backend ABI.
+/// projection. The source List, element, index operand, result identity and
+/// ownership mode are checker-owned facts; consumers must not recover them
+/// from a runtime vector, handle, or backend ABI.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MirListIndexProjectionContract {
     pub list_ty: ResolvedTypeId,
     pub element_ty: ResolvedTypeId,
     pub index_ty: ResolvedTypeId,
     pub result_ty: ResolvedTypeId,
+    pub mode: MirListIndexProjectionMode,
 }
 
 /// Backend-independent receipt for one canonical read-only List operation.
@@ -5406,9 +5419,10 @@ impl MirTypeCatalog {
     }
 
     /// Validate a read-only List index projection. The List root is borrowed
-    /// by `Project`; only the selected element is copied out. Every index,
-    /// including a source-level constant, is represented by an explicit
-    /// signed `i32`/`i64` scalar MIR value operand.
+    /// by `Project`; a scalar element is copied out, while an admitted
+    /// one-level nested child List is deep-cloned so its owned handle cannot
+    /// alias the parent. Every index, including a source-level constant, is
+    /// represented by an explicit signed `i32`/`i64` scalar MIR value operand.
     pub fn validate_list_index(
         &self,
         base_ty: &ResolvedTypeId,
@@ -5438,7 +5452,19 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        if result.ownership != MirOwnership::Copy
+        let nested_result = matches!(result.layout, MirLayout::List { .. });
+        if nested_result {
+            // Nested index is read-only at the outer List boundary but cannot
+            // shallow-copy an owned child handle. The admitted shape is a
+            // one-level List<List<Copy scalar>> whose selected child is
+            // deep-cloned, leaving the parent obligation untouched.
+            self.validate_move_owned_list_payload(result_ty).map_err(|message| {
+                format!(
+                    "nested List index child result '{}' is outside the scalar List clone contract: {message}",
+                    result_ty.as_str()
+                )
+            })?;
+        } else if result.ownership != MirOwnership::Copy
             || result.glue
                 != (MirGlueContract {
                     move_out: MirGlueKind::Noop,
@@ -5447,7 +5473,7 @@ impl MirTypeCatalog {
                 })
         {
             return Err(format!(
-                "List index result type '{}' is not a Copy/no-op element",
+                "List index result type '{}' is not a Copy/no-op element or admitted nested List clone",
                 result_ty.as_str()
             ));
         }
@@ -5532,6 +5558,7 @@ impl MirTypeCatalog {
             element_ty: element.clone(),
             index_ty: index_ty.clone(),
             result_ty: result_ty.clone(),
+            mode: MirListIndexProjectionMode::CopyScalar,
         })
     }
 
@@ -5555,11 +5582,29 @@ impl MirTypeCatalog {
                 base_ty.as_str()
             ));
         };
+        let mode = if self
+            .get(element)
+            .is_some_and(|descriptor| matches!(descriptor.layout, MirLayout::List { .. }))
+        {
+            // A nested projection returns a private deep clone of the selected
+            // child List. The source outer List remains borrowed/owned by the
+            // caller and must still be dropped independently.
+            self.validate_move_owned_list_payload(result_ty).map_err(|message| {
+                format!(
+                    "nested List index child result '{}' is outside the scalar List clone contract: {message}",
+                    result_ty.as_str()
+                )
+            })?;
+            MirListIndexProjectionMode::CloneNestedList
+        } else {
+            MirListIndexProjectionMode::CopyScalar
+        };
         Ok(MirListIndexProjectionContract {
             list_ty: base_ty.clone(),
             element_ty: element.clone(),
             index_ty: index_ty.clone(),
             result_ty: result_ty.clone(),
+            mode,
         })
     }
 
@@ -9257,6 +9302,14 @@ mod tests {
             .expect("nested List.len contract");
         assert_eq!(len.element_ty, child_list_id);
         assert_eq!(len.argument_ty, None);
+
+        let projection = catalog
+            .validated_list_index_projection_contract(&nested_list_id, &i32_id, &child_list_id)
+            .expect("nested List index clone contract");
+        assert_eq!(
+            projection.mode,
+            crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+        );
 
         let reverse = catalog
             .validate_list_operation(&nested_list_id, &nested_list_id, MirListOperation::Reverse)

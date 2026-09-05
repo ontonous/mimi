@@ -426,6 +426,39 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     ))
                 }
             };
+            if receipt.mode == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+            {
+                let get_fn = self
+                    .generator
+                    .get_runtime_fn("mimi_mir_list_get_nested")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let raw = call_try_basic_value(
+                    &self
+                        .generator
+                        .builder
+                        .build_call(
+                            get_fn,
+                            &[
+                                BasicMetadataValueEnum::from(
+                                    self.value(base, subject)?.into_pointer_value(),
+                                ),
+                                BasicMetadataValueEnum::from(index_value),
+                            ],
+                            "mir_list_get_nested",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                )
+                .ok_or_else(|| {
+                    NativeMirError::new(subject, "nested List projection returned void")
+                })?
+                .into_pointer_value();
+                self.emit_list_null_abort(
+                    raw,
+                    subject,
+                    "canonical nested MIR List projection clone failed",
+                )?;
+                return Ok(raw.into());
+            }
             let kind_value = self
                 .generator
                 .context

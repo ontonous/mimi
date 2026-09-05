@@ -1,0 +1,13 @@
+// Canonical nested List positive: indexing clones one child List deeply.
+// The outer List remains owned and is dropped independently afterwards.
+func main() -> i32 {
+    ensures: result == 3
+    let first: List<i32> = [1, 2]
+    let second: List<i32> = [3]
+    let nested: List<List<i32>> = [first, second]
+    let selected = nested[1]
+    let value = selected[0]
+    drop(selected)
+    drop(nested)
+    value
+}

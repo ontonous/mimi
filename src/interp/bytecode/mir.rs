@@ -5,8 +5,8 @@
 //! resolver, or checker.  Unsupported MIR shapes are reported explicitly
 //! instead of falling back to the legacy compiler.  The supported slice is
 //! scalar values, calls, branches, loop-shaped CFG edges, and recursively
-//! glued tuple/record products, and concrete Copy-scalar Lists including the
-//! bounded one-level nested List construction/clone/drop/outer-len shape.
+//! glued tuple/record products, and concrete Lists including the
+//! bounded one-level nested List construction/clone/drop/outer-len/index shape.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1970,6 +1970,7 @@ impl<'a> FunctionEmitter<'a> {
                     element_ty: receipt.element_ty.clone(),
                     index_ty: receipt.index_ty.clone(),
                     result_ty: receipt.result_ty.clone(),
+                    mode: receipt.mode,
                 })),
         )
     }
@@ -5063,10 +5064,54 @@ mod tests {
         assert!(!shape.list_ty.as_str().is_empty());
         assert_eq!(shape.element_ty, shape.result_ty);
         assert!(!shape.index_ty.as_str().is_empty());
+        assert_eq!(
+            shape.mode,
+            crate::core::mir::types::MirListIndexProjectionMode::CopyScalar
+        );
         let value = BytecodeVM::new(program)
             .run_value()
             .expect("canonical ListGet");
         assert!(matches!(value, Value::Int(20)));
+    }
+
+    #[test]
+    fn executes_nested_list_index_with_child_clone_through_mir_bytecode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_nested_list_index.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("nested List index MIR");
+        let main = mir
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("nested List index function");
+        let receipt = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Project {
+                    projection: crate::core::mir::MirProjection::Index(_),
+                    list_index_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .expect("nested List index receipt");
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference nested List index execution");
+        let bytecode = compile_mir_program(&mir).expect("nested List index bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("nested List index bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(3));
+        assert!(matches!(value, Value::Int(3)));
     }
 
     #[test]
@@ -5095,6 +5140,51 @@ mod tests {
         assert!(error
             .message()
             .contains("receipt element and result types disagree"));
+    }
+
+    #[test]
+    fn canonical_nested_list_index_receipt_rejects_forged_scalar_mode() {
+        let source = include_str!("../../../tests/fixtures/mir_native_nested_list_index.mimi");
+        let mut program = (*compile(source)).clone();
+        let main = &mut program.functions[program.entry as usize];
+        let contract = main
+            .code
+            .iter()
+            .find_map(|op| match op {
+                Op::ListGet {
+                    contract: Some(contract),
+                    ..
+                } => Some(*contract),
+                _ => None,
+            })
+            .expect("canonical nested List index contract");
+        let ConstValue::ListProjection(shape) = &mut main.constants[contract as usize] else {
+            panic!("canonical nested List index must carry a ListProjection shape");
+        };
+        shape.mode = crate::core::mir::types::MirListIndexProjectionMode::CopyScalar;
+        let error = BytecodeVM::new(std::sync::Arc::new(program))
+            .run_value()
+            .expect_err("forged nested List projection mode must trap before read");
+        assert!(error
+            .message()
+            .contains("scalar receipt cannot consume a nested List source"));
+    }
+
+    #[test]
+    fn canonical_mir_rejects_deep_nested_list_index_before_backend() {
+        let error = run_canonical_differential(
+            "func main() -> i32 { let leaf: List<i32> = [1]; let middle: List<List<i32>> = [leaf]; let deep: List<List<List<i32>>> = [middle]; let selected = deep[0]; drop(selected); drop(deep); 0 }",
+        )
+        .expect_err("deep nested List index must fail before bytecode");
+        match error {
+            DifferentialHarnessError::CanonicalMir(message) => {
+                assert!(
+                    message.contains("one-level") || message.contains("canonical Copy scalar"),
+                    "unexpected deep nested List index rejection: {message}"
+                );
+            }
+            other => panic!("deep nested List index crossed the canonical gate: {other:?}"),
+        }
     }
 
     #[test]

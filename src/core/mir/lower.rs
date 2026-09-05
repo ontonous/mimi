@@ -5284,6 +5284,11 @@ pub(crate) fn validate_scalar_list_projection_mir(
     contract: &super::types::MirListIndexProjectionContract,
     index_value: i64,
 ) -> Result<(), String> {
+    if contract.mode != super::types::MirListIndexProjectionMode::CopyScalar {
+        return Err(
+            "scalar generic List projection cannot use a nested child-clone receipt".into(),
+        );
+    }
     let [parameter] = function.parameters.as_slice() else {
         return Err("scalar generic List projection must have exactly one parameter".into());
     };

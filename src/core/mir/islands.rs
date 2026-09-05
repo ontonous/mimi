@@ -750,8 +750,9 @@ pub enum ScalarCollectionAdmission {
 /// the retained source file, invoke a backend, or infer a candidate from the
 /// presence of a type declaration.  Generic templates are not executable
 /// values on their own; only a checker-resolved concrete call to the narrow
-/// identity/Set facade family, List len/reverse/concat, or an exact Copy-scalar stdout effect can make
-/// them part of this island.
+/// identity/Set facade family, List len/reverse/concat, direct nested List
+/// index projection, or an exact Copy-scalar stdout effect can make them part
+/// of this island.
 pub fn classify_scalar_collection_admission(program: &CheckedProgram) -> ScalarCollectionAdmission {
     let scanner = scan_scalar_collection_admission(program);
     if !scanner.has_candidate {
@@ -1004,6 +1005,15 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                 }
             }
             ResolvedExprKind::Project { value, projection } => {
+                if concrete
+                    && matches!(projection, ResolvedValueProjection::Index(_))
+                    && is_resolved_nested_list_type(self.program, &value.ty)
+                {
+                    // Direct nested List indexing is a distinct candidate:
+                    // the MIR receipt proves a deep-cloned child handle while
+                    // preserving the borrowed parent obligation.
+                    self.has_candidate = true;
+                }
                 self.visit_expr(value, concrete);
                 if let ResolvedValueProjection::Index(index) = projection {
                     self.visit_expr(index, concrete);
@@ -1297,6 +1307,29 @@ fn is_resolved_list_type(
         }
         _ => false,
     }
+}
+
+fn is_resolved_nested_list_type(
+    program: &CheckedProgram,
+    id: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program.resolved_types().get(id)
+    else {
+        return false;
+    };
+    if item.as_str() != "builtin:type:List" || arguments.len() != 1 {
+        return false;
+    }
+    matches!(
+        program.resolved_types().get(&arguments[0]),
+        Some(ResolvedType::Nominal {
+            item: child_item,
+            arguments: child_arguments,
+            ..
+        }) if child_item.as_str() == "builtin:type:List" && child_arguments.len() == 1
+    )
 }
 
 fn is_scalar_set_facade_call(
@@ -2709,8 +2742,8 @@ fn program_uses_record(program: &CheckedProgram, record_ids: &BTreeSet<String>) 
 ///
 /// This is intentionally narrower than "the graph mentions a List/Set".  A
 /// plain collection value is still a compatibility input; only a materialized
-/// `ListOp::Len`/`Reverse`/`Concat`, `SetOp::Contains`, or checker-owned scalar
-/// Set/List facade instance,
+/// `ListOp::Len`/`Reverse`/`Concat`, a receipt-bearing nested List index,
+/// `SetOp::Contains`, or checker-owned scalar Set/List facade instance,
 /// or exact scalar `BuiltinCall::PrintlnBool`/`PrintlnInt` has crossed the
 /// S11 production boundary.
 /// Keeping this fact next to the island contract prevents the CLI and direct
@@ -2767,8 +2800,24 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
             })
         })
     });
+    let has_nested_list_index = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::Project {
+                        projection: super::MirProjection::Index(_),
+                        list_index_contract: Some(ref receipt),
+                        ..
+                    } if receipt.mode
+                        == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+                )
+            })
+        })
+    });
     has_list_operation
         || has_set_contains
+        || has_nested_list_index
         || program.instances().values().any(|instance| {
             matches!(
                 instance.contract,

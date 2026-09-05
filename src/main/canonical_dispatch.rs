@@ -117,7 +117,7 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, a one-, two-, three-, four-, or five-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), an exact S8 Flow
+/// record value, a one-, two-, three-, four-, or five-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), a direct nested List index projection, an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
@@ -2756,6 +2756,35 @@ mod tests {
                             operation: mimi::core::mir::MirListOperation::Len,
                             ..
                         }
+                    )
+                })
+            })
+        }));
+    }
+
+    #[test]
+    fn nested_list_index_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_nested_list_index.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_scalar_collection_admission(&checked),
+            mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("nested List index must select the canonical default route");
+        };
+        assert!(program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        mimi::core::mir::MirInstructionKind::Project {
+                            projection: mimi::core::mir::MirProjection::Index(_),
+                            list_index_contract: Some(ref receipt),
+                            ..
+                        } if receipt.mode
+                            == mimi::core::mir::types::MirListIndexProjectionMode::CloneNestedList
                     )
                 })
             })

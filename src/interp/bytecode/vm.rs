@@ -2057,7 +2057,8 @@ impl BytecodeVM {
                     rb,
                     contract,
                 } => {
-                    if let Some(shape) = self.list_projection_contract(contract)? {
+                    let canonical_shape = self.list_projection_contract(contract)?;
+                    if let Some(shape) = canonical_shape.as_ref() {
                         Self::validate_canonical_list_projection(
                             self.get_reg(ra),
                             &shape,
@@ -2092,7 +2093,15 @@ impl BytecodeVM {
                                     l.len()
                                 )));
                             }
-                            l[idx].clone()
+                            let selected = &l[idx];
+                            if canonical_shape.as_ref().is_some_and(|shape| {
+                                shape.mode
+                                    == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList
+                            }) {
+                                Self::clone_nested_list_projection_value(selected)?
+                            } else {
+                                selected.clone()
+                            }
                         }
                         Value::String(s) => {
                             let chars: Vec<char> = s.chars().collect();
@@ -5085,7 +5094,34 @@ impl BytecodeVM {
                 "list projection: receipt element and result types disagree",
             ));
         }
+        if shape.mode == crate::core::mir::types::MirListIndexProjectionMode::CopyScalar
+            && matches!(value, Value::List(values) if values.iter().any(|value| matches!(value, Value::List(_))))
+        {
+            return Err(InterpError::new(
+                "list projection: scalar receipt cannot consume a nested List source",
+            ));
+        }
         Ok(())
+    }
+
+    /// Clone one selected child of the admitted nested List projection shape.
+    /// The outer List is borrowed; a shallow Arc clone would alias the child
+    /// and let dropping either result violate the MIR ownership receipt.
+    fn clone_nested_list_projection_value(value: &Value) -> Result<Value, InterpError> {
+        let Value::List(child) = value else {
+            return Err(InterpError::new(
+                "list get: nested projection selected value is not a List",
+            ));
+        };
+        if child
+            .iter()
+            .any(|value| !matches!(value, Value::Int(_) | Value::Bool(_)))
+        {
+            return Err(InterpError::new(
+                "list get: nested projection child is outside Copy scalar List contract",
+            ));
+        }
+        Ok(Value::List(Arc::new(child.iter().cloned().collect())))
     }
 
     /// Decode the optional canonical List operation receipt. `None` is the

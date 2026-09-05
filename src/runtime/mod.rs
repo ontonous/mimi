@@ -1548,6 +1548,55 @@ pub unsafe extern "C" fn mimi_mir_list_len_nested(list: *const MimiList) -> i32 
     })
 }
 
+/// Read one child from a one-level nested List and return a deep-cloned child
+/// handle. The outer List is borrowed and remains owned by its caller; a
+/// shallow pointer return would create two owners for the same child and make
+/// Drop order backend-dependent. Negative indices follow the scalar List
+/// projection rule (Python-style wrapping); invalid storage traps E0800/E0803.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_get_nested(
+    list: *const MimiList,
+    raw_index: i64,
+) -> *mut MimiList {
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List handle is null\0");
+    }
+    let source = unsafe { &*list };
+    if source.element_kind != ListElementKind::List || source.len < 0 {
+        mir_list_abort(b"[E0800] canonical nested MIR List kind disagrees\0");
+    }
+    let cap = list_cap(source);
+    if (cap > 0 && source.len > cap) || (source.len > 0 && source.data.is_null()) {
+        mir_list_abort(b"[E0800] canonical nested MIR List storage is invalid\0");
+    }
+    let len = source.len;
+    let index = if raw_index < 0 {
+        let distance = raw_index.unsigned_abs();
+        if distance > len as u64 {
+            mir_list_abort(b"[E0803] canonical nested MIR List index out of bounds\0");
+        }
+        len - distance as i64
+    } else if raw_index >= len {
+        mir_list_abort(b"[E0803] canonical nested MIR List index out of bounds\0");
+    } else {
+        raw_index
+    };
+    let child = unsafe { (*source.data.add(index as usize)).cast::<MimiList>() };
+    if child.is_null()
+        || !matches!(
+            unsafe { (*child).element_kind },
+            ListElementKind::I64 | ListElementKind::Bool
+        )
+    {
+        mir_list_abort(b"[E0800] canonical nested MIR List child kind is invalid\0");
+    }
+    let clone = unsafe { mimi_mir_list_clone_any(child) };
+    if clone.is_null() {
+        mir_list_abort(b"[E0800] canonical nested MIR List projection clone failed\0");
+    }
+    clone
+}
+
 /// Clone and reverse a scalar List for canonical native MIR.
 ///
 /// The source handle remains owned by the caller.  Returning a fresh handle
@@ -2015,6 +2064,42 @@ mod canonical_mir_list_tests {
                 mimi_mir_list_get_scalar(child, ListElementKind::Bool as i8, 0),
                 1
             );
+            mimi_mir_list_drop_nested(parent);
+        }
+    }
+
+    #[test]
+    fn canonical_nested_list_index_returns_independent_child_clone() {
+        let child = unsafe { mimi_mir_list_new_scalar(ListElementKind::I64 as i8) };
+        assert!(!child.is_null());
+        unsafe {
+            assert_eq!(
+                mimi_mir_list_push_scalar(child, ListElementKind::I64 as i8, 7),
+                1
+            );
+        }
+        let parent = unsafe { mimi_mir_list_new_nested() };
+        assert!(!parent.is_null());
+        unsafe {
+            assert_eq!(mimi_mir_list_push_nested(parent, child), 1);
+            let selected = mimi_mir_list_get_nested(parent, -1);
+            assert!(!selected.is_null());
+            assert_eq!(
+                mimi_mir_list_get_scalar(selected, ListElementKind::I64 as i8, 0),
+                7
+            );
+            assert_eq!(
+                mimi_mir_list_push_scalar(selected, ListElementKind::I64 as i8, 9),
+                1
+            );
+            assert_eq!((*selected).len, 2);
+            let original = (*(*parent).data).cast::<MimiList>();
+            assert_eq!((*original).len, 1);
+            assert_eq!(
+                mimi_mir_list_get_scalar(original, ListElementKind::I64 as i8, 0),
+                7
+            );
+            mimi_mir_list_drop_scalar(selected, ListElementKind::I64 as i8);
             mimi_mir_list_drop_nested(parent);
         }
     }

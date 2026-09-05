@@ -144,6 +144,17 @@ fn register_mir_list_runtime<'ctx>(
         Some(inkwell::module::Linkage::External),
     );
     module.add_function(
+        "mimi_mir_list_get_nested",
+        ptr.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
         "mimi_mir_list_push_nested",
         i8.fn_type(
             &[

@@ -1675,6 +1675,7 @@ pub struct ListProjectionShape {
     pub element_ty: crate::core::ResolvedTypeId,
     pub index_ty: crate::core::ResolvedTypeId,
     pub result_ty: crate::core::ResolvedTypeId,
+    pub mode: crate::core::mir::types::MirListIndexProjectionMode,
 }
 
 /// One canonical read-only List operation in the bytecode physical contract.
