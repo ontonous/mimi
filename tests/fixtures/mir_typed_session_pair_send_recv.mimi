@@ -1,0 +1,11 @@
+// Canonical Session MIR roundtrip: typed pair endpoints are cross-wired.
+session Send = !i64 . end
+
+func main() -> i64 {
+    let (tx, rx) = session_pair::<Send>()
+    session_send(tx, 41)
+    let value = session_recv(rx)
+    session_close(tx)
+    session_close(rx)
+    value
+}

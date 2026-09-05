@@ -3230,6 +3230,12 @@ pub struct MirReferenceInterpreter<'a> {
     max_steps: usize,
     output: RefCell<String>,
     session_queues: RefCell<BTreeMap<i64, VecDeque<i64>>>,
+    /// Deterministic cross-wire established by a typed `SessionPairBind`.
+    /// The runtime/native backends receive the same relationship from the
+    /// session-pair allocator; keeping it in the reference oracle makes a
+    /// send followed by recv exercise the actual canonical channel shape
+    /// rather than silently discarding the sent payload.
+    session_peers: RefCell<BTreeMap<i64, i64>>,
     next_session_handle: RefCell<i64>,
 }
 
@@ -3240,6 +3246,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             max_steps: 1_000_000,
             output: RefCell::new(String::new()),
             session_queues: RefCell::new(BTreeMap::new()),
+            session_peers: RefCell::new(BTreeMap::new()),
             next_session_handle: RefCell::new(1),
         }
     }
@@ -3287,6 +3294,7 @@ impl<'a> MirReferenceInterpreter<'a> {
     ) -> Result<MirExecutionObservation, MirExecutionError> {
         self.output.borrow_mut().clear();
         *self.next_session_handle.borrow_mut() = 1;
+        self.session_peers.borrow_mut().clear();
         let mut session_queues = self.session_queues.borrow_mut();
         session_queues.clear();
         for queue in queues {
@@ -4523,6 +4531,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .type_catalog()
                     .validate_session_call_contract(&endpoint_ty, &result_ty, contract)
                     .map_err(|message| self.error(&function.owner, message))?;
+                let mut sent_payload = None;
                 if *operation == super::types::MirSessionOperation::Send {
                     let payload = payload.as_ref().ok_or_else(|| {
                         self.error(
@@ -4537,6 +4546,10 @@ impl<'a> MirReferenceInterpreter<'a> {
                             "session_send received a non-integer payload runtime value",
                         ));
                     }
+                    let MirRuntimeValue::Int(payload) = payload else {
+                        unreachable!("integer SessionCall payload checked above")
+                    };
+                    sent_payload = Some(payload);
                 } else if *operation == super::types::MirSessionOperation::Recv {
                     if payload.is_some() {
                         return Err(self.error(
@@ -4551,10 +4564,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ));
                 }
                 // The deterministic oracle models an endpoint as an opaque
-                // integer handle. Closing consumes that handle and returns
-                // unit; the native/VM runtime performs the actual channel
-                // table removal, but no backend-specific state is allowed to
-                // alter the canonical result/trap contract.
+                // integer handle. A typed pair binds the two opaque handles
+                // into a cross-wire, so Send appends to the peer FIFO and a
+                // later Recv observes the same value as the native/VM runtime.
+                // An externally supplied endpoint has no peer in the oracle;
+                // its send remains an admitted fire-and-forget operation, as
+                // it was before the pair relationship was materialized.
                 let endpoint = if matches!(
                     *operation,
                     super::types::MirSessionOperation::Send
@@ -4570,10 +4585,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "SessionCall received a non-opaque endpoint runtime value",
                     ));
                 }
-                if *operation == super::types::MirSessionOperation::Recv {
-                    let MirRuntimeValue::Int(endpoint) = endpoint else {
-                        unreachable!("validated SessionChan endpoint checked above")
-                    };
+                let MirRuntimeValue::Int(endpoint) = endpoint else {
+                    unreachable!("validated SessionChan endpoint checked above")
+                };
+                if *operation == super::types::MirSessionOperation::Send {
+                    if let Some(payload) = sent_payload {
+                        if let Some(peer) = self.session_peers.borrow().get(&endpoint).copied() {
+                            self.session_queues
+                                .borrow_mut()
+                                .entry(peer)
+                                .or_default()
+                                .push_back(payload);
+                        }
+                    }
+                    values.insert(result.clone(), MirRuntimeValue::Unit);
+                } else if *operation == super::types::MirSessionOperation::Recv {
                     let received = self
                         .session_queues
                         .borrow_mut()
@@ -4606,6 +4632,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                     }
                     values.insert(result.clone(), MirRuntimeValue::Int(received));
                 } else {
+                    let peer = self.session_peers.borrow_mut().remove(&endpoint);
+                    if let Some(peer) = peer {
+                        self.session_peers.borrow_mut().remove(&peer);
+                    }
+                    self.session_queues.borrow_mut().remove(&endpoint);
                     values.insert(result.clone(), MirRuntimeValue::Unit);
                 }
             }
@@ -4649,6 +4680,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                     self.error(&function.owner, "typed session_pair handle space exhausted")
                 })?;
                 *next = next_handle;
+                self.session_peers.borrow_mut().insert(lo_handle, hi_handle);
+                self.session_peers.borrow_mut().insert(hi_handle, lo_handle);
                 values.insert(lo.clone(), MirRuntimeValue::Int(lo_handle));
                 values.insert(hi.clone(), MirRuntimeValue::Int(hi_handle));
             }

@@ -2889,6 +2889,28 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_typed_session_pair_send_recv_roundtrip() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_typed_session_pair_send_recv.mimi"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference SessionPair send/recv execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_typed_session_pair_send_recv");
+        generator
+            .compile_mir_native(&program)
+            .expect("native SessionPair send/recv must consume canonical MIR");
+        generator
+            .module
+            .verify()
+            .expect("native SessionPair send/recv module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_scalar_generic_list_len() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_list_len.mimi"

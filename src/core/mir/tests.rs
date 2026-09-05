@@ -349,6 +349,114 @@ func main() -> i32 {
 }
 
 #[test]
+fn executes_typed_session_pair_send_recv_roundtrip_across_mir_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_typed_session_pair_send_recv.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("typed SessionPair send/recv roundtrip must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program.functions().get(&owner).expect("roundtrip main MIR");
+    let session_calls = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::SessionCall {
+                operation,
+                contract: Some(contract),
+                ..
+            } => Some((*operation, contract.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(session_calls.len(), 4);
+    assert_eq!(
+        session_calls
+            .iter()
+            .filter(|(operation, _)| {
+                *operation == crate::core::mir::types::MirSessionOperation::Send
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        session_calls
+            .iter()
+            .filter(|(operation, _)| {
+                *operation == crate::core::mir::types::MirSessionOperation::Recv
+            })
+            .count(),
+        1
+    );
+    assert!(session_calls.iter().all(|(_, contract)| !contract.terminal));
+    assert_eq!(
+        session_calls
+            .iter()
+            .filter(|(operation, _)| {
+                *operation == crate::core::mir::types::MirSessionOperation::Close
+            })
+            .count(),
+        2
+    );
+
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .expect("reference pair send/recv execution");
+    assert_eq!(
+        reference,
+        crate::core::mir::reference::MirRuntimeValue::Int(41)
+    );
+
+    let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+        .expect("bytecode must consume the canonical pair roundtrip MIR");
+    let value = crate::interp::bytecode::BytecodeVM::new(bytecode)
+        .run_value()
+        .expect("bytecode pair send/recv execution");
+    assert!(matches!(value, crate::interp::Value::Int(41)));
+
+    crate::codegen::mir::validate_mir_native(&program)
+        .expect("native validator must consume the canonical pair roundtrip MIR");
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("verifier capability gate must consume the canonical pair roundtrip MIR");
+}
+
+#[test]
+fn rejects_forged_typed_session_pair_roundtrip_receipt_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_typed_session_pair_send_recv.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical pair roundtrip MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("roundtrip main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::SessionPairBind { .. }))
+        .expect("typed pair binding instruction");
+    let MirInstructionKind::SessionPairBind { contract, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    let receipt = contract.as_mut().expect("typed pair receipt");
+    receipt.lo_ty = receipt.hi_ty.clone();
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged pair receipt must be rejected before consumers");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("typed session_pair binding receipt")
+            || error.message.contains("endpoint identities")
+    }));
+}
+
+#[test]
 fn materializes_generic_tuple_copy_projection_for_all_consumers() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_native_generic_tuple_projection.mimi"
