@@ -4016,6 +4016,64 @@ mod tests {
     }
 
     #[test]
+    fn native_managed_generic_result_unwrap_or_owned_list_consumes_move_receipt() {
+        for (source, expected, module_name) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list.mimi"
+                ),
+                41,
+                "mir_native_generic_result_unwrap_or_owned_list",
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_unwrap_or_owned_list_err.mimi"
+                ),
+                7,
+                "mir_native_generic_result_unwrap_or_owned_list_err",
+            ),
+        ] {
+            let program = canonical_program(source);
+            let instance = program
+                .instances()
+                .values()
+                .find(|instance| {
+                    matches!(
+                        &instance.contract,
+                        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                            contract
+                        } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership
+                                == crate::core::mir::types::MirOwnership::Move
+                    )
+                })
+                .expect("Result<List> fallback projection instance");
+            let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract,
+            } = &instance.contract
+            else {
+                unreachable!("filtered above");
+            };
+            assert_eq!(contract.projection.move_out_glue, crate::core::mir::types::MirGlueKind::List);
+            let owner = crate::core::NodeId("function:main".into());
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("reference Result<List> unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(expected));
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native(&program)
+                .expect("native Result<List> unwrap_or must consume MIR");
+            generator
+                .module
+                .verify()
+                .expect("native Result<List> unwrap_or module verifies");
+            assert!(generator.module.get_function("main").is_some());
+        }
+    }
+
+    #[test]
     fn native_generic_result_unwrap_err_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_none.mimi"

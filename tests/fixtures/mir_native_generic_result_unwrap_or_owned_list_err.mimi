@@ -1,0 +1,13 @@
+// Err transfers the explicit List<i32> fallback into the result.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let value: Result<List<i32>, i32> = Err(7)
+    let fallback: List<i32> = [9, 10]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    7
+}

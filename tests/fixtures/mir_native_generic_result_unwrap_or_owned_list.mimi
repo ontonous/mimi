@@ -1,0 +1,14 @@
+// Generic Result<T, i32>.unwrap_or specialized to Result<List<i32>, i32>.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let values: List<i32> = [1, 2, 3]
+    let value: Result<List<i32>, i32> = Ok(values)
+    let fallback: List<i32> = [9, 10]
+    let out = unwrap_or(value, fallback)
+    drop(out)
+    41
+}
