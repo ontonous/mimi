@@ -53,6 +53,28 @@ pub(crate) fn validate_protocol_method_identity(callee: &ResolvedCallee) -> Resu
             method.as_str()
         ));
     }
+    let protocol_name = protocol
+        .0
+        .strip_prefix("trait:")
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| "protocol method protocol identity is not canonical".to_string())?;
+    let method_owner = method
+        .as_str()
+        .strip_prefix("function:")
+        .and_then(|owner| owner.split_once(":for:").map(|(trait_name, _)| trait_name))
+        .ok_or_else(|| "protocol method identity has no canonical trait owner".to_string())?;
+    let trait_matches = method_owner == protocol_name
+        || method_owner
+            .strip_prefix(protocol_name)
+            .is_some_and(|suffix| suffix.starts_with('<') && suffix.ends_with('>'));
+    if !trait_matches {
+        return Err(format!(
+            "protocol method '{}' disagrees with protocol '{}', expected trait owner '{}'",
+            method.as_str(),
+            protocol.0,
+            protocol_name
+        ));
+    }
     Ok(())
 }
 

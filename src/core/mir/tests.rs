@@ -737,6 +737,107 @@ fn protocol_method_with_non_function_identity_is_rejected_before_consumers() {
 }
 
 #[test]
+fn protocol_method_protocol_identity_drift_is_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_protocol_method.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("protocol method must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Call { .. }))
+        .expect("ProtocolMethod MIR call");
+    let MirInstructionKind::Call { callee, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    let crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, .. } = callee else {
+        unreachable!();
+    };
+    *protocol = crate::core::NodeId("trait:Other".into());
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("protocol/method identity drift must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("disagrees with protocol 'trait:Other'")
+    }));
+}
+
+#[test]
+fn protocol_method_argument_typedesc_drift_is_rejected_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_protocol_method.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("protocol method must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("main MIR");
+    let (argument, result) = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                arguments,
+                result: Some(result),
+                ..
+            } => Some((arguments[0].clone(), result.clone())),
+            _ => None,
+        })
+        .expect("ProtocolMethod MIR call");
+    let i64_ty = program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.abi
+                == crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+            .then(|| id.clone())
+        })
+        .expect("canonical i64 TypeDesc");
+    function
+        .values
+        .get_mut(&argument)
+        .expect("receiver value")
+        .ty = i64_ty.clone();
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("protocol method argument TypeDesc drift must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("protocol method argument 0 TypeDesc disagrees with canonical method ABI")
+    }));
+
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("main MIR");
+    function.values.get_mut(&result).expect("call result").ty = i64_ty;
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("protocol method result TypeDesc drift must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("protocol method result TypeDesc disagrees with canonical method ABI")
+    }));
+}
+
+#[test]
 fn materializes_generic_option_predicate_with_a_specialized_variant_receipt() {
     let source = include_str!("../../../tests/fixtures/mir_native_generic_option_predicate.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
