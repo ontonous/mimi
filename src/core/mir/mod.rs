@@ -220,6 +220,45 @@ pub(crate) fn validate_materialized_call_abi(
     }
 }
 
+/// Validate that a materialized call carries a destination value whenever
+/// its canonical result ABI is non-unit.  The optional result on `Call` is
+/// only a valid omission for a Unit TypeDesc; silently dropping an integer,
+/// aggregate, or owned handle would let one backend observe a value while
+/// another discards it.  This helper is deliberately catalog-driven so all
+/// consumers share the same TypeDesc/ABI proof without reopening checker or
+/// surface AST state.
+pub(crate) fn validate_materialized_call_result_presence(
+    callee: &ResolvedCallee,
+    target: &MirFunction,
+    result: Option<&MirValueId>,
+    type_catalog: &types::MirTypeCatalog,
+) -> Vec<String> {
+    if result.is_some() {
+        return Vec::new();
+    }
+    let Some(descriptor) = type_catalog.get(&target.result) else {
+        // The canonical program gate reports an absent result TypeDesc on
+        // the target function itself.  Avoid inventing a second diagnostic
+        // here when the catalog is already malformed.
+        return Vec::new();
+    };
+    if descriptor.abi == types::MirAbiClass::Unit {
+        return Vec::new();
+    }
+    match callee {
+        ResolvedCallee::ProtocolMethod { .. } => {
+            vec!["protocol method result value is absent for non-unit canonical method ABI".into()]
+        }
+        ResolvedCallee::Function(_) => {
+            vec![format!(
+                "non-unit callee '{}' has no MIR result value",
+                target.result.as_str()
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
 mod contracts;
 mod copy_option_island;
 mod copy_result_island;

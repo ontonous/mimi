@@ -881,6 +881,26 @@ fn protocol_method_abi_contract_is_shared_and_rejects_arity_drift() {
         &arguments,
     )
     .is_empty());
+    assert!(
+        crate::core::mir::validate_materialized_call_result_presence(
+            &callee,
+            target,
+            result.as_ref(),
+            program.type_catalog(),
+        )
+        .is_empty()
+    );
+
+    let missing_result = crate::core::mir::validate_materialized_call_result_presence(
+        &callee,
+        target,
+        None,
+        program.type_catalog(),
+    );
+    assert_eq!(
+        missing_result,
+        vec!["protocol method result value is absent for non-unit canonical method ABI"]
+    );
 
     let mut malformed_arguments = arguments;
     malformed_arguments.pop();
@@ -938,6 +958,29 @@ fn direct_function_abi_contract_is_shared_and_rejects_arity_drift() {
         &arguments,
     )
     .is_empty());
+    assert!(
+        crate::core::mir::validate_materialized_call_result_presence(
+            &callee,
+            target,
+            result.as_ref(),
+            program.type_catalog(),
+        )
+        .is_empty()
+    );
+
+    let missing_result = crate::core::mir::validate_materialized_call_result_presence(
+        &callee,
+        target,
+        None,
+        program.type_catalog(),
+    );
+    assert_eq!(
+        missing_result,
+        vec![format!(
+            "non-unit callee '{}' has no MIR result value",
+            target.result.as_str()
+        )]
+    );
 
     let mut malformed_arguments = arguments;
     malformed_arguments.pop();
@@ -952,6 +995,50 @@ fn direct_function_abi_contract_is_shared_and_rejects_arity_drift() {
         errors,
         vec!["call to 'function:add' supplies 1 arguments but its MIR signature requires 2"]
     );
+}
+
+#[test]
+fn canonical_gate_rejects_non_unit_call_without_result_value() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_native_f64_add.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("direct function must lower to canonical MIR");
+    let main_owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let main = functions.get_mut(&main_owner).expect("main MIR");
+    let call = main
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find_map(|instruction| match &mut instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(owner),
+                result,
+                ..
+            } if owner.0 == "function:add" => Some(result),
+            _ => None,
+        })
+        .expect("direct function call");
+    *call = None;
+
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("non-unit direct call without a result must fail at MIR admission");
+    assert!(errors.iter().any(|error| {
+        error.message
+            == format!(
+                "non-unit callee '{}' has no MIR result value",
+                program
+                    .functions()
+                    .get(&crate::core::NodeId("function:add".into()))
+                    .expect("add MIR")
+                    .result
+                    .as_str()
+            )
+    }));
 }
 
 #[test]

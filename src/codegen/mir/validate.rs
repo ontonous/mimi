@@ -1996,6 +1996,14 @@ impl<'a> NativeMirValidator<'a> {
         ) {
             self.errors.push(NativeMirError::new(subject, message));
         }
+        for message in crate::core::mir::validate_materialized_call_result_presence(
+            callee,
+            target,
+            result,
+            self.program.type_catalog(),
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
         let parameter_types = target
             .parameters
             .iter()
@@ -2066,23 +2074,8 @@ impl<'a> NativeMirValidator<'a> {
         for argument in arguments.iter().take(target.parameters.len()) {
             self.validate_value(function, argument, "call argument");
         }
-        match (result, target.result.as_str()) {
-            (Some(result), _) => {
-                self.validate_value(function, result, "call result");
-            }
-            (None, ty)
-                if self
-                    .program
-                    .type_catalog()
-                    .get(&target.result)
-                    .is_some_and(|desc| desc.abi != MirAbiClass::Unit) =>
-            {
-                self.errors.push(NativeMirError::new(
-                    subject,
-                    format!("non-unit callee '{ty}' has no MIR result value"),
-                ));
-            }
-            (None, _) => {}
+        if let Some(result) = result {
+            self.validate_value(function, result, "call result");
         }
     }
 

@@ -8,9 +8,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::core::ir::{
-    ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedType, ResolvedUnaryOp,
-};
+use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral, ResolvedType, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
 use super::types::{MirGlueOperation, MirLayout, MirTypeCatalog};
@@ -1817,6 +1815,17 @@ fn validate_call_graph(
                     target,
                     result.as_ref(),
                     arguments,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message,
+                    });
+                }
+                for message in super::validate_materialized_call_result_presence(
+                    callee,
+                    target,
+                    result.as_ref(),
+                    type_catalog,
                 ) {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),

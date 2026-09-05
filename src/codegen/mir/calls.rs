@@ -749,6 +749,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         {
             return Err(NativeMirError::new(subject, message));
         }
+        if let Some(message) = crate::core::mir::validate_materialized_call_result_presence(
+            callee,
+            target,
+            result,
+            self.program.type_catalog(),
+        )
+        .into_iter()
+        .next()
+        {
+            return Err(NativeMirError::new(subject, message));
+        }
         let parameter_types = target
             .parameters
             .iter()

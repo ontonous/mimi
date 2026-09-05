@@ -1412,12 +1412,20 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("callee '{}' is absent from MIR program", owner.0));
             return;
         };
-        let call_abi_errors = crate::core::mir::validate_materialized_call_abi(
+        let mut call_abi_errors = crate::core::mir::validate_materialized_call_abi(
             callee,
             self.function,
             target,
             result,
             arguments,
+        );
+        call_abi_errors.extend(
+            crate::core::mir::validate_materialized_call_result_presence(
+                callee,
+                target,
+                result,
+                self.program.type_catalog(),
+            ),
         );
         for message in call_abi_errors.iter().cloned() {
             self.error(message);

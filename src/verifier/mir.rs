@@ -2546,6 +2546,17 @@ fn eval_materialized_call(
     {
         return Err(format!("MIR verifier {message}"));
     }
+    if let Some(message) = crate::core::mir::validate_materialized_call_result_presence(
+        callee,
+        target,
+        result.as_ref(),
+        catalog,
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(format!("MIR verifier {message}"));
+    }
     let Some(instance) = program
         .instances()
         .values()
