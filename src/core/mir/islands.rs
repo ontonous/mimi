@@ -2079,18 +2079,18 @@ fn is_owned_generic_record_definition(
             || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1))
 }
 
-/// Recognize the additional three-field declaration admitted only by the
-/// ownership-bearing record-update island: one generic field and two concrete
-/// owned String siblings. Projection of this shape remains outside the
-/// residual projection contract and must not be admitted through the generic
-/// record projection predicate.
+/// Recognize the additional heterogeneous declarations admitted only by the
+/// ownership-bearing record-update island: one generic field and two or three
+/// concrete owned String siblings. Projection of these shapes remains outside
+/// the residual projection contract and must not be admitted through the
+/// generic record projection predicate.
 fn is_owned_generic_record_update_definition(
     program: &CheckedProgram,
     definition: &crate::core::ResolvedTypeDef,
 ) -> bool {
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || definition.fields.len() != 3
+        || !matches!(definition.fields.len(), 3 | 4)
     {
         return false;
     }
@@ -2118,7 +2118,10 @@ fn is_owned_generic_record_update_definition(
             _ => false,
         }
     });
-    fields_admitted && generic_fields == 1 && owned_string_fields == 2
+    fields_admitted
+        && generic_fields == 1
+        && owned_string_fields + generic_fields == definition.fields.len()
+        && matches!(owned_string_fields, 2 | 3)
 }
 
 fn is_owned_generic_record_update_definition_used(
@@ -2315,11 +2318,11 @@ fn is_scalar_generic_record_update_callable(
 }
 
 /// Recognize the bounded ownership-bearing update envelope: a two- or
-/// three-field `Record<T>` with either homogeneous generic fields, the existing
-/// two-field generic-plus-String form, or one generic plus two String fields,
-/// a single direct String-literal override, and a record-rest expression. The
-/// concrete TypeDesc/glue receipt is still materialized only after
-/// specialization.
+/// three- or four-field `Record<T>` with either homogeneous generic fields, the
+/// existing two-field generic-plus-String form, or one generic plus two/three
+/// String fields, a single direct String-literal override, and a record-rest
+/// expression. The concrete TypeDesc/glue receipt is still materialized only
+/// after specialization.
 pub(crate) fn is_owned_generic_record_update_callable(
     program: &CheckedProgram,
     callable: &crate::core::ir::ResolvedCallable,
@@ -2329,7 +2332,7 @@ pub(crate) fn is_owned_generic_record_update_callable(
     };
     if definition.kind != crate::core::ResolvedTypeKind::Record
         || definition.generic_parameters.len() != 1
-        || !matches!(definition.fields.len(), 2 | 3)
+        || !matches!(definition.fields.len(), 2 | 3 | 4)
     {
         return false;
     }
@@ -2363,7 +2366,9 @@ pub(crate) fn is_owned_generic_record_update_callable(
         definition.fields.len() == 2 && generic_fields == 1 && string_fields == 1;
     let heterogeneous_three =
         definition.fields.len() == 3 && generic_fields == 1 && string_fields == 2;
-    (homogeneous || heterogeneous_two || heterogeneous_three)
+    let heterogeneous_four =
+        definition.fields.len() == 4 && generic_fields == 1 && string_fields == 3;
+    (homogeneous || heterogeneous_two || heterogeneous_three || heterogeneous_four)
         && fields.len() == 1
         && fields[0].value.ty != generic_ty
         && matches!(

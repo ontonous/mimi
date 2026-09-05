@@ -6202,7 +6202,7 @@ impl MirTypeCatalog {
     }
 
     /// Materialize the bounded ownership-bearing update contract: a Move-owned
-    /// two- or three-field record, one owned overlay, and one or more residual
+    /// two-, three-, or four-field record, one owned overlay, and one or more residual
     /// fields moved through the result. Both old/new field glue operations are
     /// explicit so a backend cannot clone the base or leak the overwritten
     /// payload.
@@ -6234,9 +6234,9 @@ impl MirTypeCatalog {
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
             return Err("generic record move update requires a record aggregate kind".into());
         };
-        if !matches!(fields.len(), 2 | 3) || field_types.len() != 1 {
+        if !matches!(fields.len(), 2 | 3 | 4) || field_types.len() != 1 {
             return Err(
-                "generic record move update requires a two- or three-field record with one override".into(),
+                "generic record move update requires a two-, three-, or four-field record with one override".into(),
             );
         }
         let MirLayout::Record {
@@ -6246,7 +6246,7 @@ impl MirTypeCatalog {
         else {
             return Err("generic record move update result has no record layout".into());
         };
-        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3) {
+        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3 | 4) {
             return Err("generic record move update nominal/layout disagrees with TypeDesc".into());
         }
         let update_field = fields

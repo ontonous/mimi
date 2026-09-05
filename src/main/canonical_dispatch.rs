@@ -2329,13 +2329,13 @@ mod tests {
     }
 
     #[test]
-    fn owned_generic_record_update_four_field_shape_is_rejected_before_legacy_route() {
+    fn owned_generic_record_update_five_field_shape_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_update_owned_three_field_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("four-field owned generic record update must fail closed");
+            panic!("five-field owned generic record update must fail closed");
         };
         assert!(reason.contains("canonical generic record update candidate did not materialize"));
     }
@@ -2388,6 +2388,29 @@ mod tests {
                     && contract.residual.len() == 2
                     && contract.residual[0].glue == mimi::core::mir::types::MirGlueKind::Noop
                     && contract.residual[1].glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+        )));
+    }
+
+    #[test]
+    fn owned_generic_record_update_with_three_residuals_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_update_owned_three_residual.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("owned generic record update with three residuals must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::OwnedRecordUpdate { ref contract }
+                if contract.arity == 4
+                    && contract.updates.len() == 1
+                    && contract.residual.len() == 3
+                    && contract.residual[0].glue == mimi::core::mir::types::MirGlueKind::Noop
+                    && contract.residual[1].glue
+                        == mimi::core::mir::types::MirGlueKind::OwnedString
+                    && contract.residual[2].glue
                         == mimi::core::mir::types::MirGlueKind::OwnedString
         )));
     }

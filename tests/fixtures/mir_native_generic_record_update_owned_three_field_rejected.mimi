@@ -1,5 +1,5 @@
-// S175 negative: owned generic updates stay bounded to three residual fields.
-type WidePatch<T> { value: T, label: string, extra: string, tail: string }
+// S176 negative: owned generic updates stay bounded to three residual fields.
+type WidePatch<T> { value: T, label: string, extra: string, tail: string, spare: string }
 
 func replace<T>(patch: WidePatch<T>) -> WidePatch<T> {
     WidePatch { label: "replaced", ..patch }
@@ -7,7 +7,7 @@ func replace<T>(patch: WidePatch<T>) -> WidePatch<T> {
 
 func main() -> i32 {
     ensures: result == result
-    let patch = WidePatch { value: "payload", label: "old", extra: "extra", tail: "tail" }
+    let patch = WidePatch { value: "payload", label: "old", extra: "extra", tail: "tail", spare: "spare" }
     let updated = replace(patch)
     drop(updated)
     41
