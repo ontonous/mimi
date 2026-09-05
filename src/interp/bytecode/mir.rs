@@ -3976,7 +3976,7 @@ mod tests {
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
-    use crate::core::mir::types::MirLayout;
+    use crate::core::mir::types::{MirGlueKind, MirLayout};
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::BytecodeVM;
@@ -4053,6 +4053,59 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    /// Return a single owned-record-update function with a deliberately
+    /// forged receipt.  The canonical program remains untouched so the test
+    /// can exercise both the backend-local pre-emission gate and the shared
+    /// `MirProgram` constructor gate without giving an invalid program an
+    /// executable escape hatch.
+    fn forged_owned_record_update_function(
+        mir: &MirProgram,
+        reorder_residuals: bool,
+    ) -> crate::core::mir::MirFunction {
+        let mut forged = mir
+            .functions()
+            .values()
+            .find(|function| {
+                function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::UpdateRecord {
+                                record_update_move_contract: Some(_),
+                                ..
+                            }
+                        )
+                    })
+                })
+            })
+            .cloned()
+            .expect("owned record update function");
+        let mut forged_receipt = false;
+        for block in forged.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                let MirInstructionKind::UpdateRecord {
+                    record_update_move_contract: Some(receipt),
+                    ..
+                } = &mut instruction.kind
+                else {
+                    continue;
+                };
+                if reorder_residuals {
+                    receipt.residual.swap(0, 1);
+                } else {
+                    receipt.residual[1].glue = MirGlueKind::Noop;
+                }
+                forged_receipt = true;
+                break;
+            }
+            if forged_receipt {
+                break;
+            }
+        }
+        assert!(forged_receipt, "owned update receipt must be present");
+        forged
     }
 
     fn normalize_value(value: Value) -> Result<MirRuntimeValue, String> {
@@ -5798,6 +5851,55 @@ mod tests {
             .expect("three-residual update bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(41));
         assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn rejects_forged_owned_record_update_receipts_before_bytecode_emission() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_owned_three_residual.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("three-residual update MIR");
+        let indices = mir
+            .functions()
+            .keys()
+            .enumerate()
+            .map(|(index, owner)| (owner.clone(), index as _))
+            .collect::<BTreeMap<_, _>>();
+
+        for reorder_residuals in [false, true] {
+            let forged = forged_owned_record_update_function(&mir, reorder_residuals);
+            let errors = super::compile_function(&forged, &mir, &indices)
+                .expect_err("forged update receipt must fail before bytecode emission");
+            assert!(
+                errors.iter().any(|error| {
+                    error
+                        .message
+                        .contains("record update move receipt rejected")
+                }),
+                "unexpected bytecode errors: {errors:?}"
+            );
+
+            let mut functions = mir.functions().clone();
+            functions.insert(forged.owner.clone(), forged);
+            let gate_errors = MirProgram::with_type_catalog_and_instances_and_transitions(
+                functions,
+                mir.type_catalog().clone(),
+                mir.instances().clone(),
+                mir.transitions().clone(),
+            )
+            .expect_err("forged update receipt must fail canonical MIR validation");
+            assert!(
+                gate_errors.iter().any(|error| {
+                    error
+                        .message
+                        .contains("generic record move update receipt disagrees")
+                }),
+                "unexpected MIR gate errors: {gate_errors:?}"
+            );
+        }
     }
 
     #[test]
