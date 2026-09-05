@@ -16,7 +16,7 @@ use crate::core::ir::{
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-13";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-14";
 
 /// Maximum size of a canonical trap identity/message carried by a MIR
 /// terminator.  Trap text is semantic diagnostic data, not an unchecked
@@ -606,6 +606,11 @@ pub struct MirSessionPairBindContract {
     pub pair_ty: ResolvedTypeId,
     pub lo_ty: ResolvedTypeId,
     pub hi_ty: ResolvedTypeId,
+    /// Checker-materialized protocol identities carried by the two endpoint
+    /// TypeDesc entries.  The runtime handle is opaque; consumers must use
+    /// this receipt rather than rediscovering `S`/`dual S` from source text.
+    pub lo_protocol: ResolvedTypeId,
+    pub hi_protocol: ResolvedTypeId,
 }
 
 /// Closed effect family for ordinary MIR calls that transfer a linear
@@ -984,6 +989,10 @@ pub struct MirTypeDesc {
     pub id: ResolvedTypeId,
     pub kind: MirTypeKind,
     pub layout: MirLayout,
+    /// Semantic protocol identity for a `SessionChan<S>` endpoint.  This is
+    /// deliberately separate from the opaque handle ABI: residual actions
+    /// and pair binding receipts consume this checker-owned identity.
+    pub session_protocol: Option<ResolvedTypeId>,
     pub ownership: MirOwnership,
     pub abi: MirAbiClass,
     pub needs_drop_glue: bool,
@@ -1148,6 +1157,14 @@ impl MirTypeDesc {
                 MirLayout::Opaque,
             ),
         };
+        let session_protocol = match ty {
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:SessionChan" && arguments.len() == 1 => {
+                arguments.first().cloned()
+            }
+            _ => None,
+        };
         let is_session_channel = matches!(
             ty,
             ResolvedType::Nominal { item, arguments, .. }
@@ -1166,6 +1183,7 @@ impl MirTypeDesc {
             id: id.clone(),
             kind,
             layout,
+            session_protocol,
             ownership,
             abi,
             needs_drop_glue: ownership.needs_drop() && !is_session_channel,
@@ -2945,10 +2963,30 @@ impl MirTypeCatalog {
         }
         self.validate_session_channel(lo_ty)?;
         self.validate_session_channel(hi_ty)?;
+        let lo_protocol = self
+            .get(lo_ty)
+            .and_then(|descriptor| descriptor.session_protocol.clone())
+            .ok_or_else(|| {
+                format!(
+                    "typed session_pair lo endpoint '{}' has no canonical protocol identity",
+                    lo_ty.as_str()
+                )
+            })?;
+        let hi_protocol = self
+            .get(hi_ty)
+            .and_then(|descriptor| descriptor.session_protocol.clone())
+            .ok_or_else(|| {
+                format!(
+                    "typed session_pair hi endpoint '{}' has no canonical protocol identity",
+                    hi_ty.as_str()
+                )
+            })?;
         Ok(MirSessionPairBindContract {
             pair_ty: pair_ty.clone(),
             lo_ty: lo_ty.clone(),
             hi_ty: hi_ty.clone(),
+            lo_protocol,
+            hi_protocol,
         })
     }
 
@@ -8030,10 +8068,11 @@ impl MirTypeCatalog {
         let mut output = format!("mir.type-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {
             output.push_str(&format!(
-                "{} kind={:?} layout={:?} ownership={:?} abi={:?} glue={:?} drop_plan={:?} variant_drop_plan={:?} drop={} clone={}\n",
+                "{} kind={:?} layout={:?} session_protocol={:?} ownership={:?} abi={:?} glue={:?} drop_plan={:?} variant_drop_plan={:?} drop={} clone={}\n",
                 id.as_str(),
                 descriptor.kind,
                 descriptor.layout,
+                descriptor.session_protocol,
                 descriptor.ownership,
                 descriptor.abi,
                 descriptor.glue,
@@ -8054,9 +8093,10 @@ impl MirTypeCatalog {
         let mut output = format!("mir.abi-catalog {MIR_TYPE_DESC_SCHEMA_VERSION}\n");
         for (id, descriptor) in &self.entries {
             output.push_str(&format!(
-                "{} layout={:?} abi={:?} glue={:?} drop={} clone={}\n",
+                "{} layout={:?} session_protocol={:?} abi={:?} glue={:?} drop={} clone={}\n",
                 id.as_str(),
                 descriptor.layout,
+                descriptor.session_protocol,
                 descriptor.abi,
                 descriptor.glue,
                 descriptor.needs_drop_glue,

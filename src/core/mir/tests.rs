@@ -311,6 +311,22 @@ fn materializes_typed_session_pair_direct_binding_for_all_consumers() {
         .type_catalog()
         .validate_session_channel(&hi_ty)
         .expect("hi endpoint TypeDesc");
+    assert_eq!(
+        program
+            .type_catalog()
+            .get(&lo_ty)
+            .and_then(|descriptor| descriptor.session_protocol.as_ref()),
+        Some(&contract.lo_protocol),
+        "lo endpoint protocol identity must be carried by its TypeDesc receipt"
+    );
+    assert_eq!(
+        program
+            .type_catalog()
+            .get(&hi_ty)
+            .and_then(|descriptor| descriptor.session_protocol.as_ref()),
+        Some(&contract.hi_protocol),
+        "hi endpoint protocol identity must be carried by its TypeDesc receipt"
+    );
 
     let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
         .execute(&owner, &[])
@@ -453,6 +469,41 @@ fn rejects_forged_typed_session_pair_roundtrip_receipt_before_consumers() {
     assert!(errors.iter().any(|error| {
         error.message.contains("typed session_pair binding receipt")
             || error.message.contains("endpoint identities")
+    }));
+}
+
+#[test]
+fn rejects_forged_typed_session_pair_protocol_receipt_before_consumers() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_typed_session_pair_send_recv.mimi"
+    ));
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical pair roundtrip MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("roundtrip main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::SessionPairBind { .. }))
+        .expect("typed pair binding instruction");
+    let MirInstructionKind::SessionPairBind { contract, .. } = &mut instruction.kind else {
+        unreachable!();
+    };
+    let receipt = contract.as_mut().expect("typed pair receipt");
+    receipt.lo_protocol = receipt.hi_protocol.clone();
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged protocol receipt must be rejected before consumers");
+    assert!(errors.iter().any(|error| {
+        error.message.contains("typed session_pair binding receipt")
+            || error.message.contains("protocol identity")
     }));
 }
 
