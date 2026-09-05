@@ -624,6 +624,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 base,
                 kind,
                 fields,
+                record_update_contract: _,
             } => {
                 let value = self.emit_update_record(result, base, kind, fields, subject)?;
                 self.values.insert(result.clone(), value);
@@ -4156,6 +4157,37 @@ mod tests {
             .module
             .verify()
             .expect("native four-field generic record projection module verifies");
+    }
+
+    #[test]
+    fn native_emitter_consumes_materialized_generic_record_update() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
+                ref contract
+            } if contract.arity == 2 && contract.fields[0].name == "tag"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic record update execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_record_update");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic record update must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic record update module verifies");
     }
 
     #[test]

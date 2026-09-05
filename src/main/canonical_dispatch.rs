@@ -607,6 +607,17 @@ pub(crate) fn select_default_route(
                     "canonical generic record projection candidate did not materialize a supported scalar MIR shape",
                 );
             }
+            if record_hint
+                && mimi::core::mir::has_unsupported_generic_record_update_candidate(checked)
+            {
+                return reject_migrated_candidates(
+                    flow_candidate,
+                    false,
+                    true,
+                    false,
+                    "canonical generic record update candidate did not materialize a supported scalar MIR shape",
+                );
+            }
             if generic_variant_hint
                 && mimi::core::mir::has_unsupported_generic_variant_predicate_candidate(checked)
             {
@@ -2230,6 +2241,36 @@ mod tests {
                 ref contract
             } if contract.arity == 4 && contract.name == "value"
         )));
+    }
+
+    #[test]
+    fn generic_copy_record_update_enters_canonical_default_route() {
+        let source = include_str!("../../tests/fixtures/mir_native_generic_record_update.mimi");
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic record update must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordUpdate { ref contract }
+                if contract.arity == 2 && contract.fields[0].name == "tag"
+        )));
+    }
+
+    #[test]
+    fn unsupported_generic_record_update_is_rejected_before_legacy_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_update_five_field_rejected.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("five-field generic record update must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
+        assert!(
+            reason.contains("canonical generic record update candidate did not materialize"),
+            "{reason}"
+        );
     }
 
     #[test]

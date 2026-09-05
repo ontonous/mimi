@@ -307,6 +307,7 @@ pub use islands::{
     has_unsupported_generic_option_projection_candidate,
     has_unsupported_generic_option_projection_fallback_candidate,
     has_unsupported_generic_record_projection_candidate,
+    has_unsupported_generic_record_update_candidate,
     has_unsupported_generic_result_projection_candidate,
     has_unsupported_generic_result_projection_fallback_candidate,
     has_unsupported_generic_variant_predicate_candidate, has_unsupported_list_concat_candidate,
@@ -602,6 +603,12 @@ pub enum MirGenericInstanceContract {
     ScalarRecordProjection {
         contract: types::MirRecordProjectionContract,
     },
+    /// A generic flat Copy record update with a checker-proven set of scalar
+    /// field overrides.  The update receipt fixes the source/result TypeDesc,
+    /// nominal, full declaration arity, and every overlay field identity.
+    ScalarRecordUpdate {
+        contract: types::MirRecordUpdateContract,
+    },
     /// A generic two-element tuple projection specialized to a concrete
     /// Copy-scalar element. The tuple receipt fixes the structural index and
     /// arity so consumers cannot infer a generic tuple ABI from a backend
@@ -828,6 +835,10 @@ pub enum MirInstructionKind {
         base: MirValueId,
         kind: MirAggregateKind,
         fields: Vec<MirValueId>,
+        /// Generic record updates carry a materialized TypeDesc receipt.  A
+        /// concrete non-generic update remains validated by the ordinary
+        /// TypeDesc contract and leaves this absent.
+        record_update_contract: Option<types::MirRecordUpdateContract>,
     },
     Binary {
         result: MirValueId,
@@ -2846,10 +2857,17 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             base,
             kind,
             fields,
-        } => format!(
-            "update_record {result} = {base} {kind:?}({})",
-            format_values(fields)
-        ),
+            record_update_contract,
+        } => {
+            let receipt = record_update_contract
+                .as_ref()
+                .map(|contract| format!(" receipt={contract:?}"))
+                .unwrap_or_default();
+            format!(
+                "update_record {result} = {base} {kind:?}({}){receipt}",
+                format_values(fields)
+            )
+        }
         MirInstructionKind::Binary {
             result,
             op,
@@ -3454,6 +3472,7 @@ impl<'a> MirValidator<'a> {
                 base,
                 fields,
                 kind,
+                ..
             } => {
                 self.use_value(base);
                 self.values(fields);

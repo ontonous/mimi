@@ -1,0 +1,13 @@
+// S171 negative boundary: flat Copy generic record updates stay bounded to 2..=4 fields.
+type HugePatch<T> { value: T, tag: i32, extra: i64, enabled: bool, tail: i32 }
+
+func retag<T>(patch: HugePatch<T>) -> HugePatch<T> {
+    HugePatch { tag: 9, ..patch }
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let patch = HugePatch { value: 41, tag: 7, extra: 1, enabled: true, tail: 0 }
+    let updated = retag(patch)
+    updated.value
+}

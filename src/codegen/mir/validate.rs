@@ -733,7 +733,16 @@ impl<'a> NativeMirValidator<'a> {
                 base,
                 kind,
                 fields,
-            } => self.validate_update_record(function, result, base, kind, fields, subject),
+                record_update_contract,
+            } => self.validate_update_record(
+                function,
+                result,
+                base,
+                kind,
+                fields,
+                record_update_contract.as_ref(),
+                subject,
+            ),
             MirInstructionKind::ConstructVariant {
                 result,
                 nominal,
@@ -1483,6 +1492,7 @@ impl<'a> NativeMirValidator<'a> {
         base: &MirValueId,
         kind: &MirAggregateKind,
         fields: &[MirValueId],
+        record_update_contract: Option<&crate::core::mir::types::MirRecordUpdateContract>,
         subject: &str,
     ) {
         self.validate_value(function, result, "record update result");
@@ -1522,12 +1532,23 @@ impl<'a> NativeMirValidator<'a> {
         if field_types.len() != fields.len() {
             return;
         }
-        if let Err(message) = self.program.type_catalog().validate_record_update(
-            &result_value.ty,
-            &base_value.ty,
-            kind,
-            &field_types,
-        ) {
+        let validation = if let Some(receipt) = record_update_contract {
+            self.program.type_catalog().validate_record_update_receipt(
+                &result_value.ty,
+                &base_value.ty,
+                kind,
+                &field_types,
+                receipt,
+            )
+        } else {
+            self.program.type_catalog().validate_record_update(
+                &result_value.ty,
+                &base_value.ty,
+                kind,
+                &field_types,
+            )
+        };
+        if let Err(message) = validation {
             self.errors.push(NativeMirError::new(subject, message));
         }
     }

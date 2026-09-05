@@ -657,7 +657,15 @@ impl<'a> FunctionEmitter<'a> {
                 base,
                 kind: MirAggregateKind::Record { nominal, fields },
                 fields: values,
-            } => self.emit_record_update(result, base, nominal, fields, values),
+                record_update_contract,
+            } => self.emit_record_update(
+                result,
+                base,
+                nominal,
+                fields,
+                values,
+                record_update_contract.as_ref(),
+            ),
             MirInstructionKind::UpdateRecord { .. } => {
                 self.error("record update instruction requires a record aggregate kind")
             }
@@ -3047,6 +3055,7 @@ impl<'a> FunctionEmitter<'a> {
         nominal: &crate::core::ir::NominalTypeId,
         field_ids: &[crate::core::NodeId],
         values: &[MirValueId],
+        record_update_contract: Option<&crate::core::mir::types::MirRecordUpdateContract>,
     ) {
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
@@ -3091,6 +3100,29 @@ impl<'a> FunctionEmitter<'a> {
         if field_ids.len() != values.len() || field_ids.len() > u16::MAX as usize {
             self.error("record update field/value arity exceeds the bytecode ABI");
             return;
+        }
+        let field_types = values
+            .iter()
+            .filter_map(|value| self.type_of(value).map(|descriptor| descriptor.id.clone()))
+            .collect::<Vec<_>>();
+        if field_types.len() != values.len() {
+            self.error("record update field value lacks a TypeDesc");
+            return;
+        }
+        if let Some(receipt) = record_update_contract {
+            if let Err(message) = self.program.type_catalog().validate_record_update_receipt(
+                &result_desc.id,
+                &base_desc.id,
+                &crate::core::mir::MirAggregateKind::Record {
+                    nominal: nominal.clone(),
+                    fields: field_ids.to_vec(),
+                },
+                &field_types,
+                receipt,
+            ) {
+                self.error(format!("record update receipt rejected: {message}"));
+                return;
+            }
         }
         if let Err(message) = self.supported_type(&result_desc.id) {
             self.error(format!("record update result is unsupported: {message}"));
@@ -5468,6 +5500,36 @@ mod tests {
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("four-field generic record projection bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        assert!(matches!(value, Value::Int(41)));
+    }
+
+    #[test]
+    fn executes_materialized_generic_record_update_without_ast() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_record_update.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked).expect("generic record update MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .next()
+            .expect("generic record update instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
+                ref contract
+            } if contract.arity == 2 && contract.fields[0].name == "tag"
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic record update execution");
+        let bytecode = compile_mir_program(&mir).expect("generic record update bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic record update bytecode execution");
         assert_eq!(reference, MirRuntimeValue::Int(41));
         assert!(matches!(value, Value::Int(41)));
     }

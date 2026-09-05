@@ -167,6 +167,18 @@ impl<'a> CapabilityGate<'a> {
                         ));
                     }
                 }
+                MirGenericInstanceContract::ScalarRecordUpdate { contract } => {
+                    if let Err(message) = crate::core::mir::lower::validate_scalar_record_update_mir(
+                        function,
+                        self.program.type_catalog(),
+                        contract,
+                    ) {
+                        self.error(format!(
+                            "instance '{}' record update contract is unsupported: {message}",
+                            instance.id
+                        ));
+                    }
+                }
                 MirGenericInstanceContract::ScalarTupleProjection { contract } => {
                     if let Err(message) =
                         crate::core::mir::lower::validate_scalar_tuple_projection_mir(
@@ -1087,6 +1099,7 @@ impl<'a> CapabilityGate<'a> {
                 base,
                 kind,
                 fields,
+                record_update_contract,
             } => {
                 let (Some(result_ty), Some(base_ty)) =
                     (value_type(function, result), value_type(function, base))
@@ -1099,10 +1112,21 @@ impl<'a> CapabilityGate<'a> {
                     .collect::<Vec<_>>();
                 if field_types.len() != fields.len() {
                     self.error(format!("{subject} record update field is absent"));
-                } else if let Err(message) =
-                    catalog.validate_record_update(&result_ty, &base_ty, kind, &field_types)
-                {
-                    self.error(format!("{subject} record update rejected: {message}"));
+                } else {
+                    let validation = if let Some(receipt) = record_update_contract {
+                        catalog.validate_record_update_receipt(
+                            &result_ty,
+                            &base_ty,
+                            kind,
+                            &field_types,
+                            receipt,
+                        )
+                    } else {
+                        catalog.validate_record_update(&result_ty, &base_ty, kind, &field_types)
+                    };
+                    if let Err(message) = validation {
+                        self.error(format!("{subject} record update rejected: {message}"));
+                    }
                 }
             }
             MirInstructionKind::Binary {
@@ -1370,6 +1394,7 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
+                | MirGenericInstanceContract::ScalarRecordUpdate { .. }
                 | MirGenericInstanceContract::ScalarTupleProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }

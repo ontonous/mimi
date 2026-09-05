@@ -1948,6 +1948,16 @@ pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProg
     })
 }
 
+/// Return whether a checker-resolved generic record update resembles the S171
+/// envelope but falls outside the single-Copy-override contract.  The default
+/// dispatcher uses this on the compatibility path to reject before legacy.
+pub fn has_unsupported_generic_record_update_candidate(program: &CheckedProgram) -> bool {
+    program.callables().values().any(|callable| {
+        generic_record_update_envelope(program, callable).is_some()
+            && !is_scalar_generic_record_update_callable(program, callable)
+    })
+}
+
 /// Check the checker-owned shape that the flat record island is allowed to
 /// admit.  This mirrors the public TypeDesc contract without constructing MIR:
 /// the declaration must be concrete, non-empty, and every resolved field must
@@ -2155,6 +2165,94 @@ fn is_scalar_generic_record_projection_callable(
         )
 }
 
+fn generic_record_update_envelope<'a>(
+    program: &'a CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> Option<(
+    crate::core::ResolvedTypeId,
+    &'a crate::core::ResolvedTypeDef,
+)> {
+    if callable.signature.generic_parameters.len() != 1 || callable.signature.parameters.len() != 1
+    {
+        return None;
+    }
+    let generic_ty = program.resolved_types().iter().find_map(|(id, ty)| {
+        matches!(
+            ty,
+            ResolvedType::GenericParameter(candidate)
+                if candidate == &callable.signature.generic_parameters[0]
+        )
+        .then_some(id.clone())
+    })?;
+    let ResolvedType::Nominal {
+        item, arguments, ..
+    } = program
+        .resolved_types()
+        .get(&callable.signature.parameters[0].ty)?
+    else {
+        return None;
+    };
+    if arguments.as_slice() != [generic_ty.clone()] {
+        return None;
+    }
+    let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    let definition = program.type_def(qualified_name)?;
+    if callable.signature.result != callable.signature.parameters[0].ty {
+        return None;
+    }
+    let Some(ResolvedExprKind::Record {
+        fields,
+        rest: Some(rest),
+        ..
+    }) = callable.body.root.result.as_deref().map(|expr| &expr.kind)
+    else {
+        return None;
+    };
+    if fields.is_empty()
+        || !matches!(
+            &rest.kind,
+            ResolvedExprKind::Load(place) if place.projections.is_empty()
+        )
+    {
+        return None;
+    }
+    Some((generic_ty, definition))
+}
+
+/// Recognize the exact S171 generic record update envelope: one generic
+/// `Record<T>` parameter/result, one explicit concrete Copy-scalar override,
+/// and a direct record-rest expression.  The complete TypeDesc contract is
+/// replayed after specialization by the MIR lowerer.
+fn is_scalar_generic_record_update_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    let Some((generic_ty, definition)) = generic_record_update_envelope(program, callable) else {
+        return false;
+    };
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || definition.generic_parameters.len() != 1
+        || !matches!(definition.fields.len(), 2 | 3 | 4)
+    {
+        return false;
+    }
+    let Some(ResolvedExprKind::Record { fields, .. }) =
+        callable.body.root.result.as_deref().map(|expr| &expr.kind)
+    else {
+        return false;
+    };
+    if fields.len() != 1 || fields[0].value.ty == generic_ty {
+        return false;
+    }
+    let Some(updated_ty) = program.resolved_types().get(&fields[0].value.ty) else {
+        return false;
+    };
+    matches!(
+        updated_ty,
+        ResolvedType::Primitive(PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool)
+    )
+}
+
 /// Keep the flat-record island closed over the complete typed body, not only
 /// over the record declaration.  MIR Phase 0 currently admits scalar
 /// expressions, record construction/projection, direct user calls, and
@@ -2330,11 +2428,12 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .values()
             .filter(|function| !is_prelude_origin(program, &function.origin))
             .any(|function| {
-                let generic_record_callable = program
+                    let generic_record_callable = program
                     .callables()
                     .get(&function.node_id)
                     .is_some_and(|callable| {
                         is_scalar_generic_record_projection_callable(program, callable)
+                            || is_scalar_generic_record_update_callable(program, callable)
                             || is_owned_generic_record_projection_callable(program, callable)
                     });
                 let generic_variant_callable = program
@@ -2362,6 +2461,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
             .filter(|callable| !is_prelude_origin(program, &callable.body.root.origin))
             .any(|callable| {
                 (!is_scalar_generic_record_projection_callable(program, callable)
+                    && !is_scalar_generic_record_update_callable(program, callable)
                     && !is_owned_generic_record_projection_callable(program, callable)
                     && !is_generic_variant_predicate_callable(program, callable)
                     && !is_generic_option_projection_callable(program, callable)
@@ -2563,6 +2663,7 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::ScalarRecordUpdate { .. }
         )
     }) || program.functions().values().any(|function| {
         // The current flat-record native contract emits only simple function
@@ -2921,6 +3022,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarListConstruct { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
                 | MirGenericInstanceContract::ScalarRecordProjection { .. }
+                | MirGenericInstanceContract::ScalarRecordUpdate { .. }
                 | MirGenericInstanceContract::ScalarTupleProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjection { .. }
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }

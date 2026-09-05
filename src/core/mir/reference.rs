@@ -951,6 +951,7 @@ impl MirProgram {
                             base,
                             kind,
                             fields,
+                            record_update_contract,
                         } => {
                             let Some(result_value) = function.values.get(result) else {
                                 continue;
@@ -972,12 +973,23 @@ impl MirProgram {
                                 });
                                 continue;
                             }
-                            if let Err(message) = type_catalog.validate_record_update(
-                                &result_value.ty,
-                                &base_value.ty,
-                                kind,
-                                &field_types,
-                            ) {
+                            let validation = if let Some(receipt) = record_update_contract {
+                                type_catalog.validate_record_update_receipt(
+                                    &result_value.ty,
+                                    &base_value.ty,
+                                    kind,
+                                    &field_types,
+                                    receipt,
+                                )
+                            } else {
+                                type_catalog.validate_record_update(
+                                    &result_value.ty,
+                                    &base_value.ty,
+                                    kind,
+                                    &field_types,
+                                )
+                            };
+                            if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -1500,6 +1512,9 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarRecordProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
+            MirGenericInstanceContract::ScalarRecordUpdate { .. } => {
+                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            }
             MirGenericInstanceContract::ScalarTupleProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
@@ -1669,6 +1684,20 @@ fn validate_instance_table(
                         subject: id.to_string(),
                         message: format!(
                             "generic MIR record projection contract is invalid: {message}"
+                        ),
+                    });
+                }
+            }
+            MirGenericInstanceContract::ScalarRecordUpdate { ref contract } => {
+                if let Err(message) = super::lower::validate_scalar_record_update_mir(
+                    function,
+                    type_catalog,
+                    contract,
+                ) {
+                    errors.push(super::MirValidationError {
+                        subject: id.to_string(),
+                        message: format!(
+                            "generic MIR record update contract is invalid: {message}"
                         ),
                     });
                 }
@@ -2095,14 +2124,15 @@ fn validate_call_graph(
                                 ),
                             });
                         }
-                    } else if let MirGenericInstanceContract::ScalarRecordProjection { .. } =
-                        &instance.contract
-                    {
+                    } else if matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::ScalarRecordProjection { .. }
+                            | MirGenericInstanceContract::ScalarRecordUpdate { .. }
+                    ) {
                         let Some(target_parameter) = target.parameters.first() else {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
-                                message: "generic scalar record projection target has no parameter"
-                                    .into(),
+                                message: "generic scalar record target has no parameter".into(),
                             });
                             continue;
                         };
@@ -2113,7 +2143,9 @@ fn validate_call_graph(
                         else {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
-                                message: "generic scalar record projection target parameter TypeDesc is absent".into(),
+                                message:
+                                    "generic scalar record target parameter TypeDesc is absent"
+                                        .into(),
                             });
                             continue;
                         };
@@ -2127,7 +2159,7 @@ fn validate_call_graph(
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
                                 message: format!(
-                                    "generic scalar record projection call transfer is invalid: {message}"
+                                    "generic scalar record call transfer is invalid: {message}"
                                 ),
                             });
                         }
@@ -4227,6 +4259,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 base,
                 kind: MirAggregateKind::Record { nominal, fields },
                 fields: update_values,
+                record_update_contract: _,
             } => {
                 let base_value = self.take_transfer_value(function, values, base)?;
                 let update_values = self.take_transfer_values(function, values, update_values)?;
@@ -7779,6 +7812,53 @@ mod tests {
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference four-field generic record projection execution");
         assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn concrete_generic_record_update_materializes_receipt_and_executes() {
+        let source = include_str!("../../../tests/fixtures/mir_native_generic_record_update.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("generic record update must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("generic record update instance");
+        let MirGenericInstanceContract::ScalarRecordUpdate { contract } = &instance.contract else {
+            panic!("generic record update must carry a materialized receipt");
+        };
+        assert_eq!(contract.arity, 2);
+        assert_eq!(contract.fields.len(), 1);
+        assert_eq!(contract.fields[0].name, "tag");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("generic record update target");
+        assert!(target.canonical_text().contains("receipt=Some"));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference generic record update execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
+    fn five_field_generic_record_update_fails_closed() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_update_five_field_rejected.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("five-field generic record update must remain fail-closed");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("generic record update") || message.contains("flat Copy record"),
+            "unexpected generic record update diagnostic: {message}"
+        );
     }
 
     #[test]

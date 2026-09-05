@@ -836,6 +836,20 @@ pub struct MirRecordProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for one bounded Copy-record update.  The base
+/// and result must be the same checker-owned nominal Record TypeDesc; each
+/// explicit override carries its stable field identity, declaration-order
+/// index, and concrete field TypeDesc.  Consumers must not rediscover the
+/// overlay slots from a native aggregate, bytecode map, or source AST.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirRecordUpdateContract {
+    pub source_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub nominal: NominalTypeId,
+    pub arity: usize,
+    pub fields: Vec<MirRecordProjectionContract>,
+}
+
 /// Backend-independent receipt for one canonical tuple field projection.
 ///
 /// Tuples have structural identity rather than a nominal field ID. The
@@ -6041,6 +6055,93 @@ impl MirTypeCatalog {
                     expected.ty.as_str()
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Materialize the complete receipt for the bounded generic Copy-record
+    /// update island.  This slice admits one explicit Copy-scalar override on
+    /// a two-, three-, or four-field flat Record; source and result share the
+    /// same nominal TypeDesc and the complete layout is proven before any
+    /// consumer receives the receipt.
+    pub fn validated_record_update_contract(
+        &self,
+        result_ty: &ResolvedTypeId,
+        base_ty: &ResolvedTypeId,
+        kind: &crate::core::mir::MirAggregateKind,
+        field_types: &[ResolvedTypeId],
+    ) -> Result<MirRecordUpdateContract, String> {
+        self.validate_record_update(result_ty, base_ty, kind, field_types)?;
+        if result_ty != base_ty {
+            return Err(
+                "generic record update requires identical source/result TypeDesc identities".into(),
+            );
+        }
+        self.validate_flat_copy_record(result_ty)
+            .map_err(|message| {
+                format!("generic record update requires a flat Copy record: {message}")
+            })?;
+        if !matches!(field_types.len(), 1) {
+            return Err(
+                "generic record update requires exactly one explicit Copy-scalar override".into(),
+            );
+        }
+        let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
+            return Err("generic record update requires a record aggregate kind".into());
+        };
+        if !matches!(fields.len(), 2 | 3 | 4) {
+            return Err(
+                "generic record update requires a two-, three-, or four-field Copy record".into(),
+            );
+        }
+        let descriptor = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "generic record update result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record {
+            nominal: layout_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            return Err("generic record update result has no canonical record layout".into());
+        };
+        if nominal != layout_nominal || layout_fields.len() != fields.len() {
+            return Err("generic record update nominal/layout disagrees with TypeDesc".into());
+        }
+        let field = fields
+            .first()
+            .ok_or_else(|| "generic record update override field is absent".to_string())?;
+        let projection =
+            self.validated_record_field_projection_contract(result_ty, field, &field_types[0])?;
+        self.validate_copy_scalar(&projection.field_ty)
+            .map_err(|message| {
+                format!("generic record update override is not Copy scalar: {message}")
+            })?;
+        Ok(MirRecordUpdateContract {
+            source_ty: base_ty.clone(),
+            result_ty: result_ty.clone(),
+            nominal: nominal.clone(),
+            arity: layout_fields.len(),
+            fields: vec![projection],
+        })
+    }
+
+    /// Validate an already materialized generic record-update receipt against
+    /// the complete checker-owned TypeDesc/layout graph.
+    pub fn validate_record_update_receipt(
+        &self,
+        result_ty: &ResolvedTypeId,
+        base_ty: &ResolvedTypeId,
+        kind: &crate::core::mir::MirAggregateKind,
+        field_types: &[ResolvedTypeId],
+        receipt: &MirRecordUpdateContract,
+    ) -> Result<(), String> {
+        let expected =
+            self.validated_record_update_contract(result_ty, base_ty, kind, field_types)?;
+        if receipt != &expected {
+            return Err("generic record update receipt disagrees with TypeDesc".into());
         }
         Ok(())
     }
