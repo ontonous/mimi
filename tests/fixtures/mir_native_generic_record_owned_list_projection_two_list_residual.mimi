@@ -1,0 +1,14 @@
+// S208: selected List field plus two concrete List residual fields.
+type Triple<T> { value: T, tail: List<i32>, spare: List<i32> }
+
+func take<T>(triple: Triple<T>) -> T {
+    triple.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let triple: Triple<List<i32>> = Triple { value: [1, 2], tail: [3, 4], spare: [5, 6] }
+    let picked = take(triple)
+    drop(picked)
+    42
+}

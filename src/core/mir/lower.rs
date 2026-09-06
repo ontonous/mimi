@@ -1297,7 +1297,8 @@ pub(crate) fn validate_scalar_tuple_call_argument(
 /// callable's sole generic parameter, or the bounded two-, three-, or
 /// four-field heterogeneous forms with one generic field and one, two, or
 /// three owned `String` siblings, plus the two-field generic +
-/// `List<Copy scalar>` form. One field is projected and the remaining
+/// `List<Copy scalar>` form and the three-field generic + two concrete List
+/// form. One field is projected and the remaining
 /// siblings are retained only so their ownership can be discharged by
 /// `MoveProjectDrop` after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
@@ -1388,6 +1389,10 @@ fn is_owned_record_projection_drop_callable(
         || (definition.fields.len() == 2
             && generic_fields == 1
             && owned_list_fields == 1
+            && owned_string_fields == 0)
+        || (definition.fields.len() == 3
+            && generic_fields == 1
+            && owned_list_fields == 2
             && owned_string_fields == 0));
     fields_admitted
         && matches!(
