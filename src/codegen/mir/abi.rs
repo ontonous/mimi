@@ -278,6 +278,26 @@ pub(super) fn native_non_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
+    native_non_copy_variant_payload_type_with_flow(catalog, ty, true)
+}
+
+/// Validate a non-Copy variant at a non-Flow native boundary.  Recoverable
+/// Result payloads are admitted only when the canonical program contains the
+/// matching Flow transition contract; a free-standing `Result<string,string>`
+/// must not inherit the Flow aggregate validator merely because its TypeDesc
+/// has recursive ownership glue.
+pub(super) fn native_non_copy_variant_payload_type_strict(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
+    native_non_copy_variant_payload_type_with_flow(catalog, ty, false)
+}
+
+fn native_non_copy_variant_payload_type_with_flow(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    allow_recoverable_flow: bool,
+) -> Result<crate::core::ResolvedTypeId, NativeMirError> {
     let contract_name = catalog
         .get(ty)
         .map(|descriptor| match &descriptor.layout {
@@ -300,20 +320,22 @@ pub(super) fn native_non_copy_variant_payload_type(
             _ => "Option<string>",
         })
         .unwrap_or("Option/Result");
-    catalog
-        .validate_non_copy_variant_contract(ty)
-        .or_else(|_| {
-            catalog
-                .validate_result_move_projection_variant(ty)
-                .map(|_| ())
-        })
-        .or_else(|_| catalog.validate_recoverable_result_variant(ty))
-        .map_err(|message| {
-            NativeMirError::new(
-                ty.as_str(),
-                format!("native non-Copy {contract_name} variant contract: {message}"),
-            )
-        })?;
+    let validation = catalog.validate_non_copy_variant_contract(ty).or_else(|_| {
+        catalog
+            .validate_result_move_projection_variant(ty)
+            .map(|_| ())
+    });
+    let validation = if allow_recoverable_flow {
+        validation.or_else(|_| catalog.validate_recoverable_result_variant(ty))
+    } else {
+        validation
+    };
+    validation.map_err(|message| {
+        NativeMirError::new(
+            ty.as_str(),
+            format!("native non-Copy {contract_name} variant contract: {message}"),
+        )
+    })?;
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
@@ -610,8 +632,19 @@ pub(super) fn native_basic_type<'ctx>(
                 Ok(context.struct_type(&field_types, false).into())
             }
             MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. } => {
-                let (variant_abi, _) =
-                    native_variant_abi(catalog, ty, desc.ownership != MirOwnership::Copy)?;
+                // A materialized generic Copy Result carries independent Ok
+                // and Err payload slots.  The ordinary variant helper keeps
+                // the historical one-payload shape for direct variants, but
+                // the generic Result receipt has already proved the two-slot
+                // ABI and must be reflected in the LLVM aggregate type too.
+                let allow_generic_result = matches!(desc.layout, MirLayout::Result { .. })
+                    && generic_result_copy_variant(catalog, ty);
+                let (variant_abi, _) = native_variant_abi_with_generic_result(
+                    catalog,
+                    ty,
+                    desc.ownership != MirOwnership::Copy,
+                    allow_generic_result,
+                )?;
                 let mut fields = vec![context.i8_type().into()];
                 fields.extend(
                     variant_abi

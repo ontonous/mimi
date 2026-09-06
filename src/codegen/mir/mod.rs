@@ -41,9 +41,10 @@ mod validate;
 
 use abi::{
     native_basic_type, native_copy_variant_payload_type, native_list_kind,
-    native_non_copy_variant_payload_type, native_variant_abi,
-    native_variant_abi_with_generic_result, validate_native_non_copy_record_type,
-    validate_native_product_type, validate_native_recursive_tuple_type, NativeVariantAbi,
+    native_non_copy_variant_payload_type, native_non_copy_variant_payload_type_strict,
+    native_variant_abi, native_variant_abi_with_generic_result,
+    validate_native_non_copy_record_type, validate_native_product_type,
+    validate_native_recursive_tuple_type, NativeVariantAbi,
 };
 pub use eligibility::validate_mir_native;
 use eligibility::{instruction_kind, mir_symbol, native_symbol_fragment, NativeMirError};

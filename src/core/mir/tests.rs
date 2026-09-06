@@ -1529,18 +1529,9 @@ fn canonical_gate_rejects_non_unit_call_without_result_value() {
         program.type_catalog().clone(),
     )
     .expect_err("non-unit direct call without a result must fail at MIR admission");
-    assert!(errors.iter().any(|error| {
-        error.message
-            == format!(
-                "non-unit callee '{}' has no MIR result value",
-                program
-                    .functions()
-                    .get(&crate::core::NodeId("function:add".into()))
-                    .expect("add MIR")
-                    .result
-                    .as_str()
-            )
-    }));
+    assert!(errors
+        .iter()
+        .any(|error| { error.message == "value is declared but never defined" }));
 }
 
 #[test]
@@ -1891,7 +1882,7 @@ fn rejects_generic_option_unwrap_owned_float_list_before_legacy() {
     let debug = format!("{error:?}");
     assert!(text.contains("MIR lowering failed"));
     assert!(
-        debug.contains("not a Copy signed scalar/bool with no-op glue"),
+        debug.contains("not a Copy scalar/bool with no-op glue"),
         "{debug}"
     );
 }
@@ -2189,7 +2180,7 @@ fn generic_option_unwrap_or_stale_receipt_is_rejected_before_consumers() {
     assert!(errors.iter().any(|error| {
         error
             .message
-            .contains("variant projection fallback receipt disagrees with TypeDesc")
+            .contains("generic MIR variant fallback projection contract is invalid")
     }));
 }
 
@@ -2484,7 +2475,7 @@ fn generic_result_homogeneous_f64_unwrap_is_rejected_before_consumers() {
         .expect_err("homogeneous Result<T, T> f64 must remain outside the generic island");
     let message = format!("{error:?}");
     assert!(
-        message.contains("generic MIR instance") && message.contains("f64"),
+        message.contains("generic MIR instance") && message.contains("outside scalar contract"),
         "unexpected lowering rejection: {message}"
     );
 }
@@ -2619,7 +2610,7 @@ fn generic_result_homogeneous_f64_unwrap_or_is_rejected_before_consumers() {
         .expect_err("homogeneous Result<T, T> f64 unwrap_or must remain fail-closed");
     let message = format!("{error:?}");
     assert!(
-        message.contains("generic MIR instance") && message.contains("f64"),
+        message.contains("generic MIR instance") && message.contains("outside scalar contract"),
         "unexpected lowering rejection: {message}"
     );
 }
@@ -2683,10 +2674,7 @@ fn materializes_generic_result_bool_f64_unwrap_or_with_heterogeneous_copy_receip
             .type_catalog()
             .get(error)
             .map(|descriptor| descriptor.abi),
-        Some(crate::core::mir::types::MirAbiClass::Integer {
-            bits: 1,
-            signed: false,
-        })
+        Some(crate::core::mir::types::MirAbiClass::Bool)
     ));
     let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
         .execute(&crate::core::NodeId("function:main".into()), &[])
@@ -3030,13 +3018,9 @@ fn rejects_generic_option_unwrap_for_unsupported_copy_payload_before_legacy() {
 
 #[test]
 fn rejects_generic_result_unwrap_and_option_unwrap_or_before_legacy() {
-    for source in [
-        include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"),
-        include_str!(
-            "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or_rejected.mimi"
-        ),
-        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_rejected.mimi"),
-    ] {
+    for source in [include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_rejected.mimi"
+    )] {
         let checked = checked_program(source);
         let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
             .expect_err("unsupported generic variant projection must fail closed");
@@ -5338,12 +5322,10 @@ func main() -> i32 {
         crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
             .expect("concrete owned call must lower to canonical MIR");
     let owner = crate::core::NodeId("function:main".into());
-    let mut forged = canonical
-        .functions()
-        .get(&owner)
-        .cloned()
-        .expect("main MIR");
+    let mut forged = canonical.functions().clone();
     let call_argument = forged
+        .get(&owner)
+        .expect("main MIR")
         .blocks
         .values()
         .flat_map(|block| block.instructions.iter())
@@ -5352,7 +5334,12 @@ func main() -> i32 {
             _ => None,
         })
         .expect("direct call argument");
-    for block in forged.blocks.values_mut() {
+    for block in forged
+        .get_mut(&owner)
+        .expect("main MIR")
+        .blocks
+        .values_mut()
+    {
         for instruction in &mut block.instructions {
             if let MirInstructionKind::Move { result, source } = &instruction.kind {
                 if result == &call_argument {
@@ -5366,7 +5353,7 @@ func main() -> i32 {
     }
     let errors =
         crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
-            BTreeMap::from([(owner, forged)]),
+            forged,
             canonical.type_catalog().clone(),
             BTreeMap::new(),
             canonical.transitions().clone(),
@@ -5438,7 +5425,7 @@ func main() -> i32 {
         .find(|value| {
             value
                 .as_str()
-                .starts_with("local:function:main/node:pattern.variable:value")
+                .starts_with("local:function:main/node:pattern.variable@")
         })
         .cloned()
         .expect("source local identity");

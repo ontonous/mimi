@@ -1232,7 +1232,7 @@ mod tests {
             .expect_err("homogeneous Result<T,T> f64 must fail closed");
         let message = route.to_string();
         assert!(
-            message.contains("generic") && message.contains("f64"),
+            message.contains("generic MIR instance") && message.contains("outside scalar contract"),
             "unexpected route rejection: {message}"
         );
     }

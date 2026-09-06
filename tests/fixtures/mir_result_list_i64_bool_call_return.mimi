@@ -7,6 +7,7 @@ func make_bool() -> Result<List<bool>, i32> {
 }
 
 func use_i64() -> i32 {
+    ensures: result == 20
     let value = make_i64()
     match value {
         Ok(_) => 20,
@@ -15,6 +16,7 @@ func use_i64() -> i32 {
 }
 
 func use_bool() -> i32 {
+    ensures: result == 28
     let value = make_bool()
     match value {
         Ok(_) => 28,

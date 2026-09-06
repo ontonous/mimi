@@ -4387,6 +4387,19 @@ fn specialize_type_id(
                 error: specialized_error,
             }
         }
+        ResolvedType::Tuple(items) => {
+            let mut specialized_items = Vec::with_capacity(items.len());
+            let mut changed = false;
+            for item in items {
+                let specialized = specialize_type_id(item, generic_id, concrete, program)?;
+                changed |= specialized != *item;
+                specialized_items.push(specialized);
+            }
+            if !changed {
+                return Ok(id.clone());
+            }
+            ResolvedType::Tuple(specialized_items)
+        }
         _ => return Ok(id.clone()),
     };
     program

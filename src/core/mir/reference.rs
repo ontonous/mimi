@@ -299,6 +299,15 @@ impl MirProgram {
                                 && contract.projection.ownership == MirOwnership::Copy
                     )
             });
+            let generic_option_projection_fallback = instances.values().any(|instance| {
+                instance.function == function.owner
+                    && matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                            if contract.projection.nominal.as_str() == "builtin:type:Option"
+                                && contract.projection.ownership == MirOwnership::Copy
+                    )
+            });
             if let Err(mut function_errors) = function.validate() {
                 errors.append(&mut function_errors);
                 continue;
@@ -592,14 +601,25 @@ impl MirProgram {
                                 });
                                 continue;
                             };
-                            let validation = if generic_result_projection_fallback
+                            let validation = if generic_option_projection_fallback {
+                                type_catalog
+                                    .validated_copy_option_generic_projection_fallback_contract(
+                                        &base_value.ty,
+                                        &receipt.projection.variant,
+                                        &receipt.projection.field,
+                                        &result_value.ty,
+                                        &fallback_value.ty,
+                                    )
+                                    .map(|_| ())
+                            } else if generic_result_projection_fallback
                                 && type_catalog.get(&base_value.ty).is_some_and(|descriptor| {
                                     matches!(
                                         &descriptor.layout,
                                         MirLayout::Result { ok, error, .. }
                                             if ok == &result_value.ty && ok != error
                                     )
-                                }) {
+                                })
+                            {
                                 type_catalog
                                     .validated_generic_result_scalar_projection_fallback_contract(
                                         &base_value.ty,
@@ -3483,6 +3503,18 @@ impl<'a> MirReferenceInterpreter<'a> {
         })
     }
 
+    fn is_generic_option_projection_fallback(&self, owner: &NodeId) -> bool {
+        self.program.instances.values().any(|instance| {
+            instance.function == *owner
+                && matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Option"
+                            && contract.projection.ownership == MirOwnership::Copy
+                )
+        })
+    }
+
     pub fn execute(
         &self,
         owner: &NodeId,
@@ -3991,9 +4023,22 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "variant fallback projection has no canonical receipt",
                     )
                 })?;
+                let generic_option_projection_fallback =
+                    self.is_generic_option_projection_fallback(&function.owner);
                 let generic_result_projection_fallback =
                     self.is_generic_result_projection_fallback(&function.owner);
-                let receipt_validation = if generic_result_projection_fallback
+                let receipt_validation = if generic_option_projection_fallback {
+                    self.program
+                        .type_catalog()
+                        .validated_copy_option_generic_projection_fallback_contract(
+                            &base_ty,
+                            &receipt.projection.variant,
+                            &receipt.projection.field,
+                            &result_ty,
+                            &fallback_ty,
+                        )
+                        .map(|_| ())
+                } else if generic_result_projection_fallback
                     && self
                         .program
                         .type_catalog()
@@ -4004,7 +4049,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 MirLayout::Result { ok, error, .. }
                                     if ok == &result_ty && ok != error
                             )
-                        }) {
+                        })
+                {
                     self.program
                         .type_catalog()
                         .validated_generic_result_scalar_projection_fallback_contract(
@@ -4050,6 +4096,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                         &result_ty,
                         receipt,
                         self.program.type_catalog(),
+                        generic_option_projection_fallback,
                         generic_result_projection_fallback,
                     )?
                 };
@@ -6056,15 +6103,27 @@ fn project_variant_fallback_value(
     result_ty: &crate::core::ResolvedTypeId,
     receipt: &super::types::MirVariantProjectionFallbackContract,
     type_catalog: &MirTypeCatalog,
+    generic_option_projection_fallback: bool,
     generic_result_projection_fallback: bool,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
-    let validation = if generic_result_projection_fallback
+    let validation = if generic_option_projection_fallback {
+        type_catalog
+            .validated_copy_option_generic_projection_fallback_contract(
+                base_ty,
+                &receipt.projection.variant,
+                &receipt.projection.field,
+                result_ty,
+                &receipt.fallback_ty,
+            )
+            .map(|_| ())
+    } else if generic_result_projection_fallback
         && type_catalog.get(base_ty).is_some_and(|descriptor| {
             matches!(
                 &descriptor.layout,
                 MirLayout::Result { ok, error, .. } if ok == result_ty && ok != error
             )
-        }) {
+        })
+    {
         type_catalog
             .validated_generic_result_scalar_projection_fallback_contract(
                 base_ty,
@@ -9059,7 +9118,7 @@ mod tests {
 
     #[test]
     fn concrete_scalar_set_facade_instances_are_typed_and_executable() {
-        let source = "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } if !set_contains(inserted, 2) { return 2 } let removed = set_remove(inserted, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }";
+        let source = "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } let contains_values: Set<i32> = {1, 2, 3}; if !set_contains(contains_values, 2) { return 2 } let remove_values: Set<i32> = {1, 2, 3}; let removed = set_remove(remove_values, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");

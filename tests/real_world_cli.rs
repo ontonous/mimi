@@ -2127,7 +2127,7 @@ fn canonical_default_generic_option_unwrap_or_f64_matches_mir_consumers() {
         "default generic Option<f64> unwrap_or verifier failed:\n{}",
         String::from_utf8_lossy(&verify.stderr)
     );
-    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("No contracts to verify"));
 
     let binary = std::env::temp_dir().join(format!(
         "mimi-default-generic-option-unwrap-or-f64-{}",

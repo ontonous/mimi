@@ -291,7 +291,14 @@ impl<'a> NativeMirValidator<'a> {
             } else if desc.ownership == MirOwnership::Copy {
                 self.validate_flat_copy_variant(ty, subject, desc)
             } else {
-                match native_non_copy_variant_payload_type(self.program.type_catalog(), ty) {
+                let native_variant = if matches!(desc.layout, MirLayout::Result { .. })
+                    && self.program.transitions().is_empty()
+                {
+                    native_non_copy_variant_payload_type_strict(self.program.type_catalog(), ty)
+                } else {
+                    native_non_copy_variant_payload_type(self.program.type_catalog(), ty)
+                };
+                match native_variant {
                     Ok(_) => true,
                     Err(message) => {
                         let mut message = message;

@@ -15,6 +15,7 @@ func make_bool_err() -> Result<List<bool>, i32> {
 }
 
 func use_i64_ok() -> i32 {
+    ensures: result == 20
     let value = make_i64_ok()
     match value {
         Ok(_) => 20,
@@ -23,6 +24,7 @@ func use_i64_ok() -> i32 {
 }
 
 func use_i64_err() -> i32 {
+    ensures: result == 3
     let value = make_i64_err()
     match value {
         Ok(_) => 99,
@@ -31,6 +33,7 @@ func use_i64_err() -> i32 {
 }
 
 func use_bool_ok() -> i32 {
+    ensures: result == 28
     let value = make_bool_ok()
     match value {
         Ok(_) => 28,
@@ -39,6 +42,7 @@ func use_bool_ok() -> i32 {
 }
 
 func use_bool_err() -> i32 {
+    ensures: result == 5
     let value = make_bool_err()
     match value {
         Ok(_) => 99,

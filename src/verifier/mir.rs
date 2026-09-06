@@ -30,11 +30,11 @@ enum SymbolicValue {
     Int(Int),
     Bool(Bool),
     Unit,
-    /// An owned value whose payload is intentionally opaque to the arithmetic
+    /// A value whose payload is intentionally opaque to the arithmetic
     /// contract domain.  The exact TypeDesc identity is retained so the
     /// verifier can still prove that Clone/Move/Drop operate on the same
-    /// canonical ABI and ownership contract without inventing string
-    /// semantics in Z3.
+    /// canonical ABI and ownership contract without inventing string or
+    /// floating-point semantics in Z3.
     Opaque {
         ty: crate::core::ResolvedTypeId,
     },
@@ -85,6 +85,22 @@ struct SymbolicState {
     values: BTreeMap<MirValueId, SymbolicValue>,
     constraints: Vec<Bool>,
     traps: Vec<SymbolicTrap>,
+    /// Exact child-list shapes for concrete `ConstructList` values.  The
+    /// symbolic List value still exposes only its length to Z3; this side
+    /// table preserves enough canonical runtime shape to prove a subsequent
+    /// nested index without reopening source AST or inventing element values.
+    list_shapes: BTreeMap<MirValueId, SymbolicListShape>,
+    /// Literal signed integer values needed to route a concrete nested index
+    /// through the shape table.  Non-literal indices remain symbolic and use
+    /// the ordinary bounds proof.
+    known_ints: BTreeMap<MirValueId, i64>,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolicListShape {
+    length: Int,
+    elements: Option<Vec<SymbolicValue>>,
+    children: Option<Vec<SymbolicListShape>>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +127,75 @@ pub(crate) fn verify_program(
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
     let mut results = Vec::new();
+
+    // `verify_mir` is also exercised as a public MIR-only API by callers that
+    // already built a structural program but have not run the verifier
+    // capability gate. Preserve an explicit NotInTrustedSubset result for an
+    // unsupported non-Copy variant instead of letting an arbitrary aggregate
+    // reach symbolic execution and receive a false proof. Keep the broader
+    // whole-program capability gate at its public route boundary: it also
+    // rejects ordinary calls in contract-bearing functions, which this
+    // function can verify when their concrete MIR operations are supported.
+    let unsupported_variant = program.type_catalog().iter().find_map(|(ty, desc)| {
+        if desc.ownership == crate::core::mir::types::MirOwnership::Copy {
+            return None;
+        }
+        match &desc.layout {
+            crate::core::mir::types::MirLayout::Option { .. } => {
+                crate::core::mir::types::MirTypeCatalog::validate_non_copy_variant_contract(
+                    program.type_catalog(),
+                    ty,
+                )
+                .err()
+                .map(|error| (ty.clone(), error))
+            }
+            crate::core::mir::types::MirLayout::Result { .. }
+                if program.transitions().is_empty() =>
+            {
+                let direct = program
+                    .type_catalog()
+                    .validate_non_copy_variant_contract(ty);
+                let projection = program
+                    .type_catalog()
+                    .validate_result_move_projection_variant(ty);
+                if direct.is_err() && projection.is_err() {
+                    Some((
+                        ty.clone(),
+                        direct
+                            .err()
+                            .or_else(|| projection.err())
+                            .unwrap_or_else(|| "unsupported non-Copy Result variant".into()),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    });
+    if let Some((ty, error)) = unsupported_variant {
+        let message = format!(
+            "canonical MIR verifier capability gate rejected non-Copy variant '{}': {}",
+            ty.as_str(),
+            error
+        );
+        for function in program.functions().values() {
+            if function.contracts.is_empty() {
+                continue;
+            }
+            results.push(VerificationResult {
+                func_name: function.owner.0.clone(),
+                status: VerifStatus::NotInTrustedSubset,
+                message: message.clone(),
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Body),
+            });
+        }
+        return Ok(results);
+    }
 
     for function in program.functions().values() {
         if function.contracts.is_empty() {
@@ -237,7 +322,8 @@ fn verify_function(
     for trap in traps {
         let condition = conjunction(&trap.condition);
         constraint_count += trap.condition.len();
-        match session.check_scope(condition) {
+        let trap_result = session.check_scope(&condition);
+        match trap_result {
             (SatResult::Sat, _) => {
                 return Ok((
                     VerifStatus::Disproven,
@@ -321,6 +407,8 @@ fn initial_state(
         values: BTreeMap::new(),
         constraints: Vec::new(),
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     for parameter in &function.parameters {
         let name = format!("mir.value.{}", parameter.as_str());
@@ -334,12 +422,47 @@ fn initial_state(
             &name,
         )?;
         state.constraints.extend(constraints);
+        if let SymbolicValue::List { length } = &value {
+            state.list_shapes.insert(
+                parameter.clone(),
+                SymbolicListShape {
+                    length: length.clone(),
+                    elements: None,
+                    children: None,
+                },
+            );
+        }
         state.values.insert(parameter.clone(), value);
     }
     // Keep the session argument in the constructor signature so all future
     // canonical initialization constraints have one explicit proof boundary.
     let _ = session;
     Ok(state)
+}
+
+fn remember_list_shape(
+    state: &mut SymbolicState,
+    value: &MirValueId,
+    symbolic: &SymbolicValue,
+    children: Option<Vec<SymbolicListShape>>,
+    elements: Option<Vec<SymbolicValue>>,
+) {
+    if let SymbolicValue::List { length } = symbolic {
+        state.list_shapes.insert(
+            value.clone(),
+            SymbolicListShape {
+                length: length.clone(),
+                elements,
+                children,
+            },
+        );
+    } else {
+        state.list_shapes.remove(value);
+    }
+}
+
+fn list_shape_for(state: &SymbolicState, value: &MirValueId) -> Option<SymbolicListShape> {
+    state.list_shapes.get(value).cloned()
 }
 
 fn symbolic_value_for_type(
@@ -434,6 +557,9 @@ fn symbolic_value_for_type(
                 ))
             }
             MirAbiClass::Bool => Ok((SymbolicValue::Bool(Bool::new_const(name)), Vec::new())),
+            MirAbiClass::Float { bits: 32 | 64 } => {
+                Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()))
+            }
             abi => Err(format!(
                 "MIR verifier ABI {:?} is outside the checked scalar contract",
                 abi
@@ -1126,6 +1252,12 @@ fn edge_state(
             state.values.get(argument).cloned().ok_or_else(|| {
                 format!("MIR verifier edge argument '{}' is not defined", argument)
             })?;
+        if let Some(shape) = state.list_shapes.get(argument).cloned() {
+            next.list_shapes.insert(parameter.value.clone(), shape);
+        }
+        if let Some(value) = state.known_ints.get(argument).copied() {
+            next.known_ints.insert(parameter.value.clone(), value);
+        }
         next.values.insert(parameter.value.clone(), value);
     }
     Ok(next)
@@ -1160,12 +1292,28 @@ fn eval_instruction(
                     };
                     SymbolicValue::Bool(Bool::from_bool(*value))
                 }
+                crate::core::ir::ResolvedLiteral::FloatBits(_) => {
+                    let descriptor = catalog
+                        .get(&result_ty)
+                        .ok_or_else(|| "MIR float const result TypeDesc is absent".to_string())?;
+                    if !matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+                        || descriptor.layout != MirLayout::Scalar
+                    {
+                        return Err("MIR float const literal disagrees with TypeDesc ABI".into());
+                    }
+                    SymbolicValue::Opaque { ty: result_ty }
+                }
                 crate::core::ir::ResolvedLiteral::String(_) => {
                     catalog.validate_owned_string(&result_ty)?;
                     SymbolicValue::Opaque { ty: result_ty }
                 }
                 _ => return Err("MIR scalar const literal disagrees with TypeDesc ABI".into()),
             };
+            if let crate::core::ir::ResolvedLiteral::Int(value) = literal {
+                state.known_ints.insert(result.clone(), *value);
+            } else {
+                state.known_ints.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Load { result, place } => {
@@ -1193,6 +1341,9 @@ fn eval_instruction(
                 .cloned()
                 .ok_or_else(|| format!("MIR value '{}' is not defined", source))?;
             ensure_result_shape(function, catalog, result, &value)?;
+            if let Some(shape) = list_shape_for(state, source) {
+                state.list_shapes.insert(result.clone(), shape);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Move { result, source } => {
@@ -1216,6 +1367,12 @@ fn eval_instruction(
                     .ok_or_else(|| format!("MIR value '{}' is not available for move", source))?
             };
             ensure_result_shape(function, catalog, result, &value)?;
+            if let Some(shape) = list_shape_for(state, source) {
+                state.list_shapes.insert(result.clone(), shape);
+                if !is_copy {
+                    state.list_shapes.remove(source);
+                }
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Clone { result, source } => {
@@ -1235,6 +1392,9 @@ fn eval_instruction(
                 .cloned()
                 .ok_or_else(|| format!("MIR value '{}' is not defined", source))?;
             ensure_result_shape(function, catalog, result, &value)?;
+            if let Some(shape) = list_shape_for(state, source) {
+                state.list_shapes.insert(result.clone(), shape);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Drop { value } => {
@@ -1258,6 +1418,7 @@ fn eval_instruction(
                         value
                     ));
                 }
+                state.list_shapes.remove(value);
             } else if !state.values.contains_key(value) {
                 return Err(format!("MIR drop value '{}' is not defined", value));
             }
@@ -1562,12 +1723,60 @@ fn eval_instruction(
                 let backward = Bool::and(&[&negative, &raw.ge(&length_as_int.unary_minus())]);
                 let in_bounds = Bool::or(&[&forward, &backward]);
                 add_definedness(state, in_bounds, "E0803")?;
-                let (projected, constraints) = symbolic_value_for_type(
-                    catalog,
-                    &result_ty,
-                    &format!("mir.project.{}", result),
-                )?;
+                let selected_shape = state
+                    .list_shapes
+                    .get(base)
+                    .and_then(|shape| shape.children.as_ref())
+                    .and_then(|children| {
+                        let index = state.known_ints.get(index).copied()?;
+                        let position = if index >= 0 {
+                            usize::try_from(index).ok()?
+                        } else {
+                            children.len().checked_sub(usize::try_from(-index).ok()?)?
+                        };
+                        children.get(position).cloned()
+                    });
+                let (projected, projected_children, projected_elements, constraints) =
+                    if let Some(shape) = selected_shape {
+                        (
+                            SymbolicValue::List {
+                                length: shape.length,
+                            },
+                            shape.children,
+                            shape.elements,
+                            Vec::new(),
+                        )
+                    } else if let Some(element) = state
+                        .list_shapes
+                        .get(base)
+                        .and_then(|shape| shape.elements.as_ref())
+                        .and_then(|elements| {
+                            let index = state.known_ints.get(index).copied()?;
+                            let position = if index >= 0 {
+                                usize::try_from(index).ok()?
+                            } else {
+                                elements.len().checked_sub(usize::try_from(-index).ok()?)?
+                            };
+                            elements.get(position).cloned()
+                        })
+                    {
+                        (element, None, None, Vec::new())
+                    } else {
+                        let (projected, constraints) = symbolic_value_for_type(
+                            catalog,
+                            &result_ty,
+                            &format!("mir.project.{}", result),
+                        )?;
+                        (projected, None, None, constraints)
+                    };
                 state.constraints.extend(constraints);
+                remember_list_shape(
+                    state,
+                    result,
+                    &projected,
+                    projected_children,
+                    projected_elements,
+                );
                 projected
             } else if matches!(projection, MirProjection::Dereference) {
                 let base_ty = function
@@ -1903,6 +2112,26 @@ fn eval_instruction(
                 length: Int::from_i64(elements.len() as i64),
             };
             ensure_result_shape(function, catalog, result, &value)?;
+            let nested_children = catalog
+                .get(&result_ty)
+                .and_then(|descriptor| match &descriptor.layout {
+                    MirLayout::List { element }
+                        if catalog.get(element).is_some_and(|child| {
+                            matches!(child.layout, MirLayout::List { .. })
+                        }) =>
+                    {
+                        elements
+                            .iter()
+                            .map(|element| list_shape_for(state, element))
+                            .collect::<Option<Vec<_>>>()
+                    }
+                    _ => None,
+                });
+            let list_elements = elements
+                .iter()
+                .map(|element| state.values.get(element).cloned())
+                .collect::<Option<Vec<_>>>();
+            remember_list_shape(state, result, &value, nested_children, list_elements);
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::ConstructVariant {
@@ -1988,6 +2217,8 @@ fn eval_instruction(
                 *operation,
                 receipt,
             )?;
+            let mut output_children = None;
+            let mut output_elements = None;
             let value = match operation {
                 MirListOperation::Len => {
                     let SymbolicValue::List { length } =
@@ -2011,6 +2242,18 @@ fn eval_instruction(
                     else {
                         return Err("MIR List operation receiver is not a symbolic List".into());
                     };
+                    output_children = list_shape_for(state, list).and_then(|shape| {
+                        shape.children.map(|mut children| {
+                            children.reverse();
+                            children
+                        })
+                    });
+                    output_elements = list_shape_for(state, list).and_then(|shape| {
+                        shape.elements.map(|mut elements| {
+                            elements.reverse();
+                            elements
+                        })
+                    });
                     SymbolicValue::List { length }
                 }
                 MirListOperation::Concat => {
@@ -2024,6 +2267,7 @@ fn eval_instruction(
                     else {
                         return Err("MIR List.concat receiver is not a symbolic List".into());
                     };
+                    let left_shape = state.list_shapes.remove(list);
                     let SymbolicValue::List { length: right } =
                         state.values.remove(argument).ok_or_else(|| {
                             format!("MIR List argument '{}' is not defined", argument)
@@ -2031,12 +2275,36 @@ fn eval_instruction(
                     else {
                         return Err("MIR List.concat argument is not a symbolic List".into());
                     };
+                    let right_shape = state.list_shapes.remove(argument);
+                    output_children = match (
+                        left_shape.as_ref().and_then(|shape| shape.children.clone()),
+                        right_shape
+                            .as_ref()
+                            .and_then(|shape| shape.children.clone()),
+                    ) {
+                        (Some(mut left), Some(right)) => {
+                            left.extend(right);
+                            Some(left)
+                        }
+                        _ => None,
+                    };
+                    output_elements = match (
+                        left_shape.and_then(|shape| shape.elements),
+                        right_shape.and_then(|shape| shape.elements),
+                    ) {
+                        (Some(mut left), Some(right)) => {
+                            left.extend(right);
+                            Some(left)
+                        }
+                        _ => None,
+                    };
                     let length = Int::add(&[&left, &right]);
                     add_definedness(state, length.le(Int::from_i64(i64::MAX)), "E0800")?;
                     SymbolicValue::List { length }
                 }
             };
             ensure_result_shape(function, catalog, result, &value)?;
+            remember_list_shape(state, result, &value, output_children, output_elements);
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::ConstructSet { result, elements } => {
@@ -2606,6 +2874,8 @@ fn eval_flow_transition(
         values: BTreeMap::new(),
         constraints: state.constraints.clone(),
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -3348,6 +3618,8 @@ fn eval_direct_owned_string_call(
         values: BTreeMap::new(),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -3509,6 +3781,8 @@ fn eval_direct_variant_call(
         values: BTreeMap::new(),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     for ((argument, parameter), parameter_ty) in arguments
         .iter()
@@ -3748,6 +4022,9 @@ fn symbolic_zero_for_type(
         } if descriptor.layout == MirLayout::Scalar => Ok(SymbolicValue::Int(Int::from_i64(0))),
         MirAbiClass::Bool if descriptor.layout == MirLayout::Scalar => {
             Ok(SymbolicValue::Bool(Bool::from_bool(false)))
+        }
+        MirAbiClass::Float { bits: 32 | 64 } if descriptor.layout == MirLayout::Scalar => {
+            Ok(SymbolicValue::Opaque { ty: ty.clone() })
         }
         _ => Err(format!(
             "MIR verifier direct variant call payload TypeDesc '{}' has no scalar zero value",
@@ -4664,6 +4941,8 @@ fn eval_materialized_owned_record_projection_call(
         values: BTreeMap::from([(parameter.clone(), value)]),
         constraints: caller_constraints,
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -4784,6 +5063,8 @@ fn eval_materialized_owned_record_projection_drop_call(
         values: BTreeMap::from([(parameter.clone(), value)]),
         constraints: caller_constraints,
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -4972,6 +5253,8 @@ fn eval_materialized_identity_call(
         values: BTreeMap::from([(target_parameter.clone(), symbolic)]),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -5036,6 +5319,11 @@ fn symbolic_matches_type(
             SymbolicValue::Int(_),
         )
         | (MirLayout::Scalar, MirAbiClass::Bool, SymbolicValue::Bool(_)) => true,
+        (
+            MirLayout::Scalar,
+            MirAbiClass::Float { bits: 32 | 64 },
+            SymbolicValue::Opaque { ty: actual_ty },
+        ) => actual_ty == ty,
         (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_owned_string(ty).is_ok()
         }
@@ -7557,7 +7845,9 @@ mod tests {
             result.status,
             crate::verifier::VerifStatus::NotInTrustedSubset
         );
-        assert!(result.message.contains("Copy/no-op aggregate contract"));
+        assert!(result
+            .message
+            .contains("outside the canonical non-Copy Option managed-payload variant contract"));
     }
 
     #[test]

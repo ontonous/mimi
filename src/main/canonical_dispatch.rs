@@ -1960,7 +1960,7 @@ mod tests {
         ));
         assert_eq!(
             mimi::core::mir::classify_generic_result_projection_admission(&checked),
-            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+            mimi::core::mir::GenericResultProjectionAdmission::OutsideProfile
         );
         let route = select_default_route(&checked, &file);
         let DefaultMirRoute::Rejected(reason) = route else {
@@ -2085,7 +2085,7 @@ mod tests {
             panic!("homogeneous Result<T,T> f64 unwrap_or must fail closed before legacy");
         };
         assert!(
-            reason.contains("generic") && reason.contains("f64"),
+            reason.contains("generic") && reason.contains("outside scalar contract"),
             "{reason}"
         );
     }

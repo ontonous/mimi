@@ -2305,6 +2305,16 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant fallback projection value is absent");
             return;
         };
+        let generic_option_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
         let generic_result_copy_fallback = self.program.instances().values().any(|instance| {
             instance.function == self.function.owner
                 && matches!(
@@ -2315,7 +2325,18 @@ impl<'a> FunctionEmitter<'a> {
                         && contract.projection.ownership == MirOwnership::Copy
                 )
         });
-        let receipt_validation = if generic_result_copy_fallback
+        let receipt_validation = if generic_option_copy_fallback {
+            self.program
+                .type_catalog()
+                .validated_copy_option_generic_projection_fallback_contract(
+                    &base_info.ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    &result_info.ty,
+                    &fallback_info.ty,
+                )
+                .map(|_| ())
+        } else if generic_result_copy_fallback
             && self
                 .program
                 .type_catalog()
@@ -2326,7 +2347,8 @@ impl<'a> FunctionEmitter<'a> {
                         MirLayout::Result { ok, error, .. }
                             if ok == &result_info.ty && ok != error
                     )
-                }) {
+                })
+        {
             self.program
                 .type_catalog()
                 .validated_generic_result_scalar_projection_fallback_contract(
@@ -5111,7 +5133,8 @@ mod tests {
         .expect_err("third nested List operation remains outside the nested List slice");
         match error {
             DifferentialHarnessError::CanonicalMir(message) => {
-                assert!(message.contains("List operation") && message.contains("one-level"));
+                assert!(message.contains("generic List construction receipt specialization failed"));
+                assert!(message.contains("one-level nested List contract"));
             }
             other => panic!("nested List operation crossed the canonical gate: {other:?}"),
         }

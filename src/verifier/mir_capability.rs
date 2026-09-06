@@ -56,17 +56,26 @@ impl<'a> CapabilityGate<'a> {
             program,
             errors: BTreeSet::new(),
             checked_types: HashSet::new(),
-            allow_result_move_variant: program.instances().values().any(|instance| {
-                matches!(
-                    &instance.contract,
-                    MirGenericInstanceContract::ScalarVariantProjection { contract }
-                        if contract.projection.nominal.as_str() == "builtin:type:Result"
-                            && contract.projection.ownership == MirOwnership::Move
-                            && matches!(
-                                contract.projection.move_out_glue,
-                                MirGlueKind::OwnedString | MirGlueKind::List
-                            )
-                )
+            allow_result_move_variant: program.instances().values().any(|instance| match &instance
+                .contract
+            {
+                MirGenericInstanceContract::ScalarVariantProjection { contract } => {
+                    contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Move
+                        && matches!(
+                            contract.projection.move_out_glue,
+                            MirGlueKind::OwnedString | MirGlueKind::List
+                        )
+                }
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } => {
+                    contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Move
+                        && matches!(
+                            contract.projection.move_out_glue,
+                            MirGlueKind::OwnedString | MirGlueKind::List
+                        )
+                }
+                _ => false,
             }),
             allow_recoverable_flow_result: program.transitions().values().any(|transition| {
                 transition.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
