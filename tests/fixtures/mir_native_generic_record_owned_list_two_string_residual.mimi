@@ -1,0 +1,19 @@
+// S210: selected List plus concrete List and two String residual fields.
+type QuadMix<T> { value: T, tail: List<i32>, note: string, spare: string }
+
+func take<T>(quad: QuadMix<T>) -> T {
+    quad.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let quad: QuadMix<List<i32>> = QuadMix {
+        value: [1, 2],
+        tail: [3, 4],
+        note: "note",
+        spare: "spare"
+    }
+    let picked = take(quad)
+    drop(picked)
+    42
+}

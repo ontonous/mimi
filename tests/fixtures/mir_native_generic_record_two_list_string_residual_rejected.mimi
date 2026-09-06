@@ -1,0 +1,18 @@
+// S210 negative: two concrete Lists plus a String exceed the mixed residual island.
+type QuadMixedRejected<T> { value: T, tail: List<i32>, spare: List<i32>, note: string }
+
+func take<T>(quad: QuadMixedRejected<T>) -> T {
+    quad.value
+}
+
+func main() -> i64 {
+    let quad: QuadMixedRejected<List<i32>> = QuadMixedRejected {
+        value: [1, 2],
+        tail: [3, 4],
+        spare: [5, 6],
+        note: "note"
+    }
+    let picked = take(quad)
+    drop(picked)
+    42
+}

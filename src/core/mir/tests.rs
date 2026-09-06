@@ -7851,3 +7851,60 @@ fn generic_record_list_string_string_residual_remains_rejected_before_consumers(
         "unexpected generic List/String/String residual rejection: {message}"
     );
 }
+
+#[test]
+fn materializes_generic_record_owned_list_two_string_residual_drop_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_list_two_string_residual.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<List<i32>> List/two-String residual must lower to MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
+                    if contract.projection.arity == 4
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 3
+                        && contract.residual[0].name == "spare"
+                        && contract.residual[0].glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+                        && contract.residual[1].name == "note"
+                        && contract.residual[1].glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+                        && contract.residual[2].name == "tail"
+                        && contract.residual[2].glue == crate::core::mir::types::MirGlueKind::List
+            )
+        })
+        .expect("owned generic List/two-String residual instance");
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic List/two-String residual target");
+    assert!(target.canonical_text().contains("move_project_drop"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic List/two-String residual execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_record_two_list_string_residual_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_two_list_string_residual_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<T> two-List/String residual must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection")
+            || message.contains("residual")
+            || message.contains("managed"),
+        "unexpected generic two-List/String residual rejection: {message}"
+    );
+}
