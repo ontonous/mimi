@@ -4920,6 +4920,40 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_seven_field_repeated_generic_nonzero_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic_nonzero.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("repeated-generic nonzero projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.field_index == 2 && contract.arity == 7 && contract.name == "mirror"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference repeated-generic nonzero projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(99));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_projection_seven_field_repeated_generic_nonzero",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native repeated-generic nonzero projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native repeated-generic nonzero projection module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_record_update() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_update.mimi"

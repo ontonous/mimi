@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: select the second of two fields carrying
+// the same generic binder. Concrete i64 types must not erase field_index 2.
+type SeptPairNonZero<T> { tag: i32, value: T, mirror: T, enabled: bool, extra: i64, spare: bool, tail: i32 }
+
+func get_mirror<T>(sept: SeptPairNonZero<T>) -> T {
+    sept.mirror
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let sept = SeptPairNonZero { tag: 7, value: 41 as i64, mirror: 99 as i64, enabled: true, extra: 9, spare: false, tail: 13 }
+    let picked = get_mirror(sept)
+    picked
+}

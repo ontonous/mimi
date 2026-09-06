@@ -8325,6 +8325,56 @@ mod tests {
     }
 
     #[test]
+    fn concrete_seven_field_repeated_generic_nonzero_projection_preserves_selected_field() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic_nonzero.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("repeated-generic nonzero projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("repeated-generic nonzero projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("repeated-generic nonzero projection must carry a record receipt");
+        };
+        assert_eq!(contract.name, "mirror");
+        assert_eq!(contract.field_index, 2);
+        assert_eq!(contract.arity, 7);
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("repeated-generic nonzero projection target");
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("repeated-generic nonzero projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("repeated-generic nonzero projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 7
+                    && fields[1].name == "value"
+                    && fields[2].id == contract.field
+                    && fields[1].id != contract.field
+                    && fields[1].ty == fields[2].ty
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference repeated-generic nonzero projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(99));
+    }
+
+    #[test]
     fn concrete_six_field_generic_record_projection_executes_with_copy_residuals() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_six_field.mimi"

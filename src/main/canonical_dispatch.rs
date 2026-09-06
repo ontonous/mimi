@@ -2413,6 +2413,23 @@ mod tests {
     }
 
     #[test]
+    fn seven_field_repeated_generic_nonzero_projection_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic_nonzero.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("repeated-generic nonzero projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.field_index == 2 && contract.arity == 7 && contract.name == "mirror"
+        )));
+    }
+
+    #[test]
     fn repeated_generic_record_projection_with_managed_sibling_is_rejected_before_legacy_route() {
         let source = include_str!(
             "../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic_rejected.mimi"
