@@ -7908,3 +7908,91 @@ fn generic_record_two_list_string_residual_remains_rejected_before_consumers() {
         "unexpected generic two-List/String residual rejection: {message}"
     );
 }
+
+#[test]
+fn materializes_generic_record_owned_bool_list_two_string_residual_drop_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_bool_list_two_string_residual.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<List<bool>> List/two-String residual must lower to MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
+                    if contract.projection.arity == 4
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 3
+                        && contract.residual[0].name == "spare"
+                        && contract.residual[0].glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+                        && contract.residual[1].name == "note"
+                        && contract.residual[1].glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+                        && contract.residual[2].name == "tail"
+                        && contract.residual[2].glue == crate::core::mir::types::MirGlueKind::List
+            )
+        })
+        .expect("owned generic Bool List/two-String residual instance");
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic Bool List/two-String residual target");
+    let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+    else {
+        unreachable!("instance was selected by the owned record receipt predicate")
+    };
+    let selected_desc = program
+        .type_catalog()
+        .get(&contract.result_ty)
+        .expect("selected Bool List TypeDesc");
+    let crate::core::mir::types::MirLayout::List { element } = &selected_desc.layout else {
+        panic!("selected payload must retain canonical List layout")
+    };
+    let element_desc = program
+        .type_catalog()
+        .get(element)
+        .expect("Bool List element TypeDesc");
+    assert!(matches!(
+        element_desc.kind,
+        crate::core::mir::types::MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+    ));
+    assert_eq!(
+        selected_desc.abi,
+        crate::core::mir::types::MirAbiClass::OpaqueHandle
+    );
+    assert_eq!(
+        selected_desc.ownership,
+        crate::core::mir::types::MirOwnership::Move
+    );
+    assert_eq!(
+        selected_desc.glue.move_out,
+        crate::core::mir::types::MirGlueKind::List
+    );
+    assert!(target.canonical_text().contains("move_project_drop"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Bool List/two-String residual execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_record_bool_nested_residual_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_bool_nested_residual_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<T> nested Bool List residual must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection")
+            || message.contains("nested")
+            || message.contains("managed"),
+        "unexpected generic nested Bool List rejection: {message}"
+    );
+}

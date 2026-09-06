@@ -1,0 +1,17 @@
+// S211 negative: nested List<bool> residual has no canonical payload contract.
+type BoolNested<T> { value: T, tail: List<List<bool>>, note: string }
+
+func take<T>(quad: BoolNested<T>) -> T {
+    quad.value
+}
+
+func main() -> i64 {
+    let quad: BoolNested<List<bool>> = BoolNested {
+        value: [true, false],
+        tail: [[true], [false, true]],
+        note: "note"
+    }
+    let picked = take(quad)
+    drop(picked)
+    42
+}

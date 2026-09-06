@@ -1,0 +1,19 @@
+// S211: selected List<bool> plus concrete List<bool> and two String residuals.
+type BoolQuad<T> { value: T, tail: List<bool>, note: string, spare: string }
+
+func take<T>(quad: BoolQuad<T>) -> T {
+    quad.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let quad: BoolQuad<List<bool>> = BoolQuad {
+        value: [true, false],
+        tail: [false, true],
+        note: "note",
+        spare: "spare"
+    }
+    let picked = take(quad)
+    drop(picked)
+    42
+}
