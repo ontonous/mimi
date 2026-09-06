@@ -2587,11 +2587,9 @@ impl MirTypeCatalog {
         Ok(contract)
     }
 
-    /// Materialize the total fallback receipt for any admitted generic Copy
-    /// scalar `Option<T>`.  Generic specialization uses this helper after the
-    /// concrete TypeDesc has replaced `T`; the older i32 helper above remains
-    /// the narrower default concrete island and delegates here so both routes
-    /// share one canonical Some/None/tag/ABI proof.
+    /// Materialize the total fallback receipt for the concrete Copy scalar
+    /// `Option<T>` island.  This remains the narrow concrete contract; generic
+    /// specialization uses the explicitly widened wrapper below.
     pub fn validated_copy_option_scalar_projection_fallback_contract(
         &self,
         source_ty: &ResolvedTypeId,
@@ -2599,6 +2597,47 @@ impl MirTypeCatalog {
         field_id: &NodeId,
         result_ty: &ResolvedTypeId,
         fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        self.validated_copy_option_projection_fallback_contract(
+            source_ty,
+            variant_id,
+            field_id,
+            result_ty,
+            fallback_ty,
+            false,
+        )
+    }
+
+    /// Materialize the total fallback receipt for an admitted generic Copy
+    /// scalar `Option<T>`. Generic specialization uses this helper after the
+    /// concrete TypeDesc has replaced `T`; the f64 ABI exception is scoped to
+    /// this generic receipt and cannot widen the direct concrete island.
+    pub fn validated_copy_option_generic_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        self.validated_copy_option_projection_fallback_contract(
+            source_ty,
+            variant_id,
+            field_id,
+            result_ty,
+            fallback_ty,
+            true,
+        )
+    }
+
+    fn validated_copy_option_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+        allow_generic_f64: bool,
     ) -> Result<MirVariantProjectionFallbackContract, String> {
         let descriptor = self.get(source_ty).ok_or_else(|| {
             format!(
@@ -2633,7 +2672,11 @@ impl MirTypeCatalog {
                 "Option unwrap_or fallback, result and inner TypeDesc identities must agree".into(),
             );
         }
-        self.validate_copy_scalar(result_ty)?;
+        if allow_generic_f64 {
+            self.validate_generic_option_projection_argument(result_ty)?;
+        } else {
+            self.validate_copy_scalar(result_ty)?;
+        }
         let projection = self.validated_variant_payload_projection_contract(
             source_ty, variant_id, field_id, result_ty,
         )?;
@@ -3127,9 +3170,9 @@ impl MirTypeCatalog {
                 arguments.len()
             ));
         }
-        if contract.projection.nominal.as_str() == "builtin:type:Option"
-            && contract.projection.ownership == MirOwnership::Copy
-        {
+        if contract.projection.ownership == MirOwnership::Move {
+            self.validate_move_owned_payload(&arguments[0]).map(|_| ())
+        } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
             self.validate_generic_option_projection_argument(&arguments[0])
         } else {
             self.validate_scalar_generic_arguments(arguments)
@@ -3158,6 +3201,31 @@ impl MirTypeCatalog {
                 "type '{}' is not a Copy f64 scalar with no-op glue",
                 ty.as_str()
             ))
+        }
+    }
+
+    /// Validate the concrete type argument of a materialized generic
+    /// `Option<T>.unwrap_or(T)` projection. The fallback body carries two
+    /// values, but both are checker-proven instances of this one payload
+    /// identity; only the generic Option Copy family receives the f64 ABI
+    /// exception in S200.
+    pub fn validate_generic_variant_projection_fallback_arguments(
+        &self,
+        arguments: &[ResolvedTypeId],
+        contract: &MirVariantProjectionFallbackContract,
+    ) -> Result<(), String> {
+        if arguments.len() != 1 {
+            return Err(format!(
+                "generic variant fallback projection requires one type argument, got {}",
+                arguments.len()
+            ));
+        }
+        if contract.projection.ownership == MirOwnership::Move {
+            self.validate_move_owned_payload(&arguments[0]).map(|_| ())
+        } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
+            self.validate_generic_option_projection_argument(&arguments[0])
+        } else {
+            self.validate_scalar_generic_arguments(arguments)
         }
     }
 

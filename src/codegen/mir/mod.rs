@@ -3315,6 +3315,71 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_option_unwrap_or_f64_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> fallback projection instance");
+        assert_eq!(
+            program
+                .type_catalog()
+                .get(&instance.arguments[0])
+                .expect("generic Option<f64> TypeDesc")
+                .abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Option<f64> unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_option_unwrap_or_f64");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option<f64> unwrap_or must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option<f64> unwrap_or module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
+    fn native_generic_option_unwrap_or_f64_none_selects_fallback() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64_none.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Option<f64> unwrap_or None execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_option_unwrap_or_f64_none");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option<f64> unwrap_or None must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option<f64> unwrap_or None module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_option_unwrap_or_owned_string() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_string.mimi"

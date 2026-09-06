@@ -1947,6 +1947,62 @@ fn materializes_generic_option_unwrap_or_with_a_specialized_fallback_receipt() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_or_f64_with_float_fallback_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option<f64>.unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Copy
+            )
+        })
+        .expect("generic Option<f64> fallback projection instance");
+    assert_eq!(instance.arguments.len(), 1);
+    let payload = program
+        .type_catalog()
+        .get(&instance.arguments[0])
+        .expect("generic Option<f64> fallback payload TypeDesc");
+    assert_eq!(
+        payload.abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+    );
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered to generic fallback projection");
+    };
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.fallback_arity, 0);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option<f64>.unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_option_unwrap_or_f64_none_selects_the_fallback() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64_none.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option<f64> unwrap_or None MIR");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option<f64>.unwrap_or None execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
 fn generic_option_unwrap_or_none_selects_the_explicit_fallback() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_none.mimi");

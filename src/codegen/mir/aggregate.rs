@@ -775,15 +775,38 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "variant projection fallback has no canonical receipt",
             )
         })?;
-        self.program
-            .type_catalog()
-            .validate_variant_projection_fallback_receipt(
-                &base_ty,
-                &result_ty,
-                &fallback_ty,
-                receipt,
-            )
-            .map_err(|message| NativeMirError::new(subject, message))?;
+        let generic_option_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_option_copy_fallback {
+            self.program
+                .type_catalog()
+                .validated_copy_option_generic_projection_fallback_contract(
+                    &base_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+                .map(|_| ())
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_fallback_receipt(
+                    &base_ty,
+                    &result_ty,
+                    &fallback_ty,
+                    receipt,
+                )
+        };
+        receipt_validation.map_err(|message| NativeMirError::new(subject, message))?;
         let (variant_abi, _) = native_variant_abi(
             self.program.type_catalog(),
             &base_ty,

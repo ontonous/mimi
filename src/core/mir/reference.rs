@@ -1580,8 +1580,11 @@ fn validate_instance_table(
             }
             MirGenericInstanceContract::ScalarVariantProjection { ref contract } => type_catalog
                 .validate_generic_variant_projection_arguments(&instance.arguments, contract),
-            MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {
-                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+            MirGenericInstanceContract::ScalarVariantProjectionFallback { ref contract } => {
+                type_catalog.validate_generic_variant_projection_fallback_arguments(
+                    &instance.arguments,
+                    contract,
+                )
             }
         };
         if let Err(message) = argument_error {

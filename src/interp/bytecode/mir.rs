@@ -6669,6 +6669,68 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_option_unwrap_or_f64_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Option<f64> unwrap_or MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> fallback projection instance");
+        assert_eq!(
+            mir.type_catalog().get(&instance.arguments[0]).unwrap().abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Option<f64> unwrap_or execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Option<f64> unwrap_or bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Option<f64> unwrap_or execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn generic_option_unwrap_or_f64_none_matches_reference_and_bytecode() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64_none.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("generic Option<f64> unwrap_or None MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Option<f64> unwrap_or None execution");
+        let bytecode =
+            compile_mir_program(&mir).expect("generic Option<f64> unwrap_or None bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Option<f64> unwrap_or None execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_materialized_generic_option_unwrap_or_owned_string_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_or_owned_string.mimi"

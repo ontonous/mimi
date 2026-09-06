@@ -896,12 +896,36 @@ impl<'a> CapabilityGate<'a> {
                     ));
                     return;
                 };
-                if let Err(message) = catalog.validate_variant_projection_fallback_receipt(
-                    &base_ty,
-                    &result_ty,
-                    &fallback_ty,
-                    receipt,
-                ) {
+                let generic_option_copy_fallback =
+                    self.program.instances().values().any(|instance| {
+                        instance.function == function.owner
+                            && matches!(
+                                &instance.contract,
+                                MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                                    contract
+                                } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                                    && contract.projection.ownership == MirOwnership::Copy
+                            )
+                    });
+                let receipt_validation = if generic_option_copy_fallback {
+                    catalog
+                        .validated_copy_option_generic_projection_fallback_contract(
+                            &base_ty,
+                            &receipt.projection.variant,
+                            &receipt.projection.field,
+                            &result_ty,
+                            &fallback_ty,
+                        )
+                        .map(|_| ())
+                } else {
+                    catalog.validate_variant_projection_fallback_receipt(
+                        &base_ty,
+                        &result_ty,
+                        &fallback_ty,
+                        receipt,
+                    )
+                };
+                if let Err(message) = receipt_validation {
                     self.error(format!(
                         "{subject} variant projection fallback rejected: {message}"
                     ));

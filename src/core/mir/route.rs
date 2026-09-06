@@ -1234,6 +1234,45 @@ mod tests {
     }
 
     #[test]
+    fn generic_option_f64_projection_fallback_materialization_carries_float_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_or_f64.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.generic_option_projection_fallback,
+            GenericOptionProjectionFallbackAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete generic Option<f64> fallback route must materialize");
+        assert!(route.materialized_generic_option_projection_fallback_candidate);
+        let instance = route
+            .program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> fallback instance");
+        assert_eq!(
+            route
+                .program
+                .type_catalog()
+                .get(&instance.arguments[0])
+                .expect("generic Option<f64> fallback TypeDesc")
+                .abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+    }
+
+    #[test]
     fn profile_matrix_owns_admission_and_materialization_mapping() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_native_list_len.mimi"

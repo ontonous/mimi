@@ -3207,6 +3207,13 @@ impl<'a> ScalarCollectionValidator<'a> {
                             contract,
                         )
                 }
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } => self
+                    .program
+                    .type_catalog()
+                    .validate_generic_variant_projection_fallback_arguments(
+                        &instance.arguments,
+                        contract,
+                    ),
                 _ => self
                     .program
                     .type_catalog()

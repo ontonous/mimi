@@ -1432,16 +1432,38 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_variant_projection_fallback_receipt(
-                &base_value.ty,
-                &result_value.ty,
-                &fallback_value.ty,
-                contract,
-            )
-        {
+        let generic_option_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_option_copy_fallback {
+            self.program
+                .type_catalog()
+                .validated_copy_option_generic_projection_fallback_contract(
+                    &base_value.ty,
+                    &contract.projection.variant,
+                    &contract.projection.field,
+                    &result_value.ty,
+                    &fallback_value.ty,
+                )
+                .map(|_| ())
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_fallback_receipt(
+                    &base_value.ty,
+                    &result_value.ty,
+                    &fallback_value.ty,
+                    contract,
+                )
+        };
+        if let Err(message) = receipt_validation {
             self.errors.push(NativeMirError::new(subject, message));
         }
     }

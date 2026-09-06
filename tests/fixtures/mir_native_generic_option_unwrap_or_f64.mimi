@@ -1,0 +1,9 @@
+func unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Option<f64> = Some(41.5)
+    let out = unwrap_or(value, 99.0)
+    42
+}

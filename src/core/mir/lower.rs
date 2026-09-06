@@ -1682,6 +1682,35 @@ fn materialize_generic_instance(
                         ) && call.arguments.len() == 1
                 )
             });
+    let is_copy_option_projection_fallback = callable.signature.parameters.len() == 2
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Option(inner) if inner == &generic_id
+                )
+            })
+        && callable.signature.parameters[1].ty == generic_id
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.option.unwrap_or"
+                        ) && call.arguments.len() == 2
+                )
+            });
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
@@ -1709,8 +1738,15 @@ fn materialize_generic_instance(
                         .validate_move_owned_payload(&arguments[0])
                         .map(|_| ())
                 }
-            } else if is_copy_option_projection {
-                catalog.validate_generic_option_projection_argument(&arguments[0])
+            } else if is_copy_option_projection || is_copy_option_projection_fallback {
+                if arguments.len() != 1 {
+                    Err(format!(
+                        "generic Option projection contract requires one type argument, got {}",
+                        arguments.len()
+                    ))
+                } else {
+                    catalog.validate_generic_option_projection_argument(&arguments[0])
+                }
             } else if generic_list_facade {
                 catalog
                     .validate_scalar_generic_arguments(arguments)
@@ -2456,6 +2492,15 @@ fn materialize_generic_instance(
         {
             Some(super::types::MirTypeKind::Option) if is_owned_option_projection_fallback => {
                 type_catalog.validated_move_option_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
+            Some(super::types::MirTypeKind::Option) if is_copy_option_projection_fallback => {
+                type_catalog.validated_copy_option_generic_projection_fallback_contract(
                     &base_ty,
                     &placeholder.projection.variant,
                     &placeholder.projection.field,
@@ -3444,12 +3489,22 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
         .ok_or_else(|| "generic variant fallback operand TypeDesc is absent".to_string())?
         .ty
         .clone();
-    type_catalog.validate_variant_projection_fallback_receipt(
-        &base_ty,
-        &result_ty,
-        &fallback_ty,
-        receipt,
-    )?;
+    if receipt.projection.nominal.as_str() == "builtin:type:Option" {
+        type_catalog.validated_copy_option_generic_projection_fallback_contract(
+            &base_ty,
+            &receipt.projection.variant,
+            &receipt.projection.field,
+            &result_ty,
+            &fallback_ty,
+        )?;
+    } else {
+        type_catalog.validate_variant_projection_fallback_receipt(
+            &base_ty,
+            &result_ty,
+            &fallback_ty,
+            receipt,
+        )?;
+    }
     if receipt != contract {
         return Err(
             "generic variant fallback projection receipt does not match the admitted contract"
