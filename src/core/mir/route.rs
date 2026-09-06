@@ -87,7 +87,7 @@ impl CanonicalMirRouteProfile {
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
-            Self::FlowFailureRetry => "m3-recoverable-flow-retry-v1",
+            Self::FlowFailureRetry => "recoverable-flow-result-v2",
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
             Self::GenericOptionPredicate => super::GENERIC_VARIANT_PREDICATE_ISLAND,
             Self::GenericOptionProjection => super::GENERIC_OPTION_PROJECTION_ISLAND,
@@ -561,7 +561,7 @@ pub fn materialize_canonical_mir_route(
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::FlowFailureRetry,
             stage: CanonicalMirRouteFailureStage::Coverage,
-            message: "complete recoverable Flow admission did not materialize a RecoverableLocal FlowTransition boundary".into(),
+            message: "complete recoverable Flow admission did not materialize a recoverable FlowTransition boundary".into(),
         });
     }
     if admission.option_string_complete() && !materialized_option_string_candidate {

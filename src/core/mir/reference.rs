@@ -438,6 +438,14 @@ impl MirProgram {
                                 _ => {
                                     if list_index_contract.is_some() {
                                         Err("List index receipt is attached to a non-index projection".into())
+                                    } else if let super::MirProjection::ReadPath(receipt) =
+                                        projection
+                                    {
+                                        type_catalog.validate_read_projection_receipt(
+                                            &base_value.ty,
+                                            &result_value.ty,
+                                            receipt,
+                                        )
                                     } else {
                                         type_catalog.validate_projection(
                                             &base_value.ty,
@@ -2593,9 +2601,7 @@ fn validate_transition_contracts(
                 break;
             }
         }
-        if contract.effect != MirTransitionEffect::RecoverableLocal
-            && contract.result != target.result
-        {
+        if !contract.effect.is_recoverable() && contract.result != target.result {
             errors.push(super::MirValidationError {
                 subject: subject.clone(),
                 message: "transition result TypeDesc disagrees with executable MIR signature"
@@ -2616,7 +2622,7 @@ fn validate_transition_contracts(
                     });
                 }
             }
-            MirTransitionEffect::RecoverableLocal => {
+            MirTransitionEffect::RecoverableLocal | MirTransitionEffect::RecoverableBoundary => {
                 let valid_result = type_catalog
                     .get(&contract.result)
                     .and_then(|descriptor| match &descriptor.layout {
@@ -2692,7 +2698,7 @@ fn validate_flow_transition_instruction(
         });
         return;
     };
-    let recoverable = contract.effect == MirTransitionEffect::RecoverableLocal;
+    let recoverable = contract.effect.is_recoverable();
     if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
         || contract.targets.len() != 1
         || (!recoverable && contract.failure.is_some())
@@ -2877,6 +2883,8 @@ fn materialize_transition_contracts(
                 failure: failure.clone(),
                 effect: if transition.silent_transition && failure.is_some() {
                     MirTransitionEffect::RecoverableLocal
+                } else if failure.is_some() {
+                    MirTransitionEffect::RecoverableBoundary
                 } else if transition.silent_transition {
                     MirTransitionEffect::SilentLocal
                 } else {
@@ -3123,7 +3131,7 @@ fn validate_recoverable_failure_consumption(
             };
             transitions
                 .get(transition)
-                .filter(|contract| contract.effect == MirTransitionEffect::RecoverableLocal)
+                .filter(|contract| contract.effect.is_recoverable())
                 .map(|contract| {
                     (
                         result.clone(),
@@ -5451,7 +5459,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                         format!("transition '{}' has no MIR contract", transition.0),
                     )
                 })?;
-                let recoverable = contract.effect == MirTransitionEffect::RecoverableLocal;
+                let recoverable = contract.effect.is_recoverable();
                 if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
                     || contract.targets.len() != 1
                     || (!recoverable && contract.failure.is_some())
@@ -6584,6 +6592,21 @@ fn project_value(
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     match (value, projection) {
+        (value, MirProjection::ReadPath(receipt)) => {
+            let Some(base_ty) = base_ty else {
+                return Err(execution_error(
+                    function,
+                    "read projection path has no source type",
+                ));
+            };
+            let Some(result_ty) = result_ty else {
+                return Err(execution_error(
+                    function,
+                    "read projection path has no result type",
+                ));
+            };
+            project_read_path_value(function, value, base_ty, result_ty, receipt, type_catalog)
+        }
         (MirRuntimeValue::Tuple(values), MirProjection::Tuple(index)) => {
             let Some(base_ty) = base_ty else {
                 return Err(execution_error(
@@ -6726,6 +6749,72 @@ fn project_value(
             "projection does not match aggregate value",
         )),
     }
+}
+
+fn project_read_path_value(
+    function: &NodeId,
+    value: MirRuntimeValue,
+    base_ty: &crate::core::ResolvedTypeId,
+    result_ty: &crate::core::ResolvedTypeId,
+    receipt: &super::types::MirReadProjectionContract,
+    type_catalog: &MirTypeCatalog,
+) -> Result<MirRuntimeValue, MirExecutionError> {
+    type_catalog
+        .validate_read_projection_receipt(base_ty, result_ty, receipt)
+        .map_err(|message| execution_error(function, message))?;
+    let mut current = &value;
+    for step in &receipt.steps {
+        current = match (&step.projection, current) {
+            (super::types::MirReadProjectionKind::Tuple(index), MirRuntimeValue::Tuple(values)) => {
+                if values.len()
+                    != type_catalog
+                        .validated_tuple_field_projection_contract(
+                            &step.base_ty,
+                            *index,
+                            &step.result_ty,
+                        )
+                        .map_err(|message| execution_error(function, message))?
+                        .arity
+                {
+                    return Err(execution_error(
+                        function,
+                        "read projection tuple runtime arity disagrees with TypeDesc",
+                    ));
+                }
+                values.get(*index).ok_or_else(|| {
+                    execution_error(function, "read projection tuple field is out of bounds")
+                })?
+            }
+            (
+                super::types::MirReadProjectionKind::Field(field),
+                MirRuntimeValue::Record { nominal, fields },
+            ) => {
+                let contract = type_catalog
+                    .validated_record_field_projection_contract(
+                        &step.base_ty,
+                        field,
+                        &step.result_ty,
+                    )
+                    .map_err(|message| execution_error(function, message))?;
+                if nominal != &contract.nominal || fields.len() != contract.arity {
+                    return Err(execution_error(
+                        function,
+                        "read projection record runtime shape disagrees with TypeDesc",
+                    ));
+                }
+                fields.get(contract.field_index).ok_or_else(|| {
+                    execution_error(function, "read projection record field is out of bounds")
+                })?
+            }
+            _ => {
+                return Err(execution_error(
+                    function,
+                    "read projection path encountered a non-aggregate value",
+                ))
+            }
+        };
+    }
+    Ok(current.clone())
 }
 
 fn canonical_list_index(

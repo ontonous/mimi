@@ -1422,6 +1422,33 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
+            MirProjection::ReadPath(receipt) => {
+                if list_index_contract.is_some() {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "List index receipt is attached to a read projection path",
+                    ));
+                }
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_read_projection_receipt(&base_value.ty, &result_value.ty, receipt)
+                {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+                if receipt.steps.iter().any(|step| {
+                    matches!(
+                        step.projection,
+                        crate::core::mir::types::MirReadProjectionKind::Tuple(index)
+                            if index > u32::MAX as usize
+                    )
+                }) {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "read projection tuple index exceeds native aggregate ABI",
+                    ));
+                }
+            }
         }
     }
 
@@ -2408,8 +2435,7 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        let recoverable =
-            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        let recoverable = contract.effect.is_recoverable();
         if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())

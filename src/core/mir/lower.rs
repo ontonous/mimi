@@ -33,6 +33,18 @@ use super::{
     MirValue, MirValueId, MirVariantPredicate,
 };
 
+struct NestedRecordMatchSetup {
+    base: MirValueId,
+    result: MirValueId,
+    projection: MirProjection,
+    node: NodeId,
+}
+
+struct LoweredSwitchBindings {
+    bindings: Vec<MirSwitchBinding>,
+    nested_record: Option<NestedRecordMatchSetup>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirLoweringError {
     pub node_id: NodeId,
@@ -7119,6 +7131,12 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 }
+                ResolvedStmtKind::Scope {
+                    kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                    body,
+                } => {
+                    let _ = self.lower_block_expr(body);
+                }
                 _ => self.error(
                     &statement.node_id,
                     "structured control flow is not lowered by MIR Phase 0",
@@ -7285,6 +7303,19 @@ impl<'a> Lowerer<'a> {
                                 source: local,
                             },
                         );
+                    } else if let Some(receipt) =
+                        self.read_projection_path_for_place(&local, &expression.ty, place)
+                    {
+                        self.emit(
+                            &expression.node_id,
+                            "project.read_path",
+                            MirInstructionKind::Project {
+                                result: result.clone(),
+                                base: local,
+                                projection: super::MirProjection::ReadPath(receipt),
+                                list_index_contract: None,
+                            },
+                        );
                     } else if let Some(projection) =
                         self.move_projection_for_place(&local, &expression.ty, place)
                     {
@@ -7369,6 +7400,21 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::Project { value, projection } => {
+                if let Some((base, receipt)) =
+                    self.read_projection_path_for_expr(value, projection, &expression.ty)
+                {
+                    self.emit(
+                        &expression.node_id,
+                        "project.read_path",
+                        MirInstructionKind::Project {
+                            result: result.clone(),
+                            base,
+                            projection: super::MirProjection::ReadPath(receipt),
+                            list_index_contract: None,
+                        },
+                    );
+                    return result;
+                }
                 let projection = match projection {
                     crate::core::ir::ResolvedValueProjection::Field(field) => {
                         super::MirProjection::Field(field.clone())
@@ -8381,14 +8427,15 @@ impl<'a> Lowerer<'a> {
             let Some(join_edge) = self.edge_id("match.arm.join", &arm.node_id) else {
                 continue;
             };
-            let Some(bindings) =
+            let Some(lowered_bindings) =
                 self.lower_switch_bindings(&arm.pattern, &arm.node_id, &scrutinee_ty)
             else {
                 continue;
             };
             self.add_block(
                 block_id.clone(),
-                bindings
+                lowered_bindings
+                    .bindings
                     .iter()
                     .map(|binding| MirBlockParameter {
                         value: binding.parameter.clone(),
@@ -8399,10 +8446,15 @@ impl<'a> Lowerer<'a> {
                 edge,
                 target: block_id.clone(),
                 arguments: Vec::new(),
-                bindings,
+                bindings: lowered_bindings.bindings,
                 case,
             });
-            arm_blocks.push((block_id, join_edge, &arm.body));
+            arm_blocks.push((
+                block_id,
+                join_edge,
+                &arm.body,
+                lowered_bindings.nested_record,
+            ));
         }
         if switch_arms.is_empty() {
             self.error(node, "match has no MIR-lowerable arms");
@@ -8421,8 +8473,29 @@ impl<'a> Lowerer<'a> {
         };
         self.terminate(terminator);
 
-        for (block_id, join_edge, body) in arm_blocks {
+        for (block_id, join_edge, body, nested_record) in arm_blocks {
             self.switch_to(block_id);
+            if let Some(setup) = nested_record {
+                self.emit(
+                    &setup.node,
+                    "match.nested.record.project",
+                    MirInstructionKind::Project {
+                        result: setup.result,
+                        base: setup.base.clone(),
+                        projection: setup.projection,
+                        list_index_contract: None,
+                    },
+                );
+                // The outer SwitchMove transfers the nested record payload to
+                // this arm. The pattern only reads a Copy field, so release
+                // the complete record after the projection; no partial move
+                // or backend-private residual is introduced.
+                self.emit(
+                    &setup.node,
+                    "match.nested.record.drop",
+                    MirInstructionKind::Drop { value: setup.base },
+                );
+            }
             let value = self.lower_expr(body);
             if !self.current_is_terminated() {
                 self.terminate(MirTerminator::Goto {
@@ -8433,6 +8506,106 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.switch_to(join_id);
+    }
+
+    /// Collapse a direct nested record/tuple read into one canonical
+    /// read-only projection. Lowering the source-level projections as
+    /// independent values would expose a non-Copy intermediate and either
+    /// invent a clone or incorrectly consume part of a linear failure tuple.
+    /// The path receipt keeps every intermediate TypeDesc identity explicit;
+    /// only the final Copy scalar becomes a MIR value.
+    fn read_projection_path_for_expr(
+        &mut self,
+        value: &ResolvedExpr,
+        outer_projection: &crate::core::ir::ResolvedValueProjection,
+        result_ty: &crate::core::ResolvedTypeId,
+    ) -> Option<(MirValueId, super::types::MirReadProjectionContract)> {
+        let mut steps = Vec::new();
+        let mut current_value = value;
+        let mut current_result_ty = result_ty.clone();
+        let mut current_projection = outer_projection;
+        loop {
+            let projection = match current_projection {
+                crate::core::ir::ResolvedValueProjection::Field(field) => {
+                    super::types::MirReadProjectionKind::Field(field.clone())
+                }
+                crate::core::ir::ResolvedValueProjection::Tuple(index) => {
+                    super::types::MirReadProjectionKind::Tuple(*index)
+                }
+                crate::core::ir::ResolvedValueProjection::Index(_)
+                | crate::core::ir::ResolvedValueProjection::Dereference => return None,
+            };
+            steps.push(super::types::MirReadProjectionStep {
+                base_ty: current_value.ty.clone(),
+                result_ty: current_result_ty,
+                projection,
+            });
+            match &current_value.kind {
+                ResolvedExprKind::Project {
+                    value: inner_value,
+                    projection: inner_projection,
+                } => {
+                    current_result_ty = current_value.ty.clone();
+                    current_value = inner_value;
+                    current_projection = inner_projection;
+                }
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => break,
+                _ => return None,
+            }
+        }
+        if steps.len() < 2 {
+            return None;
+        }
+        steps.reverse();
+        let ResolvedExprKind::Load(place) = &current_value.kind else {
+            return None;
+        };
+        let base = self.local_value(&place.base).ok()?;
+        let base_ty = self.values.get(&base)?.ty.clone();
+        let catalog = self.type_catalog?;
+        let receipt = catalog
+            .validated_read_projection_contract(&base_ty, result_ty, &steps)
+            .ok()?;
+        Some((base, receipt))
+    }
+
+    fn read_projection_path_for_place(
+        &self,
+        base: &MirValueId,
+        result_ty: &crate::core::ResolvedTypeId,
+        place: &crate::core::ResolvedPlace,
+    ) -> Option<super::types::MirReadProjectionContract> {
+        if place.projections.len() < 2 {
+            return None;
+        }
+        let base_ty = self.values.get(base)?.ty.clone();
+        let mut current_ty = base_ty.clone();
+        let steps = place
+            .projections
+            .iter()
+            .map(|projection| {
+                let kind = match projection {
+                    crate::core::ir::ResolvedProjection::Field { field, .. } => {
+                        super::types::MirReadProjectionKind::Field(field.clone())
+                    }
+                    crate::core::ir::ResolvedProjection::Tuple { index, .. } => {
+                        super::types::MirReadProjectionKind::Tuple(*index)
+                    }
+                    crate::core::ir::ResolvedProjection::Index { .. }
+                    | crate::core::ir::ResolvedProjection::Deref { .. } => return None,
+                };
+                let step = super::types::MirReadProjectionStep {
+                    base_ty: current_ty.clone(),
+                    result_ty: projection.ty().clone(),
+                    projection: kind,
+                };
+                current_ty = projection.ty().clone();
+                Some(step)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        self.type_catalog?
+            .validated_read_projection_contract(&base_ty, result_ty, &steps)
+            .ok()
     }
 
     /// Lower a match scrutinee that is consumed by `SwitchMove`.  Direct local
@@ -8518,14 +8691,18 @@ impl<'a> Lowerer<'a> {
         pattern: &ResolvedPattern,
         node: &NodeId,
         scrutinee_ty: &crate::core::ResolvedTypeId,
-    ) -> Option<Vec<MirSwitchBinding>> {
+    ) -> Option<LoweredSwitchBindings> {
         let ResolvedPatternKind::Constructor {
             variant, fields, ..
         } = &pattern.kind
         else {
-            return Some(Vec::new());
+            return Some(LoweredSwitchBindings {
+                bindings: Vec::new(),
+                nested_record: None,
+            });
         };
         let mut bindings = Vec::new();
+        let mut nested_record = None;
         for (field, payload) in fields {
             match &payload.kind {
                 ResolvedPatternKind::Wildcard => {}
@@ -8578,6 +8755,89 @@ impl<'a> Lowerer<'a> {
                     );
                     return None;
                 }
+                ResolvedPatternKind::Constructor {
+                    fields: nested_fields,
+                    ..
+                } if nested_record.is_none() && fields.len() == 1 => {
+                    let [(nested_field, nested_payload)] = nested_fields.as_slice() else {
+                        self.error(
+                            node,
+                            "nested variant payload patterns require a single direct record field binding",
+                        );
+                        return None;
+                    };
+                    let ResolvedPatternKind::Binding {
+                        local,
+                        by_reference: None,
+                    } = &nested_payload.kind
+                    else {
+                        self.error(
+                            node,
+                            "nested variant payload patterns require a direct Copy field binding",
+                        );
+                        return None;
+                    };
+                    let parameter = match self.local_value(local) {
+                        Ok(value) => value,
+                        Err(errors) => {
+                            self.errors.extend(errors);
+                            return None;
+                        }
+                    };
+                    let Some(parameter_ty) =
+                        self.values.get(&parameter).map(|value| value.ty.clone())
+                    else {
+                        self.error(node, "nested record binding target has no MIR type");
+                        return None;
+                    };
+                    let Some(type_catalog) = self.type_catalog else {
+                        self.error(
+                            node,
+                            "nested record binding requires a canonical TypeDesc catalog",
+                        );
+                        return None;
+                    };
+                    let Some(base) = self.id("match.nested.record", &payload.node_id) else {
+                        return None;
+                    };
+                    self.insert_value(base.clone(), payload.ty.clone(), &payload.node_id);
+                    let projection = MirProjection::Field(nested_field.clone());
+                    if let Err(message) =
+                        type_catalog.validate_projection(&payload.ty, &parameter_ty, &projection)
+                    {
+                        self.error(node, message);
+                        return None;
+                    }
+                    let Some(outer_parameter_ty) =
+                        self.values.get(&base).map(|value| value.ty.clone())
+                    else {
+                        self.error(node, "nested record payload has no MIR type");
+                        return None;
+                    };
+                    let projection_contract = match type_catalog
+                        .validated_variant_payload_projection_contract(
+                            scrutinee_ty,
+                            variant,
+                            field,
+                            &outer_parameter_ty,
+                        ) {
+                        Ok(projection) => projection,
+                        Err(message) => {
+                            self.error(node, message);
+                            return None;
+                        }
+                    };
+                    bindings.push(MirSwitchBinding {
+                        parameter: base.clone(),
+                        projection: projection_contract,
+                    });
+                    nested_record = Some(NestedRecordMatchSetup {
+                        base,
+                        result: parameter,
+                        projection,
+                        node: payload.node_id.clone(),
+                    });
+                }
                 _ => {
                     self.error(
                         node,
@@ -8587,7 +8847,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        Some(bindings)
+        Some(LoweredSwitchBindings {
+            bindings,
+            nested_record,
+        })
     }
 
     fn lower_switch_case(
@@ -8970,6 +9233,12 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
+                ResolvedStmtKind::Scope {
+                    kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                    body,
+                } => {
+                    let _ = self.lower_block_expr(body);
+                }
                 _ => self.error(
                     &statement.node_id,
                     "nested block statement is not lowered by MIR Phase 0",

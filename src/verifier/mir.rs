@@ -879,6 +879,31 @@ fn symbolic_project(
     }
 }
 
+fn symbolic_project_read_path(
+    value: SymbolicValue,
+    receipt: &crate::core::mir::types::MirReadProjectionContract,
+) -> Result<SymbolicValue, String> {
+    let mut current = value;
+    for step in &receipt.steps {
+        current = match (&step.projection, current) {
+            (
+                crate::core::mir::types::MirReadProjectionKind::Tuple(index),
+                SymbolicValue::Tuple(values),
+            ) => values.get(*index).cloned().ok_or_else(|| {
+                format!("MIR read projection tuple index {} is out of bounds", index)
+            })?,
+            (
+                crate::core::mir::types::MirReadProjectionKind::Field(field),
+                SymbolicValue::Record { fields, .. },
+            ) => fields.get(field).cloned().ok_or_else(|| {
+                format!("MIR read projection record field '{}' is absent", field.0)
+            })?,
+            _ => return Err("MIR read projection path base is not an aggregate".into()),
+        };
+    }
+    Ok(current)
+}
+
 fn symbolic_variant_construct(
     catalog: &crate::core::mir::types::MirTypeCatalog,
     result_ty: &crate::core::ir::ResolvedTypeId,
@@ -1784,6 +1809,26 @@ fn eval_instruction(
                     projected_elements,
                 );
                 projected
+            } else if let MirProjection::ReadPath(receipt) = projection {
+                let base_ty = function
+                    .values
+                    .get(base)
+                    .ok_or_else(|| format!("MIR read projection base '{}' is absent", base))?
+                    .ty
+                    .clone();
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .ok_or_else(|| format!("MIR read projection result '{}' is absent", result))?
+                    .ty
+                    .clone();
+                if list_index_contract.is_some() {
+                    return Err(
+                        "MIR List index receipt is attached to a read projection path".into(),
+                    );
+                }
+                catalog.validate_read_projection_receipt(&base_ty, &result_ty, receipt)?;
+                symbolic_project_read_path(value, receipt)?
             } else if matches!(projection, MirProjection::Dereference) {
                 let base_ty = function
                     .values
@@ -2826,7 +2871,7 @@ fn eval_flow_transition(
             transition.0
         )
     })?;
-    let recoverable = contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+    let recoverable = contract.effect.is_recoverable();
     if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
         || contract.targets.len() != 1
         || (!recoverable && contract.failure.is_some())

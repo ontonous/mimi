@@ -10,13 +10,13 @@ use crate::core::ir::{
     ResolvedPatternKind, ResolvedProjection, ResolvedStmtKind, ResolvedType,
     ResolvedValueProjection,
 };
-use crate::core::{CheckedProgram, NodeId, ResolvedBody, TransitionId};
+use crate::core::{CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, TransitionId};
 
-/// Whether the checked program is the deliberately narrow M3 recoverable Flow
-/// profile. It has one import-free Flow, one self-looping `fails` transition,
-/// one `i32` state payload, and a body containing `?`. The predicate is only
-/// admission; the canonical MIR graph and all four consumer gates still prove
-/// the concrete Result/source-transfer contract.
+/// Whether the checked program is one of the deliberately narrow recoverable
+/// Flow profiles. M3 is the single-state retry profile; F2 is the cross-state
+/// `Result<state, (source, error)>` match profile. The predicate is only
+/// admission; the canonical MIR graph and all consumer gates still prove the
+/// concrete Result/source-transfer contract.
 pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
     if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
         return false;
@@ -52,7 +52,7 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
         program.resolved_types().get(&signature.result),
         Some(ResolvedType::Result { .. })
     );
-    transition.silent_transition
+    let local_retry = transition.silent_transition
         && transition.targets.len() == 1
         && transition.targets[0] == transition.id.source
         && !transition.is_ffi_pinned
@@ -72,7 +72,712 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
         && result_is_result
         && program
             .resolved_body(&transition.node_id)
-            .is_some_and(|body| block_contains_try(&body.root))
+            .is_some_and(|body| block_contains_try(&body.root));
+
+    local_retry || is_exact_cross_state_result_match(program, transition, flow)
+}
+
+/// F2 is intentionally a source-shaped matcher, not a broad "Flow with a
+/// match" admission. It opens exactly one synchronous cross-state failing
+/// transition, with one Copy `i32` field in each state, and a caller that
+/// matches `Ok(Target { field })` versus `Err(_)`. All payload and ownership
+/// facts still come from the canonical MIR construction and validators.
+fn is_exact_cross_state_result_match(
+    program: &CheckedProgram,
+    transition: &crate::core::resolved::ResolvedTransition,
+    flow: &crate::core::resolved::ResolvedFlow,
+) -> bool {
+    if transition.silent_transition
+        || transition.targets.len() != 1
+        || transition.targets[0] == transition.id.source
+        || transition.params.len() != 0
+        || transition.fails.is_none()
+        || transition.is_fallback
+        || transition.is_ffi_pinned
+        || flow.persistent_fields.len() != 0
+        || flow
+            .states
+            .keys()
+            .filter(|name| name.as_str() != "Fault")
+            .count()
+            != 2
+        || program
+            .transitions()
+            .values()
+            .filter(|item| !item.is_fallback && program.resolved_body(&item.node_id).is_some())
+            .count()
+            != 1
+    {
+        return false;
+    }
+    let Some(source_state) = flow.states.get(&transition.id.source.name) else {
+        return false;
+    };
+    let Some(target_id) = transition.targets.first() else {
+        return false;
+    };
+    let Some(target_state) = flow.states.get(&target_id.name) else {
+        return false;
+    };
+    let [(_, source_field_ty)] = source_state.payload.as_slice() else {
+        return false;
+    };
+    let [(_, target_field_ty)] = target_state.payload.as_slice() else {
+        return false;
+    };
+    if !is_concrete_i32_type(source_field_ty) || !is_concrete_i32_type(target_field_ty) {
+        return false;
+    }
+    let Some(signature) = program.resolved_signature(&transition.node_id) else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&signature.result),
+        Some(ResolvedType::Result { .. })
+    ) {
+        return false;
+    }
+    let Some(transition_body) = program.resolved_body(&transition.node_id) else {
+        return false;
+    };
+    let Some(source_local) = transition_body.parameters.first() else {
+        return false;
+    };
+    let target_nominal = format!("state:{}::{}", flow.id.0, target_id.name);
+    let success_transition =
+        exact_cross_state_transition_body(&transition_body.root, source_local, &target_nominal);
+    let failure_transition = exact_cross_state_failure_transition_body(
+        &transition_body.root,
+        source_local,
+        &target_nominal,
+    );
+    program
+        .resolved_body(&NodeId("function:main".into()))
+        .is_some_and(|body| {
+            let success_main =
+                exact_cross_state_match_main(program, body, transition, flow, target_id);
+            let failure_main =
+                exact_cross_state_failure_match_main(program, body, transition, flow, target_id);
+            (success_transition && success_main) || (failure_transition && failure_main)
+        })
+}
+
+fn exact_cross_state_transition_body(
+    block: &crate::core::ir::ResolvedBlock,
+    source_local: &ResolvedLocalId,
+    target_nominal: &str,
+) -> bool {
+    match block.statements.as_slice() {
+        [crate::core::ir::ResolvedStmt {
+            kind: ResolvedStmtKind::Return {
+                value: Some(value), ..
+            },
+            ..
+        }] => {
+            let ResolvedExprKind::Record {
+                nominal,
+                fields,
+                rest: None,
+            } = &value.kind
+            else {
+                return false;
+            };
+            let [field] = fields.as_slice() else {
+                return false;
+            };
+            if nominal.as_str() != target_nominal || field.field.0.is_empty() {
+                return false;
+            }
+            let ResolvedExprKind::Binary {
+                op: ResolvedBinaryOp::Add,
+                left,
+                right,
+            } = &field.value.kind
+            else {
+                return false;
+            };
+            matches!(
+                (&left.kind, &right.kind),
+                (
+                    ResolvedExprKind::Load(crate::core::ir::ResolvedPlace {
+                        base,
+                        projections,
+                    }),
+                    ResolvedExprKind::Literal(ResolvedLiteral::Int(1)),
+                ) if base == source_local
+                    && projections.len() == 1
+                    && matches!(
+                        projections[0],
+                        ResolvedProjection::Field { .. }
+                    )
+            )
+        }
+        [crate::core::ir::ResolvedStmt {
+            kind:
+                ResolvedStmtKind::Scope {
+                    kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                    body,
+                },
+            ..
+        }] => exact_cross_state_transition_body(body, source_local, target_nominal),
+        _ => false,
+    }
+}
+
+fn exact_cross_state_failure_transition_body(
+    block: &crate::core::ir::ResolvedBlock,
+    source_local: &ResolvedLocalId,
+    target_nominal: &str,
+) -> bool {
+    let [checked, next, return_statement] = match block.statements.as_slice() {
+        [checked, next, return_statement] => [checked, next, return_statement],
+        [crate::core::ir::ResolvedStmt {
+            kind:
+                ResolvedStmtKind::Scope {
+                    kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                    body,
+                },
+            ..
+        }] => return exact_cross_state_failure_transition_body(body, source_local, target_nominal),
+        _ => return false,
+    };
+    let (checked_pattern, checked_initializer, next_pattern, next_initializer, value) =
+        match (&checked.kind, &next.kind, &return_statement.kind) {
+            (
+                ResolvedStmtKind::Bind {
+                    pattern: checked_pattern,
+                    initializer: Some(checked_initializer),
+                },
+                ResolvedStmtKind::Bind {
+                    pattern: next_pattern,
+                    initializer: Some(next_initializer),
+                },
+                ResolvedStmtKind::Return {
+                    value: Some(value), ..
+                },
+            ) => (
+                checked_pattern,
+                checked_initializer,
+                next_pattern,
+                next_initializer,
+                value,
+            ),
+            _ => return false,
+        };
+    let (checked_local, next_local) = match (&checked_pattern.kind, &next_pattern.kind) {
+        (
+            ResolvedPatternKind::Binding {
+                local: checked_local,
+                by_reference: None,
+            },
+            ResolvedPatternKind::Binding {
+                local: next_local,
+                by_reference: None,
+            },
+        ) => (checked_local, next_local),
+        _ => return false,
+    };
+    let ResolvedExprKind::If {
+        condition,
+        then_block,
+        else_block,
+    } = &checked_initializer.kind
+    else {
+        return false;
+    };
+    let ResolvedExprKind::Binary {
+        op: ResolvedBinaryOp::Equal,
+        left,
+        right,
+    } = &condition.kind
+    else {
+        return false;
+    };
+    let source_field = match &left.kind {
+        ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
+            if base == source_local
+                && projections.len() == 1
+                && matches!(projections[0], ResolvedProjection::Field { .. }) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    if !source_field
+        || !matches!(
+            right.kind,
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(1))
+        )
+    {
+        return false;
+    }
+    let Some(error_call) = single_block_call(then_block) else {
+        return false;
+    };
+    if !matches!(&error_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "Err")
+        || error_call.arguments.len() != 1
+    {
+        return false;
+    }
+    if !matches!(
+        error_call.arguments[0].value.kind,
+        ResolvedExprKind::Literal(ResolvedLiteral::String(_))
+    ) {
+        return false;
+    }
+    let Some(ok_call) = single_block_call(else_block) else {
+        return false;
+    };
+    if !matches!(&ok_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "Ok")
+        || ok_call.arguments.len() != 1
+    {
+        return false;
+    }
+    let ResolvedExprKind::Binary {
+        op: ResolvedBinaryOp::Add,
+        left: ok_left,
+        right: ok_right,
+    } = &ok_call.arguments[0].value.kind
+    else {
+        return false;
+    };
+    if !matches!(&ok_left.kind, ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) if base == source_local && projections.len() == 1 && matches!(projections[0], ResolvedProjection::Field { .. }))
+        || !matches!(
+            ok_right.kind,
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(1))
+        )
+    {
+        return false;
+    }
+    let ResolvedExprKind::Try {
+        value: try_value, ..
+    } = &next_initializer.kind
+    else {
+        return false;
+    };
+    if !matches!(&try_value.kind, ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) if base == checked_local && projections.is_empty())
+    {
+        return false;
+    }
+    let ResolvedExprKind::Record {
+        nominal,
+        fields,
+        rest: None,
+    } = &value.kind
+    else {
+        return false;
+    };
+    let [field] = fields.as_slice() else {
+        return false;
+    };
+    nominal.as_str() == target_nominal
+        && !field.field.0.is_empty()
+        && matches!(&field.value.kind, ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) if base == next_local && projections.is_empty())
+}
+
+fn single_block_call(
+    block: &crate::core::ir::ResolvedBlock,
+) -> Option<&crate::core::ir::ResolvedCall> {
+    match (block.statements.as_slice(), block.result.as_deref()) {
+        (
+            [crate::core::ir::ResolvedStmt {
+                kind:
+                    ResolvedStmtKind::Expr(ResolvedExpr {
+                        kind: ResolvedExprKind::Call(call),
+                        ..
+                    }),
+                ..
+            }],
+            None,
+        )
+        | (
+            [],
+            Some(ResolvedExpr {
+                kind: ResolvedExprKind::Call(call),
+                ..
+            }),
+        ) => Some(call),
+        _ => None,
+    }
+}
+
+fn exact_cross_state_failure_match_main(
+    _program: &CheckedProgram,
+    body: &ResolvedBody,
+    transition: &crate::core::resolved::ResolvedTransition,
+    flow: &crate::core::resolved::ResolvedFlow,
+    target: &crate::core::StateId,
+) -> bool {
+    let (first, match_expression) = match body.root.statements.as_slice() {
+        [first, second]
+            if body.root.result.as_deref().is_some_and(|result| {
+                matches!(
+                    &result.kind,
+                    ResolvedExprKind::Literal(ResolvedLiteral::Int(0))
+                )
+            }) =>
+        {
+            let ResolvedStmtKind::Expr(expression) = &second.kind else {
+                return false;
+            };
+            (first, expression)
+        }
+        [first] => {
+            let Some(expression) = body.root.result.as_deref() else {
+                return false;
+            };
+            (first, expression)
+        }
+        _ => return false,
+    };
+    let ResolvedExprKind::Match { scrutinee, arms } = &match_expression.kind else {
+        return false;
+    };
+    let (source_local, transition_owner) = match &first.kind {
+        ResolvedStmtKind::Bind {
+            pattern:
+                crate::core::ir::ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer:
+                Some(ResolvedExpr {
+                    kind: ResolvedExprKind::Call(call),
+                    ..
+                }),
+        } => match &call.callee {
+            ResolvedCallee::Transition(owner) => (local, owner),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    if transition_owner != &transition.id {
+        return false;
+    }
+    let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
+        &scrutinee.kind
+    else {
+        return false;
+    };
+    if base != source_local || !projections.is_empty() || arms.len() != 2 {
+        return false;
+    }
+    let target_nominal = format!("state:{}::{}", flow.id.0, target.name);
+    let mut saw_ok = false;
+    let mut saw_err = false;
+    for arm in arms {
+        match &arm.pattern.kind {
+            ResolvedPatternKind::Constructor { variant, fields }
+                if variant.0 == "builtin:variant:Result::Ok" =>
+            {
+                let [(_, nested)] = fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Constructor {
+                    variant: nested_variant,
+                    fields: nested_fields,
+                } = &nested.kind
+                else {
+                    return false;
+                };
+                let [(nested_field, nested_binding)] = nested_fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } = &nested_binding.kind
+                else {
+                    return false;
+                };
+                if nested_variant.0 != target_nominal
+                    || nested_field.0.is_empty()
+                    || (!exact_println_block(&arm.body, Some(local))
+                        && !exact_println_then_value_block(&arm.body, local, 99))
+                {
+                    return false;
+                }
+                saw_ok = true;
+            }
+            ResolvedPatternKind::Constructor { variant, fields }
+                if variant.0 == "builtin:variant:Result::Err" =>
+            {
+                let [(field, payload)] = fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } = &payload.kind
+                else {
+                    return false;
+                };
+                if field.0.is_empty() || !exact_failure_match_arm(&arm.body, local) {
+                    return false;
+                }
+                saw_err = true;
+            }
+            _ => return false,
+        }
+    }
+    saw_ok && saw_err
+}
+
+fn exact_failure_match_arm(expression: &ResolvedExpr, error_local: &ResolvedLocalId) -> bool {
+    let ResolvedExprKind::Block(block) = &expression.kind else {
+        return false;
+    };
+    let [print_statement, drop_statement] = block.statements.as_slice() else {
+        return false;
+    };
+    let ResolvedStmtKind::Expr(ResolvedExpr {
+        kind: ResolvedExprKind::Call(print_call),
+        ..
+    }) = &print_statement.kind
+    else {
+        return false;
+    };
+    if !matches!(&print_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "println")
+        || print_call.type_arguments.len() != 0
+        || print_call.session.len() != 0
+        || print_call.arguments.len() != 1
+    {
+        return false;
+    }
+    let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
+        &print_call.arguments[0].value.kind
+    else {
+        return false;
+    };
+    if base != error_local
+        || projections.len() != 2
+        || !matches!(projections[0], ResolvedProjection::Tuple { index: 0, .. })
+        || !matches!(projections[1], ResolvedProjection::Field { .. })
+    {
+        return false;
+    }
+    let ResolvedStmtKind::Drop(places) = &drop_statement.kind else {
+        return false;
+    };
+    if places.len() != 1 || places[0].base != *error_local || !places[0].projections.is_empty() {
+        return false;
+    }
+    matches!(
+        block.result.as_deref().map(|result| &result.kind),
+        Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(0)))
+    )
+}
+
+fn exact_println_then_value_block(
+    expression: &ResolvedExpr,
+    expected_local: &ResolvedLocalId,
+    expected_value: i64,
+) -> bool {
+    let ResolvedExprKind::Block(block) = &expression.kind else {
+        return false;
+    };
+    let [print_statement] = block.statements.as_slice() else {
+        return false;
+    };
+    let ResolvedStmtKind::Expr(ResolvedExpr {
+        kind: ResolvedExprKind::Call(call),
+        ..
+    }) = &print_statement.kind
+    else {
+        return false;
+    };
+    if !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "println")
+        || !call.type_arguments.is_empty()
+        || !call.session.is_empty()
+        || call.arguments.len() != 1
+        || !matches!(
+            &call.arguments[0].value.kind,
+            ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections })
+                if base == expected_local && projections.is_empty()
+        )
+    {
+        return false;
+    }
+    matches!(
+        block.result.as_deref().map(|result| &result.kind),
+        Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(value))) if *value == expected_value
+    )
+}
+
+fn exact_cross_state_match_main(
+    program: &CheckedProgram,
+    body: &ResolvedBody,
+    transition: &crate::core::resolved::ResolvedTransition,
+    flow: &crate::core::resolved::ResolvedFlow,
+    target: &crate::core::StateId,
+) -> bool {
+    let (first, match_expression) = match body.root.statements.as_slice() {
+        [first, second]
+            if body.root.result.as_deref().is_some_and(|result| {
+                matches!(
+                    &result.kind,
+                    ResolvedExprKind::Literal(ResolvedLiteral::Int(0))
+                )
+            }) =>
+        {
+            let ResolvedStmtKind::Expr(expression) = &second.kind else {
+                return false;
+            };
+            (first, expression)
+        }
+        [first] => {
+            let Some(expression) = body.root.result.as_deref() else {
+                return false;
+            };
+            (first, expression)
+        }
+        _ => return false,
+    };
+    let ResolvedExprKind::Match { scrutinee, arms } = &match_expression.kind else {
+        return false;
+    };
+    let (source_local, transition_owner) = match &first.kind {
+        ResolvedStmtKind::Bind {
+            pattern:
+                crate::core::ir::ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer:
+                Some(ResolvedExpr {
+                    kind: ResolvedExprKind::Call(call),
+                    ..
+                }),
+        } => match &call.callee {
+            ResolvedCallee::Transition(owner) => (local, owner),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    if transition_owner != &transition.id {
+        return false;
+    }
+    let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
+        &scrutinee.kind
+    else {
+        return false;
+    };
+    if base != source_local || !projections.is_empty() || arms.len() != 2 {
+        return false;
+    }
+    let target_nominal = format!("state:{}::{}", flow.id.0, target.name);
+    let mut saw_ok = false;
+    let mut saw_err = false;
+    for arm in arms {
+        match &arm.pattern.kind {
+            ResolvedPatternKind::Constructor { variant, fields }
+                if variant.0 == "builtin:variant:Result::Ok" =>
+            {
+                let [(_, nested)] = fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Constructor {
+                    variant: nested_variant,
+                    fields: nested_fields,
+                } = &nested.kind
+                else {
+                    return false;
+                };
+                let [(nested_field, nested_binding)] = nested_fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } = &nested_binding.kind
+                else {
+                    return false;
+                };
+                if nested_variant.0 != target_nominal
+                    || nested_field.0.is_empty()
+                    || !is_concrete_i32_resolved(program, &nested_binding.ty)
+                    || !exact_println_block(&arm.body, Some(local))
+                {
+                    return false;
+                }
+                saw_ok = true;
+            }
+            ResolvedPatternKind::Constructor { variant, fields }
+                if variant.0 == "builtin:variant:Result::Err" =>
+            {
+                let [(field, payload)] = fields.as_slice() else {
+                    return false;
+                };
+                if field.0.is_empty()
+                    || !matches!(payload.kind, ResolvedPatternKind::Wildcard)
+                    || !exact_println_block(&arm.body, None)
+                {
+                    return false;
+                }
+                saw_err = true;
+            }
+            _ => return false,
+        }
+    }
+    saw_ok && saw_err
+}
+
+fn is_concrete_i32_resolved(program: &CheckedProgram, ty: &crate::core::ResolvedTypeId) -> bool {
+    matches!(
+        program.resolved_types().get(ty),
+        Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+    )
+}
+
+fn exact_println_block(
+    expression: &ResolvedExpr,
+    expected_local: Option<&ResolvedLocalId>,
+) -> bool {
+    let ResolvedExprKind::Block(block) = &expression.kind else {
+        return false;
+    };
+    let call = match (block.statements.as_slice(), block.result.as_deref()) {
+        (
+            [crate::core::ir::ResolvedStmt {
+                kind:
+                    ResolvedStmtKind::Expr(ResolvedExpr {
+                        kind: ResolvedExprKind::Call(call),
+                        ..
+                    }),
+                ..
+            }],
+            None,
+        ) => call,
+        (
+            [],
+            Some(ResolvedExpr {
+                kind: ResolvedExprKind::Call(call),
+                ..
+            }),
+        ) => call,
+        _ => return false,
+    };
+    if !call.type_arguments.is_empty() || !call.session.is_empty() || call.arguments.len() != 1 {
+        return false;
+    }
+    if !matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println") {
+        return false;
+    }
+    match (expected_local, &call.arguments[0].value.kind) {
+        (Some(expected), ResolvedExprKind::Load(place)) => {
+            place.base == *expected && place.projections.is_empty()
+        }
+        (None, ResolvedExprKind::Literal(ResolvedLiteral::Int(0))) => true,
+        _ => false,
+    }
 }
 
 fn block_contains_try(block: &crate::core::ir::ResolvedBlock) -> bool {
@@ -392,7 +1097,10 @@ fn is_concrete_i32_type(ty: &Type) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
+    use super::{
+        is_exact_s8_flow_transition, is_flow_failure_retry_candidate,
+        is_s8_flow_transition_candidate,
+    };
 
     fn checked(source: &str) -> crate::core::CheckedProgram {
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -400,6 +1108,53 @@ mod tests {
             .parse_file()
             .expect("parse");
         crate::core::check_program(&file).expect("check")
+    }
+
+    #[test]
+    fn cross_state_result_match_is_a_narrow_recoverable_flow_candidate() {
+        let source = include_str!(
+            "../../../tests/real_world/flow_state_match_fail_result_dual_backend.mimi"
+        );
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn cross_state_failure_match_with_source_read_is_a_narrow_candidate() {
+        let source = include_str!(
+            "../../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi"
+        );
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn rejects_cross_state_result_match_when_body_or_arm_shape_drifts() {
+        let source = include_str!(
+            "../../../tests/real_world/flow_state_match_fail_result_dual_backend.mimi"
+        );
+        for mutated in [
+            source.replace("self.n + 1", "self.n - 1"),
+            source.replace("println(n)", "println(1)"),
+        ] {
+            let tokens = crate::lexer::Lexer::new(&mutated).tokenize().expect("lex");
+            let file = crate::parser::Parser::new(tokens)
+                .parse_file()
+                .expect("parse");
+            let program = crate::core::check_program(&file).expect("check");
+            assert!(
+                !is_flow_failure_retry_candidate(&program),
+                "drifted F2 shape was admitted: {mutated}"
+            );
+        }
     }
 
     #[test]

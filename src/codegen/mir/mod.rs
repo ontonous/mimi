@@ -431,6 +431,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let info = self.function.values.get(&parameter.value).ok_or_else(|| {
                     NativeMirError::new(parameter.value.to_string(), "block parameter is absent")
                 })?;
+                // Unit is a real MIR type but has no LLVM SSA value.  A
+                // control-flow join may still carry a unit expression as a
+                // semantic edge argument (for example, a `match` arm whose
+                // only effect is `println`).  Keep that parameter in MIR for
+                // validator/ownership identity, but do not fabricate an LLVM
+                // phi node for it; queue_edge/queue_variant_edge apply the
+                // same projection when wiring incoming values.
+                if self
+                    .program
+                    .type_catalog()
+                    .get(&info.ty)
+                    .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
+                {
+                    continue;
+                }
                 let ty = native_basic_type(
                     self.generator.context,
                     self.program.type_catalog(),
@@ -1171,6 +1186,148 @@ mod tests {
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
             .expect("native recoverable Flow execution");
         assert_eq!(native.stdout, "100\n95\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn cross_state_result_match_uses_one_mir_across_reference_bytecode_and_native() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/flow_state_match_fail_result_dual_backend.mimi"
+        ));
+        let transition = crate::core::NodeId("transition:F::go::A".into());
+        let contract = program
+            .transitions()
+            .get(&transition)
+            .expect("cross-state recoverable transition contract");
+        assert_eq!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::RecoverableBoundary
+        );
+        assert_eq!(contract.targets.len(), 1);
+        assert!(contract.failure.is_some());
+        assert!(crate::core::mir::contains_flow_failure_retry_candidate(
+            &program
+        ));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference cross-state Result match execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "2\n");
+
+        let mut bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("cross-state Result match MIR bytecode"),
+        );
+        let bytecode_value = bytecode
+            .run_value()
+            .expect("bytecode cross-state Result match execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), "2\n");
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for cross-state recoverable Result");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_cross_state_result_match_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native cross-state Result match lowering");
+        generator
+            .module
+            .verify()
+            .expect("native cross-state Result match module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native cross-state Result match execution");
+        assert_eq!(native.stdout, "2\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn cross_state_failure_returns_source_and_drops_one_failure_tuple_across_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi"
+        ));
+        let transition = crate::core::NodeId("transition:F::go::A".into());
+        let contract = program
+            .transitions()
+            .get(&transition)
+            .expect("cross-state failing transition contract");
+        assert_eq!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::RecoverableBoundary
+        );
+        assert_eq!(contract.targets.len(), 1);
+        assert!(contract.failure.is_some());
+        let main = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("main MIR");
+        let read_paths = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Project {
+                    projection: crate::core::mir::MirProjection::ReadPath(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(read_paths.len(), 1);
+        assert_eq!(read_paths[0].steps.len(), 2);
+        assert!(matches!(
+            read_paths[0].steps[0].projection,
+            crate::core::mir::types::MirReadProjectionKind::Tuple(0)
+        ));
+        assert!(matches!(
+            read_paths[0].steps[1].projection,
+            crate::core::mir::types::MirReadProjectionKind::Field(_)
+        ));
+        assert!(main.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Drop { ref value }
+                        if value.as_str().contains("pattern.variable")
+                )
+            })
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference cross-state failure execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "1\n");
+
+        let mut bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("cross-state failure MIR bytecode"),
+        );
+        let bytecode_value = bytecode
+            .run_value()
+            .expect("bytecode cross-state failure execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), "1\n");
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for cross-state failure Result");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_cross_state_result_failure_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native cross-state failure lowering");
+        generator
+            .module
+            .verify()
+            .expect("native cross-state failure module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native cross-state failure execution");
+        assert_eq!(native.stdout, "1\n");
         assert_eq!(native.stderr, "");
         assert_eq!(native.exit_code, Some(0));
     }

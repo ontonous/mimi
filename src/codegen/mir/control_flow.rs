@@ -425,6 +425,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .get(target)
             .ok_or_else(|| NativeMirError::new(subject.to_string(), "edge target is absent"))?;
         for (parameter, argument) in block.parameters.iter().zip(arguments) {
+            if self.is_unit_value(&parameter.value) {
+                continue;
+            }
             self.pending_incoming.push((
                 parameter.value.clone(),
                 NativePhiSource::Mir(argument.clone()),
@@ -459,6 +462,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ));
         }
         for (parameter, argument) in block.parameters.iter().zip(arguments) {
+            if self.is_unit_value(&parameter.value) {
+                continue;
+            }
             self.pending_incoming.push((
                 parameter.value.clone(),
                 NativePhiSource::Mir(argument.clone()),
@@ -542,6 +548,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
         }
         Ok(())
+    }
+
+    fn is_unit_value(&self, value: &MirValueId) -> bool {
+        self.function
+            .values
+            .get(value)
+            .and_then(|mir_value| self.program.type_catalog().get(&mir_value.ty))
+            .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
     }
 
     pub(super) fn add_phi_incomings(&mut self) -> Result<(), NativeMirError> {

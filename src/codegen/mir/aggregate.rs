@@ -395,6 +395,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_load(result_llvm, pointer, "mir_dereference")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()));
         }
+        if let MirProjection::ReadPath(receipt) = projection {
+            return self.emit_read_projection_path(
+                result,
+                base,
+                receipt,
+                list_index_contract,
+                subject,
+            );
+        }
         if let MirProjection::Index(index) = projection {
             let base_ty = self.value_type(base, subject)?;
             let result_ty = self.value_type(result, subject)?;
@@ -587,6 +596,76 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_extract_value(aggregate, index as u32, "mir_record_project")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
+    /// Materialize a read-only nested path directly through LLVM aggregates.
+    /// Intermediate non-Copy aggregates are never stored as owned MIR values;
+    /// the TypeDesc receipt is checked before each physical extraction and
+    /// only the final Copy scalar is returned.
+    fn emit_read_projection_path(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        receipt: &crate::core::mir::types::MirReadProjectionContract,
+        list_index_contract: Option<&crate::core::mir::types::MirListIndexProjectionContract>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let base_ty = self.value_type(base, subject)?;
+        let result_ty = self.value_type(result, subject)?;
+        if list_index_contract.is_some() {
+            return Err(NativeMirError::new(
+                subject,
+                "read projection path cannot carry a List index receipt",
+            ));
+        }
+        self.program
+            .type_catalog()
+            .validate_read_projection_receipt(&base_ty, &result_ty, receipt)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let mut current = self.value(base, subject)?;
+        for step in &receipt.steps {
+            current = match &step.projection {
+                crate::core::mir::types::MirReadProjectionKind::Tuple(index) => {
+                    let contract = self
+                        .program
+                        .type_catalog()
+                        .validated_tuple_field_projection_contract(
+                            &step.base_ty,
+                            *index,
+                            &step.result_ty,
+                        )
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    self.generator
+                        .builder
+                        .build_extract_value(
+                            current.into_struct_value(),
+                            contract.field_index as u32,
+                            "mir_read_tuple_project",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                }
+                crate::core::mir::types::MirReadProjectionKind::Field(field) => {
+                    let contract = self
+                        .program
+                        .type_catalog()
+                        .validated_record_field_projection_contract(
+                            &step.base_ty,
+                            field,
+                            &step.result_ty,
+                        )
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    self.generator
+                        .builder
+                        .build_extract_value(
+                            current.into_struct_value(),
+                            contract.field_index as u32,
+                            "mir_read_record_project",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                }
+            };
+        }
+        Ok(current)
     }
 
     /// Consume a concrete record and transfer its one managed field (owned

@@ -278,6 +278,146 @@ fn canonical_mir_native_build_matches_mir_run() {
 }
 
 #[test]
+fn canonical_flow_state_match_uses_default_mir_route_and_native_output() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("flow_state_match_fail_result_dual_backend.mimi");
+
+    let mir_dump = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn cross-state canonical MIR inspection");
+    assert!(
+        mir_dump.status.success(),
+        "cross-state MIR inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir_dump.stderr),
+        String::from_utf8_lossy(&mir_dump.stdout)
+    );
+    let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
+    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("flow_transition"));
+    assert!(mir_stdout.contains("match.nested.record"));
+    assert!(mir_stdout.contains("match.nested.record.project"));
+
+    for args in [vec!["run"], vec!["run", "--mir"]] {
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(args)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn cross-state canonical MIR run");
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "cross-state run failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stderr),
+            String::from_utf8_lossy(&run.stdout)
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "2\n");
+    }
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-flow-state-match-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default cross-state canonical MIR build");
+    assert!(
+        build.status.success(),
+        "default cross-state MIR build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default cross-state canonical MIR binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "2\n");
+    assert!(native.stderr.is_empty());
+}
+
+#[test]
+fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("flow_state_match_fail_result_failure_dual_backend.mimi");
+
+    let mir_dump = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn cross-state failure MIR inspection");
+    assert!(
+        mir_dump.status.success(),
+        "cross-state failure MIR inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir_dump.stderr),
+        String::from_utf8_lossy(&mir_dump.stdout)
+    );
+    let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
+    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("project.read_path"));
+    assert!(mir_stdout.contains("ReadPath"));
+    assert!(mir_stdout.contains("drop.0"));
+
+    for args in [vec!["run"], vec!["run", "--mir"]] {
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(args)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn cross-state failure MIR run");
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "cross-state failure run failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stderr),
+            String::from_utf8_lossy(&run.stdout)
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n");
+    }
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-flow-failure-match-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default cross-state failure MIR build");
+    assert!(
+        build.status.success(),
+        "default cross-state failure MIR build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default cross-state failure MIR binary");
+    let _ = std::fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n");
+    assert!(native.stderr.is_empty());
+}
+
+#[test]
 fn canonical_mir_scalar_list_len_closes_reference_native_and_verifier() {
     let fixture = project_root()
         .join("tests")

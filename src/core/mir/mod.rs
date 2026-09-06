@@ -454,6 +454,10 @@ pub enum MirProjection {
     Tuple(usize),
     Index(MirValueId),
     Dereference,
+    /// Read through a checker-materialized aggregate path without consuming
+    /// any intermediate value. The embedded TypeDesc receipt is mandatory
+    /// and the final result is restricted to Copy ownership.
+    ReadPath(types::MirReadProjectionContract),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -518,7 +522,17 @@ pub enum MirTransitionEffect {
     /// source state is consumed into the failure value, so retry callers can
     /// only use the returned source once.
     RecoverableLocal,
+    /// A synchronous cross-state transition whose body may return
+    /// `Err((source, error))`. The state boundary is retained as an explicit
+    /// effect fact; it is not silently reclassified as a local self-loop.
+    RecoverableBoundary,
     Boundary,
+}
+
+impl MirTransitionEffect {
+    pub const fn is_recoverable(self) -> bool {
+        matches!(self, Self::RecoverableLocal | Self::RecoverableBoundary)
+    }
 }
 
 /// Checker-owned ABI/ownership/effect contract for a Flow transition.
@@ -2425,7 +2439,11 @@ pub(crate) fn validate_transfer_event_boundaries(
                 }
                 if matches!(
                     effect,
-                    Some(MirTransitionEffect::SilentLocal | MirTransitionEffect::RecoverableLocal)
+                    Some(
+                        MirTransitionEffect::SilentLocal
+                            | MirTransitionEffect::RecoverableLocal
+                            | MirTransitionEffect::RecoverableBoundary,
+                    )
                 ) && matches!(
                     event.kind,
                     MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild

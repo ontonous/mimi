@@ -847,7 +847,7 @@ pub(crate) fn select_default_route(
     }
     if flow_failure_retry_hint && !materialized_flow_failure_retry_candidate {
         return DefaultMirRoute::Rejected(
-            "M3 recoverable Flow candidate did not materialize a canonical failure boundary".into(),
+            "recoverable Flow candidate did not materialize a canonical failure boundary".into(),
         );
     }
 

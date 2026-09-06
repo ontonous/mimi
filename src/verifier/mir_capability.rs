@@ -98,9 +98,10 @@ impl<'a> CapabilityGate<'a> {
                 }
                 _ => false,
             }) || has_managed_result_call,
-            allow_recoverable_flow_result: program.transitions().values().any(|transition| {
-                transition.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
-            }),
+            allow_recoverable_flow_result: program
+                .transitions()
+                .values()
+                .any(|transition| transition.effect.is_recoverable()),
         }
     }
 
@@ -834,6 +835,20 @@ impl<'a> CapabilityGate<'a> {
                             self.error(format!("{subject} dereference rejected: {message}"));
                         }
                     }
+                    MirProjection::ReadPath(receipt) => {
+                        if list_index_contract.is_some() {
+                            self.error(format!(
+                                "{subject} List index receipt is attached to a read projection path"
+                            ));
+                        }
+                        if let Err(message) =
+                            catalog.validate_read_projection_receipt(&base_ty, &result_ty, receipt)
+                        {
+                            self.error(format!(
+                                "{subject} read projection path rejected: {message}"
+                            ));
+                        }
+                    }
                     MirProjection::Field(_) | MirProjection::Tuple(_) => {
                         if list_index_contract.is_some() {
                             self.error(format!(
@@ -1486,8 +1501,7 @@ impl<'a> CapabilityGate<'a> {
             ));
             return;
         };
-        let recoverable =
-            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        let recoverable = contract.effect.is_recoverable();
         if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())
@@ -1496,7 +1510,7 @@ impl<'a> CapabilityGate<'a> {
             || (recoverable && contract.failure.is_none())
         {
             self.error(format!(
-                "{subject} FlowTransition is outside the silent-local transition capability"
+                "{subject} FlowTransition is outside the silent-local/recoverable transition capability"
             ));
         }
         let Some(target) = self.program.functions().get(&contract.owner) else {

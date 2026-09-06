@@ -1043,8 +1043,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 ),
             )
         })?;
-        let recoverable =
-            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        let recoverable = contract.effect.is_recoverable();
         if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())

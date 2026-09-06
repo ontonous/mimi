@@ -896,6 +896,36 @@ pub struct MirTupleProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// One read-only step in a canonical nested aggregate projection.  The step
+/// carries its input and output TypeDesc identities so a consumer cannot
+/// recover an intermediate layout from a runtime aggregate or backend ABI.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirReadProjectionStep {
+    pub base_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub projection: MirReadProjectionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirReadProjectionKind {
+    Field(NodeId),
+    Tuple(usize),
+}
+
+/// Backend-independent receipt for a read-only projection path through one
+/// or more aggregate layers.  Intermediate values may be non-Copy linear
+/// aggregates, but the single exposed result must be Copy: the path borrows
+/// through those layers and never materializes or consumes an intermediate
+/// owned value.  This is the canonical shape for reading `error.0.n` from a
+/// `Result<state, (source,error)>` while retaining the complete failure tuple
+/// for its one explicit Drop boundary.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirReadProjectionContract {
+    pub source_ty: ResolvedTypeId,
+    pub result_ty: ResolvedTypeId,
+    pub steps: Vec<MirReadProjectionStep>,
+}
+
 /// Ownership mode for one canonical read-only List index projection.
 /// `CopyScalar` is a value copy; `CloneNestedList` is a deep clone of one
 /// child handle while the outer List remains borrowed/owned by its source.
@@ -6426,6 +6456,139 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Resolve and validate a read-only projection path through nested
+    /// records/tuples.  This is intentionally a separate receipt from the
+    /// one-step Copy projection contract: a non-Copy intermediate aggregate
+    /// is legal only when it is never exposed as a value and the path ends in
+    /// a Copy result.
+    pub fn validated_read_projection_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        steps: &[MirReadProjectionStep],
+    ) -> Result<MirReadProjectionContract, String> {
+        if steps.len() < 2 {
+            return Err("read projection path requires at least two aggregate steps".into());
+        }
+        self.get(source_ty).ok_or_else(|| {
+            format!(
+                "read projection source type '{}' is absent",
+                source_ty.as_str()
+            )
+        })?;
+        let result = self.get(result_ty).ok_or_else(|| {
+            format!(
+                "read projection result type '{}' is absent",
+                result_ty.as_str()
+            )
+        })?;
+        if result.ownership != MirOwnership::Copy {
+            return Err(format!(
+                "read projection result type '{}' must be Copy",
+                result_ty.as_str()
+            ));
+        }
+        let mut current_ty = source_ty.clone();
+        for (index, step) in steps.iter().enumerate() {
+            if step.base_ty != current_ty {
+                return Err(format!(
+                    "read projection step {} base type '{}' disagrees with '{}'",
+                    index,
+                    step.base_ty.as_str(),
+                    current_ty.as_str()
+                ));
+            }
+            let next_ty = match &step.projection {
+                MirReadProjectionKind::Field(field) => {
+                    let descriptor = self.get(&current_ty).ok_or_else(|| {
+                        format!(
+                            "read projection step {} base type '{}' is absent",
+                            index,
+                            current_ty.as_str()
+                        )
+                    })?;
+                    let MirLayout::Record { fields, .. } = &descriptor.layout else {
+                        return Err(format!(
+                            "read projection step {} field '{}' requires a record layout",
+                            index, field.0
+                        ));
+                    };
+                    fields
+                        .iter()
+                        .find(|candidate| candidate.id == *field)
+                        .map(|candidate| candidate.ty.clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "read projection step {} record field '{}' is absent",
+                                index, field.0
+                            )
+                        })?
+                }
+                MirReadProjectionKind::Tuple(field_index) => {
+                    let descriptor = self.get(&current_ty).ok_or_else(|| {
+                        format!(
+                            "read projection step {} base type '{}' is absent",
+                            index,
+                            current_ty.as_str()
+                        )
+                    })?;
+                    let MirLayout::Tuple(elements) = &descriptor.layout else {
+                        return Err(format!(
+                            "read projection step {} tuple index {} requires a tuple layout",
+                            index, field_index
+                        ));
+                    };
+                    elements.get(*field_index).cloned().ok_or_else(|| {
+                        format!(
+                            "read projection step {} tuple index {} is out of bounds",
+                            index, field_index
+                        )
+                    })?
+                }
+            };
+            if step.result_ty != next_ty {
+                return Err(format!(
+                    "read projection step {} result type '{}' disagrees with layout type '{}'",
+                    index,
+                    step.result_ty.as_str(),
+                    next_ty.as_str()
+                ));
+            }
+            current_ty = next_ty;
+        }
+        if current_ty != *result_ty {
+            return Err(format!(
+                "read projection result type '{}' disagrees with final path type '{}'",
+                result_ty.as_str(),
+                current_ty.as_str()
+            ));
+        }
+        Ok(MirReadProjectionContract {
+            source_ty: source_ty.clone(),
+            result_ty: result_ty.clone(),
+            steps: steps.to_vec(),
+        })
+    }
+
+    /// Validate an already materialized read-path receipt against the
+    /// TypeDesc catalog and MIR value identities.
+    pub fn validate_read_projection_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirReadProjectionContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty || receipt.result_ty != *result_ty {
+            return Err("read projection receipt disagrees with MIR value types".into());
+        }
+        let expected =
+            self.validated_read_projection_contract(source_ty, result_ty, &receipt.steps)?;
+        if receipt != &expected {
+            return Err("read projection receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
     pub fn projection_result_type(
         &self,
         base_ty: &ResolvedTypeId,
@@ -6448,6 +6611,12 @@ impl MirTypeCatalog {
             }
             (MirLayout::List { element }, crate::core::mir::MirProjection::Index(_)) => {
                 Ok(element.clone())
+            }
+            (_, crate::core::mir::MirProjection::ReadPath(receipt)) => {
+                if receipt.source_ty != *base_ty {
+                    return Err("read projection source type disagrees with its receipt".into());
+                }
+                Ok(receipt.result_ty.clone())
             }
             (_, crate::core::mir::MirProjection::Index(_)) => {
                 Err("indexed projection requires a canonical List layout".into())
@@ -6512,6 +6681,9 @@ impl MirTypeCatalog {
                     ));
                 }
                 Ok(())
+            }
+            (_, crate::core::mir::MirProjection::ReadPath(receipt)) => {
+                self.validate_read_projection_receipt(base_ty, result_ty, receipt)
             }
             (_, crate::core::mir::MirProjection::Index(_)) => {
                 Err("indexed projection requires a canonical List layout".into())
@@ -9539,8 +9711,8 @@ fn combine_ownership(left: MirOwnership, right: MirOwnership) -> MirOwnership {
 mod tests {
     use super::{
         MirAbiClass, MirBuiltinContract, MirBuiltinEffect, MirBuiltinKind, MirGlueKind,
-        MirGlueOperation, MirLayout, MirListOperationMode, MirOwnership, MirTypeCatalog,
-        MirTypeKind, MIR_VARIANT_PROJECTION_TRAP_CODE,
+        MirGlueOperation, MirLayout, MirListOperationMode, MirOwnership, MirReadProjectionKind,
+        MirReadProjectionStep, MirTypeCatalog, MirTypeKind, MIR_VARIANT_PROJECTION_TRAP_CODE,
     };
     use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
@@ -10441,6 +10613,62 @@ mod tests {
             .expect_err("Copy parent must not hide a move-owned tuple child");
         assert!(error.contains("Copy tuple"), "{error}");
         assert!(error.contains("non-Copy"), "{error}");
+    }
+
+    #[test]
+    fn read_projection_path_allows_copy_leaf_through_linear_tuple() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string type");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32 type");
+        let pair_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![string_id.clone(), i32_id.clone()]))
+            .expect("pair type");
+        let nested_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![pair_id.clone(), i32_id.clone()]))
+            .expect("nested tuple type");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let steps = vec![
+            MirReadProjectionStep {
+                base_ty: nested_id.clone(),
+                result_ty: pair_id.clone(),
+                projection: MirReadProjectionKind::Tuple(0),
+            },
+            MirReadProjectionStep {
+                base_ty: pair_id.clone(),
+                result_ty: i32_id.clone(),
+                projection: MirReadProjectionKind::Tuple(1),
+            },
+        ];
+        let receipt = catalog
+            .validated_read_projection_contract(&nested_id, &i32_id, &steps)
+            .expect("Copy leaf may be read through a non-Copy intermediate");
+        catalog
+            .validate_read_projection_receipt(&nested_id, &i32_id, &receipt)
+            .expect("materialized read path receipt");
+
+        let error = catalog
+            .validated_read_projection_contract(
+                &nested_id,
+                &string_id,
+                &[
+                    MirReadProjectionStep {
+                        base_ty: nested_id.clone(),
+                        result_ty: pair_id.clone(),
+                        projection: MirReadProjectionKind::Tuple(0),
+                    },
+                    MirReadProjectionStep {
+                        base_ty: pair_id,
+                        result_ty: string_id.clone(),
+                        projection: MirReadProjectionKind::Tuple(0),
+                    },
+                ],
+            )
+            .expect_err("non-Copy read-path result must remain fail-closed");
+        assert!(error.contains("must be Copy"), "{error}");
     }
 
     #[test]

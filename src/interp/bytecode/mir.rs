@@ -1656,8 +1656,7 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        let recoverable =
-            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        let recoverable = contract.effect.is_recoverable();
         if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())
@@ -1859,6 +1858,10 @@ impl<'a> FunctionEmitter<'a> {
         projection: &MirProjection,
         list_index_contract: Option<&MirListIndexProjectionContract>,
     ) {
+        if let MirProjection::ReadPath(receipt) = projection {
+            self.emit_read_projection_path(result, base, receipt, list_index_contract);
+            return;
+        }
         let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
             return;
         };
@@ -1991,6 +1994,96 @@ impl<'a> FunctionEmitter<'a> {
                 "projection {:?} does not match base layout {:?}",
                 projection, layout
             )),
+        }
+    }
+
+    /// Emit a read-only nested path using the existing canonical tuple and
+    /// record opcodes. Each intermediate is written into the final result
+    /// register only as a physical scratch; the MIR receipt proves that the
+    /// final exposed value is Copy and that no intermediate ownership is
+    /// transferred.
+    fn emit_read_projection_path(
+        &mut self,
+        result: &MirValueId,
+        base: &MirValueId,
+        receipt: &crate::core::mir::types::MirReadProjectionContract,
+        list_index_contract: Option<&MirListIndexProjectionContract>,
+    ) {
+        let (Some(rd), Some(ra)) = (self.reg(result), self.reg(base)) else {
+            return;
+        };
+        if list_index_contract.is_some() {
+            self.error("read projection path cannot carry a List index receipt");
+            return;
+        }
+        let (Some(base_ty), Some(result_ty)) = (
+            self.function.values.get(base).map(|value| value.ty.clone()),
+            self.function
+                .values
+                .get(result)
+                .map(|value| value.ty.clone()),
+        ) else {
+            self.error("read projection path source/result is absent from MIR value catalog");
+            return;
+        };
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_read_projection_receipt(&base_ty, &result_ty, receipt)
+        {
+            self.error(format!("read projection path is unsupported: {message}"));
+            return;
+        }
+        let mut source_reg = ra;
+        for step in &receipt.steps {
+            match &step.projection {
+                crate::core::mir::types::MirReadProjectionKind::Tuple(index) => {
+                    let Some(contract) =
+                        self.add_tuple_projection_contract(&step.base_ty, *index, &step.result_ty)
+                    else {
+                        return;
+                    };
+                    let Ok(index) = u16::try_from(*index) else {
+                        self.error("read projection tuple index exceeds bytecode ABI");
+                        return;
+                    };
+                    self.proto.emit(Op::TupleGet {
+                        rd,
+                        ra: source_reg,
+                        idx: index,
+                        contract: Some(contract),
+                    });
+                }
+                crate::core::mir::types::MirReadProjectionKind::Field(field) => {
+                    let receipt = match self
+                        .program
+                        .type_catalog()
+                        .validated_record_field_projection_contract(
+                            &step.base_ty,
+                            field,
+                            &step.result_ty,
+                        ) {
+                        Ok(receipt) => receipt,
+                        Err(message) => {
+                            self.error(format!(
+                                "read projection record step has no canonical contract: {message}"
+                            ));
+                            return;
+                        }
+                    };
+                    let field_idx = self.proto.add_const(ConstValue::Str(receipt.name.clone()));
+                    let Some(contract) = self.add_record_projection_contract(&receipt) else {
+                        return;
+                    };
+                    self.proto.emit(Op::RecordGet {
+                        rd,
+                        ra: source_reg,
+                        field: field_idx,
+                        contract: Some(contract),
+                    });
+                }
+            }
+            source_reg = rd;
         }
     }
 

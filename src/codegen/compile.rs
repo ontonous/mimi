@@ -865,7 +865,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-LOWERING-001",
                         format!(
-                            "complete recoverable Flow retry MIR island construction failed: {message}"
+                            "complete recoverable Flow MIR island construction failed: {message}"
                         ),
                     ),
                     (
@@ -874,7 +874,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-COVERAGE-001",
                         format!(
-                            "complete recoverable Flow retry MIR island materialization failed: {message}"
+                            "complete recoverable Flow MIR island materialization failed: {message}"
                         ),
                     ),
                 };

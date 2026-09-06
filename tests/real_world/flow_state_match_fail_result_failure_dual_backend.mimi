@@ -1,0 +1,32 @@
+// L1 dual-backend regression: a cross-state failing transition must return
+// Err((source, error)); the Err arm reads the returned source payload and then
+// consumes the complete failure tuple.
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+
+    transition go(A) -> B fails string {
+        let checked: Result<i32, string> = if self.n == 1 {
+            Err("bad")
+        } else {
+            Ok(self.n + 1)
+        }
+        let next = checked?
+        return B { n: next }
+    }
+}
+
+func main() -> i32 {
+    let result = F::go(A { n: 1 })
+    match result {
+        Ok(B { n }) => {
+            println(n)
+            99
+        },
+        Err(error) => {
+            println(error.0.n)
+            drop(error)
+            0
+        },
+    }
+}

@@ -3340,13 +3340,13 @@ pub fn contains_s8_flow_transition_candidate(program: &MirProgram) -> bool {
     })
 }
 
-/// Materialization receipt for the M3 recoverable Flow profile. The effect is
-/// intentionally distinct from S8 SilentLocal, so a caller cannot mistake a
-/// successful graph build for proof that source-return failure semantics were
-/// preserved.
+/// Materialization receipt for the recoverable Flow profiles (M3 local retry
+/// and F2 cross-state Result). The effect is intentionally distinct from S8
+/// `SilentLocal`, so a caller cannot mistake a successful graph build for
+/// proof that source-return failure semantics were preserved.
 pub fn contains_flow_failure_retry_candidate(program: &MirProgram) -> bool {
     program.transitions().values().any(|contract| {
-        contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
+        contract.effect.is_recoverable()
             && contract.targets.len() == 1
             && contract.failure.is_some()
     })
