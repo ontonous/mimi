@@ -1585,7 +1585,7 @@ fn validate_instance_table(
                     ))
                 } else {
                     type_catalog
-                        .validate_move_owned_payload(&instance.arguments[0])
+                        .validate_move_owned_record_payload(&instance.arguments[0])
                         .map(|_| ())
                 }
             }
@@ -1597,7 +1597,7 @@ fn validate_instance_table(
                     ))
                 } else {
                     type_catalog
-                        .validate_move_owned_payload(&instance.arguments[0])
+                        .validate_move_owned_record_payload(&instance.arguments[0])
                         .map(|_| ())
                 }
             }

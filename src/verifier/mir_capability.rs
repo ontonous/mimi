@@ -227,7 +227,7 @@ impl<'a> CapabilityGate<'a> {
                         if let Err(message) = self
                             .program
                             .type_catalog()
-                            .validate_move_owned_payload(concrete)
+                            .validate_move_owned_record_payload(concrete)
                         {
                             self.error(format!(
                                 "instance '{}' owned record projection argument is unsupported: {message}",
@@ -258,7 +258,7 @@ impl<'a> CapabilityGate<'a> {
                         if let Err(message) = self
                             .program
                             .type_catalog()
-                            .validate_move_owned_payload(concrete)
+                            .validate_move_owned_record_payload(concrete)
                         {
                             self.error(format!(
                                 "instance '{}' owned record move/drop projection argument is unsupported: {message}",

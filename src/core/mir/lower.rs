@@ -1298,8 +1298,9 @@ pub(crate) fn validate_scalar_tuple_call_argument(
 /// four-field heterogeneous forms with one generic field and one, two, or
 /// three owned `String` siblings, plus the two-field generic +
 /// `List<Copy scalar>` form and the three-field generic + two concrete List
-/// form, or one List plus one or two String residuals. One field is projected and the
-/// remaining siblings are retained only so their ownership can be discharged by
+/// form, or one List plus one or two String residuals, or one Set residual.
+/// One field is projected and the remaining siblings are retained only so
+/// their ownership can be discharged by
 /// `MoveProjectDrop` after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
 /// concrete managed-payload/Move/glue proof is replayed from TypeDesc below.
@@ -1347,6 +1348,7 @@ fn is_owned_record_projection_drop_callable(
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
     let mut owned_list_fields = 0usize;
+    let mut owned_set_fields = 0usize;
     let fields_admitted = definition.fields.iter().all(|(name, _)| {
         let Some(field_ty) = definition
             .field_ids
@@ -1379,6 +1381,20 @@ fn is_owned_record_projection_drop_callable(
                 owned_list_fields += 1;
                 true
             }
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:Set"
+                && arguments.len() == 1
+                && matches!(
+                    program.resolved_types().get(&arguments[0]),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                    ))
+                ) =>
+            {
+                owned_set_fields += 1;
+                true
+            }
             _ => false,
         }
     }) && ((generic_fields == definition.fields.len()
@@ -1401,7 +1417,11 @@ fn is_owned_record_projection_drop_callable(
         || (definition.fields.len() == 4
             && generic_fields == 1
             && owned_list_fields == 1
-            && owned_string_fields == 2));
+            && owned_string_fields == 2)
+        || (definition.fields.len() == 2
+            && generic_fields == 1
+            && owned_set_fields == 1
+            && owned_string_fields == 0));
     fields_admitted
         && matches!(
             callable.body.root.result.as_deref().map(|expr| &expr.kind),
@@ -1693,12 +1713,14 @@ fn materialize_generic_instance(
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
     // executable parameter/result are the specialized record and managed
-    // payload. TypeDesc owns the closed payload family (owned String or
-    // List<Copy scalar>); all other generic record arguments remain on the
-    // scalar fail-closed path.
+    // payload. TypeDesc owns the closed record payload family (owned String,
+    // List<Copy scalar>, or Set<Copy scalar>); all other generic record
+    // arguments remain on the scalar fail-closed path.
     let is_owned_record_projection_drop =
         is_owned_record_projection_drop_callable(program, callable)
-            && type_catalog.validate_move_owned_payload(&concrete).is_ok();
+            && type_catalog
+                .validate_move_owned_record_payload(&concrete)
+                .is_ok();
     let is_owned_record_projection = generic_record_facade
         && !is_identity
         && !is_owned_record_projection_drop
@@ -1867,10 +1889,18 @@ fn materialize_generic_instance(
                 } else {
                     catalog.validate_owned_record_update_generic_argument(&arguments[0])
                 }
-            } else if is_owned_record_projection_drop
-                || is_owned_record_projection
-                || is_owned_variant_projection
-            {
+            } else if is_owned_record_projection_drop || is_owned_record_projection {
+                if arguments.len() != 1 {
+                    Err(format!(
+                        "owned generic projection contract requires one type argument, got {}",
+                        arguments.len()
+                    ))
+                } else {
+                    catalog
+                        .validate_move_owned_record_payload(&arguments[0])
+                        .map(|_| ())
+                }
+            } else if is_owned_variant_projection {
                 if arguments.len() != 1 {
                     Err(format!(
                         "owned generic projection contract requires one type argument, got {}",
@@ -5358,8 +5388,8 @@ pub(crate) fn validate_scalar_tuple_projection_mir(
 /// instance.  This is the consuming counterpart of the Copy projection
 /// validator: the complete record is moved, one managed field is returned,
 /// and the TypeDesc contract proves there is no residual non-Copy sibling left
-/// behind. The managed field is currently the closed OwnedString or
-/// List<Copy scalar> payload family. A two-field record is admitted only when
+/// behind. The managed field is currently the closed OwnedString,
+/// List<Copy scalar>, or Set<Copy scalar> payload family. A two-field record is admitted only when
 /// its other field is a concrete Copy scalar, so no residual/drop node is
 /// needed.
 pub(crate) fn validate_owned_record_projection_mir(

@@ -1,0 +1,17 @@
+// S212 negative: Set residual plus String is outside the first Set island.
+type SetStringQuad<T> { value: T, tail: Set<i32>, note: string }
+
+func take<T>(quad: SetStringQuad<T>) -> T {
+    quad.value
+}
+
+func main() -> i64 {
+    let quad: SetStringQuad<Set<i32>> = SetStringQuad {
+        value: {1, 2},
+        tail: {3, 4},
+        note: "note"
+    }
+    let picked = take(quad)
+    drop(picked)
+    42
+}

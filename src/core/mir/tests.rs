@@ -7996,3 +7996,77 @@ fn generic_record_bool_nested_residual_remains_rejected_before_consumers() {
         "unexpected generic nested Bool List rejection: {message}"
     );
 }
+
+#[test]
+fn materializes_generic_record_owned_set_residual_drop_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_record_owned_set_residual.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<Set<i32>> Set residual must lower to MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
+                    if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "tail"
+                        && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Set
+            )
+        })
+        .expect("owned generic Set residual instance");
+    let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+    else {
+        unreachable!("instance was selected by the owned record receipt predicate")
+    };
+    let selected_desc = program
+        .type_catalog()
+        .get(&contract.result_ty)
+        .expect("selected Set TypeDesc");
+    assert!(matches!(
+        selected_desc.layout,
+        crate::core::mir::types::MirLayout::Set { .. }
+    ));
+    assert_eq!(
+        selected_desc.abi,
+        crate::core::mir::types::MirAbiClass::SetHandle
+    );
+    assert_eq!(
+        selected_desc.ownership,
+        crate::core::mir::types::MirOwnership::Move
+    );
+    assert_eq!(
+        selected_desc.glue.move_out,
+        crate::core::mir::types::MirGlueKind::Set
+    );
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic Set residual target");
+    assert!(target.canonical_text().contains("move_project_drop"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Set residual execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_record_set_string_residual_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_set_string_residual_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<T> Set/String residual must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection")
+            || message.contains("residual")
+            || message.contains("managed"),
+        "unexpected generic Set/String residual rejection: {message}"
+    );
+}

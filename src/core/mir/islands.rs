@@ -2070,7 +2070,7 @@ fn is_scalar_generic_record_definition(
 /// four-field forms with one generic field and one, two, or three concrete
 /// `String` siblings, plus the two-field generic + one `List<Copy scalar>` form
 /// and the three-field generic + two concrete List form, or one List plus one
-/// String residual, or one List plus two String residuals.
+/// String residual, or one List plus two String residuals, or one Set residual.
 /// Concrete managed specialization and Move/Drop glue are proved later by
 /// TypeDesc. Keeping this checker-side predicate separate from the Copy-record
 /// shape prevents a larger or otherwise mixed managed record from entering
@@ -2089,6 +2089,7 @@ fn is_owned_generic_record_definition(
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
     let mut owned_list_fields = 0usize;
+    let mut owned_set_fields = 0usize;
     let fields_admitted = definition.fields.iter().all(|(name, _)| {
         let Some(field_ty) = definition
             .field_ids
@@ -2121,6 +2122,20 @@ fn is_owned_generic_record_definition(
                 owned_list_fields += 1;
                 true
             }
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:Set"
+                && arguments.len() == 1
+                && matches!(
+                    program.resolved_types().get(&arguments[0]),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                    ))
+                ) =>
+            {
+                owned_set_fields += 1;
+                true
+            }
             _ => false,
         }
     });
@@ -2144,7 +2159,11 @@ fn is_owned_generic_record_definition(
             || (definition.fields.len() == 4
                 && generic_fields == 1
                 && owned_list_fields == 1
-                && owned_string_fields == 2))
+                && owned_string_fields == 2)
+            || (definition.fields.len() == 2
+                && generic_fields == 1
+                && owned_set_fields == 1
+                && owned_string_fields == 0))
 }
 
 /// Recognize the heterogeneous declarations admitted by the ownership-bearing
@@ -2452,24 +2471,25 @@ pub(crate) fn is_owned_generic_record_update_callable(
 /// concurrency, and higher-order expressions belong to other islands.
 fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
     // A managed generic record projection may materialize a one-level
-    // `List<Copy scalar>` payload in its caller.  The list literal itself is
-    // still checker-owned and its MIR construction/glue are validated by the
-    // managed record island; rejecting it here would route the whole program
-    // to legacy before that island can be selected.  Keep this exception
-    // scoped to a program that actually contains the admitted projection,
-    // and continue rejecting nested/opaque collection shapes below.
-    let admits_managed_record_list =
-        program.callables().values().any(|callable| {
-            is_owned_generic_record_projection_callable(program, callable)
-                || is_owned_generic_record_update_callable(program, callable)
-        }) || has_unsupported_generic_record_projection_candidate(program);
+    // `List<Copy scalar>` or `Set<Copy scalar>` payload in its caller.  The
+    // collection literal itself is still checker-owned and its MIR
+    // construction/glue are validated by the managed record island; rejecting
+    // it here would route the whole program to legacy before that island can
+    // be selected.  Keep this exception scoped to a program that actually
+    // contains the admitted projection, and continue rejecting nested/opaque
+    // collection shapes below.
+    let admits_managed_record_collection = program.callables().values().any(|callable| {
+        is_owned_generic_record_projection_callable(program, callable)
+            || is_owned_generic_record_update_callable(program, callable)
+    })
+        || has_unsupported_generic_record_projection_candidate(program);
 
-    fn is_managed_record_list_literal(
+    fn is_managed_record_collection_literal(
         program: &CheckedProgram,
         expression: &ResolvedExpr,
-        admits_managed_record_list: bool,
+        admits_managed_record_collection: bool,
     ) -> bool {
-        if !admits_managed_record_list {
+        if !admits_managed_record_collection {
             return false;
         }
         let Some(ResolvedType::Nominal {
@@ -2478,7 +2498,9 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         else {
             return false;
         };
-        if item.as_str() != "builtin:type:List" || arguments.len() != 1 {
+        if !matches!(item.as_str(), "builtin:type:List" | "builtin:type:Set")
+            || arguments.len() != 1
+        {
             return false;
         }
         matches!(
@@ -2492,16 +2514,26 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
     fn expr_has_unmigrated_shape(
         program: &CheckedProgram,
         expression: &ResolvedExpr,
-        admits_managed_record_list: bool,
+        admits_managed_record_collection: bool,
     ) -> bool {
         match &expression.kind {
             ResolvedExprKind::List(_) => {
-                let admitted =
-                    is_managed_record_list_literal(program, expression, admits_managed_record_list);
+                let admitted = is_managed_record_collection_literal(
+                    program,
+                    expression,
+                    admits_managed_record_collection,
+                );
+                !admitted
+            }
+            ResolvedExprKind::Set(_) => {
+                let admitted = is_managed_record_collection_literal(
+                    program,
+                    expression,
+                    admits_managed_record_collection,
+                );
                 !admitted
             }
             ResolvedExprKind::Map(_)
-            | ResolvedExprKind::Set(_)
             | ResolvedExprKind::Tuple(_)
             | ResolvedExprKind::Comprehension { .. }
             | ResolvedExprKind::OptionalChain { .. }
@@ -2520,21 +2552,21 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
             | ResolvedExprKind::TypeOf(_) => true,
             ResolvedExprKind::Project { value, projection } => {
                 !matches!(projection, ResolvedValueProjection::Field(_))
-                    || expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                    || expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                     || matches!(projection, ResolvedValueProjection::Index(_))
             }
             ResolvedExprKind::Binary { left, right, .. } => {
-                expr_has_unmigrated_shape(program, left, admits_managed_record_list)
-                    || expr_has_unmigrated_shape(program, right, admits_managed_record_list)
+                expr_has_unmigrated_shape(program, left, admits_managed_record_collection)
+                    || expr_has_unmigrated_shape(program, right, admits_managed_record_collection)
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::Cast { value: operand, .. } => {
-                expr_has_unmigrated_shape(program, operand, admits_managed_record_list)
+                expr_has_unmigrated_shape(program, operand, admits_managed_record_collection)
             }
             // `old` is a verifier contract wrapper around an otherwise
             // ordinary scalar/record expression, not a runtime shape.
             ResolvedExprKind::Old(value) => {
-                expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
             }
             ResolvedExprKind::Call(call) => {
                 matches!(
@@ -2548,43 +2580,59 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                         expr_has_unmigrated_shape(
                             program,
                             &argument.value,
-                            admits_managed_record_list,
+                            admits_managed_record_collection,
                         )
                     })
             }
             ResolvedExprKind::Record { fields, rest, .. } => {
                 rest.as_ref().is_some_and(|value| {
-                    expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                    expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                 }) || fields.iter().any(|field| {
-                    expr_has_unmigrated_shape(program, &field.value, admits_managed_record_list)
+                    expr_has_unmigrated_shape(
+                        program,
+                        &field.value,
+                        admits_managed_record_collection,
+                    )
                 })
             }
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-                block_has_unmigrated_shape(program, block, admits_managed_record_list)
+                block_has_unmigrated_shape(program, block, admits_managed_record_collection)
             }
             ResolvedExprKind::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                expr_has_unmigrated_shape(program, condition, admits_managed_record_list)
-                    || block_has_unmigrated_shape(program, then_block, admits_managed_record_list)
-                    || block_has_unmigrated_shape(program, else_block, admits_managed_record_list)
+                expr_has_unmigrated_shape(program, condition, admits_managed_record_collection)
+                    || block_has_unmigrated_shape(
+                        program,
+                        then_block,
+                        admits_managed_record_collection,
+                    )
+                    || block_has_unmigrated_shape(
+                        program,
+                        else_block,
+                        admits_managed_record_collection,
+                    )
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
-                expr_has_unmigrated_shape(program, scrutinee, admits_managed_record_list)
+                expr_has_unmigrated_shape(program, scrutinee, admits_managed_record_collection)
                     || arms.iter().any(|arm| {
                         arm.guard.as_ref().is_some_and(|guard| {
-                            expr_has_unmigrated_shape(program, guard, admits_managed_record_list)
+                            expr_has_unmigrated_shape(
+                                program,
+                                guard,
+                                admits_managed_record_collection,
+                            )
                         }) || expr_has_unmigrated_shape(
                             program,
                             &arm.body,
-                            admits_managed_record_list,
+                            admits_managed_record_collection,
                         )
                     })
             }
             ResolvedExprKind::Lambda(lambda) => {
-                block_has_unmigrated_shape(program, &lambda.body, admits_managed_record_list)
+                block_has_unmigrated_shape(program, &lambda.body, admits_managed_record_collection)
             }
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::Load(_)
@@ -2595,7 +2643,7 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
     fn block_has_unmigrated_shape(
         program: &CheckedProgram,
         block: &crate::core::ir::ResolvedBlock,
-        admits_managed_record_list: bool,
+        admits_managed_record_collection: bool,
     ) -> bool {
         block.statements.iter().any(|statement| {
             if !statement.backend_requirements.is_empty() {
@@ -2604,17 +2652,17 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
             match &statement.kind {
                 ResolvedStmtKind::Bind { initializer, .. } => {
                     initializer.as_ref().is_some_and(|value| {
-                        expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                        expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                     })
                 }
                 ResolvedStmtKind::Assign { value, .. }
                 | ResolvedStmtKind::Expr(value)
                 | ResolvedStmtKind::Contract {
                     condition: value, ..
-                } => expr_has_unmigrated_shape(program, value, admits_managed_record_list),
+                } => expr_has_unmigrated_shape(program, value, admits_managed_record_collection),
                 ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
                     value.as_ref().is_some_and(|value| {
-                        expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                        expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
                     })
                 }
                 ResolvedStmtKind::While { .. }
@@ -2629,7 +2677,7 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 ResolvedStmtKind::Continue | ResolvedStmtKind::Drop(_) => false,
             }
         }) || block.result.as_ref().is_some_and(|value| {
-            expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+            expr_has_unmigrated_shape(program, value, admits_managed_record_collection)
         })
     }
 
@@ -2637,7 +2685,9 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
         .resolved_bodies()
         .values()
         .filter(|body| !is_prelude_origin(program, &body.root.origin))
-        .any(|body| block_has_unmigrated_shape(program, &body.root, admits_managed_record_list))
+        .any(|body| {
+            block_has_unmigrated_shape(program, &body.root, admits_managed_record_collection)
+        })
 }
 
 pub(super) fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {
@@ -3309,7 +3359,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. } => self
                     .program
                     .type_catalog()
-                    .validate_move_owned_payload(&instance.arguments[0])
+                    .validate_move_owned_record_payload(&instance.arguments[0])
                     .map(|_| ()),
                 // Generic Option and heterogeneous generic Result projection
                 // islands share the concrete float leaf contract with their

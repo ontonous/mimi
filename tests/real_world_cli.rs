@@ -6393,6 +6393,32 @@ fn canonical_default_generic_record_owned_bool_list_two_string_residual_routes_b
 }
 
 #[test]
+fn canonical_default_generic_record_owned_set_residual_routes_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_record_owned_set_residual.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Set residual default run");
+    assert_eq!(run.status.code(), Some(42));
+    assert!(String::from_utf8_lossy(&run.stderr).is_empty());
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Set residual default verify");
+    assert!(verify.status.success());
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(!stdout.contains("flow_ast"), "{stdout}");
+}
+
+#[test]
 fn canonical_default_generic_record_list_projection_rejects_before_legacy() {
     let fixture = project_root()
         .join("tests")
@@ -6524,6 +6550,29 @@ fn canonical_default_generic_record_owned_bool_nested_residual_rejects_before_le
     assert!(
         stderr_lower.contains("canonical mir")
             && (stderr_lower.contains("generic record") || stderr_lower.contains("nested")),
+        "{stderr}"
+    );
+    assert!(!stderr_lower.contains("legacy"), "{stderr}");
+}
+
+#[test]
+fn canonical_default_generic_record_owned_set_string_residual_rejects_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_record_owned_set_string_residual_rejected.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected generic Set/String residual default run");
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let stderr_lower = stderr.to_ascii_lowercase();
+    assert!(
+        stderr_lower.contains("canonical mir")
+            && (stderr_lower.contains("generic record") || stderr_lower.contains("residual")),
         "{stderr}"
     );
     assert!(!stderr_lower.contains("legacy"), "{stderr}");

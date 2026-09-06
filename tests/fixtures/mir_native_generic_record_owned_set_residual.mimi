@@ -1,0 +1,14 @@
+// S212: selected Set plus concrete Set residual.
+type SetPair<T> { value: T, tail: Set<i32> }
+
+func take<T>(pair: SetPair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let pair: SetPair<Set<i32>> = SetPair { value: {1, 2}, tail: {3, 4} }
+    let picked = take(pair)
+    drop(picked)
+    42
+}

@@ -4570,7 +4570,7 @@ fn eval_materialized_owned_record_projection_call(
     crate::core::mir::lower::validate_owned_record_projection_mir(target, catalog, contract)?;
     if type_arguments.len() != 1
         || catalog
-            .validate_move_owned_payload(&type_arguments[0])
+            .validate_move_owned_record_payload(&type_arguments[0])
             .is_err()
     {
         return Err(
@@ -4682,7 +4682,7 @@ fn eval_materialized_owned_record_projection_drop_call(
     crate::core::mir::lower::validate_owned_record_projection_drop_mir(target, catalog, contract)?;
     if type_arguments.len() != 1
         || catalog
-            .validate_move_owned_payload(&type_arguments[0])
+            .validate_move_owned_record_payload(&type_arguments[0])
             .is_err()
     {
         return Err(

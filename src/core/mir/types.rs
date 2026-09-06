@@ -3901,6 +3901,21 @@ impl MirTypeCatalog {
         Ok(MirGlueKind::List)
     }
 
+    /// Validate one move-owned payload that may cross a generic record
+    /// projection boundary.  Set has its own ABI/glue validator, so it is
+    /// deliberately added here rather than widening the Option/Result variant
+    /// payload island that still uses `validate_move_owned_payload`.
+    pub fn validate_move_owned_record_payload(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<MirGlueKind, String> {
+        if let Ok(glue) = self.validate_move_owned_payload(ty) {
+            return Ok(glue);
+        }
+        self.validate_set_glue(ty, MirGlueOperation::MoveOut)?;
+        Ok(MirGlueKind::Set)
+    }
+
     /// Validate the concrete generic argument of the bounded owned-record
     /// update island. The record itself is Move-owned because at least one
     /// field is managed, but its generic residual may be either an admitted
@@ -6543,7 +6558,7 @@ impl MirTypeCatalog {
             ));
         }
         let payload_glue = self
-            .validate_move_owned_payload(result_ty)
+            .validate_move_owned_record_payload(result_ty)
             .map_err(|message| {
                 format!(
                     "move projection result type '{}' is outside the canonical managed payload contract: {message}",
@@ -6584,7 +6599,7 @@ impl MirTypeCatalog {
     }
 
     /// Materialize a full-consumption record projection that moves one
-    /// managed payload field (owned String or List<Copy scalar>) and
+    /// managed payload field (owned String, List<Copy scalar>, or Set<Copy scalar>) and
     /// explicitly drops all sibling fields. This opens only the residual
     /// proof; it does not weaken the older `MoveProject` node, whose
     /// no-residual contract still requires Copy siblings.
@@ -6630,7 +6645,9 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        let payload_glue = self.validate_move_owned_payload(result_ty).map_err(|message| {
+        let payload_glue = self
+            .validate_move_owned_record_payload(result_ty)
+            .map_err(|message| {
             format!(
                 "record move/drop projection result is outside the canonical managed payload contract: {message}"
             )

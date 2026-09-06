@@ -993,9 +993,11 @@ mod tests {
             .compile_mir_native(&program)
             .expect_err("record with an unsupported child must fail closed in native slice");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic
-                .message
-                .contains("outside the scalar/String/List<Copy scalar>/tuple ABI")),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(
+                    "outside the scalar/String/List<Copy scalar>/Set<Copy scalar>/tuple ABI"
+                )),
             "missing unsupported-child rejection: {diagnostics:?}"
         );
         assert!(
@@ -5926,6 +5928,51 @@ mod tests {
             .module
             .verify()
             .expect("native owned generic Bool List/two-String residual module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_record_move_drop_project"));
+        assert!(ir.contains("mir_record_move_drop_residual"));
+    }
+
+    #[test]
+    fn native_emitter_consumes_owned_generic_record_set_residual() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_set_residual.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                        contract
+                    } if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "tail"
+                        && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Set
+                )
+            })
+            .expect("owned generic Set residual instance");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic Set residual target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic Set residual execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_owned_set_residual");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic Set residual must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic Set residual module verifies");
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("mir_record_move_drop_project"));
         assert!(ir.contains("mir_record_move_drop_residual"));
