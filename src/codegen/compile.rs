@@ -6,7 +6,7 @@ use crate::error::{CompileError, MimiResult};
 use super::CodeGenerator;
 use inkwell::module::Linkage;
 use inkwell::passes::PassBuilderOptions;
-use inkwell::targets::{InitializationConfig, Target, TargetMachine};
+use inkwell::targets::TargetMachine;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::OptimizationLevel;
@@ -20,51 +20,6 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::Unit => "unit".into(),
         crate::core::ResolvedConstValue::Complex => "complex".into(),
     }
-}
-
-/// Identify the bounded Flow profile whose source-returning failure contract
-/// is now implemented by canonical MIR.  This is deliberately structural and
-/// mirrors the checker admission rather than relying on a Flow name.
-fn is_recoverable_flow_retry_transition(flow: &FlowDef, transition: &TransitionDef) -> bool {
-    fn is_i32(ty: &Type) -> bool {
-        matches!(ty.unlocated(), Type::Name(name, arguments) if name == "i32" && arguments.is_empty())
-    }
-
-    if !flow.generics.is_empty()
-        || !flow.persistent_fields.is_empty()
-        || flow.fault_type.is_some()
-        || transition.fails.is_none()
-        || transition.to_states.len() != 1
-        || transition.to_states[0] != transition.from_state
-        || transition.params.len() != 1
-        || !is_i32(&transition.params[0].ty)
-    {
-        return false;
-    }
-    let Some(source) = flow
-        .states
-        .iter()
-        .find(|state| state.name == transition.from_state)
-    else {
-        return false;
-    };
-    let Some(target) = flow
-        .states
-        .iter()
-        .find(|state| state.name == transition.to_states[0])
-    else {
-        return false;
-    };
-    let Some(source_fields) = source.payload.as_ref() else {
-        return false;
-    };
-    let Some(target_fields) = target.payload.as_ref() else {
-        return false;
-    };
-    source_fields.len() == 1
-        && target_fields.len() == 1
-        && is_i32(&source_fields[0].ty)
-        && is_i32(&target_fields[0].ty)
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -1790,18 +1745,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body
             }
-            if is_recoverable_flow_retry_transition(flow, t) {
-                // The canonical MIR FlowFailureRetry profile owns this exact
-                // source-returning failure contract.  Its old AST lowering
-                // branch is intentionally removed from production codegen;
-                // direct callers must enter the same canonical route as the
-                // CLI and receive a hard diagnostic instead of a legacy
-                // approximation.
-                return Err(CompileError::Unsupported(
-                    "recoverable Flow failure/retry profile requires the canonical MIR route"
-                        .into(),
-                ));
-            }
             if t.to_states.len() != 1 {
                 // Multi-target: ret type is the synthetic union; return
                 // statements are wrapped (tag + boxed payload) below.
@@ -2105,13 +2048,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// - O2/O3 可能触发 LLVM 优化器 bug（如 inttoptr provenance UB）
     /// - 生产环境建议使用 O1（MIMI_OPT=1）
     pub fn optimize_module(&self) -> MimiResult<()> {
-        if self.target_triple.is_some() {
-            Target::initialize_all(&InitializationConfig::default());
-        } else {
-            Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
-                CompileError::LlvmError(format!("failed to initialize target: {}", e))
-            })?;
-        }
+        super::initialize_codegen_target(self.target_triple.as_deref())?;
         let triple_str = self.target_triple.clone().unwrap_or_else(|| {
             TargetMachine::get_default_triple()
                 .as_str()
@@ -2119,7 +2056,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .to_string()
         });
         let triple = inkwell::targets::TargetTriple::create(&triple_str);
-        let target = Target::from_triple(&triple)
+        let target = inkwell::targets::Target::from_triple(&triple)
             .map_err(|e| CompileError::LlvmError(format!("failed to find target: {}", e)))?;
         let (cpu, features) = if self.target_triple.is_some() {
             (String::new(), String::new())

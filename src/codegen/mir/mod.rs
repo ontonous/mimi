@@ -963,8 +963,22 @@ mod tests {
 
         crate::verifier::validate_mir_capabilities(&program)
             .expect("verifier capability for Record/List composition");
-        crate::verifier::verify_mir(&program, String::new())
+        let verification = crate::verifier::verify_mir(&program, String::new())
             .expect("verifier consumes Record/List composition MIR");
+        let main_verification = verification
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("M1 must have a non-empty contract result");
+        assert_eq!(
+            main_verification.status,
+            crate::verifier::VerifStatus::Proven
+        );
+        let artifact = main_verification
+            .artifact
+            .as_ref()
+            .expect("M1 Proven result must carry a proof artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, program.canonical_digest());
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_m1_record_list_chain_test");
@@ -975,6 +989,86 @@ mod tests {
             .module
             .verify()
             .expect("native Record/List composition module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native Record/List composition execution");
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(6));
+    }
+
+    #[test]
+    fn mir_verifier_receipt_distinguishes_disproven_contract_with_mir_identity() {
+        let program = canonical_program(
+            "func disproven(value: i32) -> i32 { requires: value == 41 ensures: result == 42 value }\nfunc main() -> i32 { 0 }",
+        );
+        let results = crate::verifier::verify_mir(&program, "m3-disproven-source".into())
+            .expect("MIR verifier must return a counterexample result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("disproven"))
+            .expect("disproven contract result");
+        assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
+        assert!(result.message.contains("ensures contract is disproven"));
+        let artifact = result
+            .artifact
+            .as_ref()
+            .expect("definitive counterexample must carry a MIR artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, program.canonical_digest());
+    }
+
+    #[test]
+    fn generated_scalar_list_chains_share_one_mir_across_three_execution_consumers() {
+        // A small deterministic generator keeps the differential corpus
+        // reproducible while varying the list shape that crosses the same
+        // reverse/concat/len production boundary. Each iteration constructs
+        // one MirProgram and passes that exact object to all three consumers.
+        for values in [vec![], vec![4], vec![1, 2], vec![7, 8, 9], vec![-3, 0, 12]] {
+            let literals = values
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = format!(
+                "func main() -> i32 {{\n    let values: List<i32> = [{literals}]\n    let reversed = values.reverse()\n    let joined = reversed.concat([11])\n    let count = len(joined)\n    drop(values)\n    drop(joined)\n    count\n}}"
+            );
+            let program = canonical_program(&source);
+            let owner = crate::core::NodeId("function:main".into());
+            let expected = MirRuntimeValue::Int(values.len() as i64 + 1);
+
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("generated list reference execution");
+            assert_eq!(reference, expected);
+
+            let bytecode = BytecodeVM::new(
+                compile_mir_program(&program).expect("generated list MIR bytecode"),
+            )
+            .run_value()
+            .expect("generated list bytecode execution");
+            assert!(matches!(bytecode, Value::Int(value) if value == values.len() as i64 + 1));
+
+            crate::verifier::validate_mir_capabilities(&program)
+                .expect("generated list verifier capability");
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_generated_list_chain_test");
+            generator
+                .compile_mir_native(&program)
+                .expect("generated list native lowering");
+            generator
+                .module
+                .verify()
+                .expect("generated list native module verifies");
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("generated list native execution");
+            assert_eq!(native.stdout, "");
+            assert_eq!(native.stderr, "");
+            assert_eq!(
+                native.exit_code,
+                Some(values.len() as i32 + 1),
+                "native result diverged for generated values {values:?}"
+            );
+        }
     }
 
     #[test]
@@ -1051,8 +1145,19 @@ mod tests {
 
         crate::verifier::validate_mir_capabilities(&program)
             .expect("verifier capability for recoverable Flow");
-        crate::verifier::verify_mir(&program, String::new())
+        let verification = crate::verifier::verify_mir(&program, String::new())
             .expect("verifier consumes recoverable Flow MIR");
+        let proof = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("retry_balance_contract"))
+            .expect("M3 must contain a non-empty positive contract result");
+        assert_eq!(proof.status, crate::verifier::VerifStatus::Proven);
+        let artifact = proof
+            .artifact
+            .as_ref()
+            .expect("M3 Proven result must carry a proof artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, program.canonical_digest());
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_m3_flow_retry_test");
@@ -1063,6 +1168,69 @@ mod tests {
             .module
             .verify()
             .expect("native recoverable Flow module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native recoverable Flow execution");
+        assert_eq!(native.stdout, "100\n95\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn recoverable_flow_negative_matrix_rejects_source_loss_identity_and_stale_state() {
+        let cases = [
+            (
+                "mir_m3_flow_source_loss_rejected.mimi",
+                "does not consume the returned source at tuple index 0",
+            ),
+            (
+                "mir_m3_flow_branch_join_rejected.mimi",
+                "does not consume the returned source at tuple index 0",
+            ),
+        ];
+        for (fixture, expected) in cases {
+            let source = match fixture {
+                "mir_m3_flow_source_loss_rejected.mimi" => {
+                    include_str!("../../../tests/fixtures/mir_m3_flow_source_loss_rejected.mimi")
+                }
+                "mir_m3_flow_branch_join_rejected.mimi" => {
+                    include_str!("../../../tests/fixtures/mir_m3_flow_branch_join_rejected.mimi")
+                }
+                _ => unreachable!("fixture is fixed above"),
+            };
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("negative remains well-typed");
+            let error = MirProgram::from_checked_program(&checked)
+                .expect_err("invalid recoverable failure receipt must fail Canonical MIR");
+            let text = format!("{error:?}");
+            assert!(
+                text.contains(expected),
+                "{fixture} lost the source-residual diagnostic: {text}"
+            );
+        }
+
+        for (fixture, expected) in [
+            (
+                include_str!("../../../tests/fixtures/mir_m3_flow_wrong_identity_rejected.mimi"),
+                "E0211",
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_m3_flow_success_stale_state_rejected.mimi"
+                ),
+                "E0423",
+            ),
+        ] {
+            let tokens = Lexer::new(fixture).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let errors = crate::core::check_program(&file)
+                .expect_err("invalid Flow identity fixture must fail checker");
+            let text = format!("{errors:?}");
+            assert!(
+                text.contains(expected),
+                "expected {expected} in Flow negative diagnostic: {text}"
+            );
+        }
     }
 
     #[test]
@@ -2939,6 +3107,53 @@ mod tests {
                 "native Set island must declare {runtime}"
             );
         }
+    }
+
+    #[test]
+    fn generic_scalar_set_facade_shares_one_mir_across_reference_bytecode_native() {
+        let program = canonical_program(
+            "func set_size<T>(s: Set<T>) -> i32 { s.size() }\nfunc set_contains<T>(s: Set<T>, value: T) -> bool { s.contains(value) }\nfunc set_insert<T>(s: Set<T>, value: T) -> Set<T> { s.insert(value) }\nfunc set_remove<T>(s: Set<T>, value: T) -> Set<T> { s.remove(value) }\nfunc set_to_list<T>(s: Set<T>) -> List<T> { s.to_list() }\nfunc main() -> i32 { let values: Set<i32> = {1, 2, 1}; let inserted = set_insert(values, 3); if set_size(inserted) != 3 { return 1 } if !set_contains(inserted, 2) { return 2 } let removed = set_remove(inserted, 1); let list = set_to_list(removed); if len(list) != 2 { return 3 } 0 }",
+        );
+        assert_eq!(
+            program.instances().len(),
+            5,
+            "all generic Set facade calls must materialize in the shared MIR"
+        );
+        assert!(program.instances().values().all(|instance| matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarSetFacade { .. }
+        )));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Set facade execution");
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("generic Set facade MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode generic Set facade execution");
+        assert!(matches!(bytecode, Value::Int(0)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for generic Set facade");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_set_facade_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Set facade lowering");
+        generator
+            .module
+            .verify()
+            .expect("native generic Set facade module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native generic Set facade execution");
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
     }
 
     #[test]

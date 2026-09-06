@@ -1,0 +1,24 @@
+// M3 negative: a successful transition consumes the old state identity; the
+// pre-transition source cannot be passed to a second transition.
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked: Result<i32, string> = if amount == 0 {
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
+        return Active { balance: new_balance }
+    }
+}
+
+func main() -> i32 {
+    let source = Active { balance: 100 }
+    let first = Account::withdraw(source, 5)
+    let second = Account::withdraw(source, 5)
+    drop(first)
+    drop(second)
+    0
+}

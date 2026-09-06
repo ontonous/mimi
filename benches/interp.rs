@@ -154,7 +154,7 @@ func main() -> i32 {
 
 fn interp_match_enum(c: &mut Criterion) {
     let src = r#"
-type Shape = Circle(f64) | Rect(f64, f64)
+type Shape { Circle(f64), Rect(f64, f64) }
 func area(s: Shape) -> f64 {
     match s {
         Circle(r) => 3.14159 * r * r,

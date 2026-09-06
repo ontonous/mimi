@@ -1,0 +1,26 @@
+// M3 negative: a state from another Flow is not a valid source identity for
+// Account::withdraw even though its payload has the same shape.
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked: Result<i32, string> = if amount == 0 {
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
+        return Active { balance: new_balance }
+    }
+}
+
+flow Other {
+    state OtherActive { balance: i32 }
+}
+
+func main() -> i32 {
+    let source = OtherActive { balance: 100 }
+    let rejected = Account::withdraw(source, 0)
+    drop(rejected)
+    0
+}

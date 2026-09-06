@@ -12,6 +12,7 @@ func pick<T>(packet: Packet<T>) -> T {
 }
 
 func main() -> i32 {
+    ensures: result == 6
     let packet = Packet { value: [7, 8], values: [10, 20], label: "residual" }
     let picked = pick(packet)
     let values: List<i32> = [1, 2, 3]

@@ -934,6 +934,17 @@ fn link_and_observe_module<'ctx>(
     Ok(observation)
 }
 
+/// Execute a module emitted from a Canonical MIR program with the same native
+/// observation envelope used by the production E2E harness.  The helper is
+/// intentionally test-only: it gives MIR consumer tests a real process result
+/// without reopening the legacy `compile_file` path or re-parsing source.
+pub(crate) fn link_and_observe_canonical_mir(
+    codegen: &crate::codegen::CodeGenerator<'_>,
+) -> Result<NativeRunObservation, String> {
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    link_and_observe_module(codegen, &E2EConfig::default(), counter)
+}
+
 /// 0.34.30: Run source through checker + checked (resolved) codegen exactly as
 /// the `mimi build` CLI does (`compile_checked`), then execute natively. This
 /// catches the codegen path the legacy `compile_file` harness silently

@@ -125,11 +125,14 @@ pub enum ManagedResultCallAdmission {
     CompleteCoverage,
 }
 
-/// Classify concrete direct calls whose checker-finalized result is a Result.
-/// The canonical MIR materializer remains the authority for the recursive
-/// TypeDesc/glue proof; this front-end gate only ensures that a recognized
-/// direct Result call cannot silently fall back to legacy when that proof is
-/// unavailable (for example `Result<List<f64>, i32>`).
+/// Classify concrete direct calls whose checker-finalized result is in the
+/// managed `Result<_, i32>` ABI family.  Other error payloads remain on the
+/// compatibility route: they are not part of this island and must not make
+/// an unrelated standard-library or application graph look like an admitted
+/// managed-result candidate.  Once the i32 error slot is recognized, the
+/// canonical MIR materializer remains the authority for the recursive
+/// TypeDesc/glue proof; unsupported Ok payloads (for example
+/// `Result<List<f64>, i32>`) therefore still fail closed before legacy.
 pub fn classify_managed_result_call_admission(
     program: &CheckedProgram,
 ) -> ManagedResultCallAdmission {
@@ -142,9 +145,16 @@ pub fn classify_managed_result_call_admission(
         let Some(result_ty) = program.resolved_node_type(&site.node_id) else {
             continue;
         };
-        let Some(ResolvedType::Result { .. }) = program.resolved_types().get(result_ty) else {
+        let Some(ResolvedType::Result { error, .. }) = program.resolved_types().get(result_ty)
+        else {
             continue;
         };
+        if !matches!(
+            program.resolved_types().get(error),
+            Some(ResolvedType::Primitive(PrimitiveType::I32))
+        ) {
+            continue;
+        }
         has_candidate = true;
         if !checker_managed_result_shape(program, result_ty) {
             unsupported_shape = true;
@@ -161,16 +171,27 @@ pub fn classify_managed_result_call_admission(
 }
 
 /// Stable candidate hint for direct managed Result calls.  The hint is based
-/// only on checker call-site/type facts and is intentionally broader than the
-/// concrete TypeDesc contract so unsupported payloads are rejected rather
-/// than routed through a legacy consumer.
+/// only on checker call-site/type facts and covers the closed i32-error-slot
+/// family.  It is intentionally broader than the concrete TypeDesc contract
+/// on the Ok side so unsupported payloads are rejected rather than routed
+/// through a legacy consumer, but it does not classify unrelated
+/// `Result<_, string>`/nominal error APIs as this island.
 pub fn has_managed_result_call_candidate(program: &CheckedProgram) -> bool {
     program.call_sites().values().any(|site| {
         site.kind == ResolvedCallKind::Function
             && program
                 .resolved_node_type(&site.node_id)
                 .and_then(|ty| program.resolved_types().get(ty))
-                .is_some_and(|ty| matches!(ty, ResolvedType::Result { .. }))
+                .is_some_and(|ty| {
+                    matches!(
+                        ty,
+                        ResolvedType::Result { error, .. }
+                            if matches!(
+                                program.resolved_types().get(error),
+                                Some(ResolvedType::Primitive(PrimitiveType::I32))
+                            )
+                    )
+                })
     })
 }
 

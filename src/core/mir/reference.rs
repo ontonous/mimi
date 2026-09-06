@@ -13,9 +13,9 @@ use crate::core::{NodeId, ResolvedPlace};
 
 use super::types::{MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
 use super::{
-    MirAggregateKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId,
-    MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase, MirTerminator,
-    MirTransitionContract, MirTransitionEffect, MirValueId,
+    MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
+    MirInstanceId, MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase,
+    MirTerminator, MirTransitionContract, MirTransitionEffect, MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +369,11 @@ impl MirProgram {
                 }
             }
             errors.extend(validate_linear_consumption(function, &type_catalog));
+            errors.extend(validate_recoverable_failure_consumption(
+                function,
+                &type_catalog,
+                &transitions,
+            ));
             errors.extend(validate_borrow_usage(function));
             errors.extend(super::validate_ownership_event_receipts(function));
             errors.extend(super::validate_call_effect_receipts(
@@ -2339,9 +2344,15 @@ fn validate_call_graph(
 
                 let allow_managed_clone = target_instance.is_some_and(|instance| {
                     matches!(
-                        instance.contract,
+                        &instance.contract,
                         MirGenericInstanceContract::ScalarListFacade { .. }
                             | MirGenericInstanceContract::ScalarListProjection { .. }
+                            | MirGenericInstanceContract::ScalarSetFacade {
+                                operation: super::MirSetOperation::Size
+                                    | super::MirSetOperation::IsEmpty
+                                    | super::MirSetOperation::Contains
+                                    | super::MirSetOperation::ToList,
+                            }
                     )
                 });
                 errors.extend(validate_call_argument_directions(
@@ -2620,14 +2631,30 @@ fn validate_transition_contracts(
                         _ => None,
                     })
                     .is_some();
+                let carries_source = contract
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| type_catalog.get(failure))
+                    .is_some_and(|descriptor| {
+                        matches!(
+                            &descriptor.layout,
+                            super::types::MirLayout::Tuple(elements)
+                                if elements.first() == Some(&contract.source)
+                        )
+                    });
                 if !valid_result
+                    || !carries_source
                     || contract.is_fallback
                     || contract.is_ffi_pinned
                     || contract.targets.len() != 1
                 {
                     errors.push(super::MirValidationError {
                         subject,
-                        message: "recoverable-local transition must return canonical Result<target, failure>, have one target, and be non-fallback/non-pinned".into(),
+                        message: if !carries_source {
+                            "recoverable-local transition failure must carry the source TypeDesc at tuple index 0".into()
+                        } else {
+                            "recoverable-local transition must return canonical Result<target, failure>, have one target, and be non-fallback/non-pinned".into()
+                        },
                     });
                 }
             }
@@ -3062,6 +3089,242 @@ fn validate_linear_consumption(
         }
     }
     errors
+}
+
+/// Validate the source-return receipt of a recoverable Flow transition.
+///
+/// The ordinary linear ledger intentionally treats a `MoveProject` as a
+/// consuming operation on its complete aggregate. That is correct for the
+/// narrow aggregate projection islands, but it is not sufficient for
+/// `Err((source, error))`: projecting `error` must not silently erase the
+/// source state. This pass keeps the Flow-specific residual obligation
+/// explicit and follows every CFG path from a bound Err payload. A path is
+/// accepted only after it moves the tuple's source field or drops the whole
+/// failure payload. In particular, a branch join uses path intersection here,
+/// not the general ledger's conservative union, so one successful retry does
+/// not mask another path that loses the returned source.
+fn validate_recoverable_failure_consumption(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
+) -> Vec<super::MirValidationError> {
+    let mut errors = Vec::new();
+
+    let flow_results = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| {
+            let MirInstructionKind::FlowTransition {
+                result, transition, ..
+            } = &instruction.kind
+            else {
+                return None;
+            };
+            transitions
+                .get(transition)
+                .filter(|contract| contract.effect == MirTransitionEffect::RecoverableLocal)
+                .map(|contract| {
+                    (
+                        result.clone(),
+                        transition.clone(),
+                        instruction.id.to_string(),
+                        contract.clone(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+
+    for (result, transition, subject, contract) in flow_results {
+        let Some(failure_ty) = contract.failure.clone() else {
+            continue;
+        };
+        let Some(failure_descriptor) = type_catalog.get(&failure_ty) else {
+            continue;
+        };
+        let MirLayout::Tuple(failure_fields) = &failure_descriptor.layout else {
+            continue;
+        };
+        if failure_fields.first() != Some(&contract.source) {
+            // `validate_transition_contracts` owns the diagnostic for a bad
+            // failure TypeDesc. Avoid emitting a second path-level message.
+            continue;
+        }
+
+        let aliases = direct_move_aliases(function, &result);
+        let Some(err_variant) = type_catalog.get(&contract.result).and_then(|descriptor| {
+            let MirLayout::Result { variants, .. } = &descriptor.layout else {
+                return None;
+            };
+            variants.iter().find(|variant| variant.name == "Err")
+        }) else {
+            continue;
+        };
+
+        let mut err_arms = Vec::new();
+        for block in function.blocks.values() {
+            let MirTerminator::SwitchMove { scrutinee, arms } = &block.terminator else {
+                continue;
+            };
+            if !aliases.contains(scrutinee) {
+                continue;
+            }
+            for arm in arms {
+                if !matches!(&arm.case, MirSwitchCase::Variant(variant) if variant == &err_variant.id)
+                {
+                    continue;
+                }
+                let Some(binding) = arm
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.projection.field_ty == failure_ty)
+                else {
+                    // An unbound Err payload is released by the canonical
+                    // variant drop plan. There is no caller-visible source
+                    // residual to follow in that shape.
+                    continue;
+                };
+                err_arms.push((
+                    arm.edge.to_string(),
+                    arm.target.clone(),
+                    binding.parameter.clone(),
+                ));
+            }
+        }
+
+        for (edge, target, binding) in err_arms {
+            if recoverable_failure_path_has_live_source(function, target, binding) {
+                errors.push(super::MirValidationError {
+                    subject: format!("{subject} via {edge}"),
+                    message: format!(
+                        "recoverable Flow transition '{}' has a failure path that does not consume the returned source at tuple index 0",
+                        transition.0
+                    ),
+                });
+            }
+        }
+    }
+
+    errors
+}
+
+fn direct_move_aliases(function: &MirFunction, root: &MirValueId) -> BTreeSet<MirValueId> {
+    let mut aliases = BTreeSet::from([root.clone()]);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let MirInstructionKind::Move { result, source } = &instruction.kind else {
+                    continue;
+                };
+                if aliases.contains(source) && aliases.insert(result.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    aliases
+}
+
+fn recoverable_failure_path_has_live_source(
+    function: &MirFunction,
+    start: MirBlockId,
+    binding: MirValueId,
+) -> bool {
+    let mut pending = vec![(start, BTreeSet::from([binding]), true)];
+    let mut seen = BTreeSet::new();
+
+    while let Some((block_id, mut aliases, mut source_live)) = pending.pop() {
+        let state = (block_id.clone(), aliases.clone(), source_live);
+        if !seen.insert(state) {
+            continue;
+        }
+        let Some(block) = function.blocks.get(&block_id) else {
+            continue;
+        };
+
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                MirInstructionKind::Move { result, source } if aliases.contains(source) => {
+                    aliases.remove(source);
+                    aliases.insert(result.clone());
+                }
+                MirInstructionKind::MoveProject {
+                    base,
+                    projection: MirProjection::Tuple(0),
+                    ..
+                } if aliases.contains(base) => {
+                    aliases.clear();
+                    source_live = false;
+                }
+                MirInstructionKind::MoveProject { base, .. } if aliases.contains(base) => {
+                    // A projection of error (or any other non-source field)
+                    // consumes the aggregate in the generic ledger, but it
+                    // does not satisfy the Flow source receipt.
+                    aliases.remove(base);
+                }
+                MirInstructionKind::Drop { value } if aliases.contains(value) => {
+                    aliases.clear();
+                    source_live = false;
+                }
+                _ => {
+                    let consumed = consumed_sources(&instruction.kind);
+                    if consumed.iter().any(|value| aliases.contains(value)) {
+                        aliases.retain(|value| !consumed.contains(value));
+                        source_live = false;
+                    }
+                }
+            }
+        }
+
+        let successors = match &block.terminator {
+            MirTerminator::Goto {
+                target, arguments, ..
+            } => {
+                vec![(target.clone(), arguments.clone())]
+            }
+            MirTerminator::Branch {
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+                ..
+            } => vec![
+                (then_target.clone(), then_arguments.clone()),
+                (else_target.clone(), else_arguments.clone()),
+            ],
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => arms
+                .iter()
+                .map(|arm| (arm.target.clone(), arm.arguments.clone()))
+                .collect(),
+            MirTerminator::Return { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => Vec::new(),
+        };
+
+        if successors.is_empty() {
+            if source_live {
+                return true;
+            }
+            continue;
+        }
+
+        for (target, arguments) in successors {
+            let mut next_aliases = aliases.clone();
+            if let Some(target_block) = function.blocks.get(&target) {
+                for (parameter, argument) in target_block.parameters.iter().zip(arguments) {
+                    if aliases.contains(&argument) {
+                        next_aliases.insert(parameter.value.clone());
+                    }
+                }
+            }
+            pending.push((target, next_aliases, source_live));
+        }
+    }
+
+    false
 }
 
 fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {

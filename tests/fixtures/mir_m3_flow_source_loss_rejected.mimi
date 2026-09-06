@@ -1,0 +1,31 @@
+// M3 negative: a recoverable failure cannot return without consuming the
+// source carried by Err((source, error)).
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked: Result<i32, string> = if amount == 0 {
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
+        return Active { balance: new_balance }
+    }
+}
+
+func main() -> i32 {
+    let source = Active { balance: 100 }
+    let rejected = Account::withdraw(source, 0)
+    match rejected {
+        Ok(success) => {
+            drop(success)
+            1000
+        },
+        Err(error) => {
+            let message = error.1
+            drop(message)
+            0
+        },
+    }
+}

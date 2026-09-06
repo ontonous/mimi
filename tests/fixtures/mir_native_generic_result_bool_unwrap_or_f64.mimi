@@ -5,6 +5,7 @@ func unwrap_or<T>(value: Result<T, bool>, fallback: T) -> T {
 }
 
 func main() -> i64 {
+    ensures: result == 42
     let value: Result<f64, bool> = Ok(41.5)
     let out = unwrap_or(value, 7.25)
     42

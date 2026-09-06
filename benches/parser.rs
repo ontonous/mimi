@@ -13,19 +13,25 @@ fn parse_simple(c: &mut Criterion) {
 }
 
 fn parse_complex(c: &mut Criterion) {
+    // Use the current enum grammar and a fieldless variant; record-style enum
+    // patterns are covered by the real-world suite, not this parser timing.
     let src = r#"
-type Shape = Circle(f64) | Rect(f64, f64) | Line { x1: i32; y1: i32; x2: i32; y2: i32 }
+type Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Triangle
+}
 
 func area(s: Shape) -> f64 {
     match s {
         Circle(r) => 3.14159 * r * r,
         Rect(w, h) => w * h,
-        Line { .. } => 0.0,
+        Triangle => 0.0,
     }
 }
 
 func main() -> f64 {
-    let shapes = [Circle(5.0), Rect(3.0, 4.0), Line { x1: 0, y1: 0, x2: 1, y2: 1 }];
+    let shapes = [Circle(5.0), Rect(3.0, 4.0), Triangle];
     let mut total = 0.0;
     for s in shapes { total = total + area(s); }
     total
@@ -53,7 +59,10 @@ fn parse_large(c: &mut Criterion) {
 }
 
 fn parse_deep_nesting(c: &mut Criterion) {
-    let depth = 100;
+    // Keep the benchmark below the parser's documented recursion guard. Each
+    // nested `if` contributes an `else` branch as well, so a source depth of
+    // 100 exceeds the 128-frame limit even though the loop count is 100.
+    let depth = 50;
     let mut src = "func main() -> i32 {\n".to_string();
     for _ in 0..depth {
         src.push_str("if true { ");
@@ -63,7 +72,7 @@ fn parse_deep_nesting(c: &mut Criterion) {
         src.push_str(" } else { 0 }");
     }
     src.push_str("\n}");
-    c.bench_function("parser/deep_nesting_100", |b| {
+    c.bench_function("parser/deep_nesting_50", |b| {
         b.iter(|| {
             let tokens = lexer::Lexer::new(black_box(&src)).tokenize().unwrap();
             let _file = parser::Parser::new(tokens).parse_file().unwrap();

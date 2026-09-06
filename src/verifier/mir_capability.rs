@@ -52,6 +52,27 @@ struct CapabilityGate<'a> {
 
 impl<'a> CapabilityGate<'a> {
     fn new(program: &'a MirProgram) -> Self {
+        let has_managed_result_call = program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    let MirInstructionKind::Call {
+                        result: Some(result),
+                        variant_call_contract: Some(receipt),
+                        ..
+                    } = &instruction.kind
+                    else {
+                        return false;
+                    };
+                    receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                        && function.values.get(result).is_some_and(|value| {
+                            program
+                                .type_catalog()
+                                .get(&value.ty)
+                                .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
+                        })
+                })
+            })
+        });
         Self {
             program,
             errors: BTreeSet::new(),
@@ -76,7 +97,7 @@ impl<'a> CapabilityGate<'a> {
                         )
                 }
                 _ => false,
-            }),
+            }) || has_managed_result_call,
             allow_recoverable_flow_result: program.transitions().values().any(|transition| {
                 transition.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
             }),
@@ -1428,6 +1449,7 @@ impl<'a> CapabilityGate<'a> {
                 callee,
                 type_arguments,
                 arguments,
+                variant_call_contract,
                 ..
             } => {
                 self.validate_call(
@@ -1436,6 +1458,7 @@ impl<'a> CapabilityGate<'a> {
                     callee,
                     type_arguments,
                     arguments,
+                    variant_call_contract.as_ref(),
                     subject,
                 );
             }
@@ -1513,6 +1536,7 @@ impl<'a> CapabilityGate<'a> {
         callee: &ResolvedCallee,
         type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) {
         let owner = match callee {
@@ -1576,7 +1600,19 @@ impl<'a> CapabilityGate<'a> {
                 "{subject} generic arguments target a non-instance function"
             ));
             return;
-        } else if function_has_ensures(function) {
+        } else if function_has_ensures(function)
+            && !variant_call_contract.is_some_and(|receipt| {
+                receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                    && result
+                        .and_then(|result| function.values.get(result))
+                        .is_some_and(|value| {
+                            self.program
+                                .type_catalog()
+                                .get(&value.ty)
+                                .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
+                        })
+            })
+        {
             self.error(format!(
                 "{subject} ordinary call in a contract-bearing function is outside the verifier capability"
             ));
@@ -1829,6 +1865,16 @@ impl<'a> CapabilityGate<'a> {
                                 "recoverable Flow Result switch is outside this verifier profile"
                                     .into(),
                             )
+                        }
+                    })
+                    .or_else(|_| {
+                        if self.allow_result_move_variant {
+                            self.program
+                                .type_catalog()
+                                .validate_result_move_projection_variant(&scrutinee_ty)
+                                .map(|_| scrutinee_ty.clone())
+                        } else {
+                            Err("move-owned Result switch is outside this verifier profile".into())
                         }
                     });
                 if let Err(message) = switch_shape {

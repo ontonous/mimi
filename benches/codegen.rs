@@ -18,16 +18,18 @@ fn codegen_simple(c: &mut Criterion) {
 }
 
 fn codegen_complex(c: &mut Criterion) {
+    // Keep this benchmark inside the currently supported enum-constructor ABI;
+    // multi-field enum constructors remain an explicit fail-closed boundary.
     let src = r#"
-type Shape = Circle(f64) | Rect(f64, f64)
+type Shape { Circle(f64), Triangle }
 func area(s: Shape) -> f64 {
     match s {
         Circle(r) => 3.14159 * r * r,
-        Rect(w, h) => w * h,
+        Triangle => 0.0,
     }
 }
 func main() -> f64 {
-    area(Circle(5.0)) + area(Rect(3.0, 4.0))
+    area(Circle(5.0)) + area(Triangle)
 }
 "#
     .to_string();

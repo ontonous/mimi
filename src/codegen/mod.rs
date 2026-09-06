@@ -29,6 +29,44 @@ use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Initialize the LLVM target set used by native code generation.
+///
+/// The normal build keeps the historical all-target/cross-target behavior.
+/// The reproducible `llvm18-host-dynamic` validation profile deliberately
+/// uses only the host X86 target: its llvm-sys all-target C wrapper is
+/// disabled, so calling the wrapper would reintroduce undeclared or
+/// version-mismatched target symbols. Cross compilation is therefore
+/// rejected explicitly in that profile rather than silently producing an
+/// incomplete target registry.
+pub(crate) fn initialize_codegen_target(target_triple: Option<&str>) -> Result<(), CompileError> {
+    if let Some(target_triple) = target_triple {
+        #[cfg(feature = "llvm18-host-dynamic")]
+        {
+            return Err(CompileError::LlvmError(format!(
+                "cross compilation for '{target_triple}' is unavailable in llvm18-host-dynamic; use a matching LLVM development installation"
+            )));
+        }
+        #[cfg(not(feature = "llvm18-host-dynamic"))]
+        {
+            let _ = target_triple;
+            Target::initialize_all(&InitializationConfig::default());
+            return Ok(());
+        }
+    }
+
+    #[cfg(feature = "llvm18-host-dynamic")]
+    {
+        Target::initialize_x86(&InitializationConfig::default());
+        return Ok(());
+    }
+    #[cfg(not(feature = "llvm18-host-dynamic"))]
+    {
+        Target::initialize_native(&InitializationConfig::default()).map_err(|error| {
+            CompileError::LlvmError(format!("failed to initialize target: {error}"))
+        })
+    }
+}
+
 /// Extract a BasicValueEnum from a ValueKind (inkwell 0.9+).
 /// Variant names changed from 0.5: BasicValueEnum -> Basic, InstructionValue -> Instruction.
 pub(crate) fn extract_basic_value<'ctx>(vk: ValueKind<'ctx>) -> Option<BasicValueEnum<'ctx>> {
@@ -5083,12 +5121,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Initialize the appropriate LLVM target(s):
         // - Native build: initialize only the host target
         // - Cross-compilation: initialize all registered targets
-        if self.target_triple.is_some() {
-            Target::initialize_all(&InitializationConfig::default());
-        } else {
-            Target::initialize_native(&InitializationConfig::default())
-                .map_err(|e| format!("failed to initialize native target: {}", e))?;
-        }
+        initialize_codegen_target(self.target_triple.as_deref())?;
         let triple_str = self.target_triple.clone().unwrap_or_else(|| {
             TargetMachine::get_default_triple()
                 .as_str()

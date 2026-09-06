@@ -285,18 +285,19 @@ fn compile_checked_routes_record_list_chain_through_canonical_mir() {
 }
 
 #[test]
-fn legacy_flow_codegen_branch_is_closed_for_recoverable_retry_profile() {
+fn direct_native_entry_routes_recoverable_retry_profile_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_m3_flow_retry.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "m3_legacy_flow_branch");
-    let error = codegen
-        .compile_file(&file)
-        .expect_err("legacy Flow lowering must not own the canonical retry profile");
-    assert!(format!("{error:?}").contains("canonical MIR route"));
+    let mut codegen = CodeGenerator::new(&context, "m3_canonical_flow_entry");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native entry must select the canonical retry profile");
+    assert!(codegen.module.get_function("main").is_some());
 }
 
 #[test]

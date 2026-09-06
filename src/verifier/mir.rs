@@ -136,69 +136,75 @@ pub(crate) fn verify_program(
     // whole-program capability gate at its public route boundary: it also
     // rejects ordinary calls in contract-bearing functions, which this
     // function can verify when their concrete MIR operations are supported.
-    let unsupported_variant = program.type_catalog().iter().find_map(|(ty, desc)| {
-        if desc.ownership == crate::core::mir::types::MirOwnership::Copy {
-            return None;
-        }
-        match &desc.layout {
-            crate::core::mir::types::MirLayout::Option { .. } => {
-                crate::core::mir::types::MirTypeCatalog::validate_non_copy_variant_contract(
-                    program.type_catalog(),
-                    ty,
-                )
-                .err()
-                .map(|error| (ty.clone(), error))
+    let unsupported_variants = program
+        .type_catalog()
+        .iter()
+        .filter_map(|(ty, desc)| {
+            if desc.ownership == crate::core::mir::types::MirOwnership::Copy {
+                return None;
             }
-            crate::core::mir::types::MirLayout::Result { .. }
-                if program.transitions().is_empty() =>
-            {
-                let direct = program
-                    .type_catalog()
-                    .validate_non_copy_variant_contract(ty);
-                let projection = program
-                    .type_catalog()
-                    .validate_result_move_projection_variant(ty);
-                if direct.is_err() && projection.is_err() {
-                    Some((
-                        ty.clone(),
-                        direct
-                            .err()
-                            .or_else(|| projection.err())
-                            .unwrap_or_else(|| "unsupported non-Copy Result variant".into()),
-                    ))
-                } else {
-                    None
+            match &desc.layout {
+                crate::core::mir::types::MirLayout::Option { .. } => {
+                    crate::core::mir::types::MirTypeCatalog::validate_non_copy_variant_contract(
+                        program.type_catalog(),
+                        ty,
+                    )
+                    .err()
+                    .map(|error| (ty.clone(), error))
                 }
+                crate::core::mir::types::MirLayout::Result { .. }
+                    if program.transitions().is_empty() =>
+                {
+                    let direct = program
+                        .type_catalog()
+                        .validate_non_copy_variant_contract(ty);
+                    let projection = program
+                        .type_catalog()
+                        .validate_result_move_projection_variant(ty);
+                    if direct.is_err() && projection.is_err() {
+                        Some((
+                            ty.clone(),
+                            direct
+                                .err()
+                                .or_else(|| projection.err())
+                                .unwrap_or_else(|| "unsupported non-Copy Result variant".into()),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
             }
-            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for function in program.functions().values() {
+        if function.contracts.is_empty() {
+            continue;
         }
-    });
-    if let Some((ty, error)) = unsupported_variant {
-        let message = format!(
-            "canonical MIR verifier capability gate rejected non-Copy variant '{}': {}",
-            ty.as_str(),
-            error
-        );
-        for function in program.functions().values() {
-            if function.contracts.is_empty() {
-                continue;
-            }
+        // A non-Copy variant in an unrelated callable must not erase a valid
+        // scalar proof elsewhere in the same MIR program. Scope the result to
+        // functions whose canonical value catalog actually contains the
+        // unsupported TypeDesc; Flow/Result bodies remain fail-closed while an
+        // independent arithmetic contract can produce a real proof artifact.
+        if let Some((ty, error)) = unsupported_variants.iter().find(|(ty, _)| {
+            function.result == *ty || function.values.values().any(|value| value.ty == *ty)
+        }) {
+            let message = format!(
+                "canonical MIR verifier capability gate rejected non-Copy variant '{}': {}",
+                ty.as_str(),
+                error
+            );
             results.push(VerificationResult {
                 func_name: function.owner.0.clone(),
                 status: VerifStatus::NotInTrustedSubset,
-                message: message.clone(),
+                message,
                 diagnostic: None,
                 duration_us: 0,
                 constraint_count: 0,
                 artifact: None,
                 trusted_subset_domain: Some(TrustedSubsetDomain::Body),
             });
-        }
-        return Ok(results);
-    }
-
-    for function in program.functions().values() {
-        if function.contracts.is_empty() {
             continue;
         }
         session.reset();
@@ -3473,7 +3479,12 @@ fn eval_materialized_variant_projection_fallback_call(
         (
             SymbolicValue::Opaque { ty: selected },
             SymbolicValue::Opaque { ty: fallback },
-        ) if selected == fallback && contract.projection.ownership == MirOwnership::Move => {
+        ) if selected == fallback
+            && matches!(
+                contract.projection.ownership,
+                MirOwnership::Copy | MirOwnership::Move
+            ) =>
+        {
             SymbolicValue::Opaque { ty: selected }
         }
         _ => return Err(

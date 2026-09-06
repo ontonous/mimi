@@ -2463,7 +2463,9 @@ fn canonical_default_generic_result_f64_unwrap_or_rejects_unsupported_shapes() {
             );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                stderr.contains("generic Result") || stderr.contains("variant projection"),
+                stderr.contains("generic Result")
+                    || stderr.contains("Copy Result")
+                    || stderr.contains("variant projection"),
                 "default {command} lost its stable fail-closed diagnostic for {name}:\n{stderr}"
             );
         }
@@ -4278,7 +4280,9 @@ fn canonical_mir_native_rejects_record_with_unsupported_child_without_fallback()
     assert!(!build.status.success());
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(stderr.contains("canonical MIR native backend rejected"));
-    assert!(stderr.contains("outside the scalar/String/tuple ABI"));
+    assert!(
+        stderr.contains("outside the scalar/String/List<Copy scalar>/Set<Copy scalar>/tuple ABI")
+    );
     assert!(!stderr.contains("bytecode runtime error"));
 }
 
@@ -5964,6 +5968,152 @@ fn canonical_mir_verifier_proves_branch_contract() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("canonical MIR ensures contract proven"));
+}
+
+#[test]
+fn canonical_mir_m1_m3_cli_acceptance_has_real_proofs_and_business_observations() {
+    let cases = [
+        ("mir_m1_record_list_chain.mimi", Some(6), "", "1/1 verified"),
+        (
+            "mir_m3_flow_retry.mimi",
+            Some(0),
+            "100\n95\n",
+            "1/1 verified",
+        ),
+    ];
+
+    for (fixture_name, expected_exit, expected_stdout, expected_summary) in cases {
+        let fixture = project_root()
+            .join("tests")
+            .join("fixtures")
+            .join(fixture_name);
+
+        let verification = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&fixture)
+            .arg("--mir")
+            .output()
+            .expect("failed to spawn M1/M3 Canonical MIR verifier");
+        assert!(
+            verification.status.success(),
+            "{fixture_name} verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&verification.stderr),
+            String::from_utf8_lossy(&verification.stdout)
+        );
+        let verify_stdout = String::from_utf8_lossy(&verification.stdout);
+        assert!(
+            verify_stdout.contains("canonical MIR ensures contract proven"),
+            "{fixture_name} did not produce a real proof:\n{verify_stdout}"
+        );
+        assert!(!verify_stdout.contains("No contracts to verify"));
+        assert!(verify_stdout.contains(expected_summary));
+
+        let reference = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&fixture)
+            .arg("--mir")
+            .output()
+            .expect("failed to spawn M1/M3 Canonical MIR reference run");
+        assert_eq!(reference.status.code(), expected_exit);
+        assert_eq!(
+            String::from_utf8_lossy(&reference.stdout),
+            expected_stdout,
+            "{fixture_name} reference business observation diverged"
+        );
+
+        let binary = std::env::temp_dir().join(format!(
+            "mimi-m1-m3-cli-{}-{}",
+            std::process::id(),
+            fixture_name
+        ));
+        let build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg(&fixture)
+            .arg("--mir")
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("failed to spawn M1/M3 Canonical MIR native build");
+        assert!(
+            build.status.success(),
+            "{fixture_name} native build failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native = Command::new(&binary)
+            .output()
+            .expect("failed to execute M1/M3 Canonical MIR native binary");
+        let _ = fs::remove_file(&binary);
+        assert_eq!(native.status.code(), expected_exit);
+        assert_eq!(
+            String::from_utf8_lossy(&native.stdout),
+            expected_stdout,
+            "{fixture_name} native business observation diverged"
+        );
+        assert_eq!(String::from_utf8_lossy(&native.stderr), "");
+
+        let default_verification = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn default-route verifier");
+        assert!(
+            default_verification.status.success(),
+            "{fixture_name} default verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&default_verification.stderr),
+            String::from_utf8_lossy(&default_verification.stdout)
+        );
+        let default_verify_stdout = String::from_utf8_lossy(&default_verification.stdout);
+        assert!(default_verify_stdout.contains("canonical MIR ensures contract proven"));
+        assert!(!default_verify_stdout.contains("No contracts to verify"));
+        assert!(default_verify_stdout.contains(expected_summary));
+
+        let default_reference = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn default-route reference run");
+        assert_eq!(default_reference.status.code(), expected_exit);
+        assert_eq!(
+            String::from_utf8_lossy(&default_reference.stdout),
+            expected_stdout,
+            "{fixture_name} default-route business observation diverged"
+        );
+
+        let default_binary = std::env::temp_dir().join(format!(
+            "mimi-m1-m3-cli-default-{}-{}",
+            std::process::id(),
+            fixture_name
+        ));
+        let default_build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("build")
+            .arg(&fixture)
+            .arg("-o")
+            .arg(&default_binary)
+            .output()
+            .expect("failed to spawn default-route native build");
+        assert!(
+            default_build.status.success(),
+            "{fixture_name} default native build failed:\n{}",
+            String::from_utf8_lossy(&default_build.stderr)
+        );
+        let default_native = Command::new(&default_binary)
+            .output()
+            .expect("failed to execute default-route native binary");
+        let _ = fs::remove_file(&default_binary);
+        assert_eq!(default_native.status.code(), expected_exit);
+        assert_eq!(
+            String::from_utf8_lossy(&default_native.stdout),
+            expected_stdout,
+            "{fixture_name} default-route native observation diverged"
+        );
+        assert_eq!(String::from_utf8_lossy(&default_native.stderr), "");
+    }
 }
 
 #[test]

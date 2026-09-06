@@ -29,8 +29,8 @@ use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
     MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary,
-    MirProjection, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue,
-    MirValueId, MirVariantPredicate,
+    MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator,
+    MirValue, MirValueId, MirVariantPredicate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -443,6 +443,15 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             MirGenericInstanceContract::ScalarListFacade { .. }
                 | MirGenericInstanceContract::ScalarListProjection { .. }
         );
+        let clone_scalar_set_receiver = matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarSetFacade {
+                operation: MirSetOperation::Size
+                    | MirSetOperation::IsEmpty
+                    | MirSetOperation::Contains
+                    | MirSetOperation::ToList,
+            }
+        );
         let owned_record_target_parameter = matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
@@ -534,6 +543,9 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             };
             if clone_scalar_list_call {
                 rewrite_scalar_list_facade_call_arguments(function, &block_id, index)?;
+            }
+            if clone_scalar_set_receiver {
+                rewrite_scalar_set_facade_call_arguments(function, &block_id, index)?;
             }
             if let Some(target_parameter_ty) = owned_record_target_parameter.as_ref() {
                 rewrite_owned_record_call_argument(
@@ -688,6 +700,68 @@ fn rewrite_scalar_list_facade_call_arguments(
         {
             block.instructions[producer_index].kind = MirInstructionKind::Clone { result, source };
         }
+    }
+    Ok(())
+}
+
+/// Read-only generic Set facade bodies clone their parameter before the
+/// operation. The call-site must therefore clone a direct local Set as well;
+/// otherwise the generic call's ordinary owned-parameter ABI would consume the
+/// caller's Set even though the checker-proven facade operation is read-only.
+/// Transformation facades (`insert`/`remove`) intentionally do not use this
+/// rewrite and retain their whole-Set transfer semantics.
+fn rewrite_scalar_set_facade_call_arguments(
+    caller: &mut MirFunction,
+    block_id: &MirBlockId,
+    call_index: usize,
+) -> Result<(), Vec<MirLoweringError>> {
+    let subject = caller
+        .blocks
+        .get(block_id)
+        .and_then(|block| block.instructions.get(call_index))
+        .map(|instruction| NodeId(instruction.id.as_str().to_owned()))
+        .unwrap_or_else(|| caller.owner.clone());
+    let Some(block) = caller.blocks.get_mut(block_id) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "generic Set facade call block is absent".into(),
+        }]);
+    };
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "generic Set facade call instruction is absent".into(),
+        }]);
+    };
+    let Some(argument) = arguments.first().cloned() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "read-only generic Set facade call has no receiver argument".into(),
+        }]);
+    };
+    let Some(producer_index) = block.instructions[..call_index]
+        .iter()
+        .rposition(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Move { result, .. }
+                    | MirInstructionKind::Clone { result, .. }
+                    if result == &argument
+            )
+        })
+    else {
+        // A fresh rvalue already owns its own Set. Only a direct local Move
+        // needs a call-site clone to preserve the caller's source.
+        return Ok(());
+    };
+    if let MirInstructionKind::Move { result, source } =
+        block.instructions[producer_index].kind.clone()
+    {
+        block.instructions[producer_index].kind = MirInstructionKind::Clone { result, source };
     }
     Ok(())
 }

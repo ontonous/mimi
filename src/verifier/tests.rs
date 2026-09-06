@@ -2276,7 +2276,18 @@ fn generic_result_f64_unwrap_or_is_verified_from_canonical_mir() {
         blake3::hash(source.as_bytes()).to_hex().to_string(),
     )
     .expect("generic Result<T,i32> f64 unwrap_or must remain on canonical verifier route");
-    assert!(results.is_empty(), "fixture has no contracts to verify");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("f64 Result unwrap_or fixture must produce a main contract result");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result
+        .artifact
+        .as_ref()
+        .expect("f64 Result unwrap_or proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
 }
 
 #[test]
@@ -2301,7 +2312,18 @@ fn generic_result_bool_f64_unwrap_or_is_verified_from_canonical_mir() {
         blake3::hash(source.as_bytes()).to_hex().to_string(),
     )
     .expect("generic Result<T,bool> f64 unwrap_or must remain on canonical verifier route");
-    assert!(results.is_empty(), "fixture has no contracts to verify");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("f64 Result<bool> unwrap_or fixture must produce a main contract result");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result
+        .artifact
+        .as_ref()
+        .expect("f64 Result<bool> unwrap_or proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
 }
 
 #[test]
