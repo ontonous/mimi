@@ -1969,6 +1969,11 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
     let mut returns = BTreeSet::new();
     let mut transfers = BTreeSet::new();
     let mut borrows = BTreeSet::new();
+    // A checker borrow action names the stable local resource, while the
+    // lowered Borrow instruction normally consumes the explicit Clone/Copy
+    // value produced for the source expression.  Keep this bridge explicit:
+    // it is a value-identity edge in MIR, not a type/layout inference.
+    let mut non_consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
     let mut consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
     for block in function.blocks.values() {
         for instruction in &block.instructions {
@@ -2056,11 +2061,36 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                 MirInstructionKind::Borrow { source, .. } => {
                     borrows.insert(source.clone());
                 }
+                MirInstructionKind::Clone { result, source }
+                | MirInstructionKind::Copy { result, source } => {
+                    non_consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(source.clone());
+                }
                 _ => {}
             }
         }
         if let MirTerminator::Return { value: Some(value) } = &block.terminator {
             returns.insert(value.clone());
+        }
+    }
+
+    // Close the explicit Clone/Copy aliases so a borrow receipt can match
+    // either the expression value or the stable local it was derived from.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current = borrows.iter().cloned().collect::<Vec<_>>();
+        for borrowed in current {
+            let Some(sources) = non_consuming_edges.get(&borrowed) else {
+                continue;
+            };
+            for source in sources {
+                if borrows.insert(source.clone()) {
+                    changed = true;
+                }
+            }
         }
     }
 
