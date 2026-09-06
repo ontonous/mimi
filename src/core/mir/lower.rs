@@ -1748,6 +1748,44 @@ fn materialize_generic_instance(
                         ) && call.arguments.len() == 1
                 )
             });
+    // Generic `Result<T, i32>.unwrap_or(T)` opens the same heterogeneous
+    // Copy-f64 Ok/fallback ABI as `unwrap`, but only for the exact
+    // checker-owned fixed-i32 envelope. Homogeneous `Result<T, T>` and every
+    // other error payload remain on their existing scalar fail-closed path.
+    let is_copy_result_projection_fallback = callable.signature.parameters.len() == 2
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Result { ok, error }
+                        if ok == &generic_id
+                            && matches!(
+                                program.resolved_types().get(error),
+                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                            )
+                )
+            })
+        && callable.signature.parameters[1].ty == generic_id
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.result.unwrap_or"
+                        ) && call.arguments.len() == 2
+                )
+            });
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
@@ -1784,7 +1822,7 @@ fn materialize_generic_instance(
                 } else {
                     catalog.validate_generic_option_projection_argument(&arguments[0])
                 }
-            } else if is_copy_result_projection {
+            } else if is_copy_result_projection || is_copy_result_projection_fallback {
                 if arguments.len() != 1 {
                     Err(format!(
                         "generic Result projection contract requires one type argument, got {}",
@@ -2573,6 +2611,24 @@ fn materialize_generic_instance(
                     }) =>
             {
                 type_catalog.validated_move_result_projection_fallback_contract(
+                    &base_ty,
+                    &placeholder.projection.variant,
+                    &placeholder.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+            }
+            Some(super::types::MirTypeKind::Result)
+                if is_copy_result_projection_fallback
+                    && type_catalog.get(&base_ty).is_some_and(|descriptor| {
+                        matches!(
+                            &descriptor.layout,
+                            super::types::MirLayout::Result { ok, error, .. }
+                                if ok == &result_ty && ok != error
+                        )
+                    }) =>
+            {
+                type_catalog.validated_generic_result_scalar_projection_fallback_contract(
                     &base_ty,
                     &placeholder.projection.variant,
                     &placeholder.projection.field,
@@ -3540,6 +3596,22 @@ pub(crate) fn validate_scalar_variant_projection_fallback_mir(
         .clone();
     if receipt.projection.nominal.as_str() == "builtin:type:Option" {
         type_catalog.validated_copy_option_generic_projection_fallback_contract(
+            &base_ty,
+            &receipt.projection.variant,
+            &receipt.projection.field,
+            &result_ty,
+            &fallback_ty,
+        )?;
+    } else if receipt.projection.nominal.as_str() == "builtin:type:Result"
+        && type_catalog.get(&base_ty).is_some_and(|descriptor| {
+            matches!(
+                &descriptor.layout,
+                super::types::MirLayout::Result { ok, error, .. }
+                    if ok == &result_ty && ok != error
+            )
+        })
+    {
+        type_catalog.validated_generic_result_scalar_projection_fallback_contract(
             &base_ty,
             &receipt.projection.variant,
             &receipt.projection.field,

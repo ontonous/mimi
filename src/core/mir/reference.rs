@@ -275,6 +275,15 @@ impl MirProgram {
                                 && contract.projection.ownership == MirOwnership::Copy
                     )
             });
+            let generic_result_projection_fallback = instances.values().any(|instance| {
+                instance.function == function.owner
+                    && matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                            if contract.projection.nominal.as_str() == "builtin:type:Result"
+                                && contract.projection.ownership == MirOwnership::Copy
+                    )
+            });
             if let Err(mut function_errors) = function.validate() {
                 errors.append(&mut function_errors);
                 continue;
@@ -568,14 +577,32 @@ impl MirProgram {
                                 });
                                 continue;
                             };
-                            if let Err(message) = type_catalog
-                                .validate_variant_projection_fallback_receipt(
+                            let validation = if generic_result_projection_fallback
+                                && type_catalog.get(&base_value.ty).is_some_and(|descriptor| {
+                                    matches!(
+                                        &descriptor.layout,
+                                        MirLayout::Result { ok, error, .. }
+                                            if ok == &result_value.ty && ok != error
+                                    )
+                                }) {
+                                type_catalog
+                                    .validated_generic_result_scalar_projection_fallback_contract(
+                                        &base_value.ty,
+                                        &receipt.projection.variant,
+                                        &receipt.projection.field,
+                                        &result_value.ty,
+                                        &fallback_value.ty,
+                                    )
+                                    .map(|_| ())
+                            } else {
+                                type_catalog.validate_variant_projection_fallback_receipt(
                                     &base_value.ty,
                                     &result_value.ty,
                                     &fallback_value.ty,
                                     receipt,
                                 )
-                            {
+                            };
+                            if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -3351,6 +3378,18 @@ impl<'a> MirReferenceInterpreter<'a> {
         })
     }
 
+    fn is_generic_result_projection_fallback(&self, owner: &NodeId) -> bool {
+        self.program.instances.values().any(|instance| {
+            instance.function == *owner
+                && matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Copy
+                )
+        })
+    }
+
     pub fn execute(
         &self,
         owner: &NodeId,
@@ -3859,15 +3898,41 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "variant fallback projection has no canonical receipt",
                     )
                 })?;
-                self.program
-                    .type_catalog()
-                    .validate_variant_projection_fallback_receipt(
-                        &base_ty,
-                        &result_ty,
-                        &fallback_ty,
-                        receipt,
-                    )
-                    .map_err(|message| self.error(&function.owner, message))?;
+                let generic_result_projection_fallback =
+                    self.is_generic_result_projection_fallback(&function.owner);
+                let receipt_validation = if generic_result_projection_fallback
+                    && self
+                        .program
+                        .type_catalog()
+                        .get(&base_ty)
+                        .is_some_and(|descriptor| {
+                            matches!(
+                                &descriptor.layout,
+                                MirLayout::Result { ok, error, .. }
+                                    if ok == &result_ty && ok != error
+                            )
+                        }) {
+                    self.program
+                        .type_catalog()
+                        .validated_generic_result_scalar_projection_fallback_contract(
+                            &base_ty,
+                            &receipt.projection.variant,
+                            &receipt.projection.field,
+                            &result_ty,
+                            &fallback_ty,
+                        )
+                        .map(|_| ())
+                } else {
+                    self.program
+                        .type_catalog()
+                        .validate_variant_projection_fallback_receipt(
+                            &base_ty,
+                            &result_ty,
+                            &fallback_ty,
+                            receipt,
+                        )
+                };
+                receipt_validation.map_err(|message| self.error(&function.owner, message))?;
                 let projected = if receipt.projection.ownership == MirOwnership::Move {
                     let value = self.take_transfer_value(function, values, base)?;
                     let fallback_value = self.take_transfer_value(function, values, fallback)?;
@@ -3879,6 +3944,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                         &result_ty,
                         receipt,
                         self.program.type_catalog(),
+                        generic_result_projection_fallback,
                     )?
                 } else {
                     let value = self.read_value(function, values, base)?;
@@ -3891,6 +3957,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                         &result_ty,
                         receipt,
                         self.program.type_catalog(),
+                        generic_result_projection_fallback,
                     )?
                 };
                 values.insert(result.clone(), projected);
@@ -5894,15 +5961,33 @@ fn project_variant_fallback_value(
     result_ty: &crate::core::ResolvedTypeId,
     receipt: &super::types::MirVariantProjectionFallbackContract,
     type_catalog: &MirTypeCatalog,
+    generic_result_projection_fallback: bool,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
-    type_catalog
-        .validate_variant_projection_fallback_receipt(
+    let validation = if generic_result_projection_fallback
+        && type_catalog.get(base_ty).is_some_and(|descriptor| {
+            matches!(
+                &descriptor.layout,
+                MirLayout::Result { ok, error, .. } if ok == result_ty && ok != error
+            )
+        }) {
+        type_catalog
+            .validated_generic_result_scalar_projection_fallback_contract(
+                base_ty,
+                &receipt.projection.variant,
+                &receipt.projection.field,
+                result_ty,
+                &receipt.fallback_ty,
+            )
+            .map(|_| ())
+    } else {
+        type_catalog.validate_variant_projection_fallback_receipt(
             base_ty,
             result_ty,
             &receipt.fallback_ty,
             receipt,
         )
-        .map_err(|message| execution_error(function, message))?;
+    };
+    validation.map_err(|message| execution_error(function, message))?;
     let MirRuntimeValue::Variant {
         nominal,
         variant,
@@ -5957,6 +6042,7 @@ fn move_project_variant_fallback_value(
     result_ty: &crate::core::ResolvedTypeId,
     receipt: &super::types::MirVariantProjectionFallbackContract,
     type_catalog: &MirTypeCatalog,
+    _generic_result_projection_fallback: bool,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
     type_catalog
         .validate_variant_projection_fallback_receipt(

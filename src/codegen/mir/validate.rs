@@ -456,6 +456,36 @@ impl<'a> NativeMirValidator<'a> {
                     }
                 }
             }
+            if let Some(receipt) = self.program.instances().values().find_map(|instance| {
+                match &instance.contract {
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract,
+                    } if contract.source_ty == *ty
+                        && contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy =>
+                    {
+                        Some(contract)
+                    }
+                    _ => None,
+                }
+            }) {
+                match self
+                    .program
+                    .type_catalog()
+                    .validated_generic_result_scalar_projection_fallback_contract(
+                        &receipt.source_ty,
+                        &receipt.projection.variant,
+                        &receipt.projection.field,
+                        &receipt.result_ty,
+                        &receipt.fallback_ty,
+                    ) {
+                    Ok(_) => return true,
+                    Err(message) => {
+                        self.errors.push(NativeMirError::new(subject, message));
+                        return false;
+                    }
+                }
+            }
             match self
                 .program
                 .type_catalog()
@@ -1496,10 +1526,43 @@ impl<'a> NativeMirValidator<'a> {
                         && contract.projection.ownership == MirOwnership::Copy
                 )
         });
+        let generic_result_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
         let receipt_validation = if generic_option_copy_fallback {
             self.program
                 .type_catalog()
                 .validated_copy_option_generic_projection_fallback_contract(
+                    &base_value.ty,
+                    &contract.projection.variant,
+                    &contract.projection.field,
+                    &result_value.ty,
+                    &fallback_value.ty,
+                )
+                .map(|_| ())
+        } else if generic_result_copy_fallback
+            && self
+                .program
+                .type_catalog()
+                .get(&base_value.ty)
+                .is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        crate::core::mir::types::MirLayout::Result { ok, error, .. }
+                            if ok == &result_value.ty && ok != error
+                    )
+                })
+        {
+            self.program
+                .type_catalog()
+                .validated_generic_result_scalar_projection_fallback_contract(
                     &base_value.ty,
                     &contract.projection.variant,
                     &contract.projection.field,

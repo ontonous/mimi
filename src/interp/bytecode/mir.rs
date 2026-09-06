@@ -2256,16 +2256,49 @@ impl<'a> FunctionEmitter<'a> {
             self.error("variant fallback projection value is absent");
             return;
         };
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_variant_projection_fallback_receipt(
-                &base_info.ty,
-                &result_info.ty,
-                &fallback_info.ty,
-                receipt,
-            )
-        {
+        let generic_result_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_result_copy_fallback
+            && self
+                .program
+                .type_catalog()
+                .get(&base_info.ty)
+                .is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        MirLayout::Result { ok, error, .. }
+                            if ok == &result_info.ty && ok != error
+                    )
+                }) {
+            self.program
+                .type_catalog()
+                .validated_generic_result_scalar_projection_fallback_contract(
+                    &base_info.ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    &result_info.ty,
+                    &fallback_info.ty,
+                )
+                .map(|_| ())
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_fallback_receipt(
+                    &base_info.ty,
+                    &result_info.ty,
+                    &fallback_info.ty,
+                    receipt,
+                )
+        };
+        if let Err(message) = receipt_validation {
             self.error(format!(
                 "variant fallback projection is unsupported: {message}"
             ));
@@ -7238,6 +7271,65 @@ mod tests {
             .expect("bytecode generic Result unwrap_or execution");
         assert_eq!(reference, MirRuntimeValue::Int(48));
         assert!(matches!(value, Value::Int(48)));
+    }
+
+    #[test]
+    fn generic_result_f64_unwrap_or_matches_reference_and_bytecode() {
+        for source in [
+            include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or_f64.mimi"),
+            include_str!(
+                "../../../tests/fixtures/mir_native_generic_result_unwrap_or_f64_err.mimi"
+            ),
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            let mir = MirProgram::from_checked_program(&checked)
+                .expect("generic Result f64 unwrap_or MIR");
+            let instance = mir
+                .instances()
+                .values()
+                .find(|instance| {
+                    matches!(
+                        &instance.contract,
+                        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                            contract
+                        } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership
+                                == crate::core::mir::types::MirOwnership::Copy
+                    )
+                })
+                .expect("generic Result f64 fallback instance");
+            let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract,
+            } = &instance.contract
+            else {
+                unreachable!("filtered above");
+            };
+            let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &mir
+                .type_catalog()
+                .get(&contract.source_ty)
+                .expect("specialized Result TypeDesc")
+                .layout
+            else {
+                panic!("specialized source must retain Result layout");
+            };
+            assert_ne!(ok, error);
+            assert!(matches!(
+                mir.type_catalog().get(ok).map(|descriptor| descriptor.abi),
+                Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+            ));
+            let reference = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference generic Result f64 unwrap_or execution");
+            let bytecode = compile_mir_program(&mir).expect("generic Result f64 bytecode");
+            assert!(bytecode.ast.is_none());
+            let value = BytecodeVM::new(bytecode)
+                .run_value()
+                .expect("bytecode generic Result f64 unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(42));
+            assert!(matches!(value, Value::Int(42)));
+        }
     }
 
     #[test]

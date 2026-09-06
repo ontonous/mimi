@@ -1,0 +1,11 @@
+// Homogeneous Result<T, T> remains outside the generic Result f64 fallback
+// island and must be rejected before any backend consumes MIR.
+func unwrap_or<T>(value: Result<T, T>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Result<f64, f64> = Ok(41.5)
+    let out = unwrap_or(value, 7.25)
+    42
+}

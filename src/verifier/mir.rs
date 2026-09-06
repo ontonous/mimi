@@ -1702,12 +1702,42 @@ fn eval_instruction(
             let receipt = contract.as_ref().ok_or_else(|| {
                 "MIR variant projection fallback has no canonical receipt".to_string()
             })?;
-            catalog.validate_variant_projection_fallback_receipt(
-                &base_ty,
-                &result_ty,
-                &fallback_ty,
-                receipt,
-            )?;
+            let generic_result_projection_fallback = program.instances().values().any(|instance| {
+                instance.function == function.owner
+                    && matches!(
+                        &instance.contract,
+                        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                            contract
+                        } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Copy
+                    )
+            });
+            if generic_result_projection_fallback
+                && catalog.get(&base_ty).is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        crate::core::mir::types::MirLayout::Result { ok, error, .. }
+                            if ok == &result_ty && ok != error
+                    )
+                })
+            {
+                catalog
+                    .validated_generic_result_scalar_projection_fallback_contract(
+                        &base_ty,
+                        &receipt.projection.variant,
+                        &receipt.projection.field,
+                        &result_ty,
+                        &fallback_ty,
+                    )
+                    .map(|_| ())?;
+            } else {
+                catalog.validate_variant_projection_fallback_receipt(
+                    &base_ty,
+                    &result_ty,
+                    &fallback_ty,
+                    receipt,
+                )?;
+            }
             let SymbolicValue::Variant {
                 nominal,
                 tag,

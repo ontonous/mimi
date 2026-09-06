@@ -2416,6 +2416,61 @@ fn canonical_default_generic_result_unwrap_or_matches_all_consumers() {
 }
 
 #[test]
+fn canonical_default_generic_result_f64_unwrap_or_routes_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_result_unwrap_or_f64.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Result f64 unwrap_or run");
+    assert_eq!(run.status.code(), Some(42));
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Result f64 unwrap_or verifier");
+    assert!(
+        verify.status.success(),
+        "generic Result f64 unwrap_or verifier failed:\n{}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verify.stdout).contains("canonical MIR"));
+}
+
+#[test]
+fn canonical_default_generic_result_f64_unwrap_or_rejects_unsupported_shapes() {
+    for name in [
+        "mir_native_generic_result_unwrap_or_homogeneous_f64_rejected.mimi",
+        "mir_native_result_f64_unwrap_or_rejected.mimi",
+    ] {
+        let fixture = project_root().join("tests").join("fixtures").join(name);
+        for command in ["run", "build", "verify"] {
+            let output = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg(command)
+                .arg(&fixture)
+                .output()
+                .expect("failed to spawn unsupported generic Result f64 command");
+            assert!(
+                !output.status.success(),
+                "default {command} must reject unsupported Result f64 fallback shape {name}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("generic Result") || stderr.contains("variant projection"),
+                "default {command} lost its stable fail-closed diagnostic for {name}:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
 fn canonical_default_generic_distinct_result_unwrap_or_matches_all_consumers() {
     let fixture = project_root()
         .join("tests")

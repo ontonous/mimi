@@ -2023,6 +2023,47 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_f64_unwrap_or_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_or_f64.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_fallback_admission(&checked),
+            mimi::core::mir::GenericResultProjectionFallbackAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Result<T,i32> f64 unwrap_or must select canonical route");
+        };
+        let instance = program.instances().values().find(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                    && contract.projection.ownership == mimi::core::mir::types::MirOwnership::Copy
+            )
+        });
+        assert!(
+            instance.is_some(),
+            "generic Result f64 fallback receipt is absent"
+        );
+    }
+
+    #[test]
+    fn generic_result_homogeneous_f64_unwrap_or_is_rejected_before_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_or_homogeneous_f64_rejected.mimi"
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("homogeneous Result<T,T> f64 unwrap_or must fail closed before legacy");
+        };
+        assert!(
+            reason.contains("generic") && reason.contains("f64"),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn unsupported_generic_result_unwrap_or_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi"

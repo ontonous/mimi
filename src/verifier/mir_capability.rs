@@ -923,9 +923,38 @@ impl<'a> CapabilityGate<'a> {
                                     && contract.projection.ownership == MirOwnership::Copy
                             )
                     });
+                let generic_result_copy_fallback =
+                    self.program.instances().values().any(|instance| {
+                        instance.function == function.owner
+                            && matches!(
+                                &instance.contract,
+                                MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                                    contract
+                                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                                    && contract.projection.ownership == MirOwnership::Copy
+                            )
+                    });
                 let receipt_validation = if generic_option_copy_fallback {
                     catalog
                         .validated_copy_option_generic_projection_fallback_contract(
+                            &base_ty,
+                            &receipt.projection.variant,
+                            &receipt.projection.field,
+                            &result_ty,
+                            &fallback_ty,
+                        )
+                        .map(|_| ())
+                } else if generic_result_copy_fallback
+                    && catalog.get(&base_ty).is_some_and(|descriptor| {
+                        matches!(
+                            &descriptor.layout,
+                            MirLayout::Result { ok, error, .. }
+                                if ok == &result_ty && ok != error
+                        )
+                    })
+                {
+                    catalog
+                        .validated_generic_result_scalar_projection_fallback_contract(
                             &base_ty,
                             &receipt.projection.variant,
                             &receipt.projection.field,

@@ -2486,6 +2486,48 @@ impl MirTypeCatalog {
         result_ty: &ResolvedTypeId,
         fallback_ty: &ResolvedTypeId,
     ) -> Result<MirVariantProjectionFallbackContract, String> {
+        self.validated_result_scalar_projection_fallback_contract_with_f64(
+            source_ty,
+            variant_id,
+            field_id,
+            result_ty,
+            fallback_ty,
+            false,
+        )
+    }
+
+    /// Materialize the heterogeneous generic `Result<T, i32|bool>.unwrap_or(T)`
+    /// receipt after specialization.  This is the fallback counterpart to
+    /// `validated_generic_result_scalar_projection_trap_contract`: only the
+    /// checker-owned generic envelope may admit a Copy `f64` Ok/fallback;
+    /// direct concrete Result fallback remains on the narrow scalar helper.
+    pub(crate) fn validated_generic_result_scalar_projection_fallback_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
+        self.validated_result_scalar_projection_fallback_contract_with_f64(
+            source_ty,
+            variant_id,
+            field_id,
+            result_ty,
+            fallback_ty,
+            true,
+        )
+    }
+
+    fn validated_result_scalar_projection_fallback_contract_with_f64(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        fallback_ty: &ResolvedTypeId,
+        allow_f64_ok: bool,
+    ) -> Result<MirVariantProjectionFallbackContract, String> {
         let descriptor = self.get(source_ty).ok_or_else(|| {
             format!(
                 "type '{}' is absent from MIR type catalog",
@@ -2526,8 +2568,24 @@ impl MirTypeCatalog {
                     .into(),
             );
         }
-        self.validate_copy_scalar(result_ty)?;
+        if allow_f64_ok {
+            self.validate_generic_result_projection_argument(result_ty)?;
+        } else {
+            self.validate_copy_scalar(result_ty)?;
+        }
         self.validate_copy_scalar(error)?;
+        if allow_f64_ok
+            && !self.get(error).is_some_and(|descriptor| {
+                matches!(
+                    &descriptor.kind,
+                    MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+                )
+            })
+        {
+            return Err(
+                "generic heterogeneous Result fallback requires an i32 or bool Err payload".into(),
+            );
+        }
         if variants.len() != 2 {
             return Err(
                 "Result fallback source must have exactly canonical Ok/Err variants".into(),
@@ -3296,6 +3354,25 @@ impl MirTypeCatalog {
             self.validate_move_owned_payload(&arguments[0]).map(|_| ())
         } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
             self.validate_generic_option_projection_argument(&arguments[0])
+        } else if contract.projection.nominal.as_str() == "builtin:type:Result"
+            && self.get(&contract.source_ty).is_some_and(|descriptor| {
+                matches!(
+                    &descriptor.layout,
+                    MirLayout::Result { ok, error, .. }
+                        if ok == &contract.result_ty
+                            && ok != error
+                            && self.get(error).is_some_and(|payload| {
+                                matches!(
+                                    payload.kind,
+                                    MirTypeKind::Primitive(
+                                        PrimitiveType::I32 | PrimitiveType::Bool
+                                    )
+                                )
+                            })
+                )
+            })
+        {
+            self.validate_generic_result_projection_argument(&arguments[0])
         } else {
             self.validate_scalar_generic_arguments(arguments)
         }

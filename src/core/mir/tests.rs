@@ -2539,6 +2539,105 @@ fn materializes_generic_result_unwrap_or_with_a_specialized_fallback_receipt() {
 }
 
 #[test]
+fn materializes_generic_result_f64_unwrap_or_with_heterogeneous_copy_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or_f64.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result<T, i32> f64 unwrap_or must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjectionFallback { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        })
+        .expect("generic Result f64 fallback projection instance");
+    let MirGenericInstanceContract::ScalarVariantProjectionFallback { contract } =
+        &instance.contract
+    else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.projection.ownership, MirOwnership::Copy);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let crate::core::mir::types::MirLayout::Result { ok, error, .. } = &program
+        .type_catalog()
+        .get(&contract.source_ty)
+        .expect("specialized heterogeneous Result TypeDesc")
+        .layout
+    else {
+        panic!("specialized source must retain a Result layout");
+    };
+    assert_ne!(ok, error);
+    assert!(matches!(
+        program
+            .type_catalog()
+            .get(ok)
+            .map(|descriptor| descriptor.abi),
+        Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+    ));
+    assert!(matches!(
+        program
+            .type_catalog()
+            .get(error)
+            .map(|descriptor| descriptor.abi),
+        Some(crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        })
+    ));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Result f64 unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_result_f64_unwrap_or_err_selects_the_fallback() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_or_f64_err.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Result<T, i32> f64 Err unwrap_or MIR");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Result f64 Err unwrap_or execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_result_homogeneous_f64_unwrap_or_is_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_result_unwrap_or_homogeneous_f64_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("homogeneous Result<T, T> f64 unwrap_or must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic MIR instance") && message.contains("f64"),
+        "unexpected lowering rejection: {message}"
+    );
+}
+
+#[test]
+fn direct_result_f64_unwrap_or_remains_rejected_before_consumers() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_result_f64_unwrap_or_rejected.mimi");
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("direct concrete Result<f64, i32> unwrap_or must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("Result fallback") || message.contains("variant projection"),
+        "unexpected direct Result<f64> fallback rejection: {message}"
+    );
+}
+
+#[test]
 fn materializes_generic_distinct_result_unwrap_or_with_two_payload_slots() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi");

@@ -1,0 +1,11 @@
+// Generic heterogeneous Result<T, i32> unwrap_or selects the explicit f64
+// fallback when the Result carries Err.
+func unwrap_or<T>(value: Result<T, i32>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Result<f64, i32> = Err(7)
+    let out = unwrap_or(value, 7.25)
+    42
+}

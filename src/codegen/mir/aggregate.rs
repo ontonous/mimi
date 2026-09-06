@@ -272,16 +272,29 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let allow_generic_result = self.program.instances().values().any(|instance| {
-            matches!(
-                &instance.contract,
+        let allow_generic_result =
+            self.program
+                .instances()
+                .values()
+                .any(|instance| {
+                    match &instance.contract {
                 crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
-                    contract
-                } if contract.source_ty == result_ty
-                    && contract.projection.nominal.as_str() == "builtin:type:Result"
-                    && contract.projection.ownership == MirOwnership::Copy
-            )
-        });
+                    contract,
+                } => {
+                    contract.source_ty == result_ty
+                        && contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                }
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                    contract,
+                } => {
+                    contract.source_ty == result_ty
+                        && contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                }
+                _ => false,
+            }
+                });
         let (variant_abi, _) = native_variant_abi_with_generic_result(
             self.program.type_catalog(),
             &result_ty,
@@ -821,10 +834,43 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         && contract.projection.ownership == MirOwnership::Copy
                 )
         });
+        let generic_result_copy_fallback = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
         let receipt_validation = if generic_option_copy_fallback {
             self.program
                 .type_catalog()
                 .validated_copy_option_generic_projection_fallback_contract(
+                    &base_ty,
+                    &receipt.projection.variant,
+                    &receipt.projection.field,
+                    &result_ty,
+                    &fallback_ty,
+                )
+                .map(|_| ())
+        } else if generic_result_copy_fallback
+            && self
+                .program
+                .type_catalog()
+                .get(&base_ty)
+                .is_some_and(|descriptor| {
+                    matches!(
+                        &descriptor.layout,
+                        crate::core::mir::types::MirLayout::Result { ok, error, .. }
+                            if ok == &result_ty && ok != error
+                    )
+                })
+        {
+            self.program
+                .type_catalog()
+                .validated_generic_result_scalar_projection_fallback_contract(
                     &base_ty,
                     &receipt.projection.variant,
                     &receipt.projection.field,
@@ -843,10 +889,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )
         };
         receipt_validation.map_err(|message| NativeMirError::new(subject, message))?;
-        let (variant_abi, _) = native_variant_abi(
+        let (variant_abi, _) = native_variant_abi_with_generic_result(
             self.program.type_catalog(),
             &base_ty,
             receipt.projection.ownership == MirOwnership::Move,
+            generic_result_copy_fallback,
         )?;
         let payload_slot = variant_abi
             .payload_slot(&receipt.projection.variant)

@@ -3191,10 +3191,10 @@ impl<'a> ScalarCollectionValidator<'a> {
                     .type_catalog()
                     .validate_move_owned_payload(&instance.arguments[0])
                     .map(|_| ()),
-                // The generic Option projection island shares the concrete
-                // float leaf contract with the already-admitted Option<f64>
-                // island. Keep this exception receipt-scoped: generic Result
-                // and every collection/record instance remain on the
+                // Generic Option and heterogeneous generic Result projection
+                // islands share the concrete float leaf contract with their
+                // promoted direct layouts. Keep each exception receipt- and
+                // instance-scoped; collection/record instances remain on the
                 // signed-integer/bool scalar boundary until their own ABI
                 // contracts are promoted.
                 MirGenericInstanceContract::ScalarVariantProjection { contract }
