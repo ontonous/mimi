@@ -1506,13 +1506,29 @@ impl<'a> CapabilityGate<'a> {
         arguments: &[MirValueId],
         subject: &str,
     ) {
-        let ResolvedCallee::Function(owner) = callee else {
-            self.error(format!(
-                "{subject} callee is outside the canonical MIR verifier capability"
-            ));
-            return;
+        let owner = match callee {
+            ResolvedCallee::Function(owner) => owner.clone(),
+            ResolvedCallee::ProtocolMethod { .. } => {
+                if let Err(message) = crate::core::mir::validate_protocol_method_identity(callee) {
+                    self.error(format!("{subject} {message}"));
+                    return;
+                }
+                let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
+                    self.error(format!(
+                        "{subject} callee is outside the canonical MIR verifier capability"
+                    ));
+                    return;
+                };
+                owner
+            }
+            _ => {
+                self.error(format!(
+                    "{subject} callee is outside the canonical MIR verifier capability"
+                ));
+                return;
+            }
         };
-        let Some(target) = self.program.functions().get(owner) else {
+        let Some(target) = self.program.functions().get(&owner) else {
             self.error(format!("{subject} callee '{}' is absent", owner.0));
             return;
         };
@@ -1520,7 +1536,7 @@ impl<'a> CapabilityGate<'a> {
             .program
             .instances()
             .values()
-            .find(|instance| instance.function == *owner);
+            .find(|instance| instance.function == owner);
         if let Some(instance) = instance {
             if instance.arguments != type_arguments {
                 self.error(format!(

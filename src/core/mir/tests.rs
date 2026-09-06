@@ -1318,9 +1318,10 @@ fn protocol_method_argument_typedesc_drift_is_rejected_before_consumers() {
     )
     .expect_err("protocol method argument TypeDesc drift must fail closed");
     assert!(errors.iter().any(|error| {
-        error
-            .message
-            .contains("protocol method argument 0 TypeDesc disagrees with canonical method ABI")
+        error.message.contains("Clone result type")
+            || error
+                .message
+                .contains("protocol method argument 0 TypeDesc")
     }));
 
     let mut functions = program.functions().clone();

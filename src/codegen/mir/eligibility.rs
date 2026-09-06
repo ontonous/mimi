@@ -73,13 +73,22 @@ pub(super) fn mir_symbol(owner: &crate::core::NodeId) -> Result<String, String> 
             native_symbol_fragment(transition)
         ));
     };
-    if symbol.trim().is_empty() || symbol.contains("::") {
+    if symbol.trim().is_empty() {
         return Err("only simple function symbols are in the native MIR slice".into());
     }
     if symbol.starts_with("mimi_") {
         return Err("function symbol collides with reserved runtime namespace".into());
     }
-    Ok(symbol.to_owned())
+    if symbol.contains("::") {
+        // Protocol method owners are checker-canonical identities such as
+        // `Read:for:Counter::read:<hash>`.  They are not surface names and
+        // therefore need a deterministic LLVM-safe spelling, shared by the
+        // declaration and call maps.  Keep ordinary function symbols
+        // unchanged for compatibility with existing native callers.
+        Ok(format!("__mimi_method_{}", native_symbol_fragment(symbol)))
+    } else {
+        Ok(symbol.to_owned())
+    }
 }
 
 pub(super) fn native_symbol_fragment(value: &str) -> String {

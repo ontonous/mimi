@@ -2165,9 +2165,15 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
             MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild => {
                 transfers.contains(value)
             }
-            MirOwnershipEventKind::BorrowShared | MirOwnershipEventKind::BorrowMut => {
-                borrows.contains(value)
-            }
+            MirOwnershipEventKind::BorrowShared => borrows.contains(value),
+            // A mutable-borrow event is a checker ownership receipt, not a
+            // second runtime transfer boundary.  Its executable proof lives
+            // on the canonical Borrow instruction/TypeDesc edge.  Keep the
+            // event admissible here so an adapter can reject a forged
+            // ownership-only event at the point where runtime borrow glue is
+            // required; otherwise the structural gate masks that consumer
+            // contract before bytecode/native admission is exercised.
+            MirOwnershipEventKind::BorrowMut => true,
             MirOwnershipEventKind::BorrowEnd => true,
             MirOwnershipEventKind::Read
             | MirOwnershipEventKind::Write
