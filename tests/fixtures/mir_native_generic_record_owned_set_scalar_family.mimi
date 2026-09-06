@@ -1,0 +1,23 @@
+// S213: selected Set<i64> and Set<bool> payloads with a Set<i64> residual.
+type SetPair<T> { value: T, tail: Set<i64> }
+
+func take<T>(pair: SetPair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let one: i64 = 1
+    let two: i64 = 2
+    let three: i64 = 3
+    let four: i64 = 4
+    let ints: SetPair<Set<i64>> = SetPair { value: {one, two}, tail: {three, four} }
+    let picked_ints = take(ints)
+    drop(picked_ints)
+    let five: i64 = 5
+    let six: i64 = 6
+    let bools: SetPair<Set<bool>> = SetPair { value: {true, false}, tail: {five, six} }
+    let picked_bools = take(bools)
+    drop(picked_bools)
+    42
+}

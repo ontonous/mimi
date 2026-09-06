@@ -5979,6 +5979,53 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_owned_generic_record_set_scalar_family() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_set_scalar_family.mimi"
+        ));
+        let instances = program
+            .instances()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                        contract
+                    } if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "tail"
+                        && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Set
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instances.len(),
+            2,
+            "both Set element instances must materialize"
+        );
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic Set scalar-family execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_owned_set_scalar_family",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic Set scalar-family must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic Set scalar-family module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_record_move_drop_project"));
+        assert!(ir.contains("mir_record_move_drop_residual"));
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_mixed_generic_record_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"

@@ -1,0 +1,15 @@
+// S213 negative: Set<f64> is outside the Copy scalar Set payload contract.
+type SetPair<T> { value: T, tail: Set<i64> }
+
+func take<T>(pair: SetPair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    let three: i64 = 3
+    let four: i64 = 4
+    let pair: SetPair<Set<f64>> = SetPair { value: {1.0, 2.0}, tail: {three, four} }
+    let picked = take(pair)
+    drop(picked)
+    42
+}

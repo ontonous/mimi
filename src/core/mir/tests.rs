@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
-use crate::core::mir::types::{MirGlueKind, MirOwnership};
+use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
 
 fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
     table.intern_resolved(ty).expect("test type must intern")
@@ -8068,5 +8068,77 @@ fn generic_record_set_string_residual_remains_rejected_before_consumers() {
             || message.contains("residual")
             || message.contains("managed"),
         "unexpected generic Set/String residual rejection: {message}"
+    );
+}
+
+#[test]
+fn materializes_generic_record_owned_set_scalar_family_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_set_scalar_family.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<Set<i64|bool>> Set residual must lower to MIR");
+    let mut saw_i64 = false;
+    let mut saw_bool = false;
+    for instance in program.instances().values().filter(|instance| {
+        matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+        )
+    }) {
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            unreachable!("instance filter preserves the owned record contract")
+        };
+        assert_eq!(contract.projection.arity, 2);
+        assert_eq!(contract.projection.name, "value");
+        assert_eq!(contract.residual.len(), 1);
+        assert_eq!(contract.residual[0].name, "tail");
+        assert_eq!(contract.residual[0].glue, MirGlueKind::Set);
+        let selected = program
+            .type_catalog()
+            .get(&contract.result_ty)
+            .expect("selected Set TypeDesc");
+        let MirLayout::Set { element } = &selected.layout else {
+            panic!("selected payload must retain its Set layout")
+        };
+        let element_desc = program
+            .type_catalog()
+            .get(element)
+            .expect("selected Set element TypeDesc");
+        saw_i64 |= matches!(
+            &element_desc.kind,
+            MirTypeKind::Primitive(PrimitiveType::I64)
+        );
+        saw_bool |= matches!(
+            &element_desc.kind,
+            MirTypeKind::Primitive(PrimitiveType::Bool)
+        );
+        assert_eq!(selected.ownership, MirOwnership::Move);
+        assert_eq!(selected.glue.move_out, MirGlueKind::Set);
+    }
+    assert!(saw_i64, "Set<i64> selected TypeDesc was not materialized");
+    assert!(saw_bool, "Set<bool> selected TypeDesc was not materialized");
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Set scalar-family execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_record_owned_set_float_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_set_float_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<Set<f64>> must remain outside the Set payload island");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record")
+            || message.contains("Set")
+            || message.contains("Copy scalar"),
+        "unexpected generic Set<f64> rejection: {message}"
     );
 }

@@ -3560,6 +3560,53 @@ fn owned_generic_record_set_residual_is_verified_from_mir() {
 }
 
 #[test]
+fn owned_generic_record_set_scalar_family_is_verified_from_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_record_owned_set_scalar_family.mimi");
+    let file =
+        parse_memory_source(source, "mir-owned-generic-record-set-scalar-family").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical owned generic Set scalar-family MIR");
+    let instances = canonical
+        .instances()
+        .values()
+        .filter(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                    contract
+                } if contract.projection.arity == 2
+                    && contract.projection.name == "value"
+                    && contract.residual.len() == 1
+                    && contract.residual[0].name == "tail"
+                    && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Set
+            )
+        })
+        .count();
+    assert_eq!(instances, 2, "both Set element instances must materialize");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("owned generic Set scalar-family verifier capability");
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("MIR verifier");
+    let main = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("main verification result");
+    assert_eq!(main.status, VerifStatus::Proven, "{}", main.message);
+    assert_eq!(
+        main.artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn three_field_owned_generic_record_projection_with_two_residuals_is_verified_from_mir() {
     require_z3!();
     let source = include_str!(

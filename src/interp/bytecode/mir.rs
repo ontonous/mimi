@@ -8183,6 +8183,55 @@ mod tests {
     }
 
     #[test]
+    fn executes_owned_generic_record_set_scalar_family_without_ast() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_set_scalar_family.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("owned generic Record<Set<i64|bool>> Set residual MIR");
+        let instances = mir
+            .instances()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                        contract
+                    } if contract.projection.arity == 2
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "tail"
+                        && contract.residual[0].glue == crate::core::mir::types::MirGlueKind::Set
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instances.len(),
+            2,
+            "both Set element instances must materialize"
+        );
+        for instance in instances {
+            let target = mir
+                .functions()
+                .get(&instance.function)
+                .expect("owned generic Set scalar-family target");
+            assert!(target.canonical_text().contains("move_project_drop"));
+        }
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic Set scalar-family execution");
+        let bytecode = compile_mir_program(&mir).expect("owned generic Set scalar-family bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("owned generic Set scalar-family bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_owned_mixed_generic_record_projection_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"
