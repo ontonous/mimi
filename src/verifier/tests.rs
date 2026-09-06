@@ -933,7 +933,12 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
     );
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed verifier route must not access a retained legacy body"
+    );
     let result = verify_result
         .iter()
         .find(|result| result.func_name == "list_len_contract")
@@ -947,7 +952,12 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
         Some(ProofArtifact::ENGINE_MIR)
     );
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed dual verifier route must not access a retained legacy body"
+    );
     let dual = dual_result
         .iter()
         .find(|result| result.func_name == "list_len_contract")
