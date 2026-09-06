@@ -1,4 +1,6 @@
-// Generic Record<T> non-Copy List projection remains outside the Copy ABI.
+// Generic Record<T> nested List projection remains outside the managed record
+// projection ABI. The current move-owned record island admits List<Copy
+// scalar>, but nested containers require a dedicated record-field ABI receipt.
 type Box<T> { value: T }
 
 func get<T>(boxed: Box<T>) -> T {
@@ -6,7 +8,7 @@ func get<T>(boxed: Box<T>) -> T {
 }
 
 func main() -> i64 {
-    let boxed: Box<List<i32>> = Box { value: [41] }
+    let boxed: Box<List<List<i32>>> = Box { value: [[41]] }
     let picked = get(boxed)
     drop(picked)
     42

@@ -9,10 +9,11 @@ use super::*;
 /// Validate the native recursive product ABI before LLVM sees a declaration.
 ///
 /// This is deliberately narrower than the backend-independent aggregate glue
-/// contract: this slice materializes only scalar leaves, owned Strings, tuples,
-/// and concrete records with those children.  A product containing a List,
-/// variant, reference, generic, or another unmodelled shape remains fail-closed
-/// even when another consumer could represent it.
+/// contract: this slice materializes only scalar leaves, owned Strings,
+/// `List<Copy scalar>` handles, tuples, and concrete records with those
+/// children. A product containing a variant, reference, generic, nested List,
+/// or another unmodelled shape remains fail-closed even when another consumer
+/// could represent it.
 pub(super) fn validate_native_product_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
@@ -119,13 +120,16 @@ pub(super) fn validate_native_non_copy_record_type(
             &field_desc.kind,
             MirTypeKind::Primitive(crate::core::PrimitiveType::String)
         );
+        let is_owned_list = matches!(field_desc.layout, MirLayout::List { .. })
+            && catalog.validate_move_owned_list_payload(&field.ty).is_ok();
         let supported = is_native_scalar_descriptor(field_desc)
             || (is_owned_string && catalog.validate_owned_string(&field.ty).is_ok())
+            || is_owned_list
             || (matches!(field_desc.layout, MirLayout::Tuple(_))
                 && validate_native_recursive_tuple_type(catalog, &field.ty).is_ok());
         if !supported {
             return Err(format!(
-                "record '{}' field '{}' type '{}' is outside the scalar/String/tuple ABI",
+                "record '{}' field '{}' type '{}' is outside the scalar/String/List<Copy scalar>/tuple ABI",
                 ty.as_str(),
                 field.name,
                 field.ty.as_str()
@@ -578,6 +582,8 @@ pub(super) fn native_basic_type<'ctx>(
                                 &field_desc.kind,
                                 MirTypeKind::Primitive(crate::core::PrimitiveType::String)
                             ) && catalog.validate_owned_string(&field.ty).is_ok())
+                            || (matches!(field_desc.layout, MirLayout::List { .. })
+                                && catalog.validate_move_owned_list_payload(&field.ty).is_ok())
                             || matches!(field_desc.layout, MirLayout::Tuple(_))
                     } else {
                         is_native_scalar_descriptor(field_desc)

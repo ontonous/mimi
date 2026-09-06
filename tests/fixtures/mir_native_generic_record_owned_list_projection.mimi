@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: consume one owned List<Copy scalar> field
+// from Box<T>. The list handle is moved out and then explicitly dropped by the
+// caller; no backend may infer this ownership from the pointer ABI.
+type Box<T> { value: T }
+
+func take<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i64 {
+    let boxed: Box<List<i32>> = Box { value: [1, 2] }
+    let picked = take(boxed)
+    drop(picked)
+    42
+}

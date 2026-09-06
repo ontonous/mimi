@@ -6542,12 +6542,23 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             ));
         }
-        if result.glue.move_out != MirGlueKind::OwnedString
-            || result.glue.clone != MirGlueKind::OwnedString
-            || result.glue.drop != MirGlueKind::OwnedString
+        let payload_glue = self
+            .validate_move_owned_payload(result_ty)
+            .map_err(|message| {
+                format!(
+                    "move projection result type '{}' is outside the canonical managed payload contract: {message}",
+                    result_ty.as_str()
+                )
+            })?;
+        if result.glue
+            != (MirGlueContract {
+                move_out: payload_glue,
+                clone: payload_glue,
+                drop: payload_glue,
+            })
         {
             return Err(format!(
-                "move projection result type '{}' requires owned-string field glue",
+                "move projection result type '{}' glue disagrees with its managed payload contract ({payload_glue:?})",
                 result_ty.as_str()
             ));
         }
@@ -6618,13 +6629,21 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
+        let payload_glue = self.validate_move_owned_payload(result_ty).map_err(|message| {
+            format!(
+                "record move/drop projection result is outside the canonical managed payload contract: {message}"
+            )
+        })?;
         if result.ownership != MirOwnership::Move
-            || result.glue.move_out != MirGlueKind::OwnedString
-            || result.glue.clone != MirGlueKind::OwnedString
-            || result.glue.drop != MirGlueKind::OwnedString
+            || result.glue
+                != (MirGlueContract {
+                    move_out: payload_glue,
+                    clone: payload_glue,
+                    drop: payload_glue,
+                })
         {
             return Err(
-                "record move/drop projection result requires owned String Move/Clone/Drop glue"
+                "record move/drop projection result glue disagrees with its managed payload contract"
                     .into(),
             );
         }

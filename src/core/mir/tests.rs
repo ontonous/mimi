@@ -7490,16 +7490,76 @@ fn materializes_generic_record_f64_projection_with_float_field_receipt() {
 }
 
 #[test]
+fn materializes_generic_record_owned_list_projection_with_list_glue_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_list_projection.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<List<i32>> projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjection { contract }
+                    if contract.arity == 1 && contract.name == "value"
+            )
+        })
+        .expect("owned generic Record<List<i32>> projection instance");
+    let function = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic Record<List<i32>> executable instance");
+    let parameter = function.parameters.first().expect("record parameter");
+    let parameter_ty = &function
+        .values
+        .get(parameter)
+        .expect("record parameter TypeDesc")
+        .ty;
+    let record = program
+        .type_catalog()
+        .get(parameter_ty)
+        .expect("record TypeDesc");
+    let crate::core::mir::types::MirLayout::Record { fields, .. } = &record.layout else {
+        panic!("specialized generic record must carry a record layout");
+    };
+    assert_eq!(fields.len(), 1);
+    let field = program
+        .type_catalog()
+        .get(&fields[0].ty)
+        .expect("List field TypeDesc");
+    assert_eq!(
+        field.glue.move_out,
+        crate::core::mir::types::MirGlueKind::List
+    );
+    assert_eq!(field.glue.clone, crate::core::mir::types::MirGlueKind::List);
+    assert_eq!(field.glue.drop, crate::core::mir::types::MirGlueKind::List);
+    assert!(matches!(
+        field.layout,
+        crate::core::mir::types::MirLayout::List { .. }
+    ));
+    assert!(function.canonical_text().contains("move_project"));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Record<List<i32>> projection execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
 fn generic_record_list_projection_remains_rejected_before_consumers() {
     let source = include_str!(
         "../../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
     );
     let checked = checked_program(source);
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("generic Record<List<i32>> projection must remain fail-closed");
+        .expect_err("generic Record<List<List<i32>>> projection must remain fail-closed");
     let message = format!("{error:?}");
     assert!(
-        message.contains("generic record projection") || message.contains("Copy scalar/bool"),
-        "unexpected generic record List rejection: {message}"
+        message.contains("generic record projection")
+            || message.contains("nested")
+            || message.contains("Copy scalar/bool"),
+        "unexpected generic nested List rejection: {message}"
     );
 }

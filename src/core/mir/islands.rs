@@ -2418,10 +2418,56 @@ pub(crate) fn is_owned_generic_record_update_callable(
 /// structured `if`; collection values, builtin/runtime calls, loops,
 /// concurrency, and higher-order expressions belong to other islands.
 fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
-    fn expr_has_unmigrated_shape(expression: &ResolvedExpr) -> bool {
+    // A managed generic record projection may materialize a one-level
+    // `List<Copy scalar>` payload in its caller.  The list literal itself is
+    // still checker-owned and its MIR construction/glue are validated by the
+    // managed record island; rejecting it here would route the whole program
+    // to legacy before that island can be selected.  Keep this exception
+    // scoped to a program that actually contains the admitted projection,
+    // and continue rejecting nested/opaque collection shapes below.
+    let admits_managed_record_list =
+        program.callables().values().any(|callable| {
+            is_owned_generic_record_projection_callable(program, callable)
+                || is_owned_generic_record_update_callable(program, callable)
+        }) || has_unsupported_generic_record_projection_candidate(program);
+
+    fn is_managed_record_list_literal(
+        program: &CheckedProgram,
+        expression: &ResolvedExpr,
+        admits_managed_record_list: bool,
+    ) -> bool {
+        if !admits_managed_record_list {
+            return false;
+        }
+        let Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) = program.resolved_types().get(&expression.ty)
+        else {
+            return false;
+        };
+        if item.as_str() != "builtin:type:List" || arguments.len() != 1 {
+            return false;
+        }
+        matches!(
+            program.resolved_types().get(&arguments[0]),
+            Some(ResolvedType::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+            ))
+        )
+    }
+
+    fn expr_has_unmigrated_shape(
+        program: &CheckedProgram,
+        expression: &ResolvedExpr,
+        admits_managed_record_list: bool,
+    ) -> bool {
         match &expression.kind {
-            ResolvedExprKind::List(_)
-            | ResolvedExprKind::Map(_)
+            ResolvedExprKind::List(_) => {
+                let admitted =
+                    is_managed_record_list_literal(program, expression, admits_managed_record_list);
+                !admitted
+            }
+            ResolvedExprKind::Map(_)
             | ResolvedExprKind::Set(_)
             | ResolvedExprKind::Tuple(_)
             | ResolvedExprKind::Comprehension { .. }
@@ -2441,17 +2487,22 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
             | ResolvedExprKind::TypeOf(_) => true,
             ResolvedExprKind::Project { value, projection } => {
                 !matches!(projection, ResolvedValueProjection::Field(_))
-                    || expr_has_unmigrated_shape(value)
+                    || expr_has_unmigrated_shape(program, value, admits_managed_record_list)
                     || matches!(projection, ResolvedValueProjection::Index(_))
             }
             ResolvedExprKind::Binary { left, right, .. } => {
-                expr_has_unmigrated_shape(left) || expr_has_unmigrated_shape(right)
+                expr_has_unmigrated_shape(program, left, admits_managed_record_list)
+                    || expr_has_unmigrated_shape(program, right, admits_managed_record_list)
             }
             ResolvedExprKind::Unary { operand, .. }
-            | ResolvedExprKind::Cast { value: operand, .. } => expr_has_unmigrated_shape(operand),
+            | ResolvedExprKind::Cast { value: operand, .. } => {
+                expr_has_unmigrated_shape(program, operand, admits_managed_record_list)
+            }
             // `old` is a verifier contract wrapper around an otherwise
             // ordinary scalar/record expression, not a runtime shape.
-            ResolvedExprKind::Old(value) => expr_has_unmigrated_shape(value),
+            ResolvedExprKind::Old(value) => {
+                expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+            }
             ResolvedExprKind::Call(call) => {
                 matches!(
                     call.callee,
@@ -2460,60 +2511,78 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 ) || !call.effects.is_empty()
                     || !call.session.is_empty()
                     || call.permission.is_some()
-                    || call
-                        .arguments
-                        .iter()
-                        .any(|argument| expr_has_unmigrated_shape(&argument.value))
+                    || call.arguments.iter().any(|argument| {
+                        expr_has_unmigrated_shape(
+                            program,
+                            &argument.value,
+                            admits_managed_record_list,
+                        )
+                    })
             }
             ResolvedExprKind::Record { fields, rest, .. } => {
-                rest.as_ref()
-                    .is_some_and(|value| expr_has_unmigrated_shape(value))
-                    || fields
-                        .iter()
-                        .any(|field| expr_has_unmigrated_shape(&field.value))
+                rest.as_ref().is_some_and(|value| {
+                    expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                }) || fields.iter().any(|field| {
+                    expr_has_unmigrated_shape(program, &field.value, admits_managed_record_list)
+                })
             }
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-                block_has_unmigrated_shape(block)
+                block_has_unmigrated_shape(program, block, admits_managed_record_list)
             }
             ResolvedExprKind::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                expr_has_unmigrated_shape(condition)
-                    || block_has_unmigrated_shape(then_block)
-                    || block_has_unmigrated_shape(else_block)
+                expr_has_unmigrated_shape(program, condition, admits_managed_record_list)
+                    || block_has_unmigrated_shape(program, then_block, admits_managed_record_list)
+                    || block_has_unmigrated_shape(program, else_block, admits_managed_record_list)
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
-                expr_has_unmigrated_shape(scrutinee)
+                expr_has_unmigrated_shape(program, scrutinee, admits_managed_record_list)
                     || arms.iter().any(|arm| {
-                        arm.guard.as_ref().is_some_and(expr_has_unmigrated_shape)
-                            || expr_has_unmigrated_shape(&arm.body)
+                        arm.guard.as_ref().is_some_and(|guard| {
+                            expr_has_unmigrated_shape(program, guard, admits_managed_record_list)
+                        }) || expr_has_unmigrated_shape(
+                            program,
+                            &arm.body,
+                            admits_managed_record_list,
+                        )
                     })
             }
-            ResolvedExprKind::Lambda(lambda) => block_has_unmigrated_shape(&lambda.body),
+            ResolvedExprKind::Lambda(lambda) => {
+                block_has_unmigrated_shape(program, &lambda.body, admits_managed_record_list)
+            }
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::Load(_)
             | ResolvedExprKind::Constant(_) => false,
         }
     }
 
-    fn block_has_unmigrated_shape(block: &crate::core::ir::ResolvedBlock) -> bool {
+    fn block_has_unmigrated_shape(
+        program: &CheckedProgram,
+        block: &crate::core::ir::ResolvedBlock,
+        admits_managed_record_list: bool,
+    ) -> bool {
         block.statements.iter().any(|statement| {
             if !statement.backend_requirements.is_empty() {
                 return true;
             }
             match &statement.kind {
                 ResolvedStmtKind::Bind { initializer, .. } => {
-                    initializer.as_ref().is_some_and(expr_has_unmigrated_shape)
+                    initializer.as_ref().is_some_and(|value| {
+                        expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                    })
                 }
                 ResolvedStmtKind::Assign { value, .. }
                 | ResolvedStmtKind::Expr(value)
                 | ResolvedStmtKind::Contract {
                     condition: value, ..
-                } => expr_has_unmigrated_shape(value),
+                } => expr_has_unmigrated_shape(program, value, admits_managed_record_list),
                 ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
-                    value.as_ref().is_some_and(expr_has_unmigrated_shape)
+                    value.as_ref().is_some_and(|value| {
+                        expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+                    })
                 }
                 ResolvedStmtKind::While { .. }
                 | ResolvedStmtKind::WhileLet { .. }
@@ -2526,17 +2595,16 @@ fn flat_record_body_has_unmigrated_shape(program: &CheckedProgram) -> bool {
                 | ResolvedStmtKind::NestedCallable(_) => true,
                 ResolvedStmtKind::Continue | ResolvedStmtKind::Drop(_) => false,
             }
-        }) || block
-            .result
-            .as_ref()
-            .is_some_and(|value| expr_has_unmigrated_shape(value))
+        }) || block.result.as_ref().is_some_and(|value| {
+            expr_has_unmigrated_shape(program, value, admits_managed_record_list)
+        })
     }
 
     program
         .resolved_bodies()
         .values()
         .filter(|body| !is_prelude_origin(program, &body.root.origin))
-        .any(|body| block_has_unmigrated_shape(&body.root))
+        .any(|body| block_has_unmigrated_shape(program, &body.root, admits_managed_record_list))
 }
 
 pub(super) fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {

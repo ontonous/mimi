@@ -6211,6 +6211,32 @@ fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
 }
 
 #[test]
+fn canonical_default_generic_record_owned_list_projection_routes_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_record_owned_list_projection.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Record<List<i32>> default run");
+    assert_eq!(run.status.code(), Some(42));
+    assert!(String::from_utf8_lossy(&run.stderr).is_empty());
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Record<List<i32>> default verify");
+    assert!(verify.status.success());
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(!stdout.contains("flow_ast"), "{stdout}");
+}
+
+#[test]
 fn canonical_default_generic_record_list_projection_rejects_before_legacy() {
     let fixture = project_root()
         .join("tests")
@@ -6221,7 +6247,7 @@ fn canonical_default_generic_record_list_projection_rejects_before_legacy() {
         .arg("run")
         .arg(&fixture)
         .output()
-        .expect("failed to spawn rejected generic Record<List> default run");
+        .expect("failed to spawn rejected generic nested List default run");
     assert!(!run.status.success());
     let stderr = String::from_utf8_lossy(&run.stderr);
     let stderr_lower = stderr.to_ascii_lowercase();

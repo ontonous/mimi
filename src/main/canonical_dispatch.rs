@@ -3807,7 +3807,7 @@ mod tests {
             "../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
         ));
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("generic Record<List<i32>> projection must fail closed");
+            panic!("generic Record<List<List<i32>>> projection must fail closed");
         };
         assert!(reason.contains("generic record projection"), "{reason}");
         assert!(!reason.contains("legacy"), "{reason}");

@@ -2316,6 +2316,34 @@ fn generic_record_f64_projection_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_record_owned_list_projection_is_verified_from_canonical_mir() {
+    let source =
+        include_str!("../../tests/fixtures/mir_native_generic_record_owned_list_projection.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-owned-list").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Record<List<i32>> projection MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { contract }
+            if contract.arity == 1 && contract.name == "value"
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Record<List<i32>> projection verifier capability");
+    let results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("generic Record<List<i32>> projection must remain on canonical verifier route");
+    assert!(
+        results
+            .iter()
+            .all(|result| result.message == "no contracts to verify"),
+        "unexpected verifier result for managed record projection: {results:?}"
+    );
+}
+
+#[test]
 fn generic_record_list_projection_is_rejected_before_verifier_consumers() {
     let source = include_str!(
         "../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
@@ -2323,11 +2351,13 @@ fn generic_record_list_projection_is_rejected_before_verifier_consumers() {
     let file = parse_memory_source(source, "mir-generic-record-list-rejected").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("generic Record<List<i32>> projection must fail before verifier");
+        .expect_err("generic Record<List<List<i32>>> projection must fail before verifier");
     let message = format!("{error:?}");
     assert!(
-        message.contains("generic record projection") || message.contains("Copy scalar/bool"),
-        "unexpected verifier-boundary rejection: {message}"
+        message.contains("generic record projection")
+            || message.contains("nested")
+            || message.contains("Copy scalar/bool"),
+        "unexpected verifier-boundary nested List rejection: {message}"
     );
 }
 

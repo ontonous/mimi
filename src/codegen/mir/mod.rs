@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn native_validator_rejects_record_with_unsupported_child_before_llvm_declarations() {
         let program = canonical_program(
-            "type Box { text: string, values: List<i32> }\nfunc main() -> i32 { let value = Box { text: \"x\", values: [1] }; drop(value); 0 }",
+            "type Box { text: string, values: Option<string> }\nfunc main() -> i32 { let value = Box { text: \"x\", values: Some(\"y\") }; drop(value); 0 }",
         );
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_record_validator_test");
@@ -995,7 +995,7 @@ mod tests {
         assert!(
             diagnostics.iter().any(|diagnostic| diagnostic
                 .message
-                .contains("outside the scalar/String/tuple ABI")),
+                .contains("outside the scalar/String/List<Copy scalar>/tuple ABI")),
             "missing unsupported-child rejection: {diagnostics:?}"
         );
         assert!(
@@ -5591,6 +5591,43 @@ mod tests {
             .module
             .verify()
             .expect("native owned generic record projection module verifies");
+    }
+
+    #[test]
+    fn native_emitter_consumes_owned_generic_record_list_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_list_projection.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordProjection { .. }
+                )
+            })
+            .expect("owned generic Record<List<i32>> projection instance");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic Record<List<i32>> projection target");
+        assert!(target.canonical_text().contains("move_project"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic Record<List<i32>> projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_owned_list_projection");
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic Record<List<i32>> projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic Record<List<i32>> projection module verifies");
     }
 
     #[test]

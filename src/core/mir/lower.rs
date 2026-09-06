@@ -645,7 +645,7 @@ fn rewrite_owned_record_call_argument(
     let Some(producer_index) = call_index.checked_sub(1) else {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call requires a direct local Clone or fresh Record Construct producer".into(),
+            message: "owned generic record projection call requires a direct local Move/Clone or fresh Record Construct producer".into(),
         }]);
     };
     if let Some(MirInstruction {
@@ -707,37 +707,41 @@ fn rewrite_owned_record_call_argument(
         }
         return Ok(());
     }
-    let Some(MirInstruction {
-        kind:
-            MirInstructionKind::Clone {
-                result: produced,
-                source,
-            },
-        ..
-    }) = block.instructions.get(producer_index)
-    else {
-        return Err(vec![MirLoweringError {
-            node_id: subject,
-            message: "owned generic record projection call requires a direct local Clone or fresh Record Construct producer".into(),
-        }]);
+    let (produced, source, producer_is_move) = match block.instructions.get(producer_index) {
+        Some(MirInstruction {
+            kind: MirInstructionKind::Move { result, source },
+            ..
+        }) => (result, source, true),
+        Some(MirInstruction {
+            kind: MirInstructionKind::Clone { result, source },
+            ..
+        }) => (result, source, false),
+        _ => {
+            return Err(vec![MirLoweringError {
+                node_id: subject,
+                message: "owned generic record projection call requires a direct local Move/Clone or fresh Record Construct producer".into(),
+            }])
+        }
     };
     if produced != argument {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call argument is not the direct Clone result"
-                .into(),
+            message:
+                "owned generic record projection call argument is not the direct Move/Clone result"
+                    .into(),
         }]);
     }
     if !source.as_str().starts_with("local:") {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call Clone source is not a local".into(),
+            message: "owned generic record projection call Move/Clone source is not a local".into(),
         }]);
     }
     let Some(source_ty) = caller.values.get(source).map(|value| value.ty.clone()) else {
         return Err(vec![MirLoweringError {
             node_id: subject,
-            message: "owned generic record projection call Move source TypeDesc is absent".into(),
+            message: "owned generic record projection call Move/Clone source TypeDesc is absent"
+                .into(),
         }]);
     };
     if source_ty != *target_parameter_ty {
@@ -762,31 +766,26 @@ fn rewrite_owned_record_call_argument(
             message: "owned generic record projection call source is not Move-owned".into(),
         }]);
     }
-    if let Err(message) =
-        type_catalog.validate_glue(&source_ty, super::types::MirGlueOperation::MoveOut)
-    {
+    let operation = if producer_is_move {
+        super::types::MirGlueOperation::MoveOut
+    } else {
+        super::types::MirGlueOperation::Clone
+    };
+    if let Err(message) = type_catalog.validate_glue(&source_ty, operation) {
         return Err(vec![MirLoweringError {
             node_id: subject,
             message: format!(
-                "owned generic record projection call source lacks MoveOut glue: {message}"
+                "owned generic record projection call source lacks {:?} glue: {message}",
+                operation
             ),
         }]);
     }
-    let MirInstruction {
-        kind:
-            MirInstructionKind::Clone {
-                result: produced,
-                source,
-            },
-        ..
-    } = &mut block.instructions[producer_index]
-    else {
-        unreachable!("producer checked above")
-    };
-    block.instructions[producer_index].kind = MirInstructionKind::Move {
-        result: produced.clone(),
-        source: source.clone(),
-    };
+    if !producer_is_move {
+        block.instructions[producer_index].kind = MirInstructionKind::Move {
+            result: produced.clone(),
+            source: source.clone(),
+        };
+    }
     Ok(())
 }
 
@@ -1660,9 +1659,10 @@ fn materialize_generic_instance(
         || is_owned_result_projection_fallback;
     // The owned record projection is a separate contract from generic
     // identity: its argument is the concrete record's field type, while the
-    // executable parameter/result are the specialized record and String.
-    // Keep the admission closed to exactly owned String; all other generic
-    // record arguments remain on the scalar fail-closed path.
+    // executable parameter/result are the specialized record and managed
+    // payload. TypeDesc owns the closed payload family (owned String or
+    // List<Copy scalar>); all other generic record arguments remain on the
+    // scalar fail-closed path.
     let is_owned_record_projection_drop =
         is_owned_record_projection_drop_callable(program, callable)
             && type_catalog.validate_owned_string(&concrete).is_ok();
@@ -1680,7 +1680,7 @@ fn materialize_generic_instance(
                     ResolvedExprKind::Record { rest: Some(_), .. }
                 )
             })
-        && type_catalog.validate_owned_string(&concrete).is_ok();
+        && type_catalog.validate_move_owned_payload(&concrete).is_ok();
     let is_owned_record_update = generic_record_facade
         && is_owned_generic_record_update_callable(program, callable)
         && type_catalog
@@ -1975,9 +1975,38 @@ fn materialize_generic_instance(
                         base,
                         projection: MirProjection::Field(field),
                         list_index_contract: None,
+                    }
+                    | MirInstructionKind::MoveProject {
+                        result,
+                        base,
+                        projection: MirProjection::Field(field),
                     },
                 ..
             }] => (result.clone(), base.clone(), field.clone()),
+            [MirInstruction {
+                kind: MirInstructionKind::Load { result, place },
+                ..
+            }] => {
+                let [crate::core::ir::ResolvedProjection::Field { field, .. }] =
+                    place.projections.as_slice()
+                else {
+                    return Err(vec![MirLoweringError {
+                        node_id: subject(),
+                        message:
+                            "owned generic record move/drop projection Load must be a direct field"
+                                .into(),
+                    }]);
+                };
+                let base = MirValueId::new(format!("local:{}", place.base.0 .0)).map_err(
+                    |error| {
+                        vec![MirLoweringError {
+                            node_id: subject(),
+                            message: error.to_string(),
+                        }]
+                    },
+                )?;
+                (result.clone(), base, field.clone())
+            }
             [_] => {
                 return Err(vec![MirLoweringError {
                     node_id: subject(),
@@ -2053,6 +2082,28 @@ fn materialize_generic_instance(
                     },
                 ..
             }] => (result.clone(), base.clone(), field.clone()),
+            [MirInstruction {
+                kind: MirInstructionKind::Load { result, place },
+                ..
+            }] => {
+                let [crate::core::ir::ResolvedProjection::Field { field, .. }] =
+                    place.projections.as_slice()
+                else {
+                    return Err(vec![MirLoweringError {
+                        node_id: subject(),
+                        message: "owned generic record projection Load must be a direct field"
+                            .into(),
+                    }]);
+                };
+                let base =
+                    MirValueId::new(format!("local:{}", place.base.0 .0)).map_err(|error| {
+                        vec![MirLoweringError {
+                            node_id: subject(),
+                            message: error.to_string(),
+                        }]
+                    })?;
+                (result.clone(), base, field.clone())
+            }
             [_] => {
                 return Err(vec![MirLoweringError {
                     node_id: subject(),
@@ -5272,10 +5323,12 @@ pub(crate) fn validate_scalar_tuple_projection_mir(
 
 /// Validate the materialized body behind an `OwnedRecordProjection` generic
 /// instance.  This is the consuming counterpart of the Copy projection
-/// validator: the complete record is moved, one owned String field is
-/// returned, and the TypeDesc contract proves there is no residual non-Copy
-/// sibling left behind. A two-field record is admitted only when its other
-/// field is a concrete Copy scalar, so no residual/drop node is needed.
+/// validator: the complete record is moved, one managed field is returned,
+/// and the TypeDesc contract proves there is no residual non-Copy sibling left
+/// behind. The managed field is currently the closed OwnedString or
+/// List<Copy scalar> payload family. A two-field record is admitted only when
+/// its other field is a concrete Copy scalar, so no residual/drop node is
+/// needed.
 pub(crate) fn validate_owned_record_projection_mir(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
@@ -5340,9 +5393,13 @@ pub(crate) fn validate_owned_record_projection_mir(
             "owned generic record projection requires one or two fields and a direct result identity".into(),
         );
     }
-    if type_catalog.validate_owned_string(&result_ty).is_err() {
-        return Err("owned generic record projection result must be canonical String".into());
-    }
+    type_catalog
+        .validate_move_owned_payload(&result_ty)
+        .map_err(|message| {
+            format!(
+                "owned generic record projection result is outside the canonical managed payload contract: {message}"
+            )
+        })?;
     let MirTerminator::Return {
         value: Some(returned),
     } = &block.terminator
