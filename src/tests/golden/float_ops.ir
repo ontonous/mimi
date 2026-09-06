@@ -60,6 +60,22 @@ declare i64 @mimi_mir_list_get_scalar(ptr, i8, i64)
 
 declare void @mimi_mir_list_drop_scalar(ptr, i8)
 
+declare ptr @mimi_mir_list_new_nested()
+
+declare i32 @mimi_mir_list_len_nested(ptr)
+
+declare ptr @mimi_mir_list_get_nested(ptr, i64)
+
+declare ptr @mimi_mir_list_reverse_nested(ptr)
+
+declare ptr @mimi_mir_list_concat_nested(ptr, ptr)
+
+declare i8 @mimi_mir_list_push_nested(ptr, ptr)
+
+declare ptr @mimi_mir_list_clone_nested(ptr)
+
+declare void @mimi_mir_list_drop_nested(ptr)
+
 declare i64 @mimi_map_new()
 
 declare i64 @mimi_map_clone(i64)
