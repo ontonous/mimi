@@ -3288,7 +3288,10 @@ mod tests {
             reason.contains("S11 scalar collection candidate"),
             "{reason}"
         );
-        assert!(reason.contains("Copy scalar contract"), "{reason}");
+        assert!(
+            reason.contains("outside the canonical Copy scalar"),
+            "{reason}"
+        );
     }
 
     #[test]

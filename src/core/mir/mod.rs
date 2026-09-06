@@ -2093,6 +2093,36 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
             }
         }
     }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current = transfers.iter().cloned().collect::<Vec<_>>();
+        for transferred in current {
+            let Some(sources) = non_consuming_edges.get(&transferred) else {
+                continue;
+            };
+            for source in sources {
+                if transfers.insert(source.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current = drops.iter().cloned().collect::<Vec<_>>();
+        for dropped in current {
+            let Some(sources) = non_consuming_edges.get(&dropped) else {
+                continue;
+            };
+            for source in sources {
+                if drops.insert(source.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
 
     // A checker Return event names the resource's stable local identity, while
     // the MIR Return terminator often carries a fresh expression value.  Close
@@ -2175,6 +2205,7 @@ pub(crate) fn validate_transfer_event_boundaries(
     }
 
     let mut consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
+    let mut non_consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
     let mut boundaries = Vec::new();
     for block in function.blocks.values() {
         for instruction in &block.instructions {
@@ -2211,6 +2242,13 @@ pub(crate) fn validate_transfer_event_boundaries(
                         .entry(result.clone())
                         .or_default()
                         .extend(fields.iter().map(|(_, value)| value.clone()));
+                }
+                MirInstructionKind::Clone { result, source }
+                | MirInstructionKind::Copy { result, source } => {
+                    non_consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(source.clone());
                 }
                 MirInstructionKind::ListOp {
                     result,
@@ -2279,6 +2317,9 @@ pub(crate) fn validate_transfer_event_boundaries(
                 continue;
             }
             if let Some(sources) = consuming_edges.get(&candidate) {
+                pending.extend(sources.iter().cloned());
+            }
+            if let Some(sources) = non_consuming_edges.get(&candidate) {
                 pending.extend(sources.iter().cloned());
             }
         }

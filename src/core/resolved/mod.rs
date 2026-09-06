@@ -8294,14 +8294,14 @@ fn format_session_type(ty: &crate::ast::SessionType) -> String {
     match ty.unlocated() {
         crate::ast::SessionType::Send(payload, cont) => {
             format!(
-                "!{}.{}",
+                "!{} . {}",
                 crate::core::fmt_type(payload),
                 format_session_type(cont)
             )
         }
         crate::ast::SessionType::Recv(payload, cont) => {
             format!(
-                "?{}.{}",
+                "?{} . {}",
                 crate::core::fmt_type(payload),
                 format_session_type(cont)
             )

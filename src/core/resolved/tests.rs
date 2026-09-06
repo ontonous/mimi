@@ -476,10 +476,10 @@ func main() -> i32 { 0 }
     assert_eq!(actions.iter().filter(|action| action.terminal).count(), 1);
     assert!(actions
         .iter()
-        .any(|action| action.before.as_str().starts_with("!i32.")));
+        .any(|action| action.before.as_str().starts_with("!i32 .")));
     assert!(actions
         .iter()
-        .any(|action| action.before.as_str().starts_with("?i32.")));
+        .any(|action| action.before.as_str().starts_with("?i32 .")));
     assert!(actions
         .iter()
         .any(|action| action.terminal && action.after.as_str() == "closed"));
@@ -1626,24 +1626,27 @@ func main() -> i32 { 0 }
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
-    assert_eq!(program.session_body_display("Ping"), Some("!i32.?i32.end"));
+    assert_eq!(
+        program.session_body_display("Ping"),
+        Some("!i32 . ?i32 . end")
+    );
     let interp = crate::interp::Interpreter::from_checked(&program);
     assert_eq!(
         interp.resolved_session_display("Ping"),
-        Some("!i32.?i32.end")
+        Some("!i32 . ?i32 . end")
     );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
     let _ = verifier.verify_checked(&program);
     assert_eq!(
         verifier.checked_session_display("Ping"),
-        Some("!i32.?i32.end")
+        Some("!i32 . ?i32 . end")
     );
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "sess");
     codegen.compile_checked(&program).expect("compile");
     assert_eq!(
         codegen.resolved_session_display("Ping"),
-        Some("!i32.?i32.end")
+        Some("!i32 . ?i32 . end")
     );
 }
 

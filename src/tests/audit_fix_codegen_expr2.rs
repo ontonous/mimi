@@ -1238,7 +1238,7 @@ fn audit_generic_identity_list_tuple_return_stop_ship_receipt() {
         }
     "#,
         "7\n9\n[[(1, 2), (3, 4)]]",
-        Some("outside the canonical Copy scalar contract"),
+        Some("outside the canonical Copy scalar"),
     );
 }
 

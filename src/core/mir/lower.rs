@@ -7519,7 +7519,7 @@ impl<'a> Lowerer<'a> {
                                             && place.projections.is_empty()
                                 )
                             });
-                        if session_send_call && session_call && index == 0 {
+                        if (session_send_call || session_recv_call) && session_call && index == 0 {
                             if let ResolvedExprKind::Load(place) = &argument.value.kind {
                                 if place.projections.is_empty() {
                                     return self.local_value(&place.base).unwrap_or_else(|_| {

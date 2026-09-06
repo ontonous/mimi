@@ -2548,7 +2548,7 @@ mod tests {
         };
         assert!(errors
             .iter()
-            .any(|error| error.message.contains("Copy scalar contract")));
+            .any(|error| error.message.contains("outside the canonical Copy scalar")));
     }
 
     #[test]

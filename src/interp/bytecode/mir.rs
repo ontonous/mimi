@@ -8,7 +8,7 @@
 //! glued tuple/record products, and concrete Lists including the
 //! bounded one-level nested List construction/clone/drop/outer-len/index/reverse/concat shape.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -218,6 +218,36 @@ impl<'a> FunctionEmitter<'a> {
     /// mutable, session, and actor effects remain fail-closed so an
     /// unsupported fact cannot be silently discarded.
     fn validate_ownership(&mut self) {
+        let mut non_consuming_edges: BTreeMap<MirValueId, BTreeSet<MirValueId>> = BTreeMap::new();
+        for block in self.function.blocks.values() {
+            for instruction in &block.instructions {
+                if let MirInstructionKind::Move { result, source }
+                | MirInstructionKind::Clone { result, source }
+                | MirInstructionKind::Copy { result, source } = &instruction.kind
+                {
+                    non_consuming_edges
+                        .entry(result.clone())
+                        .or_default()
+                        .insert(source.clone());
+                }
+            }
+        }
+        let reaches = |value: &MirValueId, candidate: &MirValueId| {
+            let mut seen = BTreeSet::new();
+            let mut pending = vec![candidate.clone()];
+            while let Some(current) = pending.pop() {
+                if current == *value {
+                    return true;
+                }
+                if !seen.insert(current.clone()) {
+                    continue;
+                }
+                if let Some(sources) = non_consuming_edges.get(&current) {
+                    pending.extend(sources.iter().cloned());
+                }
+            }
+            false
+        };
         let events = self.function.ownership.events.clone();
         for event in events {
             let Some(value) = event.value.as_ref() else {
@@ -292,7 +322,7 @@ impl<'a> FunctionEmitter<'a> {
                                             endpoint,
                                             contract: Some(contract),
                                             ..
-                                        } if endpoint == value
+                                        } if reaches(value, endpoint)
                                             && contract.terminal
                                             && point == Some(event.point.0.as_str())
                                     )
@@ -321,7 +351,7 @@ impl<'a> FunctionEmitter<'a> {
                                     endpoint,
                                     contract: Some(contract),
                                     ..
-                                } if endpoint == value
+                                } if reaches(value, endpoint)
                                     && !contract.terminal
                                     && point == Some(event.point.0.as_str())
                             )
@@ -1128,6 +1158,7 @@ impl<'a> FunctionEmitter<'a> {
                     | MirGlueKind::List
                     | MirGlueKind::Set
                     | MirGlueKind::Aggregate
+                    | MirGlueKind::Session
             ) {
                 self.proto.emit(Op::Clone {
                     rd,
@@ -1708,6 +1739,7 @@ impl<'a> FunctionEmitter<'a> {
                     | MirGlueKind::List
                     | MirGlueKind::Set
                     | MirGlueKind::Aggregate
+                    | MirGlueKind::Session
             ) {
                 self.proto.emit(Op::Move {
                     rd: scratch,
@@ -4017,6 +4049,7 @@ impl<'a> FunctionEmitter<'a> {
                 | MirGlueKind::List
                 | MirGlueKind::Set
                 | MirGlueKind::Aggregate
+                | MirGlueKind::Session
         ) {
             self.proto.emit(Op::Move { rd, rs });
             true

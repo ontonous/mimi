@@ -405,7 +405,9 @@ fn executes_typed_session_pair_send_recv_roundtrip_across_mir_consumers() {
             .count(),
         1
     );
-    assert!(session_calls.iter().all(|(_, contract)| !contract.terminal));
+    assert!(session_calls.iter().all(|(operation, contract)| {
+        contract.terminal == (*operation == crate::core::mir::types::MirSessionOperation::Close)
+    }));
     assert_eq!(
         session_calls
             .iter()
@@ -777,9 +779,7 @@ fn materializes_i32_session_recv_with_range_checked_queue_oracle() {
     let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
         .execute_with_session_queues(
             &owner,
-            &[crate::core::mir::reference::MirRuntimeValue::Int(
-                2_147_483_647,
-            )],
+            &[crate::core::mir::reference::MirRuntimeValue::Int(17)],
             &[crate::core::mir::reference::MirSessionQueueInput {
                 endpoint: 17,
                 values: vec![2_147_483_647],
