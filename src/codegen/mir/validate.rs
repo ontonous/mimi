@@ -425,6 +425,37 @@ impl<'a> NativeMirValidator<'a> {
             )
         });
         if promoted_distinct_result {
+            if let Some(receipt) =
+                self.program
+                    .instances()
+                    .values()
+                    .find_map(|instance| match &instance.contract {
+                        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                            contract,
+                        } if contract.source_ty == *ty
+                            && contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Copy =>
+                        {
+                            Some(contract)
+                        }
+                        _ => None,
+                    })
+            {
+                match self
+                    .program
+                    .type_catalog()
+                    .validate_generic_result_projection_trap_receipt(
+                        &receipt.source_ty,
+                        &receipt.result_ty,
+                        receipt,
+                    ) {
+                    Ok(()) => return true,
+                    Err(message) => {
+                        self.errors.push(NativeMirError::new(subject, message));
+                        return false;
+                    }
+                }
+            }
             match self
                 .program
                 .type_catalog()
@@ -1397,11 +1428,34 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_variant_projection_trap_receipt(&base_value.ty, &result_value.ty, contract)
-        {
+        let generic_result_copy_projection = self.program.instances().values().any(|instance| {
+            instance.function == function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_result_copy_projection {
+            self.program
+                .type_catalog()
+                .validate_generic_result_projection_trap_receipt(
+                    &base_value.ty,
+                    &result_value.ty,
+                    contract,
+                )
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_trap_receipt(
+                    &base_value.ty,
+                    &result_value.ty,
+                    contract,
+                )
+        };
+        if let Err(message) = receipt_validation {
             self.errors.push(NativeMirError::new(subject, message));
         }
     }

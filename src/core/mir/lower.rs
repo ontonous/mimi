@@ -1711,6 +1711,43 @@ fn materialize_generic_instance(
                         ) && call.arguments.len() == 2
                 )
             });
+    // Generic `Result<T, i32>.unwrap()` opens the heterogeneous Copy-f64 Ok
+    // ABI only for the checker-owned fixed-i32 envelope. `Result<T, T>` and
+    // other Result shapes remain on the scalar contract so a homogeneous
+    // `Result<f64, f64>` cannot inherit this exception accidentally.
+    let is_copy_result_projection = callable.signature.parameters.len() == 1
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Result { ok, error }
+                        if ok == &generic_id
+                            && matches!(
+                                program.resolved_types().get(error),
+                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                            )
+                )
+            })
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.result.unwrap"
+                        ) && call.arguments.len() == 1
+                )
+            });
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
@@ -1746,6 +1783,15 @@ fn materialize_generic_instance(
                     ))
                 } else {
                     catalog.validate_generic_option_projection_argument(&arguments[0])
+                }
+            } else if is_copy_result_projection {
+                if arguments.len() != 1 {
+                    Err(format!(
+                        "generic Result projection contract requires one type argument, got {}",
+                        arguments.len()
+                    ))
+                } else {
+                    catalog.validate_generic_result_projection_argument(&arguments[0])
                 }
             } else if generic_list_facade {
                 catalog
@@ -2310,7 +2356,7 @@ fn materialize_generic_instance(
                     &result_ty,
                 )
                 .or_else(|_| {
-                    type_catalog.validated_result_scalar_projection_trap_contract(
+                    type_catalog.validated_generic_result_scalar_projection_trap_contract(
                         &base_ty,
                         &placeholder.projection.variant,
                         &placeholder.projection.field,
@@ -3217,6 +3263,9 @@ pub(crate) fn validate_scalar_variant_projection_mir(
     if consuming {
         type_catalog
             .validate_variant_move_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+    } else if receipt.projection.nominal.as_str() == "builtin:type:Result" {
+        type_catalog
+            .validate_generic_result_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
     } else {
         type_catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
     }

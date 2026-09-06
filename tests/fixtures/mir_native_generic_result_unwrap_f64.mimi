@@ -1,0 +1,10 @@
+// Canonical MIR generic Result<T, i32> unwrap projection with a Copy f64 Ok payload.
+func unwrap<T>(value: Result<T, i32>) -> T {
+    value.unwrap()
+}
+
+func main() -> i64 {
+    let value: Result<f64, i32> = Ok(41.5)
+    let out = unwrap(value)
+    42
+}

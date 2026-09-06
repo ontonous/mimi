@@ -1622,7 +1622,23 @@ fn eval_instruction(
             let receipt = contract.as_ref().ok_or_else(|| {
                 "MIR direct variant projection has no canonical trap receipt".to_string()
             })?;
-            catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+            let generic_result_projection = program.instances().values().any(|instance| {
+                instance.function == function.owner
+                    && matches!(
+                        &instance.contract,
+                        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                            contract
+                        } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Copy
+                    )
+            });
+            if generic_result_projection {
+                catalog.validate_generic_result_projection_trap_receipt(
+                    &base_ty, &result_ty, receipt,
+                )?;
+            } else {
+                catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)?;
+            }
             let value =
                 state.values.get(base).cloned().ok_or_else(|| {
                     format!("MIR variant projection base '{}' is not defined", base)

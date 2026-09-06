@@ -2260,6 +2260,40 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate a materialized generic heterogeneous Result projection
+    /// receipt. This is intentionally separate from the direct concrete
+    /// receipt validator so a generic `Result<T, i32|bool>` instance may open
+    /// the Copy `f64` Ok ABI without widening direct Result lowering.
+    pub fn validate_generic_result_projection_trap_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        result_ty: &ResolvedTypeId,
+        receipt: &MirVariantProjectionTrapContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty || receipt.result_ty != *result_ty {
+            return Err(
+                "generic Result projection trap receipt disagrees with MIR value types".into(),
+            );
+        }
+        validate_trap_code(&receipt.trap_code)?;
+        if receipt.trap_code != MIR_VARIANT_PROJECTION_TRAP_CODE {
+            return Err(format!(
+                "generic Result projection trap code '{}' is not the canonical {}",
+                receipt.trap_code, MIR_VARIANT_PROJECTION_TRAP_CODE
+            ));
+        }
+        let expected = self.validated_generic_result_scalar_projection_trap_contract(
+            source_ty,
+            &receipt.projection.variant,
+            &receipt.projection.field,
+            result_ty,
+        )?;
+        if receipt != &expected {
+            return Err("variant projection trap receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
     /// Materialize the complete contract for a total Copy Result projection
     /// with an explicit fallback operand (`unwrap_or`).  Both payload slots
     /// and the fallback value share the same checker-owned i32 TypeDesc; the
@@ -3174,6 +3208,18 @@ impl MirTypeCatalog {
             self.validate_move_owned_payload(&arguments[0]).map(|_| ())
         } else if contract.projection.nominal.as_str() == "builtin:type:Option" {
             self.validate_generic_option_projection_argument(&arguments[0])
+        } else if contract.projection.nominal.as_str() == "builtin:type:Result"
+            && self.get(&contract.source_ty).is_some_and(|descriptor| {
+                matches!(
+                    &descriptor.layout,
+                    MirLayout::Result { ok, error, .. }
+                        if ok == &contract.result_ty
+                            && ok != error
+                            && self.validate_copy_scalar(error).is_ok()
+                )
+            })
+        {
+            self.validate_generic_result_projection_argument(&arguments[0])
         } else {
             self.validate_scalar_generic_arguments(arguments)
         }
@@ -3194,6 +3240,32 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
+            Ok(())
+        } else {
+            Err(format!(
+                "type '{}' is not a Copy f64 scalar with no-op glue",
+                ty.as_str()
+            ))
+        }
+    }
+
+    /// Validate the Copy payload family opened by the generic Result
+    /// projection slice: signed i32/i64/bool plus the canonical native f64
+    /// ABI. The distinct Result contract keeps its Err slot on the existing
+    /// Copy i32/bool boundary, so this helper is only for the selected Ok
+    /// payload.
+    pub fn validate_generic_result_projection_argument(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        if self.validate_copy_scalar(ty).is_ok() {
+            return Ok(());
+        }
+        self.validate_copy_float_scalar(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
         if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
             Ok(())
         } else {
@@ -7584,6 +7656,35 @@ impl MirTypeCatalog {
         field_id: &NodeId,
         result_ty: &ResolvedTypeId,
     ) -> Result<MirVariantProjectionTrapContract, String> {
+        self.validated_result_scalar_projection_trap_contract_with_f64(
+            source_ty, variant_id, field_id, result_ty, false,
+        )
+    }
+
+    /// Materialize a heterogeneous generic `Result<T, i32|bool>.unwrap()`
+    /// receipt after `T` has been specialized. This wrapper is the only path
+    /// that admits a Copy `f64` Ok payload; the direct concrete Result island
+    /// remains signed-scalar-only.
+    pub(crate) fn validated_generic_result_scalar_projection_trap_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
+        self.validated_result_scalar_projection_trap_contract_with_f64(
+            source_ty, variant_id, field_id, result_ty, true,
+        )
+    }
+
+    fn validated_result_scalar_projection_trap_contract_with_f64(
+        &self,
+        source_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        field_id: &NodeId,
+        result_ty: &ResolvedTypeId,
+        allow_f64_ok: bool,
+    ) -> Result<MirVariantProjectionTrapContract, String> {
         let descriptor = self.get(source_ty).ok_or_else(|| {
             format!(
                 "Result projection source type '{}' is absent from MIR type catalog",
@@ -7626,8 +7727,25 @@ impl MirTypeCatalog {
                     .into(),
             );
         }
-        self.validate_copy_scalar(result_ty)?;
+        if allow_f64_ok {
+            self.validate_generic_result_projection_argument(result_ty)?;
+        } else {
+            self.validate_copy_scalar(result_ty)?;
+        }
         self.validate_copy_scalar(error)?;
+        if error != result_ty
+            && !self.get(error).is_some_and(|descriptor| {
+                matches!(
+                    &descriptor.kind,
+                    MirTypeKind::Primitive(PrimitiveType::I32 | PrimitiveType::Bool)
+                )
+            })
+        {
+            return Err(
+                "generic heterogeneous Result projection requires an i32 or bool Err payload"
+                    .into(),
+            );
+        }
         let selected = variants
             .iter()
             .find(|variant| {

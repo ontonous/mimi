@@ -358,6 +358,20 @@ pub(super) fn native_variant_abi(
     ty: &crate::core::ResolvedTypeId,
     moving: bool,
 ) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    native_variant_abi_with_generic_result(catalog, ty, moving, false)
+}
+
+/// Materialize a variant ABI for a function whose MIR instance table has
+/// already admitted the heterogeneous generic `Result<T, i32|bool>` Copy
+/// projection island. The direct concrete variant ABI remains narrow; callers
+/// must opt into this helper only after carrying the checker-owned instance
+/// identity into their backend context.
+pub(super) fn native_variant_abi_with_generic_result(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    moving: bool,
+    allow_generic_result: bool,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| NativeMirError::new(ty.as_str(), "variant TypeDesc is absent"))?;
@@ -374,7 +388,8 @@ pub(super) fn native_variant_abi(
             }
         }
     } else if matches!(descriptor.layout, MirLayout::Result { .. })
-        && catalog.validate_copy_result_scalar_variant(ty).is_ok()
+        && (catalog.validate_copy_result_scalar_variant(ty).is_ok()
+            || (allow_generic_result && generic_result_copy_variant(catalog, ty)))
     {
         let MirLayout::Result { ok, error, .. } = &descriptor.layout else {
             unreachable!("Result layout checked above");
@@ -436,6 +451,39 @@ pub(super) fn native_variant_abi(
         },
         first_payload_type,
     ))
+}
+
+fn generic_result_copy_variant(catalog: &MirTypeCatalog, ty: &crate::core::ResolvedTypeId) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    let MirLayout::Result {
+        variants,
+        ok,
+        error,
+        ..
+    } = &descriptor.layout
+    else {
+        return false;
+    };
+    let Some(selected) = variants.iter().find(|variant| {
+        variant.id.0 == "builtin:variant:Result::Ok"
+            && variant.name == "Ok"
+            && variant.discriminant == 0
+            && variant.fields.len() == 1
+            && variant.fields[0].ty == *ok
+    }) else {
+        return false;
+    };
+    catalog
+        .validated_generic_result_scalar_projection_trap_contract(
+            ty,
+            &selected.id,
+            &selected.fields[0].id,
+            ok,
+        )
+        .is_ok()
+        && catalog.validate_copy_scalar(error).is_ok()
 }
 
 pub(super) fn native_basic_type<'ctx>(

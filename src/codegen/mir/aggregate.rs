@@ -272,7 +272,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validated_variant_construct(&result_ty, nominal, variant, &field_ids, &field_types)
             .map_err(|message| NativeMirError::new(subject, message))?;
-        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &result_ty, moving)?;
+        let allow_generic_result = self.program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.source_ty == result_ty
+                    && contract.projection.nominal.as_str() == "builtin:type:Result"
+                    && contract.projection.ownership == MirOwnership::Copy
+            )
+        });
+        let (variant_abi, _) = native_variant_abi_with_generic_result(
+            self.program.type_catalog(),
+            &result_ty,
+            moving,
+            allow_generic_result,
+        )?;
         let struct_ty = native_basic_type(
             self.generator.context,
             self.program.type_catalog(),
@@ -680,11 +695,32 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "direct variant projection has no canonical trap receipt",
             )
         })?;
-        self.program
-            .type_catalog()
-            .validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
-            .map_err(|message| NativeMirError::new(subject, message))?;
-        let (variant_abi, _) = native_variant_abi(self.program.type_catalog(), &base_ty, false)?;
+        let generic_result_copy_projection = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_result_copy_projection {
+            self.program
+                .type_catalog()
+                .validate_generic_result_projection_trap_receipt(&base_ty, &result_ty, receipt)
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
+        };
+        receipt_validation.map_err(|message| NativeMirError::new(subject, message))?;
+        let (variant_abi, _) = native_variant_abi_with_generic_result(
+            self.program.type_catalog(),
+            &base_ty,
+            false,
+            generic_result_copy_projection,
+        )?;
         let payload_slot = variant_abi
             .payload_slot(&receipt.projection.variant)
             .ok_or_else(|| {

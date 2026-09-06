@@ -41,7 +41,8 @@ mod validate;
 
 use abi::{
     native_basic_type, native_copy_variant_payload_type, native_list_kind,
-    native_non_copy_variant_payload_type, native_variant_abi, validate_native_non_copy_record_type,
+    native_non_copy_variant_payload_type, native_variant_abi,
+    native_variant_abi_with_generic_result, validate_native_non_copy_record_type,
     validate_native_product_type, validate_native_recursive_tuple_type, NativeVariantAbi,
 };
 pub use eligibility::validate_mir_native;
@@ -3625,6 +3626,59 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_result_f64_unwrap_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_f64.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Result f64 projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            program
+                .type_catalog()
+                .get(&contract.result_ty)
+                .map(|descriptor| descriptor.abi),
+            Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference generic Result f64 unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("generic Result f64 MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode generic Result f64 unwrap execution");
+        assert!(matches!(bytecode, Value::Int(42)));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_result_unwrap_f64");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Result f64 unwrap must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Result f64 unwrap module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_result_unwrap_owned_string() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_owned_string.mimi"
@@ -4282,6 +4336,25 @@ mod tests {
             .module
             .verify()
             .expect("native generic Result unwrap Err module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+    }
+
+    #[test]
+    fn native_generic_result_f64_unwrap_err_keeps_the_receipt_trap() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_f64_err.mimi"
+        ));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_result_unwrap_f64_err");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Result f64 unwrap Err must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Result f64 unwrap Err module verifies");
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
     }

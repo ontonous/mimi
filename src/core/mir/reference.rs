@@ -266,6 +266,15 @@ impl MirProgram {
             &instances,
         ));
         for function in functions.values() {
+            let generic_result_projection = instances.values().any(|instance| {
+                instance.function == function.owner
+                    && matches!(
+                        &instance.contract,
+                        MirGenericInstanceContract::ScalarVariantProjection { contract }
+                            if contract.projection.nominal.as_str() == "builtin:type:Result"
+                                && contract.projection.ownership == MirOwnership::Copy
+                    )
+            });
             if let Err(mut function_errors) = function.validate() {
                 errors.append(&mut function_errors);
                 continue;
@@ -518,13 +527,20 @@ impl MirProgram {
                                 });
                                 continue;
                             };
-                            if let Err(message) = type_catalog
-                                .validate_variant_projection_trap_receipt(
+                            let validation = if generic_result_projection {
+                                type_catalog.validate_generic_result_projection_trap_receipt(
                                     &base_value.ty,
                                     &result_value.ty,
                                     receipt,
                                 )
-                            {
+                            } else {
+                                type_catalog.validate_variant_projection_trap_receipt(
+                                    &base_value.ty,
+                                    &result_value.ty,
+                                    receipt,
+                                )
+                            };
+                            if let Err(message) = validation {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,
@@ -3323,6 +3339,18 @@ impl<'a> MirReferenceInterpreter<'a> {
         self
     }
 
+    fn is_generic_result_projection(&self, owner: &NodeId) -> bool {
+        self.program.instances.values().any(|instance| {
+            instance.function == *owner
+                && matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ScalarVariantProjection { contract }
+                        if contract.projection.nominal.as_str() == "builtin:type:Result"
+                            && contract.projection.ownership == MirOwnership::Copy
+                )
+        })
+    }
+
     pub fn execute(
         &self,
         owner: &NodeId,
@@ -3764,10 +3792,19 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "direct variant projection has no canonical trap receipt",
                     )
                 })?;
-                self.program
-                    .type_catalog()
-                    .validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
-                    .map_err(|message| self.error(&function.owner, message))?;
+                if self.is_generic_result_projection(&function.owner) {
+                    self.program
+                        .type_catalog()
+                        .validate_generic_result_projection_trap_receipt(
+                            &base_ty, &result_ty, receipt,
+                        )
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else {
+                    self.program
+                        .type_catalog()
+                        .validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                }
                 let value = self.read_value(function, values, base)?;
                 let projected = project_variant_value(
                     &function.owner,
@@ -3776,6 +3813,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &result_ty,
                     receipt,
                     self.program.type_catalog(),
+                    self.is_generic_result_projection(&function.owner),
                 )?;
                 values.insert(result.clone(), projected);
             }
@@ -5799,10 +5837,17 @@ fn project_variant_value(
     result_ty: &crate::core::ResolvedTypeId,
     receipt: &super::types::MirVariantProjectionTrapContract,
     type_catalog: &MirTypeCatalog,
+    generic_result_projection: bool,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
-    type_catalog
-        .validate_variant_projection_trap_receipt(base_ty, result_ty, receipt)
-        .map_err(|message| execution_error(function, message))?;
+    if generic_result_projection {
+        type_catalog
+            .validate_generic_result_projection_trap_receipt(base_ty, result_ty, receipt)
+            .map_err(|message| execution_error(function, message))?;
+    } else {
+        type_catalog
+            .validate_variant_projection_trap_receipt(base_ty, result_ty, receipt)
+            .map_err(|message| execution_error(function, message))?;
+    }
     let MirRuntimeValue::Variant {
         nominal,
         variant,

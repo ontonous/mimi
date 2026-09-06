@@ -2176,11 +2176,30 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!("variant projection result '{}' is absent", result));
             return;
         };
-        if let Err(message) = self
-            .program
-            .type_catalog()
-            .validate_variant_projection_trap_receipt(&base_info.ty, &result_info.ty, receipt)
-        {
+        let generic_result_copy_projection = self.program.instances().values().any(|instance| {
+            instance.function == self.function.owner
+                && matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership == MirOwnership::Copy
+                )
+        });
+        let receipt_validation = if generic_result_copy_projection {
+            self.program
+                .type_catalog()
+                .validate_generic_result_projection_trap_receipt(
+                    &base_info.ty,
+                    &result_info.ty,
+                    receipt,
+                )
+        } else {
+            self.program
+                .type_catalog()
+                .validate_variant_projection_trap_receipt(&base_info.ty, &result_info.ty, receipt)
+        };
+        if let Err(message) = receipt_validation {
             self.error(format!(
                 "direct variant projection is unsupported: {message}"
             ));
@@ -6923,6 +6942,52 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_result_f64_unwrap_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_f64.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Result<T,i32> f64 MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Result f64 projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            mir.type_catalog()
+                .get(&contract.result_ty)
+                .map(|desc| desc.abi),
+            Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Result f64 unwrap execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Result f64 bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Result f64 unwrap execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_materialized_generic_result_owned_string_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_owned_string.mimi"
@@ -7081,6 +7146,27 @@ mod tests {
         let bytecode_error = BytecodeVM::new(bytecode)
             .run_value()
             .expect_err("bytecode generic Result unwrap Err must trap");
+        assert!(reference_error.to_string().contains("E0800"));
+        assert_eq!(bytecode_error.code(), "E0800");
+    }
+
+    #[test]
+    fn generic_result_f64_unwrap_err_matches_reference_trap() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_result_unwrap_f64_err.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Result<T,i32> f64 trap MIR");
+        let reference_error = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference Err(7).unwrap must trap");
+        let bytecode = compile_mir_program(&mir).expect("generic Result f64 trap bytecode");
+        assert!(bytecode.ast.is_none());
+        let bytecode_error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("bytecode Err(7).unwrap must trap");
         assert!(reference_error.to_string().contains("E0800"));
         assert_eq!(bytecode_error.code(), "E0800");
     }

@@ -1,0 +1,9 @@
+// Canonical MIR generic Result<T, i32> unwrap must preserve the active-Err trap.
+func unwrap<T>(value: Result<T, i32>) -> T {
+    value.unwrap()
+}
+
+func main() -> f64 {
+    let value: Result<f64, i32> = Err(7)
+    unwrap(value)
+}

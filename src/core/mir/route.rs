@@ -1152,6 +1152,65 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_f64_projection_materialization_carries_heterogeneous_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_f64.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.generic_result_projection,
+            GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("generic Result<T,i32> f64 route must materialize");
+        assert!(route.materialized_generic_result_projection_candidate);
+        let instance = route
+            .program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic Result f64 projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            route
+                .program
+                .type_catalog()
+                .get(&contract.result_ty)
+                .map(|descriptor| descriptor.abi),
+            Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+    }
+
+    #[test]
+    fn generic_result_homogeneous_f64_projection_is_not_admitted() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_unwrap_homogeneous_f64_rejected.mimi"
+        ));
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).generic_result_projection,
+            GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect_err("homogeneous Result<T,T> f64 must fail closed");
+        let message = route.to_string();
+        assert!(
+            message.contains("generic") && message.contains("f64"),
+            "unexpected route rejection: {message}"
+        );
+    }
+
+    #[test]
     fn managed_result_call_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_result_list_i32_call_return.mimi"

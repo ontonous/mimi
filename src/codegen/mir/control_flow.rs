@@ -296,8 +296,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return Ok(());
         }
 
-        let (variant_abi, _) =
-            native_variant_abi(self.program.type_catalog(), &scrutinee_ty, false)?;
+        let allow_generic_result = self.program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.source_ty == scrutinee_ty
+                    && contract.projection.nominal.as_str() == "builtin:type:Result"
+                    && contract.projection.ownership == MirOwnership::Copy
+            )
+        });
+        let (variant_abi, _) = native_variant_abi_with_generic_result(
+            self.program.type_catalog(),
+            &scrutinee_ty,
+            false,
+            allow_generic_result,
+        )?;
 
         let tag = self
             .generator

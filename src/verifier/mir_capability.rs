@@ -869,9 +869,25 @@ impl<'a> CapabilityGate<'a> {
                     ));
                     return;
                 };
-                if let Err(message) =
+                let generic_result_copy_projection =
+                    self.program.instances().values().any(|instance| {
+                        instance.function == function.owner
+                            && matches!(
+                                &instance.contract,
+                                MirGenericInstanceContract::ScalarVariantProjection {
+                                    contract
+                                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                                    && contract.projection.ownership == MirOwnership::Copy
+                            )
+                    });
+                let receipt_validation = if generic_result_copy_projection {
+                    catalog.validate_generic_result_projection_trap_receipt(
+                        &base_ty, &result_ty, receipt,
+                    )
+                } else {
                     catalog.validate_variant_projection_trap_receipt(&base_ty, &result_ty, receipt)
-                {
+                };
+                if let Err(message) = receipt_validation {
                     self.error(format!(
                         "{subject} direct variant projection rejected: {message}"
                     ));

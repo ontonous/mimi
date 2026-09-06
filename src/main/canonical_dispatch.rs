@@ -1733,6 +1733,62 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_f64_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_f64.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Result<T,i32> f64 projection must select the canonical route");
+        };
+        let instance = program.instances().values().find(|instance| {
+            matches!(
+                &instance.contract,
+                mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                    contract
+                } if contract.projection.nominal.as_str() == "builtin:type:Result"
+            )
+        });
+        let Some(instance) = instance else {
+            panic!("generic Result f64 projection instance is absent");
+        };
+        let mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            program
+                .type_catalog()
+                .get(&contract.result_ty)
+                .map(|descriptor| descriptor.abi),
+            Some(mimi::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+    }
+
+    #[test]
+    fn generic_result_homogeneous_f64_projection_is_rejected_before_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_unwrap_homogeneous_f64_rejected.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_admission(&checked),
+            mimi::core::mir::GenericResultProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("homogeneous Result<T,T> f64 projection must fail closed before legacy");
+        };
+        assert!(
+            reason.contains("generic-result-projection-v1")
+                || reason.contains("generic Result projection"),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn generic_result_bool_error_projection_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_result_bool_error.mimi"

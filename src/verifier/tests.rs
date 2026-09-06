@@ -2221,6 +2221,44 @@ fn generic_result_distinct_projection_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_result_f64_projection_is_verified_from_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_generic_result_unwrap_f64.mimi");
+    let file = parse_memory_source(source, "mir-generic-result-f64").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Result<T,i32> f64 MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection { contract }
+            if contract.projection.nominal.as_str() == "builtin:type:Result"
+                && contract.projection.ownership == crate::core::mir::types::MirOwnership::Copy
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Result<T,i32> f64 verifier capability");
+    let results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("generic Result<T,i32> f64 must remain on canonical verifier route");
+    assert!(results.is_empty(), "fixture has no contracts to verify");
+}
+
+#[test]
+fn generic_result_homogeneous_f64_projection_is_rejected_before_verifier_consumers() {
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_result_unwrap_homogeneous_f64_rejected.mimi"
+    );
+    let file = parse_memory_source(source, "mir-generic-result-homogeneous-f64").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("homogeneous Result<T,T> f64 must be rejected before verifier");
+    assert!(
+        format!("{error:?}").contains("generic MIR instance"),
+        "unexpected canonical rejection: {error:?}"
+    );
+}
+
+#[test]
 fn generic_result_bool_error_projection_is_verified_from_canonical_mir() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_native_generic_result_bool_error.mimi");
