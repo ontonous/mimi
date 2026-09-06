@@ -1,0 +1,14 @@
+// Canonical generic MIR candidate: borrow the last Copy-scalar field from a
+// seven-field Record<T>; the selected field is intentionally non-zero index.
+type SeptTail<T> { tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool, extra2: i32, value: T }
+
+func get_value<T>(sept: SeptTail<T>) -> T {
+    sept.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let sept = SeptTail { tag: 7, enabled: true, extra: 9, tail: 11, spare: false, extra2: 13, value: 41 as i64 }
+    let picked = get_value(sept)
+    picked
+}

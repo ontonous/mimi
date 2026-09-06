@@ -4852,6 +4852,40 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_seven_field_generic_record_tail_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_seven_field_tail.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("seven-field tail projection instance");
+        assert!(matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.field_index == 6 && contract.arity == 7 && contract.name == "value"
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference seven-field tail projection execution");
+        assert_eq!(reference, MirRuntimeValue::Int(41));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_projection_seven_field_tail",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native seven-field tail projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native seven-field tail projection module verifies");
+    }
+
+    #[test]
     fn native_emitter_consumes_materialized_generic_record_update() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_update.mimi"

@@ -8205,6 +8205,55 @@ mod tests {
     }
 
     #[test]
+    fn concrete_seven_field_generic_record_tail_projection_preserves_field_identity() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_seven_field_tail.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("seven-field tail projection must materialize");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("seven-field tail projection instance");
+        let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract
+        else {
+            panic!("seven-field tail projection must carry a record receipt");
+        };
+        assert_eq!(contract.name, "value");
+        assert_eq!(contract.field_index, 6);
+        assert_eq!(contract.arity, 7);
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("seven-field tail projection target");
+        let parameter_ty = target
+            .values
+            .get(&target.parameters[0])
+            .map(|value| value.ty.clone())
+            .expect("seven-field tail projection parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&parameter_ty)
+            .expect("seven-field tail projection TypeDesc");
+        assert!(matches!(
+            descriptor.layout,
+            crate::core::mir::types::MirLayout::Record { ref fields, .. }
+                if fields.len() == 7
+                    && fields[6].id == contract.field
+                    && fields[6].ty == contract.field_ty
+                    && fields[..6].iter().all(|field| field.id != contract.field)
+        ));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference seven-field tail projection execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
+    }
+
+    #[test]
     fn concrete_six_field_generic_record_projection_executes_with_copy_residuals() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_record_projection_six_field.mimi"
