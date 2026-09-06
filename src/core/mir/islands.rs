@@ -2069,7 +2069,8 @@ fn is_scalar_generic_record_definition(
 /// homogeneous fields, or the bounded heterogeneous two-, three-, or
 /// four-field forms with one generic field and one, two, or three concrete
 /// `String` siblings, plus the two-field generic + one `List<Copy scalar>` form
-/// and the three-field generic + two concrete List form.
+/// and the three-field generic + two concrete List form, or one List plus one
+/// String residual.
 /// Concrete managed specialization and Move/Drop glue are proved later by
 /// TypeDesc. Keeping this checker-side predicate separate from the Copy-record
 /// shape prevents a larger or otherwise mixed managed record from entering
@@ -2135,7 +2136,11 @@ fn is_owned_generic_record_definition(
             || (definition.fields.len() == 3
                 && generic_fields == 1
                 && owned_list_fields == 2
-                && owned_string_fields == 0))
+                && owned_string_fields == 0)
+            || (definition.fields.len() == 3
+                && generic_fields == 1
+                && owned_list_fields == 1
+                && owned_string_fields == 1))
 }
 
 /// Recognize the heterogeneous declarations admitted by the ownership-bearing

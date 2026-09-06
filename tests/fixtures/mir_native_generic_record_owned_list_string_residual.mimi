@@ -1,0 +1,14 @@
+// S209: selected List field plus concrete List and String residual fields.
+type Trio<T> { value: T, tail: List<i32>, note: string }
+
+func take<T>(trio: Trio<T>) -> T {
+    trio.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let trio: Trio<List<i32>> = Trio { value: [1, 2], tail: [3, 4], note: "residual" }
+    let picked = take(trio)
+    drop(picked)
+    42
+}
