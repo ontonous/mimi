@@ -153,6 +153,7 @@ pub(crate) fn select_default_route(
     let copy_option_i64_admission = admission.copy_option_i64;
     let copy_option_f64_admission = admission.copy_option_f64;
     let copy_result_i32_admission = admission.copy_result_i32;
+    let flow_failure_retry_hint = admission.flow_failure_retry;
     // Imported stdlib facades are part of the production island once their
     // concrete operations materialize in MIR.  Do not use the retained File
     // import list as a second route policy: checker admission records the
@@ -173,6 +174,12 @@ pub(crate) fn select_default_route(
         record_admission,
         mimi::core::mir::FlatCopyRecordAdmission::OutsideProfile
     );
+    let generic_record_projection_unsupported_hint =
+        mimi::core::mir::has_unsupported_generic_record_projection_candidate(checked);
+    let generic_record_update_unsupported_hint =
+        mimi::core::mir::has_unsupported_generic_record_update_candidate(checked);
+    let generic_record_update_candidate_hint = generic_record_update_unsupported_hint
+        || mimi::core::mir::has_generic_record_update_candidate(checked);
     let user_record_hint = checked.type_defs().values().any(|definition| {
         definition.kind == mimi::core::ResolvedTypeKind::Record
             && matches!(definition.origin, mimi::core::Origin::User(_))
@@ -296,6 +303,7 @@ pub(crate) fn select_default_route(
     if !collection_hint
         && !record_hint
         && !flow_candidate
+        && !flow_failure_retry_hint
         && !option_string_hint
         && !generic_variant_hint
         && !generic_option_projection_hint
@@ -311,7 +319,10 @@ pub(crate) fn select_default_route(
     {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
-    if managed_result_call_hint && !complete_managed_result_call_candidate {
+    if managed_result_call_hint
+        && !complete_managed_result_call_candidate
+        && !flow_failure_retry_hint
+    {
         return DefaultMirRoute::Rejected(
             "managed Result direct-call candidate is outside complete coverage".into(),
         );
@@ -429,7 +440,11 @@ pub(crate) fn select_default_route(
             }
             let reason = match stage {
                 mimi::core::mir::CanonicalMirRouteFailureStage::Construction => {
-                    if matches!(
+                    if generic_record_projection_unsupported_hint {
+                        "canonical generic record projection candidate did not materialize a supported scalar MIR shape".into()
+                    } else if generic_record_update_candidate_hint {
+                        "canonical generic record update candidate did not materialize a supported scalar MIR shape".into()
+                    } else if matches!(
                         profile,
                         mimi::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate
                             | mimi::core::mir::CanonicalMirRouteProfile::GenericOptionProjection
@@ -561,7 +576,7 @@ pub(crate) fn select_default_route(
             // different: its unsupported shape must fail closed even when
             // canonical construction cannot produce a receipt, otherwise a
             // List<T> contract hole would silently enter legacy.
-            if managed_result_call_hint {
+            if managed_result_call_hint && !flow_failure_retry_hint {
                 return DefaultMirRoute::Rejected(
                     "managed Result direct-call candidate did not materialize a supported MIR shape"
                         .into(),
@@ -596,9 +611,7 @@ pub(crate) fn select_default_route(
                     "canonical generic List facade candidate did not materialize a supported scalar MIR shape",
                 );
             }
-            if record_hint
-                && mimi::core::mir::has_unsupported_generic_record_projection_candidate(checked)
-            {
+            if record_hint && generic_record_projection_unsupported_hint {
                 return reject_migrated_candidates(
                     flow_candidate,
                     false,
@@ -607,9 +620,7 @@ pub(crate) fn select_default_route(
                     "canonical generic record projection candidate did not materialize a supported scalar MIR shape",
                 );
             }
-            if record_hint
-                && mimi::core::mir::has_unsupported_generic_record_update_candidate(checked)
-            {
+            if record_hint && generic_record_update_unsupported_hint {
                 return reject_migrated_candidates(
                     flow_candidate,
                     false,
@@ -747,8 +758,11 @@ pub(crate) fn select_default_route(
     };
     let canonical = &route.program;
     let copy_record = route.materialized_record_candidate;
+    let owned_record_route_candidate =
+        mimi::core::mir::contains_owned_record_projection_candidate(canonical);
     let materialized_collection_candidate = route.materialized_collection_candidate;
     let materialized_flow_candidate = route.materialized_flow_candidate;
+    let materialized_flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
     let materialized_option_string_candidate = route.materialized_option_string_candidate;
     let materialized_generic_variant_candidate = route.materialized_generic_variant_candidate;
     let materialized_generic_option_projection_candidate =
@@ -766,7 +780,10 @@ pub(crate) fn select_default_route(
     let materialized_copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
     let materialized_copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
     let materialized_copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
-    let flow_route_candidate = flow_candidate || materialized_flow_candidate;
+    let flow_route_candidate =
+        flow_candidate || materialized_flow_candidate || flow_failure_retry_hint;
+    let flow_failure_route_candidate =
+        flow_failure_retry_hint || materialized_flow_failure_retry_candidate;
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
     // Mixed coverage remains a compatibility boundary only when construction
@@ -814,7 +831,7 @@ pub(crate) fn select_default_route(
             "canonical graph did not materialize the selected production operation",
         );
     }
-    if flow_candidate && !complete_flow_candidate {
+    if flow_candidate && !complete_flow_candidate && !flow_failure_retry_hint {
         return reject_migrated_candidates_with_copy_f64(
             true,
             collection_route_candidate,
@@ -828,12 +845,21 @@ pub(crate) fn select_default_route(
             "S8 Flow transition candidate is not complete coverage",
         );
     }
+    if flow_failure_retry_hint && !materialized_flow_failure_retry_candidate {
+        return DefaultMirRoute::Rejected(
+            "M3 recoverable Flow candidate did not materialize a canonical failure boundary".into(),
+        );
+    }
 
     // A mixed program is not a partial canonical program.  If its graph does
     // contain a migrated boundary, keep the old path deleted for that
     // boundary and reject the whole route.  If it contains no such operation,
     // it remains an explicit compatibility input and may use Legacy.
-    if record_route_candidate && !complete_record_candidate && !generic_route_candidate {
+    if record_route_candidate
+        && !complete_record_candidate
+        && !generic_route_candidate
+        && !owned_record_route_candidate
+    {
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -906,6 +932,7 @@ pub(crate) fn select_default_route(
     if !collection_route_candidate
         && !record_route_candidate
         && !flow_route_candidate
+        && !flow_failure_route_candidate
         && !option_string_route_candidate
         && !copy_option_i32_route_candidate
         && !copy_option_bool_route_candidate
@@ -2642,8 +2669,8 @@ mod tests {
             mimi::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
                 ref contract
             } if contract.arity == 3 && contract.fields.len() == 2
-                && contract.fields[0].name == "enabled"
-                && contract.fields[1].name == "tag"
+                && contract.fields[0].name == "tag"
+                && contract.fields[1].name == "enabled"
         )));
     }
 
@@ -2693,7 +2720,10 @@ mod tests {
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("five-field owned generic record update must fail closed");
         };
-        assert!(reason.contains("canonical generic record update candidate did not materialize"));
+        assert!(
+            reason.contains("canonical generic record update candidate did not materialize"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -2724,7 +2754,10 @@ mod tests {
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("f64 mixed owned generic record update must fail closed");
         };
-        assert!(reason.contains("canonical generic record update candidate did not materialize"));
+        assert!(
+            reason.contains("canonical generic record update candidate did not materialize"),
+            "{reason}"
+        );
     }
 
     #[test]

@@ -607,6 +607,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validate_move_projection(&base_ty, &result_ty, projection)
             .map_err(|message| NativeMirError::new(subject, message))?;
+        if let MirProjection::Tuple(field_index) = projection {
+            validate_native_recursive_tuple_type(self.program.type_catalog(), &base_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let aggregate = self.value(base, subject)?.into_struct_value();
+            return self
+                .generator
+                .builder
+                .build_extract_value(aggregate, *field_index as u32, "mir_tuple_move_project")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()));
+        }
         validate_native_non_copy_record_type(self.program.type_catalog(), &base_ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let MirProjection::Field(field_id) = projection else {

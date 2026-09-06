@@ -1304,8 +1304,8 @@ fn two_override_generic_record_update_is_consumed_by_mir_verifier() {
         instance.contract,
         crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate { ref contract }
             if contract.arity == 3 && contract.fields.len() == 2
-                && contract.fields[0].name == "enabled"
-                && contract.fields[1].name == "tag"
+                && contract.fields[0].name == "tag"
+                && contract.fields[1].name == "enabled"
     )));
     crate::verifier::validate_mir_capabilities(&canonical)
         .expect("two-override generic record update verifier capability");
@@ -1342,12 +1342,15 @@ fn owned_generic_record_update_is_consumed_by_mir_verifier() {
         blake3::hash(source.as_bytes()).to_hex().to_string(),
     )
     .expect("MIR verifier");
-    assert!(results.iter().all(|result| {
-        matches!(
-            result.status,
-            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
-        )
-    }));
+    assert!(
+        results.iter().all(|result| {
+            matches!(
+                result.status,
+                VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+            )
+        }),
+        "{results:?}"
+    );
 }
 
 #[test]

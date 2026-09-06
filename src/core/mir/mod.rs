@@ -288,7 +288,9 @@ pub use copy_result_island::{
     validate_copy_result_i32_variant_island, CopyResultI32VariantAdmission,
     COPY_RESULT_I32_VARIANT_ISLAND,
 };
-pub use eligibility::{is_exact_s8_flow_transition, is_s8_flow_transition_candidate};
+pub use eligibility::{
+    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+};
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,
     classify_generic_option_projection_fallback_admission,
@@ -296,13 +298,14 @@ pub use islands::{
     classify_generic_result_projection_fallback_admission,
     classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
     classify_scalar_collection_admission, contains_flat_copy_record_candidate,
-    contains_generic_option_projection_candidate,
+    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
-    contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
-    contains_scalar_collection_operation_candidate, has_managed_result_call_candidate,
+    contains_owned_record_projection_candidate, contains_s8_flow_transition_candidate,
+    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
+    has_generic_record_update_candidate, has_managed_result_call_candidate,
     has_unsupported_generic_list_facade_candidate,
     has_unsupported_generic_option_projection_candidate,
     has_unsupported_generic_option_projection_fallback_candidate,
@@ -511,6 +514,10 @@ pub enum MirVariantPredicate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirTransitionEffect {
     SilentLocal,
+    /// A local transition whose body may return `Err((source, error))`. The
+    /// source state is consumed into the failure value, so retry callers can
+    /// only use the returned source once.
+    RecoverableLocal,
     Boundary,
 }
 
@@ -2339,13 +2346,13 @@ pub(crate) fn validate_transfer_event_boundaries(
                         ),
                     });
                 }
-                if matches!(effect, Some(MirTransitionEffect::SilentLocal))
-                    && matches!(
-                        event.kind,
-                        MirOwnershipEventKind::TransferSession
-                            | MirOwnershipEventKind::TransferChild
-                    )
-                {
+                if matches!(
+                    effect,
+                    Some(MirTransitionEffect::SilentLocal | MirTransitionEffect::RecoverableLocal)
+                ) && matches!(
+                    event.kind,
+                    MirOwnershipEventKind::TransferSession | MirOwnershipEventKind::TransferChild
+                ) {
                     errors.push(MirValidationError {
                         subject: format!("ownership[{index}]"),
                         message: format!(

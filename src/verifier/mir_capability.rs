@@ -47,6 +47,7 @@ struct CapabilityGate<'a> {
     /// record/variant route before its own whole-program consumer matrix is
     /// closed.
     allow_result_move_variant: bool,
+    allow_recoverable_flow_result: bool,
 }
 
 impl<'a> CapabilityGate<'a> {
@@ -66,6 +67,9 @@ impl<'a> CapabilityGate<'a> {
                                 MirGlueKind::OwnedString | MirGlueKind::List
                             )
                 )
+            }),
+            allow_recoverable_flow_result: program.transitions().values().any(|transition| {
+                transition.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
             }),
         }
     }
@@ -544,7 +548,11 @@ impl<'a> CapabilityGate<'a> {
                 if descriptor.ownership == MirOwnership::Copy {
                     self.require_copy_aggregate(ty, &descriptor)?;
                 } else {
-                    let validation = if self.allow_result_move_variant
+                    let validation = if self.allow_recoverable_flow_result
+                        && matches!(descriptor.kind, MirTypeKind::Result)
+                    {
+                        catalog.validate_recoverable_result_variant(ty)
+                    } else if self.allow_result_move_variant
                         && matches!(descriptor.kind, MirTypeKind::Result)
                     {
                         catalog
@@ -1171,6 +1179,13 @@ impl<'a> CapabilityGate<'a> {
                     .validate_option_move_variant(&result_ty)
                     .map(|_| ())
                     .or_else(|_| {
+                        if self.allow_recoverable_flow_result {
+                            catalog.validate_recoverable_result_variant(&result_ty)
+                        } else {
+                            Err("recoverable Flow Result construction is outside this verifier profile".into())
+                        }
+                    })
+                    .or_else(|_| {
                         if self.allow_result_move_variant {
                             catalog
                                 .validate_result_move_projection_variant(&result_ty)
@@ -1439,11 +1454,14 @@ impl<'a> CapabilityGate<'a> {
             ));
             return;
         };
-        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+        let recoverable =
+            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
-            || contract.failure.is_some()
+            || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
+            || (recoverable && contract.failure.is_none())
         {
             self.error(format!(
                 "{subject} FlowTransition is outside the silent-local transition capability"
@@ -1469,7 +1487,10 @@ impl<'a> CapabilityGate<'a> {
             }
         }
         match value_type(function, result) {
-            Some(actual) if actual == contract.result && actual == target.result => {}
+            Some(actual)
+                if actual == contract.result
+                    && (recoverable || actual == target.result)
+                    && (!recoverable || target.result == contract.result) => {}
             _ => self.error(format!(
                 "{subject} FlowTransition result TypeDesc disagrees with its canonical contract"
             )),
@@ -1768,11 +1789,24 @@ impl<'a> CapabilityGate<'a> {
                     self.error(format!("{subject} SwitchMove scrutinee is absent"));
                     return;
                 };
-                if let Err(message) = self
+                let switch_shape = self
                     .program
                     .type_catalog()
                     .validate_option_string_variant(&scrutinee_ty)
-                {
+                    .or_else(|_| {
+                        if self.allow_recoverable_flow_result {
+                            self.program
+                                .type_catalog()
+                                .validate_recoverable_result_variant(&scrutinee_ty)
+                                .map(|_| scrutinee_ty.clone())
+                        } else {
+                            Err(
+                                "recoverable Flow Result switch is outside this verifier profile"
+                                    .into(),
+                            )
+                        }
+                    });
+                if let Err(message) = switch_shape {
                     self.error(format!("{subject} SwitchMove rejected: {message}"));
                     return;
                 }

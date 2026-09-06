@@ -7,9 +7,160 @@
 use crate::ast::Type;
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
-    ResolvedPatternKind, ResolvedProjection, ResolvedStmtKind, ResolvedValueProjection,
+    ResolvedPatternKind, ResolvedProjection, ResolvedStmtKind, ResolvedType,
+    ResolvedValueProjection,
 };
 use crate::core::{CheckedProgram, NodeId, ResolvedBody, TransitionId};
+
+/// Whether the checked program is the deliberately narrow M3 recoverable Flow
+/// profile. It has one import-free Flow, one self-looping `fails` transition,
+/// one `i32` state payload, and a body containing `?`. The predicate is only
+/// admission; the canonical MIR graph and all four consumer gates still prove
+/// the concrete Result/source-transfer contract.
+pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
+    if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
+        return false;
+    }
+    let implemented = program
+        .transitions()
+        .values()
+        .filter(|transition| {
+            !transition.is_fallback
+                && transition.fails.is_some()
+                && program.resolved_body(&transition.node_id).is_some()
+        })
+        .collect::<Vec<_>>();
+    let [transition] = implemented.as_slice() else {
+        return false;
+    };
+    let Some(flow) = program.flows().get(&transition.id.flow) else {
+        return false;
+    };
+    let Some(source_state) = flow.states.get(&transition.id.source.name) else {
+        return false;
+    };
+    let Some(target) = transition.targets.first() else {
+        return false;
+    };
+    let Some(target_state) = flow.states.get(&target.name) else {
+        return false;
+    };
+    let Some(signature) = program.resolved_signature(&transition.node_id) else {
+        return false;
+    };
+    let result_is_result = matches!(
+        program.resolved_types().get(&signature.result),
+        Some(ResolvedType::Result { .. })
+    );
+    transition.silent_transition
+        && transition.targets.len() == 1
+        && transition.targets[0] == transition.id.source
+        && !transition.is_ffi_pinned
+        && flow
+            .states
+            .keys()
+            .filter(|name| name.as_str() != "Fault")
+            .count()
+            == 1
+        && flow.persistent_fields.is_empty()
+        && source_state.payload.len() == 1
+        && target_state.payload.len() == 1
+        && is_concrete_i32_type(&source_state.payload[0].1)
+        && is_concrete_i32_type(&target_state.payload[0].1)
+        && transition.params.len() == 1
+        && is_concrete_i32_type(&transition.params[0].1)
+        && result_is_result
+        && program
+            .resolved_body(&transition.node_id)
+            .is_some_and(|body| block_contains_try(&body.root))
+}
+
+fn block_contains_try(block: &crate::core::ir::ResolvedBlock) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| match &statement.kind {
+            ResolvedStmtKind::Bind { initializer, .. } => {
+                initializer.as_ref().is_some_and(expr_contains_try)
+            }
+            ResolvedStmtKind::Expr(expression) => expr_contains_try(expression),
+            ResolvedStmtKind::Return { value, .. } => value.as_ref().is_some_and(expr_contains_try),
+            ResolvedStmtKind::While { condition, body } => {
+                expr_contains_try(condition) || block_contains_try(body)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => expr_contains_try(initializer) || block_contains_try(body),
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_contains_try(initializer)
+                    || block_contains_try(then_block)
+                    || else_block.as_ref().is_some_and(block_contains_try)
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                block_contains_try(body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                expr_contains_try(iterable) || block_contains_try(body)
+            }
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                expr_contains_try(value) || block_contains_try(body)
+            }
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => expr_contains_try(value),
+            ResolvedStmtKind::Math(values) => values.iter().any(expr_contains_try),
+            _ => false,
+        })
+        || block.result.as_deref().is_some_and(expr_contains_try)
+}
+
+fn expr_contains_try(expression: &ResolvedExpr) -> bool {
+    match &expression.kind {
+        ResolvedExprKind::Try { .. } => true,
+        ResolvedExprKind::Unary { operand, .. } => expr_contains_try(operand),
+        ResolvedExprKind::Binary { left, right, .. } => {
+            expr_contains_try(left) || expr_contains_try(right)
+        }
+        ResolvedExprKind::Project { value, projection } => {
+            expr_contains_try(value)
+                || matches!(projection, ResolvedValueProjection::Index(index) if expr_contains_try(index))
+        }
+        ResolvedExprKind::Tuple(values)
+        | ResolvedExprKind::List(values)
+        | ResolvedExprKind::Set(values) => values.iter().any(expr_contains_try),
+        ResolvedExprKind::Record { fields, rest, .. } => {
+            fields.iter().any(|field| expr_contains_try(&field.value))
+                || rest.as_deref().is_some_and(expr_contains_try)
+        }
+        ResolvedExprKind::Call(call) => call
+            .arguments
+            .iter()
+            .any(|argument| expr_contains_try(&argument.value)),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_contains_try(condition)
+                || block_contains_try(then_block)
+                || block_contains_try(else_block)
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            expr_contains_try(scrutinee) || arms.iter().any(|arm| expr_contains_try(&arm.body))
+        }
+        ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+            block_contains_try(block)
+        }
+        ResolvedExprKind::Cast { value, .. } => expr_contains_try(value),
+        _ => false,
+    }
+}
 
 /// Whether `program` contains an S8-shaped Flow transition candidate.
 ///

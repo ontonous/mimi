@@ -27,18 +27,20 @@ use super::{
     classify_option_string_variant_admission, classify_scalar_collection_admission,
     contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
     contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
-    contains_generic_option_projection_candidate,
+    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
-    contains_option_string_variant_candidate, contains_s8_flow_transition_candidate,
-    contains_scalar_collection_candidate, contains_scalar_collection_operation_candidate,
-    is_exact_s8_flow_transition, is_s8_flow_transition_candidate, CopyOptionI32VariantAdmission,
-    CopyResultI32VariantAdmission, FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
-    GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
-    GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
-    ManagedResultCallAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
+    contains_option_string_variant_candidate, contains_owned_record_projection_candidate,
+    contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
+    contains_scalar_collection_operation_candidate, is_exact_s8_flow_transition,
+    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
+    GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
+    GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
+    GenericVariantPredicateAdmission, ManagedResultCallAdmission, OptionStringVariantAdmission,
+    ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -64,6 +66,7 @@ pub enum CanonicalMirRouteProfile {
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
+    FlowFailureRetry,
     NonCopyOptionStringVariant,
     GenericOptionPredicate,
     GenericOptionProjection,
@@ -84,6 +87,7 @@ impl CanonicalMirRouteProfile {
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
+            Self::FlowFailureRetry => "m3-recoverable-flow-retry-v1",
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
             Self::GenericOptionPredicate => super::GENERIC_VARIANT_PREDICATE_ISLAND,
             Self::GenericOptionProjection => super::GENERIC_OPTION_PROJECTION_ISLAND,
@@ -113,6 +117,7 @@ impl CanonicalMirRouteProfile {
             Self::ScalarCollection => admission.collection_complete(),
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
+            Self::FlowFailureRetry => admission.flow_failure_retry,
             Self::NonCopyOptionStringVariant => admission.option_string_complete(),
             Self::GenericOptionPredicate => admission.generic_variant_complete(),
             Self::GenericOptionProjection => admission.generic_option_projection_complete(),
@@ -139,6 +144,7 @@ impl CanonicalMirRouteProfile {
             Self::ScalarCollection => route.materialized_collection_candidate,
             Self::FlatCopyRecord => route.materialized_record_candidate,
             Self::S8FlowTransition => route.materialized_flow_candidate,
+            Self::FlowFailureRetry => route.materialized_flow_failure_retry_candidate,
             Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
             Self::GenericOptionPredicate => route.materialized_generic_variant_candidate,
             Self::GenericOptionProjection => route.materialized_generic_option_projection_candidate,
@@ -226,6 +232,7 @@ pub struct CanonicalMirRouteAdmission {
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
+    pub flow_failure_retry: bool,
     pub option_string: OptionStringVariantAdmission,
     pub generic_variant: GenericVariantPredicateAdmission,
     pub generic_option_projection: GenericOptionProjectionAdmission,
@@ -245,6 +252,7 @@ impl CanonicalMirRouteAdmission {
         !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
             || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
+            || self.flow_failure_retry
             || !matches!(
                 self.option_string,
                 OptionStringVariantAdmission::OutsideProfile
@@ -403,6 +411,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_collection_candidate: bool,
     pub materialized_record_candidate: bool,
     pub materialized_flow_candidate: bool,
+    pub materialized_flow_failure_retry_candidate: bool,
     pub materialized_option_string_candidate: bool,
     pub materialized_generic_variant_candidate: bool,
     pub materialized_generic_option_projection_candidate: bool,
@@ -425,6 +434,7 @@ pub fn classify_canonical_mir_route_admission(
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
+        flow_failure_retry: is_flow_failure_retry_candidate(program),
         option_string: classify_option_string_variant_admission(program),
         generic_variant: classify_generic_variant_predicate_admission(program),
         generic_option_projection: classify_generic_option_projection_admission(program),
@@ -497,6 +507,8 @@ pub fn materialize_canonical_mir_route(
             && contains_scalar_collection_candidate(&canonical));
     let materialized_record_candidate = contains_flat_copy_record_candidate(&canonical);
     let materialized_flow_candidate = contains_s8_flow_transition_candidate(&canonical);
+    let materialized_flow_failure_retry_candidate =
+        contains_flow_failure_retry_candidate(&canonical);
     let materialized_option_string_candidate = contains_option_string_variant_candidate(&canonical);
     let materialized_generic_variant_candidate =
         contains_generic_variant_predicate_candidate(&canonical);
@@ -543,6 +555,13 @@ pub fn materialize_canonical_mir_route(
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "complete S8 Flow admission did not materialize a FlowTransition boundary"
                 .into(),
+        });
+    }
+    if admission.flow_failure_retry && !materialized_flow_failure_retry_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::FlowFailureRetry,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete recoverable Flow admission did not materialize a RecoverableLocal FlowTransition boundary".into(),
         });
     }
     if admission.option_string_complete() && !materialized_option_string_candidate {
@@ -667,6 +686,7 @@ pub fn materialize_canonical_mir_route(
         materialized_collection_candidate,
         materialized_record_candidate,
         materialized_flow_candidate,
+        materialized_flow_failure_retry_candidate,
         materialized_option_string_candidate,
         materialized_generic_variant_candidate,
         materialized_generic_option_projection_candidate,
@@ -687,7 +707,13 @@ fn match_complete_or_compatibility(
     stage: CanonicalMirRouteFailureStage,
     message: String,
 ) -> CanonicalMirRouteMaterializationError {
-    if admission.managed_result_call_complete() {
+    if admission.flow_failure_retry {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::FlowFailureRetry,
+            stage,
+            message,
+        }
+    } else if admission.managed_result_call_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ManagedResultCall,
             stage,
@@ -861,6 +887,7 @@ mod tests {
             collection: ScalarCollectionAdmission::MixedCoverage,
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,
+            flow_failure_retry: false,
             option_string: OptionStringVariantAdmission::OutsideProfile,
             generic_variant: GenericVariantPredicateAdmission::OutsideProfile,
             generic_option_projection: GenericOptionProjectionAdmission::OutsideProfile,

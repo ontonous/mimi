@@ -1,0 +1,6 @@
+// C2 runtime boundary: the empty List index is a runtime trap, not a static
+// refusal and not an equivalent successful result.
+func main() -> i32 {
+    let values: List<i32> = []
+    values[0]
+}

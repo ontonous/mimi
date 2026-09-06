@@ -65,7 +65,7 @@ impl std::error::Error for MirLoweringError {}
 /// receipt-bearing `MoveProjectDrop`, while all other partial moves and
 /// projected drops remain fail-closed.
 pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, None, None)
+    lower_body_impl(body, None, None, None)
 }
 
 /// Lower a body with the checker-derived TypeDesc catalog available.  The
@@ -75,13 +75,14 @@ pub fn lower_body_with_type_catalog(
     body: &ResolvedBody,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    lower_body_impl(body, Some(type_catalog), None)
+    lower_body_impl(body, Some(type_catalog), None, None)
 }
 
 fn lower_body_impl(
     body: &ResolvedBody,
     type_catalog: Option<&MirTypeCatalog>,
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut lowerer = Lowerer {
         body,
@@ -92,6 +93,7 @@ fn lower_body_impl(
         blocks: BTreeMap::new(),
         current: MirBlockId::new("bb.entry").expect("static MIR block id"),
         loops: Vec::new(),
+        transition_result,
         errors: Vec::new(),
     };
     let entry = lowerer.current.clone();
@@ -114,7 +116,7 @@ fn lower_body_impl(
     lowerer.lower_root(&body.root);
     if !lowerer.current_is_terminated() && lowerer.errors.is_empty() {
         if let Some(result) = body.root.result.as_deref() {
-            let value = lowerer.lower_return_expr(result);
+            let value = lowerer.lower_transition_return_expr(result);
             if lowerer.errors.is_empty() {
                 lowerer.terminate(MirTerminator::Return { value: Some(value) });
             }
@@ -135,7 +137,10 @@ fn lower_body_impl(
         owner: body.owner.clone(),
         parameters,
         parameter_permissions: None,
-        result: body.root.ty.clone(),
+        result: lowerer
+            .transition_result
+            .clone()
+            .unwrap_or_else(|| body.root.ty.clone()),
         entry: entry.clone(),
         values: lowerer.values,
         blocks,
@@ -202,10 +207,25 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions(
     type_catalog: &MirTypeCatalog,
     call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        None,
+    )
+}
+
+pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body_impl(
         &callable.body,
         Some(type_catalog),
         call_parameter_permissions,
+        transition_result,
     )?;
     function.parameter_permissions = Some(
         callable
@@ -289,10 +309,16 @@ pub fn lower_program_with_type_catalog(
         if !is_concrete_callable(callable) {
             continue;
         }
-        match lower_callable_with_type_catalog_and_permissions(
+        let transition_result = program
+            .transitions()
+            .values()
+            .find(|transition| transition.node_id == *owner && transition.fails.is_some())
+            .map(|_| callable.signature.result.clone());
+        match lower_callable_with_type_catalog_and_permissions_for_transition(
             callable,
             type_catalog,
             Some(&call_parameter_permissions),
+            transition_result,
         ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -412,6 +438,11 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             sites.first().map(|(_, _, _, instruction)| instruction),
         )?;
         let target = instance.function.clone();
+        let clone_scalar_list_call = matches!(
+            instance.contract,
+            MirGenericInstanceContract::ScalarListFacade { .. }
+                | MirGenericInstanceContract::ScalarListProjection { .. }
+        );
         let owned_record_target_parameter = matches!(
             instance.contract,
             MirGenericInstanceContract::OwnedRecordProjection { .. }
@@ -501,6 +532,9 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                     ),
                 }]);
             };
+            if clone_scalar_list_call {
+                rewrite_scalar_list_facade_call_arguments(function, &block_id, index)?;
+            }
             if let Some(target_parameter_ty) = owned_record_target_parameter.as_ref() {
                 rewrite_owned_record_call_argument(
                     function,
@@ -595,6 +629,67 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
         }
     }
     Ok(instances)
+}
+
+/// Generic List facade bodies have an explicit ownership contract, but the
+/// facade call itself preserves the caller's source List by passing a clone.
+/// The polymorphic body then performs the operation-specific transfer on its
+/// parameter: Len/Reverse borrow the cloned input and Concat consumes the two
+/// cloned inputs.  This keeps the caller-side `drop(source)` obligation
+/// visible and prevents the generic call boundary from turning a read/clone
+/// facade into an accidental Move of the caller's local.
+fn rewrite_scalar_list_facade_call_arguments(
+    caller: &mut MirFunction,
+    block_id: &MirBlockId,
+    call_index: usize,
+) -> Result<(), Vec<MirLoweringError>> {
+    let subject = caller
+        .blocks
+        .get(block_id)
+        .and_then(|block| block.instructions.get(call_index))
+        .map(|instruction| NodeId(instruction.id.as_str().to_owned()))
+        .unwrap_or_else(|| caller.owner.clone());
+    let Some(block) = caller.blocks.get_mut(block_id) else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "generic List facade call block is absent".into(),
+        }]);
+    };
+    let Some(MirInstruction {
+        kind: MirInstructionKind::Call { arguments, .. },
+        ..
+    }) = block.instructions.get(call_index)
+    else {
+        return Err(vec![MirLoweringError {
+            node_id: subject,
+            message: "generic List facade call instruction is absent".into(),
+        }]);
+    };
+    let arguments = arguments.clone();
+    for argument in arguments {
+        let Some(producer_index) =
+            block.instructions[..call_index]
+                .iter()
+                .rposition(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::Move { result, .. }
+                            | MirInstructionKind::Clone { result, .. }
+                            if result == &argument
+                    )
+                })
+        else {
+            // A fresh rvalue is already a new owned value.  Only a direct
+            // local Move needs to be rewritten at this boundary.
+            continue;
+        };
+        if let MirInstructionKind::Move { result, source } =
+            block.instructions[producer_index].kind.clone()
+        {
+            block.instructions[producer_index].kind = MirInstructionKind::Clone { result, source };
+        }
+    }
+    Ok(())
 }
 
 /// Transfer a direct local into an owned generic record projection call.
@@ -1466,6 +1561,13 @@ fn materialize_generic_instance(
         &generic_id,
         &mut HashSet::new(),
     );
+    let generic_list_construct_facade = generic_list_facade
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| matches!(&expression.kind, ResolvedExprKind::List(_)));
     let generic_set_facade = callable.signature.parameters.iter().any(|parameter| {
         mentions_generic_set_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
     }) || mentions_generic_set_type(
@@ -1494,7 +1596,8 @@ fn materialize_generic_instance(
     // exception. Keep the predicate tied to the exact one-parameter,
     // one-block field-load envelope so record updates and arbitrary generic
     // bodies cannot inherit the f64 ABI merely because they mention a record.
-    let is_copy_record_projection = callable.signature.parameters.len() == 1
+    let is_copy_record_projection = !is_owned_record_projection_drop_callable(program, callable)
+        && callable.signature.parameters.len() == 1
         && callable.signature.result == generic_id
         && program
             .resolved_types()
@@ -1541,6 +1644,10 @@ fn materialize_generic_instance(
             message: "generic instance has no concrete argument".into(),
         }]
     })?;
+    let nested_list_construct = generic_list_construct_facade
+        && type_catalog
+            .validate_move_owned_list_payload(&concrete)
+            .is_ok();
     let is_owned_string_identity =
         is_identity && type_catalog.validate_owned_string(&concrete).is_ok();
     // Generic Option<T>.unwrap is lowered through the Copy placeholder so the
@@ -1938,7 +2045,7 @@ fn materialize_generic_instance(
                 } else {
                     catalog.validate_generic_record_projection_argument(&arguments[0])
                 }
-            } else if generic_list_facade {
+            } else if generic_list_construct_facade {
                 catalog
                     .validate_scalar_generic_arguments(arguments)
                     .or_else(|scalar_error| {
@@ -1951,6 +2058,8 @@ fn materialize_generic_instance(
                             Err(scalar_error)
                         }
                     })
+            } else if generic_list_facade {
+                catalog.validate_scalar_generic_arguments(arguments)
             } else {
                 catalog.validate_scalar_generic_arguments(arguments)
             }
@@ -2015,6 +2124,26 @@ fn materialize_generic_instance(
     }
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
+    }
+    if nested_list_construct {
+        let parameter = function.parameters.first().cloned().ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: "nested generic List construction has no parameter".into(),
+            }]
+        })?;
+        for block in function.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                if let MirInstructionKind::Clone { result, source } = &instruction.kind {
+                    if source == &parameter {
+                        instruction.kind = MirInstructionKind::Move {
+                            result: result.clone(),
+                            source: source.clone(),
+                        };
+                    }
+                }
+            }
+        }
     }
     if is_owned_record_projection_drop {
         let block = if function.blocks.len() == 1 {
@@ -4811,24 +4940,39 @@ fn detect_scalar_record_update_contract(
             message: "generic record update entry block is absent".into(),
         }]
     })?;
-    let [MirInstruction {
-        kind:
-            MirInstructionKind::UpdateRecord {
-                result,
-                base,
-                kind: MirAggregateKind::Record { .. },
-                fields,
-                record_update_contract: None,
-                record_update_move_contract: None,
-            },
-        ..
-    }] = block.instructions.as_slice()
-    else {
+    let update_indices = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::UpdateRecord {
+                    kind: MirAggregateKind::Record { .. },
+                    record_update_contract: None,
+                    record_update_move_contract: None,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [update_index] = update_indices.as_slice() else {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message: "generic record update must contain exactly one receipt-free UpdateRecord"
                 .into(),
         }]);
+    };
+    let MirInstructionKind::UpdateRecord {
+        result,
+        base,
+        kind: MirAggregateKind::Record { .. },
+        fields,
+        ..
+    } = &block.instructions[*update_index].kind
+    else {
+        unreachable!("update index is selected from receipt-free record updates");
     };
     if base != parameter {
         return Err(vec![MirLoweringError {
@@ -4880,7 +5024,7 @@ fn detect_scalar_record_update_contract(
         kind,
         fields: update_values,
         ..
-    } = &block.instructions[0].kind
+    } = &block.instructions[*update_index].kind
     else {
         unreachable!("shape matched above");
     };
@@ -4961,25 +5105,40 @@ fn detect_owned_record_update_contract(
             message: "generic record move update entry block is absent".into(),
         }]
     })?;
-    let [MirInstruction {
-        kind:
-            MirInstructionKind::UpdateRecord {
-                result,
-                base,
-                kind: MirAggregateKind::Record { .. },
-                fields,
-                record_update_contract: None,
-                record_update_move_contract: None,
-            },
-        ..
-    }] = block.instructions.as_slice()
-    else {
+    let update_indices = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::UpdateRecord {
+                    kind: MirAggregateKind::Record { .. },
+                    record_update_contract: None,
+                    record_update_move_contract: None,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [update_index] = update_indices.as_slice() else {
         return Err(vec![MirLoweringError {
             node_id: subject.clone(),
             message:
                 "generic record move update must contain exactly one receipt-free UpdateRecord"
                     .into(),
         }]);
+    };
+    let MirInstructionKind::UpdateRecord {
+        result,
+        base,
+        kind: MirAggregateKind::Record { .. },
+        fields,
+        ..
+    } = &block.instructions[*update_index].kind
+    else {
+        unreachable!("update index is selected from receipt-free record updates");
     };
     if base != parameter || fields.len() != 1 {
         return Err(vec![MirLoweringError {
@@ -5025,7 +5184,7 @@ fn detect_owned_record_update_contract(
         kind,
         fields: update_values,
         ..
-    } = &block.instructions[0].kind
+    } = &block.instructions[*update_index].kind
     else {
         unreachable!("shape matched above");
     };
@@ -5156,22 +5315,37 @@ pub(crate) fn validate_scalar_record_update_mir(
         .blocks
         .get(&function.entry)
         .ok_or_else(|| "generic record update entry block is absent".to_string())?;
-    let [MirInstruction {
-        kind:
-            MirInstructionKind::UpdateRecord {
-                result,
-                base,
-                kind,
-                fields,
-                record_update_contract: Some(receipt),
-                record_update_move_contract: None,
-            },
-        ..
-    }] = block.instructions.as_slice()
-    else {
+    let update_indices = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::UpdateRecord {
+                    record_update_contract: Some(_),
+                    record_update_move_contract: None,
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [update_index] = update_indices.as_slice() else {
         return Err(
             "generic record update must contain exactly one receipt-bearing UpdateRecord".into(),
         );
+    };
+    let MirInstructionKind::UpdateRecord {
+        result,
+        base,
+        kind,
+        fields,
+        record_update_contract: Some(receipt),
+        record_update_move_contract: None,
+    } = &block.instructions[*update_index].kind
+    else {
+        unreachable!("update index is selected from receipt-bearing record updates");
     };
     if base != parameter {
         return Err("generic record update must update its record parameter".into());
@@ -5237,23 +5411,38 @@ pub(crate) fn validate_owned_record_update_mir(
         .blocks
         .get(&function.entry)
         .ok_or_else(|| "generic record move update entry block is absent".to_string())?;
-    let [MirInstruction {
-        kind:
-            MirInstructionKind::UpdateRecord {
-                result,
-                base,
-                kind,
-                fields,
-                record_update_contract: None,
-                record_update_move_contract: Some(receipt),
-            },
-        ..
-    }] = block.instructions.as_slice()
-    else {
+    let update_indices = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::UpdateRecord {
+                    record_update_contract: None,
+                    record_update_move_contract: Some(_),
+                    ..
+                }
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [update_index] = update_indices.as_slice() else {
         return Err(
             "generic record move update must contain exactly one Move receipt-bearing UpdateRecord"
                 .into(),
         );
+    };
+    let MirInstructionKind::UpdateRecord {
+        result,
+        base,
+        kind,
+        fields,
+        record_update_contract: None,
+        record_update_move_contract: Some(receipt),
+    } = &block.instructions[*update_index].kind
+    else {
+        unreachable!("update index is selected from Move receipt-bearing record updates");
     };
     if base != parameter || fields.len() != 1 {
         return Err("generic record move update must update its parameter with one field".into());
@@ -5848,10 +6037,14 @@ pub(crate) fn validate_scalar_list_construct_mir(
         .ok_or_else(|| "scalar generic List construction entry block is absent".to_string())?;
     let mut construct = None;
     let mut clones = Vec::new();
+    let mut moves = Vec::new();
     for instruction in &block.instructions {
         match &instruction.kind {
             MirInstructionKind::Clone { result, source } => {
                 clones.push((result.clone(), source.clone()));
+            }
+            MirInstructionKind::Move { result, source } => {
+                moves.push((result.clone(), source.clone()));
             }
             MirInstructionKind::ConstructList {
                 result,
@@ -5867,7 +6060,7 @@ pub(crate) fn validate_scalar_list_construct_mir(
             }
             _ => {
                 return Err(
-                    "scalar generic List construction body may contain only one parameter Clone and ConstructList".into(),
+                    "scalar generic List construction body may contain only one parameter Clone/Move and ConstructList".into(),
                 )
             }
         }
@@ -5877,19 +6070,13 @@ pub(crate) fn validate_scalar_list_construct_mir(
             "scalar generic List construction must contain exactly one ConstructList".into(),
         );
     };
-    if clones.len() != 1 || clones[0].1 != *parameter {
-        return Err(
-            "scalar generic List construction must clone its parameter exactly once".into(),
-        );
-    }
-    if elements.len() != 1 || elements[0] != clones[0].0 {
-        return Err(
-            "scalar generic List construction must place the parameter Clone as its sole element"
-                .into(),
-        );
-    }
     let receipt = receipt
         .ok_or_else(|| "scalar generic List construction has no canonical receipt".to_string())?;
+    if elements.len() != 1 {
+        return Err(
+            "scalar generic List construction must have exactly one transferred element".into(),
+        );
+    }
     if receipt != *contract {
         return Err(
             "scalar generic List construction receipt disagrees with its instance contract".into(),
@@ -5907,6 +6094,30 @@ pub(crate) fn validate_scalar_list_construct_mir(
         .ok_or_else(|| "scalar generic List construction element value is absent".to_string())?
         .ty
         .clone();
+    let nested_element = type_catalog
+        .validate_move_owned_list_payload(&element_ty)
+        .is_ok();
+    let transfer_result = if nested_element {
+        if clones.is_empty() && moves.len() == 1 && moves[0].1 == *parameter {
+            moves[0].0.clone()
+        } else {
+            return Err(
+                "nested generic List construction must move its List parameter exactly once".into(),
+            );
+        }
+    } else if moves.is_empty() && clones.len() == 1 && clones[0].1 == *parameter {
+        clones[0].0.clone()
+    } else {
+        return Err(
+            "scalar generic List construction must clone its scalar parameter exactly once".into(),
+        );
+    };
+    if elements.len() != 1 || elements[0] != transfer_result {
+        return Err(
+            "scalar generic List construction must place its parameter transfer as its sole element"
+                .into(),
+        );
+    }
     type_catalog.validate_list_construct_receipt(&result_ty, &[element_ty], &receipt)?;
     let MirTerminator::Return {
         value: Some(returned),
@@ -6444,6 +6655,7 @@ struct Lowerer<'a> {
     body: &'a ResolvedBody,
     type_catalog: Option<&'a MirTypeCatalog>,
     call_parameter_permissions: Option<&'a BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
     values: BTreeMap<MirValueId, MirValue>,
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
@@ -6774,7 +6986,9 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ResolvedStmtKind::Return { value, .. } => {
-                    let value = value.as_ref().map(|value| self.lower_return_expr(value));
+                    let value = value
+                        .as_ref()
+                        .map(|value| self.lower_transition_return_expr(value));
                     self.terminate(MirTerminator::Return { value });
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
@@ -7056,7 +7270,6 @@ impl<'a> Lowerer<'a> {
                 );
             }
             ResolvedExprKind::Project { value, projection } => {
-                let base = self.lower_expr(value);
                 let projection = match projection {
                     crate::core::ir::ResolvedValueProjection::Field(field) => {
                         super::MirProjection::Field(field.clone())
@@ -7071,6 +7284,30 @@ impl<'a> Lowerer<'a> {
                     crate::core::ir::ResolvedValueProjection::Dereference => {
                         super::MirProjection::Dereference
                     }
+                };
+                let base = if let ResolvedExprKind::Load(place) = &value.kind {
+                    if place.projections.is_empty() {
+                        self.local_value(&place.base)
+                            .ok()
+                            .filter(|local| {
+                                self.type_catalog.is_some_and(|catalog| {
+                                    self.values.get(local).is_some_and(|base_value| {
+                                        catalog
+                                            .validate_move_projection(
+                                                &base_value.ty,
+                                                &expression.ty,
+                                                &projection,
+                                            )
+                                            .is_ok()
+                                    })
+                                })
+                            })
+                            .unwrap_or_else(|| self.lower_expr(value))
+                    } else {
+                        self.lower_expr(value)
+                    }
+                } else {
+                    self.lower_expr(value)
                 };
                 let list_index_contract = match &projection {
                     super::MirProjection::Index(index) => self.list_index_projection_contract(
@@ -7164,7 +7401,24 @@ impl<'a> Lowerer<'a> {
                     fields: fields.iter().map(|field| field.field.clone()).collect(),
                 };
                 if let Some(rest) = rest {
-                    let base = self.lower_expr(rest);
+                    // `UpdateRecord` consumes its base.  A direct local load
+                    // therefore must stay as the parameter/local value rather
+                    // than being lowered through the ordinary read-only Load
+                    // path, which would insert a Clone and hide the exact
+                    // one-instruction update envelope required by the generic
+                    // record receipt.
+                    let base = match &rest.kind {
+                        ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                            match self.local_value(&place.base) {
+                                Ok(base) => base,
+                                Err(errors) => {
+                                    self.errors.extend(errors);
+                                    self.fallback_value(rest)
+                                }
+                            }
+                        }
+                        _ => self.lower_expr(rest),
+                    };
                     self.emit(
                         &expression.node_id,
                         "update_record",
@@ -7630,6 +7884,9 @@ impl<'a> Lowerer<'a> {
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.lower_match_expr(&expression.node_id, result.clone(), scrutinee, arms);
             }
+            ResolvedExprKind::Try { value: inner, .. } => {
+                self.lower_try_expr(&expression.node_id, result.clone(), inner);
+            }
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
                 if let Some(value) = self.lower_block_expr(block) {
                     self.emit(
@@ -7648,6 +7905,301 @@ impl<'a> Lowerer<'a> {
             ),
         }
         result
+    }
+
+    fn result_variant_parts(
+        &mut self,
+        result_ty: &crate::core::ResolvedTypeId,
+        name: &str,
+        node: &NodeId,
+    ) -> Option<(NominalTypeId, NodeId, NodeId)> {
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                node,
+                "Flow failure lowering requires a canonical TypeDesc catalog",
+            );
+            return None;
+        };
+        let Some((nominal, variants)) = catalog.variant_layout(result_ty) else {
+            self.error(
+                node,
+                format!(
+                    "Flow failure Result type '{}' has no canonical variant layout",
+                    result_ty.as_str()
+                ),
+            );
+            return None;
+        };
+        let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
+            self.error(
+                node,
+                format!(
+                    "Flow failure Result type '{}' has no {name} variant",
+                    result_ty.as_str()
+                ),
+            );
+            return None;
+        };
+        let Some(field) = variant.fields.first() else {
+            self.error(
+                node,
+                format!("Flow failure Result {name} variant has no payload field"),
+            );
+            return None;
+        };
+        let nominal = match NominalTypeId::new(nominal.to_string()) {
+            Ok(nominal) => nominal,
+            Err(error) => {
+                self.error(node, error.to_string());
+                return None;
+            }
+        };
+        Some((nominal, variant.id.clone(), field.id.clone()))
+    }
+
+    fn wrap_transition_success(&mut self, node: &NodeId, value: MirValueId) -> MirValueId {
+        let Some(result_ty) = self.transition_result.clone() else {
+            return value;
+        };
+        let Some(result) = self.id("flow.ok", node) else {
+            return self.fallback_value_for_type(&result_ty, node);
+        };
+        let Some((nominal, variant, field)) = self.result_variant_parts(&result_ty, "Ok", node)
+        else {
+            return result;
+        };
+        self.insert_value(result.clone(), result_ty, node);
+        self.emit(
+            node,
+            "flow_ok",
+            MirInstructionKind::ConstructVariantMove {
+                result: result.clone(),
+                nominal,
+                variant,
+                fields: vec![(field, value)],
+            },
+        );
+        result
+    }
+
+    fn fallback_value_for_type(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+        node: &NodeId,
+    ) -> MirValueId {
+        let value = MirValueId::new(format!("error:flow:{}", node.0))
+            .unwrap_or_else(|_| MirValueId::new("error:flow").expect("static MIR id"));
+        self.insert_value(value.clone(), ty.clone(), node);
+        value
+    }
+
+    fn lower_try_expr(&mut self, node: &NodeId, result: MirValueId, inner: &ResolvedExpr) {
+        let inner_value = self.lower_consuming_expr(inner);
+        let Some(inner_ty) = self.values.get(&inner_value).map(|value| value.ty.clone()) else {
+            self.error(node, "Flow failure Try operand has no canonical MIR type");
+            return;
+        };
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                node,
+                "Flow failure Try requires a canonical TypeDesc catalog",
+            );
+            return;
+        };
+        let Some(descriptor) = catalog.get(&inner_ty) else {
+            self.error(node, "Flow failure Try operand TypeDesc is absent");
+            return;
+        };
+        let super::types::MirLayout::Result {
+            ok,
+            error,
+            variants,
+        } = &descriptor.layout
+        else {
+            self.error(
+                node,
+                "MIR Try currently admits only a checker-owned Result operand",
+            );
+            return;
+        };
+        if ok != &self.values[&result].ty {
+            self.error(
+                node,
+                "Flow failure Try result TypeDesc disagrees with Result::Ok",
+            );
+            return;
+        }
+        let Some(ok_variant) = variants.iter().find(|variant| variant.name == "Ok") else {
+            self.error(node, "Flow failure Try Result has no Ok variant");
+            return;
+        };
+        let Some(err_variant) = variants.iter().find(|variant| variant.name == "Err") else {
+            self.error(node, "Flow failure Try Result has no Err variant");
+            return;
+        };
+        let Some(ok_field) = ok_variant.fields.first() else {
+            self.error(node, "Flow failure Try Ok variant has no payload field");
+            return;
+        };
+        let Some(err_field) = err_variant.fields.first() else {
+            self.error(node, "Flow failure Try Err variant has no payload field");
+            return;
+        };
+        let Some(transition_result) = self.transition_result.clone() else {
+            self.error(
+                node,
+                "`?` in MIR requires a failing Flow transition context",
+            );
+            return;
+        };
+        let Some(outer_error) = (match catalog.get(&transition_result) {
+            Some(super::types::MirTypeDesc {
+                layout: super::types::MirLayout::Result { error, .. },
+                ..
+            }) => Some(error.clone()),
+            _ => None,
+        }) else {
+            self.error(
+                node,
+                "failing Flow transition result has no canonical error payload",
+            );
+            return;
+        };
+        let Some((_, ok_id, ok_field_id)) = self.result_variant_parts(&inner_ty, "Ok", node) else {
+            return;
+        };
+        let Some((_, err_id, err_field_id)) = self.result_variant_parts(&inner_ty, "Err", node)
+        else {
+            return;
+        };
+        let Some((outer_nominal, outer_err_id, outer_err_field_id)) =
+            self.result_variant_parts(&transition_result, "Err", node)
+        else {
+            return;
+        };
+        let Some(source) = self.body.parameters.first().cloned() else {
+            self.error(
+                node,
+                "failing Flow transition has no source state parameter",
+            );
+            return;
+        };
+        let Ok(source_value) = self.local_value(&source) else {
+            self.error(
+                node,
+                "failing Flow transition source state has no MIR value",
+            );
+            return;
+        };
+        let Some(ok_block) = self.block_id("try.ok", node) else {
+            return;
+        };
+        let Some(err_block) = self.block_id("try.err", node) else {
+            return;
+        };
+        let Some(ok_edge) = self.edge_id("try.ok", node) else {
+            return;
+        };
+        let Some(err_edge) = self.edge_id("try.err", node) else {
+            return;
+        };
+        let Some(error_value) = self.id("try.error", node) else {
+            return;
+        };
+        self.insert_value(error_value.clone(), error.clone(), node);
+        let ok_projection = match catalog.validated_variant_payload_projection_contract(
+            &inner_ty,
+            &ok_id,
+            &ok_field_id,
+            &self.values[&result].ty,
+        ) {
+            Ok(projection) => projection,
+            Err(message) => {
+                self.error(node, message);
+                return;
+            }
+        };
+        let err_projection = match catalog.validated_variant_payload_projection_contract(
+            &inner_ty,
+            &err_id,
+            &err_field_id,
+            error,
+        ) {
+            Ok(projection) => projection,
+            Err(message) => {
+                self.error(node, message);
+                return;
+            }
+        };
+        self.add_block(
+            ok_block.clone(),
+            vec![MirBlockParameter {
+                value: result.clone(),
+            }],
+        );
+        self.add_block(
+            err_block.clone(),
+            vec![MirBlockParameter {
+                value: error_value.clone(),
+            }],
+        );
+        self.terminate(MirTerminator::SwitchMove {
+            scrutinee: inner_value,
+            arms: vec![
+                MirSwitchArm {
+                    edge: ok_edge,
+                    target: ok_block.clone(),
+                    arguments: Vec::new(),
+                    bindings: vec![MirSwitchBinding {
+                        parameter: result.clone(),
+                        projection: ok_projection,
+                    }],
+                    case: MirSwitchCase::Variant(ok_id),
+                },
+                MirSwitchArm {
+                    edge: err_edge,
+                    target: err_block.clone(),
+                    arguments: Vec::new(),
+                    bindings: vec![MirSwitchBinding {
+                        parameter: error_value.clone(),
+                        projection: err_projection,
+                    }],
+                    case: MirSwitchCase::Variant(err_id),
+                },
+            ],
+        });
+        self.switch_to(err_block);
+        let failure_payload = self
+            .id("flow.failure.payload", node)
+            .unwrap_or_else(|| self.fallback_value_for_type(&outer_error, node));
+        self.insert_value(failure_payload.clone(), outer_error.clone(), node);
+        self.emit(
+            node,
+            "flow_failure_payload",
+            MirInstructionKind::Construct {
+                result: failure_payload.clone(),
+                kind: super::MirAggregateKind::Tuple,
+                fields: vec![source_value, error_value],
+            },
+        );
+        let Some(failure) = self.id("flow.failure", node) else {
+            return;
+        };
+        self.insert_value(failure.clone(), transition_result.clone(), node);
+        self.emit(
+            node,
+            "flow_err",
+            MirInstructionKind::ConstructVariantMove {
+                result: failure.clone(),
+                nominal: outer_nominal,
+                variant: outer_err_id,
+                fields: vec![(outer_err_field_id, failure_payload)],
+            },
+        );
+        self.terminate(MirTerminator::Return {
+            value: Some(failure),
+        });
+        self.switch_to(ok_block);
     }
 
     fn lower_match_expr(
@@ -7827,6 +8379,15 @@ impl<'a> Lowerer<'a> {
             self.lower_consuming_expr(expression)
         } else {
             self.lower_expr(expression)
+        }
+    }
+
+    fn lower_transition_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
+        let value = self.lower_return_expr(expression);
+        if self.transition_result.is_some() {
+            self.wrap_transition_success(&expression.node_id, value)
+        } else {
+            value
         }
     }
 
@@ -8262,8 +8823,29 @@ impl<'a> Lowerer<'a> {
                     self.lower_continue(&statement.node_id);
                 }
                 ResolvedStmtKind::Return { value, .. } => {
-                    let value = value.as_ref().map(|value| self.lower_return_expr(value));
+                    let value = value
+                        .as_ref()
+                        .map(|value| self.lower_transition_return_expr(value));
                     self.terminate(MirTerminator::Return { value });
+                }
+                ResolvedStmtKind::Drop(places) => {
+                    for (index, place) in places.iter().enumerate() {
+                        if !place.projections.is_empty() {
+                            self.error(
+                                &statement.node_id,
+                                "projected drop requires aggregate glue and remains fail-closed",
+                            );
+                            continue;
+                        }
+                        match self.local_value(&place.base) {
+                            Ok(value) => self.emit(
+                                &statement.node_id,
+                                &format!("drop.{index}"),
+                                MirInstructionKind::Drop { value },
+                            ),
+                            Err(errors) => self.errors.extend(errors),
+                        }
+                    }
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
                 _ => self.error(
@@ -8800,6 +9382,9 @@ impl<'a> Lowerer<'a> {
         let projection = match projection {
             crate::core::ir::ResolvedProjection::Field { field, .. } => {
                 super::MirProjection::Field(field.clone())
+            }
+            crate::core::ir::ResolvedProjection::Tuple { index, .. } => {
+                super::MirProjection::Tuple(*index)
             }
             _ => return None,
         };

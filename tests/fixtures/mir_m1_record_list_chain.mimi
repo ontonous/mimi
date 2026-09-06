@@ -1,0 +1,24 @@
+// C1: a single business result depends on a generic Record projection and
+// on a concrete List transform/length chain. The projection consumes the
+// record and its managed residual fields through the canonical drop receipt.
+type Packet<T> {
+    value: T,
+    values: List<i32>,
+    label: string,
+}
+
+func pick<T>(packet: Packet<T>) -> T {
+    packet.value
+}
+
+func main() -> i32 {
+    let packet = Packet { value: [7, 8], values: [10, 20], label: "residual" }
+    let picked = pick(packet)
+    let values: List<i32> = [1, 2, 3]
+    let reversed = values.reverse()
+    let joined = reversed.concat([4])
+    let count = len(joined)
+    drop(values)
+    drop(joined)
+    len(picked) + count
+}

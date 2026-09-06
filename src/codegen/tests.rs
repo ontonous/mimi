@@ -261,6 +261,45 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_record_list_chain_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_m1_record_list_chain.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("record/list chain canonical MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("record/list chain verifier capability");
+    crate::codegen::mir::validate_mir_native(&canonical)
+        .expect("record/list chain native capability");
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "m1_record_list_chain_direct");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native API must use the canonical record/list MIR route");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
+fn legacy_flow_codegen_branch_is_closed_for_recoverable_retry_profile() {
+    let source = include_str!("../../tests/fixtures/mir_m3_flow_retry.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "m3_legacy_flow_branch");
+    let error = codegen
+        .compile_file(&file)
+        .expect_err("legacy Flow lowering must not own the canonical retry profile");
+    assert!(format!("{error:?}").contains("canonical MIR route"));
+}
+
+#[test]
 fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
     let source = r#"
         func main() -> i32 {

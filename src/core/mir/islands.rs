@@ -21,7 +21,9 @@ use crate::core::mir::types::{
     MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
     MirTypeKind, MirVariantCallAbiMode,
 };
-use crate::core::{CheckedProgram, NodeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId};
+use crate::core::{
+    CheckedProgram, NodeId, NominalTypeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId,
+};
 
 use super::{
     MirFunction, MirGenericInstanceContract, MirInstructionKind, MirListOperation, MirTerminator,
@@ -1992,6 +1994,18 @@ pub fn has_unsupported_generic_record_update_candidate(program: &CheckedProgram)
     })
 }
 
+/// Return whether the checked program contains any generic record-update
+/// envelope, including an otherwise recognized envelope whose concrete
+/// TypeDesc later fails materialization.  Route diagnostics use this broader
+/// predicate to keep a construction failure attached to the generic-record
+/// profile instead of collapsing it into an unrelated flat-record message.
+pub fn has_generic_record_update_candidate(program: &CheckedProgram) -> bool {
+    program
+        .callables()
+        .values()
+        .any(|callable| generic_record_update_envelope(program, callable).is_some())
+}
+
 /// Check the checker-owned shape that the flat record island is allowed to
 /// admit.  This mirrors the public TypeDesc contract without constructing MIR:
 /// the declaration must be concrete, non-empty, and every resolved field must
@@ -3053,6 +3067,21 @@ pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
         })
 }
 
+/// Return whether the canonical graph contains an ownership-bearing generic
+/// record operation.  Unlike the flat Copy-record receipt, this family is
+/// explicitly allowed to coexist with the scalar List island: its
+/// `MoveProject`/`MoveProjectDrop` receipt owns the residual release plan.
+pub fn contains_owned_record_projection_candidate(program: &MirProgram) -> bool {
+    program.instances().values().any(|instance| {
+        matches!(
+            instance.contract,
+            MirGenericInstanceContract::OwnedRecordProjection { .. }
+                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
+        )
+    })
+}
+
 /// Return whether a canonical graph contains a materialized generic Option
 /// predicate instance. The instance contract is the executable receipt; no
 /// source-level generic name or backend representation participates here.
@@ -3290,6 +3319,18 @@ pub fn contains_s8_flow_transition_candidate(program: &MirProgram) -> bool {
     })
 }
 
+/// Materialization receipt for the M3 recoverable Flow profile. The effect is
+/// intentionally distinct from S8 SilentLocal, so a caller cannot mistake a
+/// successful graph build for proof that source-return failure semantics were
+/// preserved.
+pub fn contains_flow_failure_retry_candidate(program: &MirProgram) -> bool {
+    program.transitions().values().any(|contract| {
+        contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal
+            && contract.targets.len() == 1
+            && contract.failure.is_some()
+    })
+}
+
 /// Validate the current bounded List/Set whole-program island.
 ///
 /// This is deliberately a second, island-level gate above the generic MIR
@@ -3302,6 +3343,7 @@ pub fn validate_scalar_collection_island(program: &MirProgram) -> Result<(), Vec
         program,
         errors: BTreeSet::new(),
         checked_types: BTreeSet::new(),
+        allow_owned_record_family: contains_owned_record_projection_candidate(program),
     };
     validator.validate();
     if validator.errors.is_empty() {
@@ -3315,6 +3357,7 @@ struct ScalarCollectionValidator<'a> {
     program: &'a MirProgram,
     errors: BTreeSet<String>,
     checked_types: BTreeSet<crate::core::ResolvedTypeId>,
+    allow_owned_record_family: bool,
 }
 
 impl<'a> ScalarCollectionValidator<'a> {
@@ -3532,6 +3575,25 @@ impl<'a> ScalarCollectionValidator<'a> {
                 .type_catalog()
                 .validate_set_glue(ty, MirGlueOperation::MoveOut)
                 .and_then(|()| self.validate_copy_scalar_element(&element)),
+            MirLayout::Record { .. } if self.allow_owned_record_family => self
+                .program
+                .type_catalog()
+                .validate_aggregate_glue(ty, MirGlueOperation::MoveOut)
+                .and_then(|()| {
+                    self.program
+                        .type_catalog()
+                        .validate_aggregate_glue(ty, MirGlueOperation::Drop)
+                }),
+            MirLayout::Handle
+                if self.allow_owned_record_family
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_owned_string(ty)
+                        .is_ok() =>
+            {
+                Ok(())
+            }
             layout => Err(format!(
                 "layout {layout:?} is outside {SCALAR_COLLECTION_ISLAND}"
             )),
@@ -3567,6 +3629,13 @@ impl<'a> ScalarCollectionValidator<'a> {
                         self.require_copy_scalar(&result_ty, subject, "constant result");
                     }
                     ResolvedLiteral::Unit => self.require_unit(&result_ty, subject),
+                    ResolvedLiteral::String(_)
+                        if self.allow_owned_record_family
+                            && self
+                                .program
+                                .type_catalog()
+                                .validate_owned_string(&result_ty)
+                                .is_ok() => {}
                     ResolvedLiteral::FloatBits(_) | ResolvedLiteral::String(_) => {
                         self.error(format!(
                             "{subject} literal {literal:?} is outside {SCALAR_COLLECTION_ISLAND}"
@@ -3614,6 +3683,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                     .is_err()
                     && !self.is_list_type(&source_ty)
                     && !self.is_set_type(&source_ty)
+                    && !self.is_owned_record_or_string_type(&source_ty)
                 {
                     self.error(format!(
                         "{subject} Clone source '{}' is outside {SCALAR_COLLECTION_ISLAND}",
@@ -3938,6 +4008,41 @@ impl<'a> ScalarCollectionValidator<'a> {
                 "{subject} typed session_pair binding is outside {SCALAR_COLLECTION_ISLAND}"
             )),
             MirInstructionKind::Nop => {}
+            MirInstructionKind::MoveProjectDrop {
+                result,
+                base,
+                contract: Some(receipt),
+                ..
+            } if self.allow_owned_record_family => {
+                let (Some(result_ty), Some(base_ty)) = (
+                    self.value_type(function, result, subject),
+                    self.value_type(function, base, subject),
+                ) else {
+                    return;
+                };
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_record_move_projection_drop_receipt(&base_ty, &result_ty, receipt)
+                {
+                    self.error(format!(
+                        "{subject} record move/drop projection rejected: {message}"
+                    ));
+                }
+            }
+            MirInstructionKind::Construct {
+                result,
+                kind:
+                    super::MirAggregateKind::Record {
+                        nominal,
+                        fields: field_ids,
+                    },
+                fields,
+            } if self.allow_owned_record_family => {
+                self.validate_record_construct(
+                    function, result, nominal, field_ids, fields, subject,
+                );
+            }
             MirInstructionKind::Borrow { .. }
             | MirInstructionKind::EndBorrow { .. }
             | MirInstructionKind::MoveProject { .. }
@@ -3953,6 +4058,65 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::FlowTransition { .. } => self.error(format!(
                 "{subject} MIR operation is outside {SCALAR_COLLECTION_ISLAND}"
             )),
+        }
+    }
+
+    fn validate_record_construct(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        nominal: &NominalTypeId,
+        field_ids: &[NodeId],
+        fields: &[MirValueId],
+        subject: &str,
+    ) {
+        let Some(result_ty) = self.value_type(function, result, subject) else {
+            return;
+        };
+        let Some(descriptor) = self.program.type_catalog().get(&result_ty) else {
+            return;
+        };
+        let MirLayout::Record {
+            nominal: result_nominal,
+            fields: layout_fields,
+        } = &descriptor.layout
+        else {
+            self.error(format!(
+                "{subject} record construction result is not a canonical record TypeDesc"
+            ));
+            return;
+        };
+        if result_nominal != nominal
+            || layout_fields.len() != field_ids.len()
+            || fields.len() != field_ids.len()
+        {
+            self.error(format!(
+                "{subject} record construction shape disagrees with its TypeDesc"
+            ));
+            return;
+        }
+        for ((field_id, field), layout_field) in field_ids.iter().zip(fields).zip(layout_fields) {
+            if field_id != &layout_field.id {
+                self.error(format!(
+                    "{subject} record construction field identity disagrees with its TypeDesc"
+                ));
+            }
+            if let Some(field_ty) = self.value_type(function, field, subject) {
+                if field_ty != layout_field.ty {
+                    self.error(format!(
+                        "{subject} record construction field type disagrees with its TypeDesc"
+                    ));
+                }
+            }
+        }
+        if let Err(message) = self
+            .program
+            .type_catalog()
+            .validate_aggregate_glue(&result_ty, MirGlueOperation::MoveOut)
+        {
+            self.error(format!(
+                "{subject} record construction glue rejected: {message}"
+            ));
         }
     }
 
@@ -4096,6 +4260,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         let valid = self.program.type_catalog().validate_copy_scalar(ty).is_ok()
             || self.is_list_type(ty)
             || self.is_set_type(ty)
+            || self.is_owned_record_or_string_type(ty)
             || self.is_unit_type(ty);
         if !valid {
             self.error(format!(
@@ -4120,7 +4285,10 @@ impl<'a> ScalarCollectionValidator<'a> {
         if self.program.type_catalog().validate_copy_scalar(ty).is_ok() || self.is_unit_type(ty) {
             return;
         }
-        if !self.is_list_type(ty) && !self.is_set_type(ty) {
+        if !self.is_list_type(ty)
+            && !self.is_set_type(ty)
+            && !self.is_owned_record_or_string_type(ty)
+        {
             self.error(format!(
                 "{subject} {role} type '{}' is outside {SCALAR_COLLECTION_ISLAND}",
                 ty.as_str()
@@ -4159,6 +4327,36 @@ impl<'a> ScalarCollectionValidator<'a> {
                     && descriptor.abi == MirAbiClass::Unit
                     && descriptor.ownership == MirOwnership::Copy
                     && is_noop_glue(descriptor.glue)
+            })
+    }
+
+    fn is_owned_record_or_string_type(&self, ty: &crate::core::ResolvedTypeId) -> bool {
+        if !self.allow_owned_record_family {
+            return false;
+        }
+        if self
+            .program
+            .type_catalog()
+            .validate_owned_string(ty)
+            .is_ok()
+        {
+            return true;
+        }
+        self.program
+            .type_catalog()
+            .get(ty)
+            .is_some_and(|descriptor| {
+                matches!(descriptor.layout, MirLayout::Record { .. })
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_aggregate_glue(ty, MirGlueOperation::MoveOut)
+                        .is_ok()
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_aggregate_glue(ty, MirGlueOperation::Drop)
+                        .is_ok()
             })
     }
 

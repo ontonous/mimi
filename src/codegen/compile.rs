@@ -22,6 +22,51 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
     }
 }
 
+/// Identify the bounded Flow profile whose source-returning failure contract
+/// is now implemented by canonical MIR.  This is deliberately structural and
+/// mirrors the checker admission rather than relying on a Flow name.
+fn is_recoverable_flow_retry_transition(flow: &FlowDef, transition: &TransitionDef) -> bool {
+    fn is_i32(ty: &Type) -> bool {
+        matches!(ty.unlocated(), Type::Name(name, arguments) if name == "i32" && arguments.is_empty())
+    }
+
+    if !flow.generics.is_empty()
+        || !flow.persistent_fields.is_empty()
+        || flow.fault_type.is_some()
+        || transition.fails.is_none()
+        || transition.to_states.len() != 1
+        || transition.to_states[0] != transition.from_state
+        || transition.params.len() != 1
+        || !is_i32(&transition.params[0].ty)
+    {
+        return false;
+    }
+    let Some(source) = flow
+        .states
+        .iter()
+        .find(|state| state.name == transition.from_state)
+    else {
+        return false;
+    };
+    let Some(target) = flow
+        .states
+        .iter()
+        .find(|state| state.name == transition.to_states[0])
+    else {
+        return false;
+    };
+    let Some(source_fields) = source.payload.as_ref() else {
+        return false;
+    };
+    let Some(target_fields) = target.payload.as_ref() else {
+        return false;
+    };
+    source_fields.len() == 1
+        && target_fields.len() == 1
+        && is_i32(&source_fields[0].ty)
+        && is_i32(&target_fields[0].ty)
+}
+
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_checked(
         &mut self,
@@ -564,18 +609,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         // island would force unrelated legacy prelude arithmetic through the
         // narrow native Float contract and poison the graph before emission.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-        let excluded_sources =
-            if admission.copy_option_f64_complete() || admission.copy_result_i32_complete() {
-                program
-                    .source_registry()
-                    .records()
-                    .iter()
-                    .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-                    .map(|record| record.id)
-                    .collect::<HashSet<_>>()
-            } else {
-                HashSet::new()
-            };
+        let excluded_sources = if admission.copy_option_f64_complete()
+            || admission.copy_result_i32_complete()
+            || admission.flow_failure_retry
+            || admission.flow_complete()
+        {
+            program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id)
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
         let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
         let route = match crate::core::mir::materialize_canonical_mir_route(
             program,
@@ -854,6 +902,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "MIR-COVERAGE-001",
                         format!(
                             "complete Copy Result<i32, i32> variant MIR island materialization failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::FlowFailureRetry,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete recoverable Flow retry MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::FlowFailureRetry,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete recoverable Flow retry MIR island materialization failed: {message}"
                         ),
                     ),
                 };
@@ -1723,6 +1789,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         for t in &flow.transitions {
             if t.body.is_none() {
                 continue; // abstract / protocol-style transition — no body
+            }
+            if is_recoverable_flow_retry_transition(flow, t) {
+                // The canonical MIR FlowFailureRetry profile owns this exact
+                // source-returning failure contract.  Its old AST lowering
+                // branch is intentionally removed from production codegen;
+                // direct callers must enter the same canonical route as the
+                // CLI and receive a hard diagnostic instead of a legacy
+                // approximation.
+                return Err(CompileError::Unsupported(
+                    "recoverable Flow failure/retry profile requires the canonical MIR route"
+                        .into(),
+                ));
             }
             if t.to_states.len() != 1 {
                 // Multi-target: ret type is the synthetic union; return

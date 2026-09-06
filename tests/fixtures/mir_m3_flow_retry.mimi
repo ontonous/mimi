@@ -1,0 +1,28 @@
+// M3: a failing transition returns its source in Err((source, error)); the
+// caller consumes that source exactly once for a safe retry.
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked: Result<i32, string> = if amount == 0 {
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
+        return Active { balance: new_balance }
+    }
+}
+
+func main() -> i32 {
+    let source = Active { balance: 100 }
+    let rejected = Account::withdraw(source, 0)
+    match rejected {
+        Ok(_) => 1000,
+        Err(error) => {
+            let retried = Account::withdraw(error.0, 5)
+            drop(retried)
+            0
+        },
+    }
+}

@@ -84,7 +84,16 @@ impl std::fmt::Display for MirProgramBuildError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Lowering(errors) => {
-                write!(formatter, "MIR lowering failed ({} errors)", errors.len())
+                let details = errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                write!(
+                    formatter,
+                    "MIR lowering failed ({} errors): {details}",
+                    errors.len()
+                )
             }
             Self::Types(errors) => write!(
                 formatter,
@@ -175,10 +184,16 @@ impl MirProgram {
             if !callable.signature.generic_parameters.is_empty() {
                 continue;
             }
-            match super::lower::lower_callable_with_type_catalog_and_permissions(
+            let transition_result = program
+                .transitions()
+                .values()
+                .find(|transition| transition.node_id == *owner && transition.fails.is_some())
+                .map(|_| callable.signature.result.clone());
+            match super::lower::lower_callable_with_type_catalog_and_permissions_for_transition(
                 callable,
                 &type_catalog,
                 Some(&call_parameter_permissions),
+                transition_result,
             ) {
                 Ok(function) => {
                     functions.insert(owner.clone(), function);
@@ -1555,9 +1570,20 @@ fn validate_instance_table(
             MirGenericInstanceContract::ScalarListFacade { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
-            MirGenericInstanceContract::ScalarListConstruct { .. } => {
-                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
-            }
+            MirGenericInstanceContract::ScalarListConstruct { .. } => type_catalog
+                .validate_scalar_generic_arguments(&instance.arguments)
+                .or_else(|scalar_error| {
+                    if instance.arguments.len() == 1 {
+                        type_catalog
+                            .validate_move_owned_list_payload(&instance.arguments[0])
+                            .or_else(|_| {
+                                type_catalog.validate_nested_list_payload(&instance.arguments[0])
+                            })
+                            .map_err(|_| scalar_error)
+                    } else {
+                        Err(scalar_error)
+                    }
+                }),
             MirGenericInstanceContract::ScalarListProjection { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
@@ -2291,12 +2317,20 @@ fn validate_call_graph(
                     }
                 }
 
+                let allow_managed_clone = target_instance.is_some_and(|instance| {
+                    matches!(
+                        instance.contract,
+                        MirGenericInstanceContract::ScalarListFacade { .. }
+                            | MirGenericInstanceContract::ScalarListProjection { .. }
+                    )
+                });
                 errors.extend(validate_call_argument_directions(
                     function,
                     target,
                     arguments,
                     type_catalog,
                     &instruction.id.to_string(),
+                    allow_managed_clone,
                 ));
             }
         }
@@ -2318,6 +2352,7 @@ fn validate_call_argument_directions(
     arguments: &[MirValueId],
     type_catalog: &MirTypeCatalog,
     subject: &str,
+    allow_managed_clone: bool,
 ) -> Vec<super::MirValidationError> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Producer {
@@ -2448,7 +2483,10 @@ fn validate_call_argument_directions(
                     callee.owner.0
                 ),
             });
-        } else if !borrowed && matches!(producer, Producer::Clone | Producer::Unknown) {
+        } else if !borrowed
+            && !allow_managed_clone
+            && matches!(producer, Producer::Clone | Producer::Unknown)
+        {
             errors.push(super::MirValidationError {
                 subject: subject.into(),
                 message: format!(
@@ -2524,7 +2562,9 @@ fn validate_transition_contracts(
                 break;
             }
         }
-        if contract.result != target.result {
+        if contract.effect != MirTransitionEffect::RecoverableLocal
+            && contract.result != target.result
+        {
             errors.push(super::MirValidationError {
                 subject: subject.clone(),
                 message: "transition result TypeDesc disagrees with executable MIR signature"
@@ -2542,6 +2582,32 @@ fn validate_transition_contracts(
                     errors.push(super::MirValidationError {
                         subject,
                         message: "silent-local transition must be one target, non-failing, non-fallback, non-pinned, and return that target state".into(),
+                    });
+                }
+            }
+            MirTransitionEffect::RecoverableLocal => {
+                let valid_result = type_catalog
+                    .get(&contract.result)
+                    .and_then(|descriptor| match &descriptor.layout {
+                        super::types::MirLayout::Result { ok, error, .. }
+                            if contract.targets.len() == 1
+                                && contract.targets.first() == Some(ok)
+                                && contract.failure.as_ref() == Some(error)
+                                && target.result == contract.result =>
+                        {
+                            Some(())
+                        }
+                        _ => None,
+                    })
+                    .is_some();
+                if !valid_result
+                    || contract.is_fallback
+                    || contract.is_ffi_pinned
+                    || contract.targets.len() != 1
+                {
+                    errors.push(super::MirValidationError {
+                        subject,
+                        message: "recoverable-local transition must return canonical Result<target, failure>, have one target, and be non-fallback/non-pinned".into(),
                     });
                 }
             }
@@ -2579,11 +2645,13 @@ fn validate_flow_transition_instruction(
         });
         return;
     };
-    if contract.effect != MirTransitionEffect::SilentLocal
+    let recoverable = contract.effect == MirTransitionEffect::RecoverableLocal;
+    if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
         || contract.targets.len() != 1
-        || contract.failure.is_some()
+        || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
         || contract.is_ffi_pinned
+        || (recoverable && contract.failure.is_none())
     {
         errors.push(super::MirValidationError {
             subject: subject.into(),
@@ -2633,7 +2701,19 @@ fn validate_flow_transition_instruction(
         });
         return;
     };
-    if result_value.ty != contract.result || result_value.ty != target.result {
+    if result_value.ty != contract.result
+        || (!recoverable && result_value.ty != target.result)
+        || (recoverable
+            && type_catalog.get(&result_value.ty).is_none_or(|descriptor| {
+                !matches!(
+                    descriptor.layout,
+                    super::types::MirLayout::Result { ref ok, ref error, .. }
+                        if contract.targets.first() == Some(ok)
+                            && contract.failure.as_ref() == Some(error)
+                            && target.result == contract.result
+                )
+            }))
+    {
         errors.push(super::MirValidationError {
             subject: subject.into(),
             message: "FlowTransition result TypeDesc disagrees with transition result".into(),
@@ -2747,8 +2827,10 @@ fn materialize_transition_contracts(
                 parameters,
                 result: signature.result.clone(),
                 targets,
-                failure,
-                effect: if transition.silent_transition {
+                failure: failure.clone(),
+                effect: if transition.silent_transition && failure.is_some() {
+                    MirTransitionEffect::RecoverableLocal
+                } else if transition.silent_transition {
                     MirTransitionEffect::SilentLocal
                 } else {
                     MirTransitionEffect::Boundary
@@ -5059,11 +5141,13 @@ impl<'a> MirReferenceInterpreter<'a> {
                         format!("transition '{}' has no MIR contract", transition.0),
                     )
                 })?;
-                if contract.effect != MirTransitionEffect::SilentLocal
+                let recoverable = contract.effect == MirTransitionEffect::RecoverableLocal;
+                if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
                     || contract.targets.len() != 1
-                    || contract.failure.is_some()
+                    || (!recoverable && contract.failure.is_some())
                     || contract.is_fallback
                     || contract.is_ffi_pinned
+                    || (recoverable && contract.failure.is_none())
                 {
                     return Err(self.error(
                         &function.owner,
@@ -6357,6 +6441,23 @@ fn move_project_value(
     projection: &MirProjection,
     type_catalog: &MirTypeCatalog,
 ) -> Result<MirRuntimeValue, MirExecutionError> {
+    if let MirProjection::Tuple(index) = projection {
+        let MirRuntimeValue::Tuple(mut values) = value else {
+            return Err(execution_error(
+                function,
+                "move projection tuple base is not a tuple",
+            ));
+        };
+        type_catalog
+            .validate_move_projection(base_ty, result_ty, projection)
+            .map_err(|message| execution_error(function, message))?;
+        return values
+            .get_mut(*index)
+            .map(|value| std::mem::replace(value, MirRuntimeValue::Unit))
+            .ok_or_else(|| {
+                execution_error(function, "move projection tuple field is out of bounds")
+            });
+    }
     let MirRuntimeValue::Record {
         nominal,
         mut fields,
@@ -7331,7 +7432,7 @@ mod tests {
             errors.iter().any(|error| {
                 error
                     .message
-                    .contains("generic scalar record projection call transfer is invalid")
+                    .contains("generic scalar record call transfer is invalid")
                     && error.message.contains("direct Record Construct result")
             }),
             "{errors:?}"
@@ -7914,7 +8015,7 @@ mod tests {
             MirProgramBuildError::Lowering(errors) => assert!(errors.iter().any(|error| {
                 error
                     .message
-                    .contains("owned generic record projection call requires a direct local Clone or fresh Record Construct producer")
+                    .contains("owned generic record projection call requires a direct local Move/Clone or fresh Record Construct producer")
             }), "{errors:?}"),
             other => panic!("owned generic record indirect argument crossed the MIR gate: {other:?}"),
         }
@@ -8580,13 +8681,14 @@ mod tests {
             .get(&parameter_ty)
             .expect("four-field record projection TypeDesc");
         assert!(matches!(
-            descriptor.layout,
+                descriptor.layout,
             crate::core::mir::types::MirLayout::Record { ref fields, .. }
                 if fields.len() == 4
                     && fields[0].ty == contract.field_ty
-                    && fields[1].ty != contract.field_ty
-                    && fields[2].ty != contract.field_ty
-                    && fields[3].ty != contract.field_ty
+                    && fields[0].id == contract.field
+                    && fields[1].id != contract.field
+                    && fields[2].id != contract.field
+                    && fields[3].id != contract.field
         ));
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
@@ -8629,14 +8731,15 @@ mod tests {
             .get(&parameter_ty)
             .expect("five-field record projection TypeDesc");
         assert!(matches!(
-            descriptor.layout,
+                descriptor.layout,
             crate::core::mir::types::MirLayout::Record { ref fields, .. }
                 if fields.len() == 5
                     && fields[0].ty == contract.field_ty
-                    && fields[1].ty != contract.field_ty
-                    && fields[2].ty != contract.field_ty
-                    && fields[3].ty != contract.field_ty
-                    && fields[4].ty != contract.field_ty
+                    && fields[0].id == contract.field
+                    && fields[1].id != contract.field
+                    && fields[2].id != contract.field
+                    && fields[3].id != contract.field
+                    && fields[4].id != contract.field
         ));
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
@@ -8667,7 +8770,18 @@ mod tests {
             .functions()
             .get(&instance.function)
             .expect("generic record update target");
-        assert!(target.canonical_text().contains("receipt=Some"));
+        assert!(target
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::UpdateRecord {
+                    record_update_contract: Some(_),
+                    record_update_move_contract: None,
+                    ..
+                }
+            )));
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
             .expect("reference generic record update execution");
@@ -8716,7 +8830,7 @@ mod tests {
                 .iter()
                 .map(|field| field.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["enabled", "tag"]
+            vec!["tag", "enabled"]
         );
         let value = MirReferenceInterpreter::new(&program)
             .execute(&NodeId("function:main".into()), &[])
@@ -8761,23 +8875,40 @@ mod tests {
     }
 
     #[test]
-    fn mixed_owned_generic_record_projection_with_unsupported_noncopy_siblings_fails_closed() {
+    fn mixed_owned_generic_record_projection_with_noncopy_siblings_materializes_drop_receipt() {
         let source = "type Triple<T> { value: T, tag: string, extra: string }\nfunc get<T>(triple: Triple<T>) -> T { triple.value }\nfunc main() -> i32 { let triple = Triple { value: \"owned\", tag: \"residual\", extra: \"extra\" }; let picked = get(triple); drop(picked); 41 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("non-Copy sibling must prevent an owned projection");
-        match error {
-            MirProgramBuildError::Lowering(errors) => assert!(
-                errors.iter().any(|error| {
-                    error.message.contains("generic record projection")
-                        && error.message.contains("direct field Project")
-                }),
-                "unexpected errors: {errors:?}"
-            ),
-            other => panic!("non-Copy sibling crossed the MIR gate: {other:?}"),
-        }
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("owned generic record projection must carry residual-drop proof");
+        let instance = program
+            .instances()
+            .values()
+            .next()
+            .expect("owned generic record projection instance");
+        let MirGenericInstanceContract::OwnedRecordProjectionDrop { contract } = &instance.contract
+        else {
+            panic!("owned generic record projection must carry a drop receipt");
+        };
+        assert_eq!(contract.projection.arity, 3);
+        assert_eq!(contract.residual.len(), 2);
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic record projection target");
+        assert!(target
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::MoveProjectDrop { .. }
+            )));
+        let value = MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference owned generic record residual-drop execution");
+        assert_eq!(value, MirRuntimeValue::Int(41));
     }
 
     #[test]

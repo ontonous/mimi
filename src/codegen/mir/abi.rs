@@ -307,6 +307,7 @@ pub(super) fn native_non_copy_variant_payload_type(
                 .validate_result_move_projection_variant(ty)
                 .map(|_| ())
         })
+        .or_else(|_| catalog.validate_recoverable_result_variant(ty))
         .map_err(|message| {
             NativeMirError::new(
                 ty.as_str(),

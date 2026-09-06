@@ -1441,6 +1441,14 @@ impl<'a> NativeMirValidator<'a> {
             self.errors.push(NativeMirError::new(subject, message));
             return;
         }
+        if matches!(projection, MirProjection::Tuple(_)) {
+            if let Err(message) =
+                validate_native_recursive_tuple_type(self.program.type_catalog(), &base_value.ty)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+            return;
+        }
         if let Err(message) =
             validate_native_non_copy_record_type(self.program.type_catalog(), &base_value.ty)
         {
@@ -2393,12 +2401,15 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+        let recoverable =
+            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
-            || contract.failure.is_some()
+            || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
-            || contract.targets.first() != Some(&contract.result)
+            || (recoverable && contract.failure.is_none())
+            || (!recoverable && contract.targets.first() != Some(&contract.result))
         {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -2434,11 +2445,11 @@ impl<'a> NativeMirValidator<'a> {
             }
         }
         self.validate_value(function, result, "FlowTransition result");
-        if function
-            .values
-            .get(result)
-            .is_some_and(|value| value.ty != contract.result || value.ty != target.result)
-        {
+        if function.values.get(result).is_some_and(|value| {
+            value.ty != contract.result
+                || (!recoverable && value.ty != target.result)
+                || (recoverable && target.result != contract.result)
+        }) {
             self.errors.push(NativeMirError::new(
                 subject,
                 "FlowTransition result TypeDesc disagrees with its canonical contract",

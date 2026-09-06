@@ -5130,7 +5130,10 @@ impl MirTypeCatalog {
                 ));
             }
         } else {
-            if descriptor.ownership != MirOwnership::Move {
+            if !matches!(
+                descriptor.ownership,
+                MirOwnership::Move | MirOwnership::Linear
+            ) {
                 return Err(format!(
                     "tuple TypeDesc '{}' ownership {:?} is outside the concrete Move contract",
                     ty.as_str(),
@@ -5178,9 +5181,16 @@ impl MirTypeCatalog {
                     element.as_str()
                 ));
             }
+            let record_supported = matches!(child.layout, MirLayout::Record { .. })
+                && child.ownership != MirOwnership::Copy
+                && self
+                    .validate_glue(element, MirGlueOperation::MoveOut)
+                    .is_ok()
+                && self.validate_glue(element, MirGlueOperation::Drop).is_ok();
             let supported = self.validate_copy_scalar(element).is_ok()
                 || self.validate_owned_string(element).is_ok()
-                || matches!(child.layout, MirLayout::Tuple(_));
+                || matches!(child.layout, MirLayout::Tuple(_))
+                || record_supported;
             if !supported {
                 return Err(format!(
                     "tuple '{}' field {} type '{}' is outside the scalar/String/tuple ABI",
@@ -6537,16 +6547,38 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        let MirLayout::Record { fields, .. } = &base.layout else {
-            return Err("move projection requires a record product base".into());
-        };
         if base.ownership == MirOwnership::Copy {
             return Err("move projection base must be non-Copy".into());
         }
         self.validate_glue(base_ty, MirGlueOperation::MoveOut)?;
         self.validate_aggregate_glue(base_ty, MirGlueOperation::Drop)?;
+        if let (MirLayout::Tuple(elements), crate::core::mir::MirProjection::Tuple(index)) =
+            (&base.layout, projection)
+        {
+            let field_ty = elements
+                .get(*index)
+                .ok_or_else(|| format!("move projection tuple index {} is out of bounds", index))?;
+            if field_ty != result_ty {
+                return Err(format!(
+                    "move projection result type '{}' disagrees with tuple field type '{}'",
+                    result_ty.as_str(),
+                    field_ty.as_str()
+                ));
+            }
+            if result.ownership == MirOwnership::Copy {
+                return Err(format!(
+                    "move projection result type '{}' must be non-Copy",
+                    result_ty.as_str()
+                ));
+            }
+            self.validate_glue(result_ty, MirGlueOperation::MoveOut)?;
+            return Ok(());
+        }
+        let MirLayout::Record { fields, .. } = &base.layout else {
+            return Err("move projection requires a record or tuple product base".into());
+        };
         let crate::core::mir::MirProjection::Field(field) = projection else {
-            return Err("move projection currently supports direct record fields only".into());
+            return Err("move projection requires a direct record field or tuple index".into());
         };
         let receipt = self
             .validated_record_field_projection_contract(base_ty, field, result_ty)
@@ -6902,11 +6934,6 @@ impl MirTypeCatalog {
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
             return Err("generic record update requires a record aggregate kind".into());
         };
-        if !matches!(fields.len(), 2 | 3 | 4) {
-            return Err(
-                "generic record update requires a two-, three-, or four-field Copy record".into(),
-            );
-        }
         let descriptor = self.get(result_ty).ok_or_else(|| {
             format!(
                 "generic record update result type '{}' is absent",
@@ -6920,7 +6947,7 @@ impl MirTypeCatalog {
         else {
             return Err("generic record update result has no canonical record layout".into());
         };
-        if nominal != layout_nominal || layout_fields.len() != fields.len() {
+        if nominal != layout_nominal || !matches!(layout_fields.len(), 2 | 3 | 4) {
             return Err("generic record update nominal/layout disagrees with TypeDesc".into());
         }
         let projections = fields
@@ -6996,7 +7023,7 @@ impl MirTypeCatalog {
         let crate::core::mir::MirAggregateKind::Record { nominal, fields } = kind else {
             return Err("generic record move update requires a record aggregate kind".into());
         };
-        if !matches!(fields.len(), 2 | 3 | 4) || field_types.len() != 1 {
+        if field_types.len() != 1 {
             return Err(
                 "generic record move update requires a two-, three-, or four-field record with one override".into(),
             );
@@ -8703,6 +8730,78 @@ impl MirTypeCatalog {
                 ty.as_str()
             )),
         }
+    }
+
+    /// Validate the closed Result envelope used by a recoverable local Flow
+    /// transition. Unlike the older managed-payload Result islands, both
+    /// payloads may be linear products: the Ok state is returned on success,
+    /// while the Err payload is the canonical `(source, error)` product used
+    /// by `?` to return the source for a retry. The payload TypeDesc/glue is
+    /// checked recursively by the shared catalog; no backend may infer this
+    /// shape from an aggregate ABI.
+    pub fn validate_recoverable_result_variant(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::Result {
+            ok,
+            error,
+            variants,
+        } = &descriptor.layout
+        else {
+            return Err("recoverable Flow result requires a canonical Result layout".into());
+        };
+        if descriptor.kind != MirTypeKind::Result
+            || descriptor.abi != MirAbiClass::Aggregate
+            || descriptor.ownership == MirOwnership::Copy
+            || descriptor.glue
+                != (MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.variant_drop_plan.is_none()
+        {
+            return Err("recoverable Flow Result aggregate glue/drop plan is incomplete".into());
+        }
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_glue(ty, operation)?;
+        }
+        if variants.len() != 2 {
+            return Err("recoverable Flow Result requires exactly Ok and Err variants".into());
+        }
+        let ok_variant = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Result::Ok"
+                    && variant.name == "Ok"
+                    && variant.discriminant == 0
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| "recoverable Flow Result Ok variant is not canonical".to_string())?;
+        let err_variant = variants
+            .iter()
+            .find(|variant| {
+                variant.id.0 == "builtin:variant:Result::Err"
+                    && variant.name == "Err"
+                    && variant.discriminant == 1
+                    && variant.fields.len() == 1
+            })
+            .ok_or_else(|| "recoverable Flow Result Err variant is not canonical".to_string())?;
+        if ok_variant.fields[0].ty != *ok || err_variant.fields[0].ty != *error {
+            return Err("recoverable Flow Result payload fields disagree with its layout".into());
+        }
+        for field_ty in [ok, error] {
+            self.validate_glue(field_ty, MirGlueOperation::MoveOut)?;
+            self.validate_glue(field_ty, MirGlueOperation::Drop)?;
+        }
+        Ok(())
     }
 
     /// Return the canonical active/inactive variant descriptors for the

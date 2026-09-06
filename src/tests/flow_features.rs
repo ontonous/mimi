@@ -6465,36 +6465,14 @@ func main() -> i32 {{
 fn flow_turn_rejected_dual_backend() {
     // FLOW-TURN-001: `?` failure in a `fails E` transition produces
     // Err((source, error)) in both interpreter and codegen.
-    let src = r#"
-flow Account {
-    state Active { balance: i32 }
-    transition withdraw(Active, amount: i32) -> Active fails string {
-        let result = safe_div(self.balance, amount)
-        let new_balance = result?
-        return Active { balance: new_balance }
-    }
-}
-func safe_div(a: i32, b: i32) -> Result<i32, string> {
-    if b == 0 { return Err("div0") }
-    return Ok(a / b)
-}
-func main() -> i32 {
-    let s0 = Active { balance: 100 }
-    let r = Account::withdraw(s0, 0)
-    let out = match r {
-        Ok(_) => 1,
-        Err(_) => 0 - 1,
-    }
-    println(out)
-    0
-}
-"#;
-    // Interpreter: Rejected path returns Err((source, "div0")), match hits Err branch → -1
+    let src = include_str!("../../tests/fixtures/mir_m3_flow_retry.mimi");
+    // Interpreter: Rejected path returns Err((source, "div0")); the caller
+    // retries with that returned source and consumes the retry result.
     let interp_result = checked_run_source_result(src);
     assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    // Codegen: same behavior
-    let native = checked_compile_and_run(src).expect("codegen rejected path");
-    assert_eq!(native.trim(), "-1");
+    // Native: the retry consumes the returned source exactly once.
+    let native = checked_codegen_compile_and_observe(src).expect("codegen rejected path");
+    assert_eq!(native.exit_code, Some(0));
 }
 
 #[test]
@@ -6505,30 +6483,32 @@ fn flow_turn_success_dual_backend() {
 flow Account {
     state Active { balance: i32 }
     transition withdraw(Active, amount: i32) -> Active fails string {
-        let result = safe_div(self.balance, amount)
-        let new_balance = result?
+        let checked: Result<i32, string> = if amount == 0 {
+            Err("div0")
+        } else {
+            Ok(self.balance - amount)
+        }
+        let new_balance = checked?
         return Active { balance: new_balance }
     }
 }
-func safe_div(a: i32, b: i32) -> Result<i32, string> {
-    if b == 0 { return Err("div0") }
-    return Ok(a / b)
-}
 func main() -> i32 {
-    let s0 = Active { balance: 100 }
-    let r = Account::withdraw(s0, 5)
-    let out = match r {
+    let source = Active { balance: 100 }
+    let rejected = Account::withdraw(source, 5)
+    match rejected {
         Ok(_) => 1,
-        Err(_) => 0 - 1,
+        Err(error) => {
+            let retried = Account::withdraw(error.0, 5)
+            drop(retried)
+            0 - 1
+        },
     }
-    println(out)
-    0
 }
 "#;
     let interp_result = checked_run_source_result(src);
-    assert_eq!(interp_result, Ok(interp::Value::Int(0)));
-    let native = checked_compile_and_run(src).expect("codegen success path");
-    assert_eq!(native.trim(), "1");
+    assert_eq!(interp_result, Ok(interp::Value::Int(1)));
+    let native = checked_codegen_compile_and_observe(src).expect("codegen success path");
+    assert_eq!(native.exit_code, Some(1));
 }
 
 #[test]

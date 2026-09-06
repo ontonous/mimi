@@ -1043,12 +1043,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 ),
             )
         })?;
-        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+        let recoverable =
+            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
-            || contract.failure.is_some()
+            || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
-            || contract.targets.first() != Some(&contract.result)
+            || (recoverable && contract.failure.is_none())
+            || (!recoverable && contract.targets.first() != Some(&contract.result))
         {
             return Err(NativeMirError::new(
                 subject,
@@ -1064,6 +1067,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 ),
             )
         })?;
+        if recoverable {
+            if function.get_type().get_return_type().is_none() {
+                return Err(NativeMirError::new(
+                    subject,
+                    "recoverable FlowTransition target has no Result return ABI",
+                ));
+            }
+        }
         self.emit_call_target(Some(result), function, arguments, subject)
     }
 

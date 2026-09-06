@@ -1,0 +1,16 @@
+// C2 ownership boundary: concat consumes its receiver. Reusing it after the
+// operation must remain a checker/MIR rejection.
+func concat_any<T>(left: List<T>, right: List<T>) -> List<T> {
+    left.concat(right)
+}
+
+func main() -> i32 {
+    let left: List<string> = ["a"]
+    let right: List<string> = ["b"]
+    let joined = concat_any(left, right)
+    let count = len(joined)
+    drop(left)
+    drop(right)
+    drop(joined)
+    count
+}

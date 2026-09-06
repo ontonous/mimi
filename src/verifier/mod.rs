@@ -355,10 +355,11 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 15] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 16] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
+        crate::core::mir::CanonicalMirRouteProfile::FlowFailureRetry,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection,
@@ -403,7 +404,8 @@ fn verify_closed_mir_profile(
             })?;
         }
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord
-        | crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition => {}
+        | crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition
+        | crate::core::mir::CanonicalMirRouteProfile::FlowFailureRetry => {}
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant => {
             crate::core::mir::validate_option_string_variant_island(&canonical).map_err(
                 |errors| {

@@ -1625,11 +1625,14 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+        let recoverable =
+            contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
             || contract.targets.len() != 1
-            || contract.failure.is_some()
+            || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
             || contract.is_ffi_pinned
+            || (recoverable && contract.failure.is_none())
         {
             self.error(format!(
                 "flow transition '{}' is outside the bytecode production contract",
@@ -2015,6 +2018,20 @@ impl<'a> FunctionEmitter<'a> {
             self.error(format!(
                 "move projection has no canonical contract: {message}"
             ));
+            return;
+        }
+        if let MirProjection::Tuple(field_index) = projection {
+            let Some(contract) =
+                self.add_tuple_projection_contract(&base_desc.id, *field_index, &result_desc.id)
+            else {
+                return;
+            };
+            self.proto.emit(Op::TupleGet {
+                rd,
+                ra,
+                idx: *field_index as u16,
+                contract: Some(contract),
+            });
             return;
         }
         let MirProjection::Field(field) = projection else {
@@ -6146,8 +6163,8 @@ mod tests {
             crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
                 ref contract
             } if contract.arity == 3 && contract.fields.len() == 2
-                && contract.fields[0].name == "enabled"
-                && contract.fields[1].name == "tag"
+                && contract.fields[0].name == "tag"
+                && contract.fields[1].name == "enabled"
         ));
         let reference = MirReferenceInterpreter::new(&mir)
             .execute(&crate::core::NodeId("function:main".into()), &[])

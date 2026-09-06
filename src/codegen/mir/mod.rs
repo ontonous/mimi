@@ -943,21 +943,150 @@ mod tests {
     }
 
     #[test]
-    fn failing_flow_transition_is_rejected_before_any_backend() {
-        let source =
-            "flow F { state A { v: i32 } transition go(A) -> A fails string { return A { v: self.v + 1 } } } func main() -> i32 { 0 }";
+    fn record_list_family_composes_across_reference_bytecode_native_and_verifier() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_m1_record_list_chain.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference Record/List composition");
+        assert_eq!(reference, MirRuntimeValue::Int(6));
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Record/List composition MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode Record/List composition");
+        assert!(matches!(bytecode, Value::Int(6)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for Record/List composition");
+        crate::verifier::verify_mir(&program, String::new())
+            .expect("verifier consumes Record/List composition MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_m1_record_list_chain_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native Record/List composition lowering");
+        generator
+            .module
+            .verify()
+            .expect("native Record/List composition module verifies");
+    }
+
+    #[test]
+    fn recoverable_flow_failure_returns_source_and_retries_across_four_consumers() {
+        let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("failing transition must remain outside the S8 island");
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("silent-local")
-                || message.contains("FlowTransition")
-                || message.contains("Lowering"),
-            "missing fail-closed transition diagnostic: {message}"
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("recoverable Flow transition must lower to canonical MIR");
+        let transition = crate::core::NodeId("transition:Account::withdraw::Active".into());
+        let contract = program
+            .transitions()
+            .get(&transition)
+            .expect("recoverable transition contract");
+        assert_eq!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::RecoverableLocal
         );
+        assert_eq!(contract.targets.len(), 1);
+        assert!(contract.failure.is_some());
+        assert_eq!(
+            program
+                .functions()
+                .get(&crate::core::NodeId("function:main".into()))
+                .expect("main MIR")
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .filter(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        crate::core::mir::MirInstructionKind::FlowTransition {
+                            transition: ref owner,
+                            ..
+                        } if owner == &transition
+                    )
+                })
+                .count(),
+            2,
+            "the returned source must be consumed by exactly one retry"
+        );
+        let transition_body = program
+            .functions()
+            .get(&transition)
+            .expect("transition MIR");
+        assert!(transition_body.blocks.values().any(|block| matches!(
+            block.terminator,
+            crate::core::mir::MirTerminator::SwitchMove { .. }
+        )));
+        assert!(transition_body.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::Construct {
+                        kind: crate::core::mir::MirAggregateKind::Tuple,
+                        ..
+                    }
+                )
+            })
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference recoverable Flow execution");
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+
+        let bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("recoverable Flow MIR bytecode"))
+                .run_value()
+                .expect("bytecode recoverable Flow execution");
+        assert!(matches!(bytecode, Value::Int(0)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for recoverable Flow");
+        crate::verifier::verify_mir(&program, String::new())
+            .expect("verifier consumes recoverable Flow MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_m3_flow_retry_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native recoverable Flow lowering");
+        generator
+            .module
+            .verify()
+            .expect("native recoverable Flow module verifies");
+    }
+
+    #[test]
+    fn recoverable_flow_contract_rejects_silent_effect_forgery_before_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_m3_flow_retry.mimi"
+        ));
+        let mut transitions = program.transitions().clone();
+        transitions
+            .values_mut()
+            .next()
+            .expect("recoverable transition")
+            .effect = crate::core::mir::MirTransitionEffect::SilentLocal;
+        let errors = crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            transitions,
+        )
+        .expect_err("forged silent failure contract must be rejected before consumers");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("silent-local transition must be one target, non-failing")
+        }));
     }
 
     #[test]
@@ -5246,8 +5375,8 @@ mod tests {
             crate::core::mir::MirGenericInstanceContract::ScalarRecordUpdate {
                 ref contract
             } if contract.arity == 3 && contract.fields.len() == 2
-                && contract.fields[0].name == "enabled"
-                && contract.fields[1].name == "tag"
+                && contract.fields[0].name == "tag"
+                && contract.fields[1].name == "enabled"
         ));
         let reference = MirReferenceInterpreter::new(&program)
             .execute(&crate::core::NodeId("function:main".into()), &[])

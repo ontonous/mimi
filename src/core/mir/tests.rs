@@ -4018,7 +4018,7 @@ fn materializes_generic_nested_list_construct_with_recursive_list_glue() {
     ));
     program
         .type_catalog()
-        .validate_nested_list_payload(argument)
+        .validate_move_owned_list_payload(argument)
         .expect("nested List child glue must be fully materialized");
     let nested_list_ty = program
         .type_catalog()
@@ -4082,7 +4082,7 @@ fn rejects_generic_list_construct_for_non_copy_elements_at_the_mir_gate() {
         .expect_err("List<string> generic construction must fail closed");
     let message = format!("{error:?}");
     assert!(
-        message.contains("outside the canonical Copy scalar contract")
+        message.contains("outside the canonical Copy scalar")
             || message.contains("generic List facade candidate did not materialize"),
         "unexpected non-Copy generic List construction rejection: {message}"
     );
@@ -4356,7 +4356,7 @@ fn rejects_generic_list_concat_for_non_copy_elements_at_the_mir_gate() {
         .expect_err("List<string> generic concat must fail closed");
     let message = format!("{error:?}");
     assert!(
-        message.contains("outside the canonical Copy scalar contract"),
+        message.contains("outside the canonical Copy scalar"),
         "unexpected non-Copy generic List.concat rejection: {message}"
     );
 }
@@ -8138,7 +8138,8 @@ fn generic_record_owned_set_float_remains_rejected_before_consumers() {
     assert!(
         message.contains("generic record")
             || message.contains("Set")
-            || message.contains("Copy scalar"),
+            || message.contains("Copy scalar")
+            || message.contains("scalar contract"),
         "unexpected generic Set<f64> rejection: {message}"
     );
 }

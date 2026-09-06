@@ -2156,11 +2156,6 @@ fn eval_instruction(
             let base_ty = instruction_value_type(function, base, "move projection base")?;
             let result_ty = instruction_value_type(function, result, "move projection result")?;
             catalog.validate_move_projection(&base_ty, &result_ty, projection)?;
-            let MirProjection::Field(field) = projection else {
-                return Err("MIR move projection requires a direct record field".into());
-            };
-            let receipt =
-                catalog.validated_record_field_projection_contract(&base_ty, field, &result_ty)?;
             let base_value = state
                 .values
                 .remove(base)
@@ -2168,7 +2163,7 @@ fn eval_instruction(
             if !symbolic_matches_type(catalog, &base_ty, &base_value) {
                 return Err("MIR move projection base disagrees with TypeDesc".into());
             }
-            let projected = symbolic_project(base_value, &MirProjection::Field(receipt.field))?;
+            let projected = symbolic_project(base_value, projection)?;
             ensure_result_shape(function, catalog, result, &projected)?;
             state.values.insert(result.clone(), projected);
         }
@@ -2244,7 +2239,8 @@ fn eval_instruction(
                     catalog
                         .validate_result_move_projection_variant(&result_ty)
                         .map(|_| ())
-                })?;
+                })
+                .or_else(|_| catalog.validate_recoverable_result_variant(&result_ty))?;
             let mut values = Vec::with_capacity(fields.len());
             let mut field_types = Vec::with_capacity(fields.len());
             for (field, value) in fields {
@@ -2468,6 +2464,7 @@ fn eval_instruction(
                 nominal,
                 fields,
                 update_values,
+                record_update_move_contract.is_none(),
             )?;
             state.values.insert(result.clone(), value);
         }
@@ -2555,12 +2552,14 @@ fn eval_flow_transition(
             transition.0
         )
     })?;
-    if contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal
+    let recoverable = contract.effect == crate::core::mir::MirTransitionEffect::RecoverableLocal;
+    if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
         || contract.targets.len() != 1
-        || contract.failure.is_some()
+        || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
         || contract.is_ffi_pinned
-        || contract.targets.first() != Some(&contract.result)
+        || (recoverable && contract.failure.is_none())
+        || (!recoverable && contract.targets.first() != Some(&contract.result))
     {
         return Err(format!(
             "MIR verifier transition '{}' is outside the silent-local contract",
@@ -2579,11 +2578,24 @@ fn eval_flow_transition(
             transition.0
         ));
     }
-    if function
-        .values
-        .get(result)
-        .is_none_or(|value| value.ty != target.result)
-    {
+    if function.values.get(result).is_none_or(|value| {
+        value.ty != contract.result
+            || (!recoverable && value.ty != target.result)
+            || (recoverable
+                && (target.result != contract.result
+                    || catalog.get(&contract.result).is_none_or(|descriptor| {
+                        !matches!(
+                            descriptor.layout,
+                            crate::core::mir::types::MirLayout::Result {
+                                ref ok,
+                                ref error,
+                                ..
+                            } if contract.targets.first() == Some(ok)
+                                && contract.failure.as_ref() == Some(error)
+                                && target.result == contract.result
+                        )
+                    })))
+    }) {
         return Err(format!(
             "MIR verifier transition '{}' result TypeDesc disagrees with its body",
             transition.0
@@ -4046,7 +4058,17 @@ fn eval_materialized_list_construct_call(
         )
     })?;
     crate::core::mir::lower::validate_scalar_list_construct_mir(target, catalog, contract)?;
-    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    catalog
+        .validate_scalar_generic_arguments(type_arguments)
+        .or_else(|scalar_error| {
+            if type_arguments.len() == 1 {
+                catalog
+                    .validate_move_owned_list_payload(&type_arguments[0])
+                    .map_err(|_| scalar_error)
+            } else {
+                Err(scalar_error)
+            }
+        })?;
     if arguments.len() != 1 || target.parameters.len() != 1 {
         return Err("MIR verifier List construction call requires one argument".into());
     }
@@ -4077,7 +4099,17 @@ fn eval_materialized_list_construct_call(
     if argument_info.ty != parameter_info.ty || argument_info.ty != contract.element_ty {
         return Err("MIR verifier List construction argument disagrees with TypeDesc".into());
     }
-    catalog.validate_glue(&argument_info.ty, MirGlueOperation::Clone)?;
+    let move_argument = catalog
+        .validate_move_owned_list_payload(&argument_info.ty)
+        .is_ok();
+    catalog.validate_glue(
+        &argument_info.ty,
+        if move_argument {
+            MirGlueOperation::MoveOut
+        } else {
+            MirGlueOperation::Clone
+        },
+    )?;
     let value = state.values.get(argument).cloned().ok_or_else(|| {
         format!(
             "MIR verifier List construction argument '{}' is not defined",
@@ -4086,6 +4118,9 @@ fn eval_materialized_list_construct_call(
     })?;
     if !symbolic_matches_type(catalog, &argument_info.ty, &value) {
         return Err("MIR verifier List construction argument has the wrong symbolic shape".into());
+    }
+    if move_argument {
+        state.values.remove(argument);
     }
     let output = SymbolicValue::List {
         length: Int::from_i64(contract.element_count as i64),
@@ -4352,6 +4387,7 @@ fn eval_materialized_record_update_call(
         &nominal,
         &fields,
         symbolic_updates,
+        true,
     )?;
     ensure_result_shape(function, catalog, result, &updated)?;
     state.values.insert(result.clone(), updated);
@@ -4469,6 +4505,7 @@ fn eval_materialized_owned_record_update_call(
         &nominal,
         &fields,
         symbolic_updates,
+        false,
     )?;
     ensure_result_shape(function, catalog, result, &updated)?;
     state.values.insert(result.clone(), updated);
@@ -5135,15 +5172,21 @@ fn symbolic_update_record(
     nominal: &crate::core::ir::NominalTypeId,
     fields: &[crate::core::NodeId],
     update_values: Vec<SymbolicValue>,
+    require_copy: bool,
 ) -> Result<SymbolicValue, String> {
-    ensure_copy_value(function, catalog, result)?;
-
     let result_ty = function
         .values
         .get(result)
         .ok_or_else(|| format!("MIR record update result '{}' is absent", result))?
         .ty
         .clone();
+    if require_copy {
+        ensure_copy_value(function, catalog, result)?;
+    } else {
+        catalog.validate_glue(&result_ty, MirGlueOperation::MoveOut)?;
+        catalog.validate_glue(&result_ty, MirGlueOperation::Drop)?;
+    }
+
     let descriptor = catalog
         .get(&result_ty)
         .ok_or_else(|| format!("MIR record update result '{}' TypeDesc is absent", result))?;
