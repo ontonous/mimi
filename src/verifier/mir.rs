@@ -2932,7 +2932,7 @@ fn eval_materialized_variant_projection_call(
         }
         catalog.validate_move_owned_payload(&type_arguments[0])?;
     } else {
-        catalog.validate_scalar_generic_arguments(type_arguments)?;
+        catalog.validate_generic_variant_projection_arguments(type_arguments, contract)?;
     }
     let target = program.functions().get(target_owner).ok_or_else(|| {
         format!(

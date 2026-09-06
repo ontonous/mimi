@@ -3180,7 +3180,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                     instance.id,
                     instance.arguments.len()
                 ));
-            } else if let Err(message) = match instance.contract {
+            } else if let Err(message) = match &instance.contract {
                 MirGenericInstanceContract::OwnedRecordUpdate { .. } => self
                     .program
                     .type_catalog()
@@ -3191,6 +3191,22 @@ impl<'a> ScalarCollectionValidator<'a> {
                     .type_catalog()
                     .validate_move_owned_payload(&instance.arguments[0])
                     .map(|_| ()),
+                // The generic Option projection island shares the concrete
+                // float leaf contract with the already-admitted Option<f64>
+                // island. Keep this exception receipt-scoped: generic Result
+                // and every collection/record instance remain on the
+                // signed-integer/bool scalar boundary until their own ABI
+                // contracts are promoted.
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option" =>
+                {
+                    self.program
+                        .type_catalog()
+                        .validate_generic_variant_projection_arguments(
+                            &instance.arguments,
+                            contract,
+                        )
+                }
                 _ => self
                     .program
                     .type_catalog()

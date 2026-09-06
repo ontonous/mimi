@@ -3040,6 +3040,45 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_materialized_generic_option_unwrap_f64_projection() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_option_unwrap_f64.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> projection instance");
+        assert_eq!(
+            program
+                .type_catalog()
+                .get(&instance.arguments[0])
+                .unwrap()
+                .abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_generic_option_unwrap_f64");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Option<f64> unwrap must consume specialized MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Option<f64> unwrap module verifies");
+        assert!(generator.module.get_function("main").is_some());
+    }
+
+    #[test]
     fn native_generic_option_unwrap_none_keeps_the_receipt_trap() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_none.mimi"

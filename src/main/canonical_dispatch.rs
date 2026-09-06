@@ -1528,6 +1528,42 @@ mod tests {
     }
 
     #[test]
+    fn generic_option_f64_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_option_unwrap_f64.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_option_projection_admission(&checked),
+            mimi::core::mir::GenericOptionProjectionAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Option<f64> projection must select the canonical default route");
+        };
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == mimi::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> projection instance");
+        assert_eq!(
+            program
+                .type_catalog()
+                .get(&instance.arguments[0])
+                .unwrap()
+                .abi,
+            mimi::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+    }
+
+    #[test]
     fn generic_owned_option_projection_enters_canonical_default_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_option_unwrap_owned_string.mimi"

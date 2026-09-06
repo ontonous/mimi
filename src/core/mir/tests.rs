@@ -1658,6 +1658,47 @@ fn materializes_generic_option_unwrap_with_a_specialized_projection_receipt() {
 }
 
 #[test]
+fn materializes_generic_option_unwrap_f64_with_float_projection_receipt() {
+    let source = include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_f64.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Option<f64> unwrap must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarVariantProjection { contract }
+                    if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership == MirOwnership::Copy
+            )
+        })
+        .expect("generic Option<f64> projection instance");
+    assert_eq!(instance.arguments.len(), 1);
+    let payload = program
+        .type_catalog()
+        .get(&instance.arguments[0])
+        .expect("generic Option<f64> payload TypeDesc");
+    assert_eq!(
+        payload.abi,
+        crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+    );
+    assert_eq!(payload.layout, crate::core::mir::types::MirLayout::Scalar);
+    let MirGenericInstanceContract::ScalarVariantProjection { contract } = &instance.contract
+    else {
+        unreachable!("filtered to generic variant projection");
+    };
+    assert_eq!(contract.projection.field_index, 0);
+    assert_eq!(contract.projection.arity, 1);
+    assert_eq!(contract.projection.move_out_glue, MirGlueKind::Noop);
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Option<f64> unwrap execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
 fn materializes_generic_option_unwrap_owned_string_with_move_receipt() {
     let source =
         include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_owned_string.mimi");

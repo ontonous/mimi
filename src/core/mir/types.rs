@@ -3109,6 +3109,58 @@ impl MirTypeCatalog {
         self.validate_copy_scalar(ty)
     }
 
+    /// Validate the concrete argument of a materialized generic variant
+    /// projection. The historical generic scalar envelope is signed
+    /// i32/i64/bool; the read-only `Option<T>.unwrap()` receipt additionally
+    /// admits the already-closed Copy-float ABI. Keep this exception tied to
+    /// the checker-owned Option projection identity so Result, fallback,
+    /// collection, and record instances cannot inherit float admission by
+    /// sharing the generic-instance table.
+    pub fn validate_generic_variant_projection_arguments(
+        &self,
+        arguments: &[ResolvedTypeId],
+        contract: &MirVariantProjectionTrapContract,
+    ) -> Result<(), String> {
+        if arguments.len() != 1 {
+            return Err(format!(
+                "generic variant projection requires one type argument, got {}",
+                arguments.len()
+            ));
+        }
+        if contract.projection.nominal.as_str() == "builtin:type:Option"
+            && contract.projection.ownership == MirOwnership::Copy
+        {
+            self.validate_generic_option_projection_argument(&arguments[0])
+        } else {
+            self.validate_scalar_generic_arguments(arguments)
+        }
+    }
+
+    /// Validate the Copy payload family opened by the generic Option
+    /// projection slice: signed i32/i64/bool plus the canonical native f64
+    /// ABI. f32 stays outside this named S199 envelope until it receives its
+    /// own differential/route contract.
+    pub fn validate_generic_option_projection_argument(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        if self.validate_copy_scalar(ty).is_ok() {
+            return Ok(());
+        }
+        self.validate_copy_float_scalar(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
+            Ok(())
+        } else {
+            Err(format!(
+                "type '{}' is not a Copy f64 scalar with no-op glue",
+                ty.as_str()
+            ))
+        }
+    }
+
     /// Validate the concrete argument for the generic identity instance.
     /// Identity is the first generic contract whose result can carry the
     /// already-closed flat Copy Option/Result ABI receipt; Set facades remain

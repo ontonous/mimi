@@ -3,10 +3,9 @@ func unwrap<T>(value: Option<T>) -> T {
 }
 
 func main() -> i32 {
-    // f64 remains outside the generic scalar admission (the concrete
-    // Option<f64> island is intentionally separate), so this shape must
-    // reject before any legacy consumer.
-    let value: Option<f64> = Some(41.0)
+    // Managed/nested payloads remain outside the generic Option projection
+    // island even though Copy f64 is now admitted by the dedicated receipt.
+    let value: Option<List<f64>> = Some([41.0])
     let out = unwrap(value)
     41
 }

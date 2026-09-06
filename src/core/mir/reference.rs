@@ -1578,9 +1578,8 @@ fn validate_instance_table(
                         .map(|_| ())
                 }
             }
-            MirGenericInstanceContract::ScalarVariantProjection { .. } => {
-                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
-            }
+            MirGenericInstanceContract::ScalarVariantProjection { ref contract } => type_catalog
+                .validate_generic_variant_projection_arguments(&instance.arguments, contract),
             MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }

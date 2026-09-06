@@ -1654,6 +1654,34 @@ fn materialize_generic_instance(
         && type_catalog
             .validate_owned_record_update_generic_argument(&concrete)
             .is_ok();
+    let is_copy_option_projection = callable.signature.parameters.len() == 1
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Option(inner) if inner == &generic_id
+                )
+            })
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Call(call)
+                        if matches!(
+                            &call.callee,
+                            ResolvedCallee::Builtin(name)
+                                if name.as_str() == "builtin.method.option.unwrap"
+                        ) && call.arguments.len() == 1
+                )
+            });
     let validate_arguments =
         |catalog: &MirTypeCatalog, arguments: &[crate::core::ResolvedTypeId]| {
             if is_identity {
@@ -1681,6 +1709,8 @@ fn materialize_generic_instance(
                         .validate_move_owned_payload(&arguments[0])
                         .map(|_| ())
                 }
+            } else if is_copy_option_projection {
+                catalog.validate_generic_option_projection_argument(&arguments[0])
             } else if generic_list_facade {
                 catalog
                     .validate_scalar_generic_arguments(arguments)

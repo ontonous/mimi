@@ -6389,6 +6389,45 @@ mod tests {
     }
 
     #[test]
+    fn executes_materialized_generic_option_unwrap_f64_without_ast() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_option_unwrap_f64.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Option<f64> unwrap MIR");
+        let instance = mir
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjection {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Option"
+                        && contract.projection.ownership
+                            == crate::core::mir::types::MirOwnership::Copy
+                )
+            })
+            .expect("generic Option<f64> projection instance");
+        assert_eq!(
+            mir.type_catalog().get(&instance.arguments[0]).unwrap().abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Option<f64> unwrap execution");
+        let bytecode = compile_mir_program(&mir).expect("generic Option<f64> unwrap bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("generic Option<f64> unwrap bytecode execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
     fn executes_materialized_generic_option_unwrap_owned_string_without_ast() {
         let source = include_str!(
             "../../../tests/fixtures/mir_native_generic_option_unwrap_owned_string.mimi"
