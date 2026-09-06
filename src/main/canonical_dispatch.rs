@@ -2396,6 +2396,39 @@ mod tests {
     }
 
     #[test]
+    fn seven_field_repeated_generic_record_projection_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("repeated-generic projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.field_index == 0 && contract.arity == 7 && contract.name == "value"
+        )));
+    }
+
+    #[test]
+    fn repeated_generic_record_projection_with_managed_sibling_is_rejected_before_legacy_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_seven_field_repeated_generic_rejected.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("managed repeated-generic projection must fail closed");
+        };
+        assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
+        assert!(
+            reason.contains("canonical generic record projection candidate did not materialize"),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn generic_copy_record_update_enters_canonical_default_route() {
         let source = include_str!("../../tests/fixtures/mir_native_generic_record_update.mimi");
         let (checked, file) = checked(source);

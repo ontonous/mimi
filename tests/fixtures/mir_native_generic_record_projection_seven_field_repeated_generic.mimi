@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: borrow one of two fields carrying the same
+// generic binder from a seven-field Record<T>; field identity must disambiguate
+// the selected slot even after concrete specialization makes both fields i64.
+type SeptPair<T> { value: T, tag: i32, mirror: T, enabled: bool, extra: i64, spare: bool, tail: i32 }
+
+func get_value<T>(sept: SeptPair<T>) -> T {
+    sept.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let sept = SeptPair { value: 41 as i64, tag: 7, mirror: 99 as i64, enabled: true, extra: 9, spare: false, tail: 13 }
+    let picked = get_value(sept)
+    picked
+}

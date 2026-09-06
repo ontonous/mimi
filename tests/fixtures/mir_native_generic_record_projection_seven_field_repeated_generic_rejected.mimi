@@ -1,0 +1,14 @@
+// Outside S197: repeated-generic fields do not permit a managed sibling.
+// The canonical gate must reject this shape before every backend and legacy.
+type SeptPairBad<T> { value: T, mirror: T, tag: i32, enabled: bool, label: string, spare: bool, tail: i32 }
+
+func get_value<T>(sept: SeptPairBad<T>) -> T {
+    sept.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let sept = SeptPairBad { value: 41, mirror: 99, tag: 7, enabled: true, label: "managed", spare: false, tail: 13 }
+    let picked = get_value(sept)
+    picked
+}
