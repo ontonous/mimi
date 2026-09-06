@@ -1,0 +1,14 @@
+// S207: selected List field plus concrete List<Copy scalar> residual.
+type Pair<T> { value: T, tail: List<i32> }
+
+func take<T>(pair: Pair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let pair: Pair<List<i32>> = Pair { value: [1, 2], tail: [3, 4] }
+    let picked = take(pair)
+    drop(picked)
+    42
+}

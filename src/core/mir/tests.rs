@@ -7599,6 +7599,86 @@ fn materializes_generic_record_owned_list_projection_with_string_residual_drop_r
 }
 
 #[test]
+fn materializes_generic_record_owned_list_projection_with_list_residual_drop_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_list_projection_list_residual.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<List<i32>> List residual projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
+                    if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "tail"
+                        && contract.residual[0].glue
+                            == crate::core::mir::types::MirGlueKind::List
+            )
+        })
+        .expect("owned generic Record<List<i32>> List residual projection instance");
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic Record<List<i32>> List residual target");
+    assert!(target.canonical_text().contains("move_project_drop"));
+    let result_desc = program
+        .type_catalog()
+        .get(&target.result)
+        .expect("selected List result TypeDesc");
+    assert!(matches!(
+        result_desc.layout,
+        crate::core::mir::types::MirLayout::List { .. }
+    ));
+    assert_eq!(
+        result_desc.glue,
+        crate::core::mir::types::MirGlueContract {
+            move_out: crate::core::mir::types::MirGlueKind::List,
+            clone: crate::core::mir::types::MirGlueKind::List,
+            drop: crate::core::mir::types::MirGlueKind::List,
+        }
+    );
+    let parameter = target.parameters.first().expect("record parameter");
+    let record_ty = &target
+        .values
+        .get(parameter)
+        .expect("record parameter TypeDesc")
+        .ty;
+    let record_desc = program
+        .type_catalog()
+        .get(record_ty)
+        .expect("specialized record TypeDesc");
+    let crate::core::mir::types::MirLayout::Record { fields, .. } = &record_desc.layout else {
+        panic!("specialized generic record must carry a record layout");
+    };
+    let residual_desc = program
+        .type_catalog()
+        .get(&fields[1].ty)
+        .expect("List residual TypeDesc");
+    assert!(matches!(
+        residual_desc.layout,
+        crate::core::mir::types::MirLayout::List { .. }
+    ));
+    assert_eq!(
+        residual_desc.glue,
+        crate::core::mir::types::MirGlueContract {
+            move_out: crate::core::mir::types::MirGlueKind::List,
+            clone: crate::core::mir::types::MirGlueKind::List,
+            drop: crate::core::mir::types::MirGlueKind::List,
+        }
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Record<List<i32>> List residual execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
 fn generic_record_list_projection_remains_rejected_before_consumers() {
     let source = include_str!(
         "../../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
@@ -7612,5 +7692,23 @@ fn generic_record_list_projection_remains_rejected_before_consumers() {
             || message.contains("nested")
             || message.contains("Copy scalar/bool"),
         "unexpected generic nested List rejection: {message}"
+    );
+}
+
+#[test]
+fn generic_record_list_residual_projection_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_list_projection_nested_list_residual_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<T> nested List residual must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection")
+            || message.contains("nested")
+            || message.contains("managed")
+            || message.contains("List<Copy scalar>"),
+        "unexpected generic nested List residual rejection: {message}"
     );
 }

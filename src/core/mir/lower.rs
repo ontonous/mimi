@@ -1296,7 +1296,8 @@ pub(crate) fn validate_scalar_tuple_call_argument(
 /// residual-drop receipt: two or three homogeneous fields bound to the
 /// callable's sole generic parameter, or the bounded two-, three-, or
 /// four-field heterogeneous forms with one generic field and one, two, or
-/// three owned `String` siblings. One field is projected and the remaining
+/// three owned `String` siblings, plus the two-field generic +
+/// `List<Copy scalar>` form. One field is projected and the remaining
 /// siblings are retained only so their ownership can be discharged by
 /// `MoveProjectDrop` after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
@@ -1344,6 +1345,7 @@ fn is_owned_record_projection_drop_callable(
     let binder = &definition.generic_parameters[0].1;
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
+    let mut owned_list_fields = 0usize;
     let fields_admitted = definition.fields.iter().all(|(name, _)| {
         let Some(field_ty) = definition
             .field_ids
@@ -1362,13 +1364,31 @@ fn is_owned_record_projection_drop_callable(
                 owned_string_fields += 1;
                 true
             }
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:List"
+                && arguments.len() == 1
+                && matches!(
+                    program.resolved_types().get(&arguments[0]),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                    ))
+                ) =>
+            {
+                owned_list_fields += 1;
+                true
+            }
             _ => false,
         }
     }) && ((generic_fields == definition.fields.len()
         && matches!(definition.fields.len(), 2 | 3))
         || (definition.fields.len() == 2 && generic_fields == 1 && owned_string_fields == 1)
         || (definition.fields.len() == 3 && generic_fields == 1 && owned_string_fields == 2)
-        || (definition.fields.len() == 4 && generic_fields == 1 && owned_string_fields == 3));
+        || (definition.fields.len() == 4 && generic_fields == 1 && owned_string_fields == 3)
+        || (definition.fields.len() == 2
+            && generic_fields == 1
+            && owned_list_fields == 1
+            && owned_string_fields == 0));
     fields_admitted
         && matches!(
             callable.body.root.result.as_deref().map(|expr| &expr.kind),

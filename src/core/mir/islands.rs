@@ -2068,8 +2068,8 @@ fn is_scalar_generic_record_definition(
 /// The managed generic record residual island admits exactly two or three
 /// homogeneous fields, or the bounded heterogeneous two-, three-, or
 /// four-field forms with one generic field and one, two, or three concrete
-/// `String` siblings.
-/// Concrete `String` specialization and Move/Drop glue are proved later by
+/// `String` siblings, plus the two-field generic + `List<Copy scalar>` form.
+/// Concrete managed specialization and Move/Drop glue are proved later by
 /// TypeDesc. Keeping this checker-side predicate separate from the Copy-record
 /// shape prevents a larger or otherwise mixed managed record from entering
 /// the scalar projection island.
@@ -2086,6 +2086,7 @@ fn is_owned_generic_record_definition(
     let binder = &definition.generic_parameters[0].1;
     let mut generic_fields = 0usize;
     let mut owned_string_fields = 0usize;
+    let mut owned_list_fields = 0usize;
     let fields_admitted = definition.fields.iter().all(|(name, _)| {
         let Some(field_ty) = definition
             .field_ids
@@ -2104,6 +2105,20 @@ fn is_owned_generic_record_definition(
                 owned_string_fields += 1;
                 true
             }
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } if item.as_str() == "builtin:type:List"
+                && arguments.len() == 1
+                && matches!(
+                    program.resolved_types().get(&arguments[0]),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+                    ))
+                ) =>
+            {
+                owned_list_fields += 1;
+                true
+            }
             _ => false,
         }
     });
@@ -2111,7 +2126,11 @@ fn is_owned_generic_record_definition(
         && ((generic_fields == definition.fields.len() && matches!(definition.fields.len(), 2 | 3))
             || (generic_fields == 1
                 && matches!(definition.fields.len(), 2 | 3 | 4)
-                && owned_string_fields + generic_fields == definition.fields.len()))
+                && owned_string_fields + generic_fields == definition.fields.len())
+            || (definition.fields.len() == 2
+                && generic_fields == 1
+                && owned_list_fields == 1
+                && owned_string_fields == 0))
 }
 
 /// Recognize the heterogeneous declarations admitted by the ownership-bearing

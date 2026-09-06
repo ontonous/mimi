@@ -1,0 +1,13 @@
+// S207 negative: nested List residual has no record MoveProjectDrop receipt.
+type Pair<T> { value: T, tail: List<List<i32>> }
+
+func take<T>(pair: Pair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    let pair: Pair<List<i32>> = Pair { value: [1, 2], tail: [[3, 4]] }
+    let picked = take(pair)
+    drop(picked)
+    42
+}
