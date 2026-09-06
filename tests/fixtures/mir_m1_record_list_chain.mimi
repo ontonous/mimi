@@ -20,5 +20,7 @@ func main() -> i32 {
     let count = len(joined)
     drop(values)
     drop(joined)
-    len(picked) + count
+    let picked_count = len(picked)
+    drop(picked)
+    picked_count + count
 }

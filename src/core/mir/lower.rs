@@ -4145,6 +4145,7 @@ pub(crate) fn validate_scalar_list_facade_mir(
     let mut list_op = None;
     let mut clones = Vec::new();
     let mut moves = Vec::new();
+    let mut drops = Vec::new();
     for instruction in &block.instructions {
         match &instruction.kind {
             MirInstructionKind::Clone { result, source } => {
@@ -4152,6 +4153,9 @@ pub(crate) fn validate_scalar_list_facade_mir(
             }
             MirInstructionKind::Move { result, source } => {
                 moves.push((result.clone(), source.clone()));
+            }
+            MirInstructionKind::Drop { value } => {
+                drops.push(value.clone());
             }
             MirInstructionKind::ListOp {
                 result,
@@ -4175,7 +4179,7 @@ pub(crate) fn validate_scalar_list_facade_mir(
                     return Err("scalar List facade must contain exactly one ListOp".into());
                 }
             }
-            _ => return Err("scalar List facade body may contain only parameter Clone/Move and ListOp instructions".into()),
+            _ => return Err("scalar List facade body may contain only parameter Clone/Move/Drop and ListOp instructions".into()),
         }
     }
     let Some((list_result, list_operand, argument, receipt)) = list_op else {
@@ -4275,6 +4279,11 @@ pub(crate) fn validate_scalar_list_facade_mir(
                     "scalar List facade read/clone operation unexpectedly has an argument".into(),
                 );
             }
+            if drops != vec![list_operand.clone()] {
+                return Err(
+                    "scalar List facade read/clone operation must Drop its temporary receiver exactly once".into(),
+                );
+            }
         }
         super::MirListOperation::Concat => {
             let expected = input_for(&function.parameters[1]).ok_or_else(|| {
@@ -4285,6 +4294,9 @@ pub(crate) fn validate_scalar_list_facade_mir(
                     "scalar List.concat facade argument is not the moved second List parameter"
                         .into(),
                 );
+            }
+            if !drops.is_empty() {
+                return Err("scalar List.concat facade must not Drop its moved inputs".into());
             }
             let argument_ty = function
                 .values
@@ -7686,6 +7698,18 @@ impl<'a> Lowerer<'a> {
                                 list_operation_contract,
                             },
                         );
+                        // `Len` borrows the receiver and the argument
+                        // lowering above materializes a managed Clone (or a
+                        // fresh owned rvalue).  Make that temporary owner an
+                        // explicit MIR Drop so every consumer shares the
+                        // same exactly-once obligation.
+                        self.emit(
+                            &expression.node_id,
+                            "drop.list-borrow",
+                            MirInstructionKind::Drop {
+                                value: list.clone(),
+                            },
+                        );
                     } else {
                         self.error(
                             &expression.node_id,
@@ -7710,6 +7734,17 @@ impl<'a> Lowerer<'a> {
                                 list: list.clone(),
                                 argument: None,
                                 list_operation_contract,
+                            },
+                        );
+                        // `Reverse` borrows its receiver and returns an
+                        // independent List.  Release the explicit temporary
+                        // receiver owner after the operation; the source
+                        // local remains available to its own later Drop.
+                        self.emit(
+                            &expression.node_id,
+                            "drop.list-borrow",
+                            MirInstructionKind::Drop {
+                                value: list.clone(),
                             },
                         );
                     } else {

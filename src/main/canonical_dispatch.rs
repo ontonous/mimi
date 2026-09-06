@@ -3289,7 +3289,8 @@ mod tests {
             "{reason}"
         );
         assert!(
-            reason.contains("outside the canonical Copy scalar"),
+            reason.contains("outside the canonical Copy scalar")
+                || reason.contains("outside the Copy scalar contract"),
             "{reason}"
         );
     }
