@@ -1,6 +1,5 @@
-// Historical S189 rejection fixture retained for provenance.  S195 admits
-// this seven-field Copy projection; eight-field shapes are the current
-// fail-closed boundary (see mir_native_generic_record_projection_eight_field_rejected.mimi).
+// Canonical generic MIR candidate: borrow one Copy-scalar field from a
+// seven-field Record<T>; all fixed siblings remain Copy and retain their ABI slots.
 type Sept<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool, extra2: i32 }
 
 func get_value<T>(sept: Sept<T>) -> T {
@@ -10,5 +9,6 @@ func get_value<T>(sept: Sept<T>) -> T {
 func main() -> i32 {
     ensures: result == result
     let sept = Sept { value: 41, tag: 7, enabled: true, extra: 9, tail: 11, spare: false, extra2: 13 }
-    get_value(sept)
+    let picked = get_value(sept)
+    picked
 }

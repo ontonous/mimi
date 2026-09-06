@@ -117,7 +117,7 @@ pub(crate) fn build_canonical_program_for_sources(
 ///
 /// The current default-switch islands are deliberately narrow: a program must
 /// contain either a checker-selected scalar Set facade instance, a flat Copy
-/// record value, a one-, two-, three-, four-, or five-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), a direct nested List index projection, an exact S8 Flow
+/// record value, a one-, two-, three-, four-, five-, six-, or seven-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), a direct nested List index projection, an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
 /// `Option<T>.unwrap()` projection island, generic `Option<T>.unwrap_or(T)`
@@ -2362,6 +2362,23 @@ mod tests {
     }
 
     #[test]
+    fn seven_field_generic_record_projection_enters_canonical_default_route() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_seven_field.mimi"
+        );
+        let (checked, file) = checked(source);
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("seven-field generic record projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 7 && contract.name == "value"
+        )));
+    }
+
+    #[test]
     fn generic_copy_record_update_enters_canonical_default_route() {
         let source = include_str!("../../tests/fixtures/mir_native_generic_record_update.mimi");
         let (checked, file) = checked(source);
@@ -2534,13 +2551,13 @@ mod tests {
     }
 
     #[test]
-    fn seven_field_generic_record_projection_is_rejected_before_legacy_route() {
+    fn eight_field_generic_record_projection_is_rejected_before_legacy_route() {
         let source = include_str!(
-            "../../tests/fixtures/mir_native_generic_record_projection_five_field_rejected.mimi"
+            "../../tests/fixtures/mir_native_generic_record_projection_eight_field_rejected.mimi"
         );
         let (checked, file) = checked(source);
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("seven-field generic record projection must fail closed");
+            panic!("eight-field generic record projection must fail closed");
         };
         assert!(reason.contains("S0 flat Copy record candidate"), "{reason}");
         assert!(

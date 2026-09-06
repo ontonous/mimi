@@ -1,0 +1,13 @@
+// Outside S195: generic Copy record projection with eight fields remains
+// rejected before any backend or legacy route.
+type Oct<T> { value: T, tag: i32, enabled: bool, extra: i64, tail: i32, spare: bool, extra2: i32, extra3: i64 }
+
+func get_value<T>(oct: Oct<T>) -> T {
+    oct.value
+}
+
+func main() -> i32 {
+    ensures: result == result
+    let oct = Oct { value: 41, tag: 7, enabled: true, extra: 9, tail: 11, spare: false, extra2: 13, extra3: 15 }
+    get_value(oct)
+}
