@@ -1720,6 +1720,18 @@ impl MirTypeCatalog {
     /// Nested products and non-Copy fields stay outside this island until
     /// their own aggregate contract is promoted.
     pub fn validate_flat_copy_record(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        self.validate_flat_copy_record_with_float(ty, false)
+    }
+
+    /// Validate a flat Copy record while explicitly admitting the native
+    /// floating-point leaf ABI. This opt-in is reserved for the generic
+    /// `Record<T>` borrow-projection receipt; ordinary concrete records and
+    /// record-update contracts keep the signed-integer/bool boundary above.
+    pub(crate) fn validate_flat_copy_record_with_float(
+        &self,
+        ty: &ResolvedTypeId,
+        allow_float: bool,
+    ) -> Result<(), String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
@@ -1759,7 +1771,12 @@ impl MirTypeCatalog {
                     field.id.0
                 ));
             }
-            self.validate_copy_scalar(&field.ty).map_err(|message| {
+            let validate_field = if allow_float {
+                Self::validate_copy_float_scalar
+            } else {
+                Self::validate_copy_scalar
+            };
+            validate_field(self, &field.ty).map_err(|message| {
                 format!(
                     "record type '{}' field '{}' is outside the flat Copy record contract: {message}",
                     ty.as_str(),
@@ -1768,6 +1785,31 @@ impl MirTypeCatalog {
             })?;
         }
         Ok(())
+    }
+
+    /// Validate the concrete argument of the generic borrowed-record
+    /// projection island. The generic envelope retains signed i32/i64/bool
+    /// and adds only Copy f64; f32 and managed/nested/linear payloads remain
+    /// fail-closed.
+    pub fn validate_generic_record_projection_argument(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        if self.validate_copy_scalar(ty).is_ok() {
+            return Ok(());
+        }
+        self.validate_copy_float_scalar(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.abi == (MirAbiClass::Float { bits: 64 }) {
+            Ok(())
+        } else {
+            Err(format!(
+                "type '{}' is not a Copy f64 scalar with no-op glue",
+                ty.as_str()
+            ))
+        }
     }
 
     /// Validate the bounded flat Copy tuple production contract used by the

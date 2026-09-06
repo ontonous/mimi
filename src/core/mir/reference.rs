@@ -1562,7 +1562,14 @@ fn validate_instance_table(
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)
             }
             MirGenericInstanceContract::ScalarRecordProjection { .. } => {
-                type_catalog.validate_scalar_generic_arguments(&instance.arguments)
+                if instance.arguments.len() != 1 {
+                    Err(format!(
+                        "generic record projection contract requires one type argument, got {}",
+                        instance.arguments.len()
+                    ))
+                } else {
+                    type_catalog.validate_generic_record_projection_argument(&instance.arguments[0])
+                }
             }
             MirGenericInstanceContract::ScalarRecordUpdate { .. } => {
                 type_catalog.validate_scalar_generic_arguments(&instance.arguments)

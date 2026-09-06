@@ -2293,6 +2293,45 @@ fn generic_result_bool_f64_unwrap_or_is_verified_from_canonical_mir() {
 }
 
 #[test]
+fn generic_record_f64_projection_is_verified_from_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_native_generic_record_projection_f64.mimi");
+    let file = parse_memory_source(source, "mir-generic-record-f64").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical generic Record<f64> projection MIR");
+    assert!(canonical.instances().values().any(|instance| matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+            contract
+        } if contract.arity == 1 && contract.name == "value"
+    )));
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("generic Record<f64> projection verifier capability");
+    let results = crate::verifier::verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("generic Record<f64> projection must remain on canonical verifier route");
+    assert!(results.is_empty(), "fixture has no contracts to verify");
+}
+
+#[test]
+fn generic_record_list_projection_is_rejected_before_verifier_consumers() {
+    let source = include_str!(
+        "../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
+    );
+    let file = parse_memory_source(source, "mir-generic-record-list-rejected").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<List<i32>> projection must fail before verifier");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection") || message.contains("Copy scalar/bool"),
+        "unexpected verifier-boundary rejection: {message}"
+    );
+}
+
+#[test]
 fn direct_result_bool_f64_unwrap_or_is_rejected_before_verifier_consumers() {
     let source =
         include_str!("../../tests/fixtures/mir_native_result_bool_f64_unwrap_or_rejected.mimi");

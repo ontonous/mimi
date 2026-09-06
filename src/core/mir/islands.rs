@@ -1934,12 +1934,10 @@ pub fn classify_flat_copy_record_admission(program: &CheckedProgram) -> FlatCopy
 }
 
 /// Return whether a checker-resolved generic record projection looks like the
-/// S108 candidate but its declaration/body shape is outside the admitted
-/// one-, two-, three-, four-, five-, six-, or seven-field Copy contract, the two/three-field homogeneous owned
-/// residual contract, or the bounded two/three/four-field `T + string` /
-/// `T + string + string` / `T + string + string + string` owned residual contracts.
-/// Default dispatch uses this only on the mixed compatibility path to reject
-/// instead of silently handing the candidate to legacy code.
+/// S108 candidate. Default dispatch uses this only on the mixed compatibility
+/// path to reject instead of silently handing a recognized record projection
+/// (including one whose concrete argument later fails TypeDesc admission) to
+/// legacy code.
 pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProgram) -> bool {
     program.callables().values().any(|callable| {
         if callable.signature.generic_parameters.len() != 1
@@ -1979,8 +1977,7 @@ pub fn has_unsupported_generic_record_projection_candidate(program: &CheckedProg
                 Some(ResolvedExprKind::Load(place))
                     if matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Field { .. }])
             )
-            && !is_scalar_generic_record_definition(program, definition)
-            && !is_owned_generic_record_definition(program, definition)
+            && definition.kind == crate::core::ResolvedTypeKind::Record
     })
 }
 
@@ -2839,48 +2836,70 @@ pub fn contains_scalar_collection_operation_candidate(program: &MirProgram) -> b
 /// and the CLI make the same admission decision without re-reading surface
 /// record names or duplicating the TypeDesc rule.
 pub fn contains_flat_copy_record_candidate(program: &MirProgram) -> bool {
-    program.instances().values().any(|instance| {
+    let promoted_generic_record_projection = program.instances().values().any(|instance| {
         matches!(
             instance.contract,
-            MirGenericInstanceContract::OwnedRecordProjection { .. }
-                | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
-                | MirGenericInstanceContract::OwnedRecordUpdate { .. }
-                | MirGenericInstanceContract::ScalarRecordUpdate { .. }
-        )
-    }) || program.functions().values().any(|function| {
-        // The current flat-record native contract emits only simple function
-        // symbols.  A qualified trait/impl method may carry an implicit
-        // receiver whose type is a flat record, but that declaration is not a
-        // record value consumed by this production island.  Treating it as a
-        // candidate would make unrelated metadata-only programs cross the
-        // default route boundary.
-        let Some(owner) = function.owner.0.strip_prefix("function:") else {
-            return false;
-        };
-        if owner.contains(':') {
-            return false;
-        }
-        function
-            .parameters
-            .iter()
-            .filter_map(|parameter| function.values.get(parameter))
-            .any(|value| {
+            MirGenericInstanceContract::ScalarRecordProjection { .. }
+        ) && program
+            .functions()
+            .get(&instance.function)
+            .and_then(|function| {
+                function
+                    .parameters
+                    .first()
+                    .and_then(|parameter| function.values.get(parameter))
+            })
+            .is_some_and(|value| {
                 program
                     .type_catalog()
-                    .validate_flat_copy_record(&value.ty)
+                    .validate_flat_copy_record_with_float(&value.ty, true)
                     .is_ok()
             })
-            || program
-                .type_catalog()
-                .validate_flat_copy_record(&function.result)
-                .is_ok()
-            || function.values.values().any(|value| {
-                program
+    });
+    promoted_generic_record_projection
+        || program.instances().values().any(|instance| {
+            matches!(
+                instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjection { .. }
+                    | MirGenericInstanceContract::OwnedRecordProjectionDrop { .. }
+                    | MirGenericInstanceContract::OwnedRecordUpdate { .. }
+                    | MirGenericInstanceContract::ScalarRecordUpdate { .. }
+            )
+        })
+        || program.functions().values().any(|function| {
+            // The current flat-record native contract emits only simple function
+            // symbols.  A qualified trait/impl method may carry an implicit
+            // receiver whose type is a flat record, but that declaration is not a
+            // record value consumed by this production island.  Treating it as a
+            // candidate would make unrelated metadata-only programs cross the
+            // default route boundary.
+            let Some(owner) = function.owner.0.strip_prefix("function:") else {
+                return false;
+            };
+            if owner.contains(':') {
+                return false;
+            }
+            function
+                .parameters
+                .iter()
+                .filter_map(|parameter| function.values.get(parameter))
+                .any(|value| {
+                    program
+                        .type_catalog()
+                        .validate_flat_copy_record(&value.ty)
+                        .is_ok()
+                })
+                || program
                     .type_catalog()
-                    .validate_flat_copy_record(&value.ty)
+                    .validate_flat_copy_record(&function.result)
                     .is_ok()
-            })
-    })
+                || function.values.values().any(|value| {
+                    program
+                        .type_catalog()
+                        .validate_flat_copy_record(&value.ty)
+                        .is_ok()
+                })
+        })
 }
 
 /// Return whether a canonical graph contains a materialized generic Option

@@ -1,0 +1,13 @@
+// Generic Record<T> non-Copy List projection remains outside the Copy ABI.
+type Box<T> { value: T }
+
+func get<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i64 {
+    let boxed: Box<List<i32>> = Box { value: [41] }
+    let picked = get(boxed)
+    drop(picked)
+    42
+}

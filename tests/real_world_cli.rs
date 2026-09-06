@@ -6185,6 +6185,54 @@ fn canonical_mir_verifier_rejects_unsupported_abi_without_fallback() {
 }
 
 #[test]
+fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_record_projection_f64.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Record<f64> default run");
+    assert_eq!(run.status.code(), Some(42));
+    assert!(String::from_utf8_lossy(&run.stderr).is_empty());
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn generic Record<f64> default verify");
+    assert!(verify.status.success());
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(!stdout.contains("flow_ast"), "{stdout}");
+}
+
+#[test]
+fn canonical_default_generic_record_list_projection_rejects_before_legacy() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_generic_record_projection_list_rejected.mimi");
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn rejected generic Record<List> default run");
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let stderr_lower = stderr.to_ascii_lowercase();
+    assert!(
+        stderr_lower.contains("canonical mir") && stderr_lower.contains("generic record"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("legacy"), "{stderr}");
+}
+
+#[test]
 fn real_world_cli_suite() {
     let root = project_root().join("tests").join("real_world");
     let mut sources: Vec<PathBuf> = fs::read_dir(&root)

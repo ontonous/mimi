@@ -7439,3 +7439,67 @@ fn variant_call_abi_receipt_drift_is_rejected_before_consumers() {
             .contains("variant call ABI receipt disagrees with TypeDesc")
     }));
 }
+
+#[test]
+fn materializes_generic_record_f64_projection_with_float_field_receipt() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_record_projection_f64.mimi");
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<T=f64> projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::ScalarRecordProjection { contract }
+                    if contract.arity == 1 && contract.name == "value"
+            )
+        })
+        .expect("generic Record<f64> projection instance");
+    let function = program
+        .functions()
+        .get(&instance.function)
+        .expect("generic Record<f64> executable instance");
+    let parameter = function.parameters.first().expect("record parameter");
+    let parameter_ty = &function
+        .values
+        .get(parameter)
+        .expect("parameter TypeDesc")
+        .ty;
+    program
+        .type_catalog()
+        .validate_flat_copy_record_with_float(parameter_ty, true)
+        .expect("specialized Record<f64> must carry the float Copy layout");
+    let MirGenericInstanceContract::ScalarRecordProjection { contract } = &instance.contract else {
+        unreachable!("filtered above");
+    };
+    assert_eq!(contract.field_ty, function.result);
+    assert!(matches!(
+        program
+            .type_catalog()
+            .get(&contract.field_ty)
+            .map(|descriptor| descriptor.abi),
+        Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+    ));
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Record<f64> projection execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
+fn generic_record_list_projection_remains_rejected_before_consumers() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
+    );
+    let checked = checked_program(source);
+    let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("generic Record<List<i32>> projection must remain fail-closed");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("generic record projection") || message.contains("Copy scalar/bool"),
+        "unexpected generic record List rejection: {message}"
+    );
+}

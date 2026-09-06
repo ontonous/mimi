@@ -1159,7 +1159,7 @@ pub(crate) fn validate_scalar_record_call_argument(
                 "generic scalar record projection call Construct type disagrees with target parameter".into(),
             );
         }
-        type_catalog.validate_flat_copy_record(&result_ty)?;
+        type_catalog.validate_flat_copy_record_with_float(&result_ty, true)?;
         return type_catalog.validate_glue(&result_ty, super::types::MirGlueOperation::MoveOut);
     }
     let Some(MirInstruction {
@@ -1192,7 +1192,7 @@ pub(crate) fn validate_scalar_record_call_argument(
                 .into(),
         );
     }
-    type_catalog.validate_flat_copy_record(&source_ty)?;
+    type_catalog.validate_flat_copy_record_with_float(&source_ty, true)?;
     type_catalog.validate_value_operation(
         target_parameter_ty,
         &source_ty,
@@ -1438,6 +1438,38 @@ fn materialize_generic_instance(
         &generic_id,
         &mut HashSet::new(),
     );
+    // The generic borrowed-record projection has a deliberately narrow float
+    // exception. Keep the predicate tied to the exact one-parameter,
+    // one-block field-load envelope so record updates and arbitrary generic
+    // bodies cannot inherit the f64 ABI merely because they mention a record.
+    let is_copy_record_projection = callable.signature.parameters.len() == 1
+        && callable.signature.result == generic_id
+        && program
+            .resolved_types()
+            .get(&callable.signature.parameters[0].ty)
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    crate::core::ResolvedType::Nominal { arguments, .. }
+                        if arguments.as_slice() == [generic_id.clone()]
+                )
+            })
+        && callable.body.root.statements.is_empty()
+        && callable
+            .body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(|expression| {
+                matches!(
+                    &expression.kind,
+                    ResolvedExprKind::Load(place)
+                        if matches!(
+                            place.projections.as_slice(),
+                            [crate::core::ir::ResolvedProjection::Field { .. }]
+                        )
+                )
+            });
     let generic_variant_predicate_facade =
         callable.signature.parameters.iter().any(|parameter| {
             mentions_generic_option_type(program, &parameter.ty, &generic_id, &mut HashSet::new())
@@ -1834,6 +1866,15 @@ fn materialize_generic_instance(
                 } else {
                     catalog.validate_generic_result_projection_argument(&arguments[0])
                 }
+            } else if is_copy_record_projection {
+                if arguments.len() != 1 {
+                    Err(format!(
+                        "generic record projection contract requires one type argument, got {}",
+                        arguments.len()
+                    ))
+                } else {
+                    catalog.validate_generic_record_projection_argument(&arguments[0])
+                }
             } else if generic_list_facade {
                 catalog
                     .validate_scalar_generic_arguments(arguments)
@@ -1856,7 +1897,9 @@ fn materialize_generic_instance(
             node_id: subject(),
             message: format!(
                 "generic MIR instance argument is outside {}: {message}",
-                if is_owned_variant_projection {
+                if is_copy_record_projection {
+                    "the generic record projection contract"
+                } else if is_owned_variant_projection {
                     "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
@@ -3081,7 +3124,9 @@ fn materialize_generic_instance(
             node_id: subject(),
             message: format!(
                 "specialized generic TypeDesc is outside {}: {message}",
-                if is_owned_variant_projection {
+                if is_copy_record_projection {
+                    "the generic record projection contract"
+                } else if is_owned_variant_projection {
                     "the admitted scalar or owned managed-payload variant contract"
                 } else {
                     "scalar contract or flat Copy variant contract"
@@ -4356,7 +4401,7 @@ fn detect_scalar_record_projection_contract(
         }]);
     }
     type_catalog
-        .validate_flat_copy_record(&base_ty)
+        .validate_flat_copy_record_with_float(&base_ty, true)
         .map_err(|message| {
             vec![MirLoweringError {
                 node_id: subject.clone(),
@@ -4955,7 +5000,7 @@ pub(crate) fn validate_scalar_record_projection_mir(
         .ok_or_else(|| "generic record projection result value is absent".to_string())?
         .ty
         .clone();
-    type_catalog.validate_flat_copy_record(&base_ty)?;
+    type_catalog.validate_flat_copy_record_with_float(&base_ty, true)?;
     let expected =
         type_catalog.validated_record_field_projection_contract(&base_ty, field, &result_ty)?;
     if &expected != contract {

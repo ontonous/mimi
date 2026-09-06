@@ -1,0 +1,12 @@
+// Generic Record<T> borrow projection with the narrowly promoted Copy f64 leaf.
+type Box<T> { value: T }
+
+func get<T>(boxed: Box<T>) -> T {
+    boxed.value
+}
+
+func main() -> i64 {
+    let boxed = Box { value: 41.5 }
+    let picked = get(boxed)
+    42
+}

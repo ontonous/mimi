@@ -51,7 +51,7 @@ impl<'a> NativeMirValidator<'a> {
             self.validate_value(function, parameter, "parameter");
             self.reject_reference_callable_boundary(function, parameter, "reference parameter");
         }
-        self.validate_signature_type(&function.result, "result", true);
+        self.validate_signature_type(function, &function.result, "result", true);
         self.reject_reference_type(&function.result, "reference result");
         if crate::core::mir::is_owned_string_return_candidate(function, catalog) {
             if let Err(message) =
@@ -165,11 +165,12 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        self.validate_signature_type(&info.ty, &format!("{subject} '{value}'"), false);
+        self.validate_signature_type(function, &info.ty, &format!("{subject} '{value}'"), false);
     }
 
     fn validate_signature_type(
         &mut self,
+        function: &MirFunction,
         ty: &crate::core::ResolvedTypeId,
         subject: &str,
         _allow_unit_result: bool,
@@ -262,7 +263,11 @@ impl<'a> NativeMirValidator<'a> {
             }
         } else if is_record {
             if desc.ownership == MirOwnership::Copy {
-                self.validate_flat_copy_record(ty, subject)
+                if self.is_promoted_generic_record_projection(function, ty) {
+                    self.validate_flat_copy_record_with_float(ty, subject)
+                } else {
+                    self.validate_flat_copy_record(ty, subject)
+                }
             } else {
                 match validate_native_non_copy_record_type(self.program.type_catalog(), ty) {
                     Ok(()) => true,
@@ -396,6 +401,59 @@ impl<'a> NativeMirValidator<'a> {
                 false
             }
         }
+    }
+
+    fn validate_flat_copy_record_with_float(
+        &mut self,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> bool {
+        match self
+            .program
+            .type_catalog()
+            .validate_flat_copy_record_with_float(ty, true)
+        {
+            Ok(()) => true,
+            Err(message) => {
+                self.errors.push(NativeMirError::new(subject, message));
+                false
+            }
+        }
+    }
+
+    fn is_promoted_generic_record_projection(
+        &self,
+        function: &MirFunction,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        self.program.instances().values().any(|instance| {
+            matches!(
+                &instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection { .. }
+            ) && (instance.function == function.owner
+                || function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            &instruction.kind,
+                            MirInstructionKind::Call {
+                                callee: ResolvedCallee::Function(target),
+                                ..
+                            } if target == &instance.function
+                        )
+                    })
+                }))
+                && self
+                    .program
+                    .functions()
+                    .get(&instance.function)
+                    .and_then(|target| {
+                        target
+                            .parameters
+                            .first()
+                            .and_then(|parameter| target.values.get(parameter))
+                    })
+                    .is_some_and(|value| value.ty == *ty)
+        })
     }
 
     fn validate_flat_copy_variant(

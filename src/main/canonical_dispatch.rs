@@ -3780,4 +3780,36 @@ mod tests {
         );
         assert!(reason.contains("None and Some"), "{reason}");
     }
+
+    #[test]
+    fn generic_record_f64_projection_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_f64.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_flat_copy_record_admission(&checked),
+            mimi::core::mir::FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Record<f64> projection must select canonical MIR");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                ref contract
+            } if contract.arity == 1 && contract.name == "value"
+        )));
+    }
+
+    #[test]
+    fn generic_record_list_projection_rejects_before_legacy_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"
+        ));
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("generic Record<List<i32>> projection must fail closed");
+        };
+        assert!(reason.contains("generic record projection"), "{reason}");
+        assert!(!reason.contains("legacy"), "{reason}");
+    }
 }

@@ -6246,4 +6246,49 @@ mod tests {
             "L2 requires variant validation before LLVM function declarations"
         );
     }
+
+    #[test]
+    fn native_generic_record_f64_projection_consumes_float_record_receipt() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_f64.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                        contract
+                    } if contract.arity == 1 && contract.name == "value"
+                )
+            })
+            .expect("generic Record<f64> projection instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection { contract } =
+            &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            program
+                .type_catalog()
+                .get(&contract.field_ty)
+                .map(|descriptor| descriptor.abi),
+            Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Record<f64> projection");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator =
+            CodeGenerator::new(&context, "mir_native_generic_record_projection_f64");
+        generator
+            .compile_mir_native(&program)
+            .expect("native generic Record<f64> projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native generic Record<f64> projection module verifies");
+    }
 }

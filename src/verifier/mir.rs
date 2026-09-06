@@ -4199,7 +4199,13 @@ fn eval_materialized_record_projection_call(
         )
     })?;
     crate::core::mir::lower::validate_scalar_record_projection_mir(target, catalog, contract)?;
-    catalog.validate_scalar_generic_arguments(type_arguments)?;
+    if type_arguments.len() != 1 {
+        return Err(format!(
+            "MIR verifier record projection call requires one type argument, got {}",
+            type_arguments.len()
+        ));
+    }
+    catalog.validate_generic_record_projection_argument(&type_arguments[0])?;
     if arguments.len() != 1 || target.parameters.len() != 1 {
         return Err("MIR verifier record projection call requires one argument".into());
     }

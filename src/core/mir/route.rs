@@ -1452,4 +1452,40 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn generic_record_f64_projection_materializes_float_record_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_projection_f64.mimi"
+        ));
+        assert_eq!(
+            classify_flat_copy_record_admission(&program),
+            FlatCopyRecordAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("generic Record<f64> route must materialize");
+        assert!(route.materialized_record_candidate);
+        let instance = route
+            .program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarRecordProjection {
+                        contract
+                    } if contract.arity == 1 && contract.name == "value"
+                )
+            })
+            .expect("generic Record<f64> route instance");
+        assert_eq!(
+            route
+                .program
+                .type_catalog()
+                .get(&instance.arguments[0])
+                .expect("generic Record<f64> argument TypeDesc")
+                .abi,
+            crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        );
+    }
 }

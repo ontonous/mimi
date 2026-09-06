@@ -10290,4 +10290,25 @@ mod tests {
             .iter()
             .any(|error| error.message.contains("borrow_mut")));
     }
+
+    #[test]
+    fn generic_record_f64_projection_matches_reference_and_ast_free_bytecode() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_native_generic_record_projection_f64.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("generic Record<f64> projection MIR");
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic Record<f64> projection");
+        let bytecode = compile_mir_program(&mir).expect("generic Record<f64> bytecode");
+        assert!(bytecode.ast.is_none());
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode generic Record<f64> projection");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        assert!(matches!(value, Value::Int(42)));
+    }
 }
