@@ -1,0 +1,11 @@
+// Generic heterogeneous Result<T, bool> unwrap_or admits a Copy f64
+// Ok/fallback while retaining the fixed bool Err slot.
+func unwrap_or<T>(value: Result<T, bool>, fallback: T) -> T {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Result<f64, bool> = Ok(41.5)
+    let out = unwrap_or(value, 7.25)
+    42
+}

@@ -7333,6 +7333,34 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_bool_f64_unwrap_or_matches_reference_and_bytecode() {
+        for source in [
+            include_str!(
+                "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64.mimi"
+            ),
+            include_str!(
+                "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64_err.mimi"
+            ),
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            let mir = MirProgram::from_checked_program(&checked)
+                .expect("generic Result bool/f64 unwrap_or MIR");
+            let reference = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference generic Result bool/f64 unwrap_or execution");
+            let bytecode = compile_mir_program(&mir).expect("generic Result bool/f64 bytecode");
+            assert!(bytecode.ast.is_none());
+            let value = BytecodeVM::new(bytecode)
+                .run_value()
+                .expect("bytecode generic Result bool/f64 unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(42));
+            assert!(matches!(value, Value::Int(42)));
+        }
+    }
+
+    #[test]
     fn generic_result_unwrap_or_i64_and_bool_match_reference_and_bytecode() {
         for (source, expected) in [
             (

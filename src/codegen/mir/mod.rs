@@ -4103,6 +4103,39 @@ mod tests {
     }
 
     #[test]
+    fn native_generic_result_bool_f64_unwrap_or_selects_fallback() {
+        for (source, module_name) in [
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64.mimi"
+                ),
+                "mir_native_generic_result_bool_unwrap_or_f64",
+            ),
+            (
+                include_str!(
+                    "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64_err.mimi"
+                ),
+                "mir_native_generic_result_bool_unwrap_or_f64_err",
+            ),
+        ] {
+            let program = canonical_program(source);
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference generic Result bool/f64 unwrap_or execution");
+            assert_eq!(reference, MirRuntimeValue::Int(42));
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native(&program)
+                .expect("native generic Result bool/f64 unwrap_or must consume MIR");
+            generator
+                .module
+                .verify()
+                .expect("native generic Result bool/f64 unwrap_or module verifies");
+        }
+    }
+
+    #[test]
     fn native_generic_distinct_result_unwrap_or_consumes_two_slot_receipt() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_distinct_unwrap_or.mimi"

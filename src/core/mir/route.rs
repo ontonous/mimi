@@ -1252,6 +1252,47 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_bool_f64_unwrap_or_materialization_carries_heterogeneous_receipt() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64.mimi"
+        ));
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).generic_result_projection_fallback,
+            GenericResultProjectionFallbackAdmission::CompleteCoverage
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("generic Result<T,bool> f64 unwrap_or route must materialize");
+        assert!(route.materialized_generic_result_projection_fallback_candidate);
+        let instance = route
+            .program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                        contract
+                    } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                )
+            })
+            .expect("generic Result bool/f64 fallback instance");
+        let crate::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+            contract,
+        } = &instance.contract
+        else {
+            unreachable!("filtered above");
+        };
+        assert!(matches!(
+            route
+                .program
+                .type_catalog()
+                .get(&contract.result_ty)
+                .map(|descriptor| descriptor.abi),
+            Some(crate::core::mir::types::MirAbiClass::Float { bits: 64 })
+        ));
+    }
+
+    #[test]
     fn managed_result_call_materialization_carries_one_receipt() {
         let program = checked(include_str!(
             "../../../tests/fixtures/mir_result_list_i32_call_return.mimi"

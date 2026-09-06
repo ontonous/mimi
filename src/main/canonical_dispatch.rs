@@ -2064,6 +2064,27 @@ mod tests {
     }
 
     #[test]
+    fn generic_result_bool_f64_unwrap_or_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/fixtures/mir_native_generic_result_bool_unwrap_or_f64.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_generic_result_projection_fallback_admission(&checked),
+            mimi::core::mir::GenericResultProjectionFallbackAdmission::CompleteCoverage
+        );
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("generic Result<T,bool> f64 unwrap_or must select canonical route");
+        };
+        assert!(program.instances().values().any(|instance| matches!(
+            &instance.contract,
+            mimi::core::mir::MirGenericInstanceContract::ScalarVariantProjectionFallback {
+                contract
+            } if contract.projection.nominal.as_str() == "builtin:type:Result"
+                && contract.projection.ownership == mimi::core::mir::types::MirOwnership::Copy
+        )));
+    }
+
+    #[test]
     fn unsupported_generic_result_unwrap_or_cannot_reenter_legacy_route() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_native_generic_result_unwrap_or_rejected.mimi"

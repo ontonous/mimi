@@ -1748,10 +1748,11 @@ fn materialize_generic_instance(
                         ) && call.arguments.len() == 1
                 )
             });
-    // Generic `Result<T, i32>.unwrap_or(T)` opens the same heterogeneous
+    // Generic `Result<T, i32|bool>.unwrap_or(T)` opens the same heterogeneous
     // Copy-f64 Ok/fallback ABI as `unwrap`, but only for the exact
-    // checker-owned fixed-i32 envelope. Homogeneous `Result<T, T>` and every
-    // other error payload remain on their existing scalar fail-closed path.
+    // checker-owned fixed scalar error envelope. Homogeneous `Result<T, T>`
+    // and every other error payload remain on their existing scalar
+    // fail-closed path.
     let is_copy_result_projection_fallback = callable.signature.parameters.len() == 2
         && callable.signature.result == generic_id
         && program
@@ -1764,7 +1765,9 @@ fn materialize_generic_instance(
                         if ok == &generic_id
                             && matches!(
                                 program.resolved_types().get(error),
-                                Some(crate::core::ResolvedType::Primitive(PrimitiveType::I32))
+                                Some(crate::core::ResolvedType::Primitive(
+                                    PrimitiveType::I32 | PrimitiveType::Bool,
+                                ))
                             )
                 )
             })

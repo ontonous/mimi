@@ -1,0 +1,11 @@
+// Direct concrete Result<f64, bool> remains outside the generic fallback
+// island; only the generic envelope may admit this f64 ABI.
+func unwrap_or(value: Result<f64, bool>, fallback: f64) -> f64 {
+    value.unwrap_or(fallback)
+}
+
+func main() -> i64 {
+    let value: Result<f64, bool> = Ok(41.5)
+    let out = unwrap_or(value, 7.25)
+    42
+}
