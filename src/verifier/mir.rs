@@ -4568,8 +4568,15 @@ fn eval_materialized_owned_record_projection_call(
         )
     })?;
     crate::core::mir::lower::validate_owned_record_projection_mir(target, catalog, contract)?;
-    if type_arguments.len() != 1 || catalog.validate_owned_string(&type_arguments[0]).is_err() {
-        return Err("MIR verifier owned record projection argument is not canonical String".into());
+    if type_arguments.len() != 1
+        || catalog
+            .validate_move_owned_payload(&type_arguments[0])
+            .is_err()
+    {
+        return Err(
+            "MIR verifier owned record projection argument is outside the managed payload contract"
+                .into(),
+        );
     }
     if arguments.len() != 1 || target.parameters.len() != 1 {
         return Err("MIR verifier owned record projection call requires one argument".into());
@@ -4673,9 +4680,13 @@ fn eval_materialized_owned_record_projection_drop_call(
         )
     })?;
     crate::core::mir::lower::validate_owned_record_projection_drop_mir(target, catalog, contract)?;
-    if type_arguments.len() != 1 || catalog.validate_owned_string(&type_arguments[0]).is_err() {
+    if type_arguments.len() != 1
+        || catalog
+            .validate_move_owned_payload(&type_arguments[0])
+            .is_err()
+    {
         return Err(
-            "MIR verifier owned record move/drop projection argument is not canonical String"
+            "MIR verifier owned record move/drop projection argument is outside the managed payload contract"
                 .into(),
         );
     }

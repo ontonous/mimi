@@ -6583,10 +6583,11 @@ impl MirTypeCatalog {
         Ok(())
     }
 
-    /// Materialize a full-consumption record projection that moves one owned
-    /// String field and explicitly drops all sibling fields.  This opens only
-    /// the residual proof; it does not weaken the older `MoveProject` node,
-    /// whose no-residual contract still requires Copy siblings.
+    /// Materialize a full-consumption record projection that moves one
+    /// managed payload field (owned String or List<Copy scalar>) and
+    /// explicitly drops all sibling fields. This opens only the residual
+    /// proof; it does not weaken the older `MoveProject` node, whose
+    /// no-residual contract still requires Copy siblings.
     pub fn validated_record_move_projection_drop_contract(
         &self,
         source_ty: &ResolvedTypeId,

@@ -589,10 +589,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
-    /// Consume a concrete record and transfer its one owned String field.
-    /// The canonical validator proves that every sibling is Copy, so the
-    /// extracted `{ptr, len}` value is a move boundary rather than a clone;
-    /// the source record must not be used again along any valid MIR path.
+    /// Consume a concrete record and transfer its one managed field (owned
+    /// String or List<Copy scalar>). The canonical validator proves that every
+    /// sibling is Copy, so the extracted ABI value is a move boundary rather
+    /// than a clone; the source record must not be used again along any valid
+    /// MIR path.
     pub(super) fn emit_move_project(
         &mut self,
         result: &MirValueId,

@@ -7548,6 +7548,57 @@ fn materializes_generic_record_owned_list_projection_with_list_glue_receipt() {
 }
 
 #[test]
+fn materializes_generic_record_owned_list_projection_with_string_residual_drop_receipt() {
+    let source = include_str!(
+        "../../../tests/fixtures/mir_native_generic_record_owned_list_projection_residual.mimi"
+    );
+    let checked = checked_program(source);
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("generic Record<List<i32>> residual projection must lower to canonical MIR");
+    let instance = program
+        .instances()
+        .values()
+        .find(|instance| {
+            matches!(
+                &instance.contract,
+                MirGenericInstanceContract::OwnedRecordProjectionDrop { contract }
+                    if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "note"
+                        && contract.residual[0].glue
+                            == crate::core::mir::types::MirGlueKind::OwnedString
+            )
+        })
+        .expect("owned generic Record<List<i32>> residual projection instance");
+    let target = program
+        .functions()
+        .get(&instance.function)
+        .expect("owned generic Record<List<i32>> residual target");
+    assert!(target.canonical_text().contains("move_project_drop"));
+    let result_desc = program
+        .type_catalog()
+        .get(&target.result)
+        .expect("selected List result TypeDesc");
+    assert!(matches!(
+        result_desc.layout,
+        crate::core::mir::types::MirLayout::List { .. }
+    ));
+    assert_eq!(
+        result_desc.glue,
+        crate::core::mir::types::MirGlueContract {
+            move_out: crate::core::mir::types::MirGlueKind::List,
+            clone: crate::core::mir::types::MirGlueKind::List,
+            drop: crate::core::mir::types::MirGlueKind::List,
+        }
+    );
+    let value = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference generic Record<List<i32>> residual execution");
+    assert_eq!(value, crate::core::mir::reference::MirRuntimeValue::Int(42));
+}
+
+#[test]
 fn generic_record_list_projection_remains_rejected_before_consumers() {
     let source = include_str!(
         "../../../tests/fixtures/mir_native_generic_record_projection_list_rejected.mimi"

@@ -721,9 +721,10 @@ pub enum MirInstructionKind {
         base: MirValueId,
         projection: MirProjection,
     },
-    /// Consume a non-Copy record, move one owned String field out, and drop
-    /// every residual sibling according to the attached TypeDesc receipt.
-    /// This is distinct from `MoveProject`, which admits only Copy siblings.
+    /// Consume a non-Copy record, move one managed field (owned String or
+    /// List<Copy scalar>) out, and drop every residual sibling according to the
+    /// attached TypeDesc receipt. This is distinct from `MoveProject`, which
+    /// admits only Copy siblings.
     MoveProjectDrop {
         result: MirValueId,
         base: MirValueId,

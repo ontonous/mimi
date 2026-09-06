@@ -5631,6 +5631,52 @@ mod tests {
     }
 
     #[test]
+    fn native_emitter_consumes_owned_generic_record_list_projection_with_string_residual() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_generic_record_owned_list_projection_residual.mimi"
+        ));
+        let instance = program
+            .instances()
+            .values()
+            .find(|instance| {
+                matches!(
+                    &instance.contract,
+                    crate::core::mir::MirGenericInstanceContract::OwnedRecordProjectionDrop {
+                        contract
+                    } if contract.projection.arity == 2
+                        && contract.projection.name == "value"
+                        && contract.residual.len() == 1
+                        && contract.residual[0].name == "note"
+                )
+            })
+            .expect("owned generic Record<List<i32>> residual instance");
+        let target = program
+            .functions()
+            .get(&instance.function)
+            .expect("owned generic Record<List<i32>> residual target");
+        assert!(target.canonical_text().contains("move_project_drop"));
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference owned generic residual execution");
+        assert_eq!(reference, MirRuntimeValue::Int(42));
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_generic_record_owned_list_projection_residual",
+        );
+        generator
+            .compile_mir_native(&program)
+            .expect("native owned generic List residual projection must consume MIR");
+        generator
+            .module
+            .verify()
+            .expect("native owned generic List residual module verifies");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(ir.contains("mir_record_move_drop_project"));
+        assert!(ir.contains("mir_record_move_drop_residual"));
+    }
+
+    #[test]
     fn native_emitter_consumes_owned_mixed_generic_record_projection() {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_record_owned_string_mixed.mimi"

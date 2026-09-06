@@ -1300,7 +1300,7 @@ pub(crate) fn validate_scalar_tuple_call_argument(
 /// siblings are retained only so their ownership can be discharged by
 /// `MoveProjectDrop` after specialization.
 /// The declaration is intentionally checker-owned and surface-AST-free; the
-/// concrete String/Move/glue proof is replayed from TypeDesc below.
+/// concrete managed-payload/Move/glue proof is replayed from TypeDesc below.
 fn is_owned_record_projection_drop_callable(
     program: &CheckedProgram,
     callable: &crate::core::ResolvedCallable,
@@ -1665,7 +1665,7 @@ fn materialize_generic_instance(
     // scalar fail-closed path.
     let is_owned_record_projection_drop =
         is_owned_record_projection_drop_callable(program, callable)
-            && type_catalog.validate_owned_string(&concrete).is_ok();
+            && type_catalog.validate_move_owned_payload(&concrete).is_ok();
     let is_owned_record_projection = generic_record_facade
         && !is_identity
         && !is_owned_record_projection_drop

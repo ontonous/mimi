@@ -1,0 +1,15 @@
+// Canonical generic MIR candidate: move a List<Copy scalar> field while the
+// concrete owned String sibling is discharged by MoveProjectDrop's receipt.
+type Pair<T> { value: T, note: string }
+
+func take<T>(pair: Pair<T>) -> T {
+    pair.value
+}
+
+func main() -> i64 {
+    ensures: result == result
+    let pair: Pair<List<i32>> = Pair { value: [1, 2], note: "residual" }
+    let picked = take(pair)
+    drop(picked)
+    42
+}
