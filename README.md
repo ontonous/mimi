@@ -163,7 +163,8 @@ The Architecture Amendment (2026-07-25) established 10 design rulings after nine
 git clone https://github.com/ontonous/mimi
 cd mimi
 bash scripts/setup-llvm-wrapper.sh
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --release
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo build --release --features llvm18-host-dynamic
 ```
 
 ### Hello, Flow
@@ -206,7 +207,8 @@ func main() -> i32 {
 ### Run Tests
 
 ```bash
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic
 ```
 
 ---
@@ -395,19 +397,24 @@ mimi/
 
 ```bash
 # Full test suite
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic
 
 # Dual-backend equivalence (L1)
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test dual_
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic dual_
 
 # Type system soundness (L2)
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test "typecheck::"
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic "typecheck::"
 
 # Real-world MCDD test suite
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test real_world
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo test --features llvm18-host-dynamic real_world
 
 # Clippy (zero-warnings gate)
-LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper \
+  cargo clippy --features llvm18-host-dynamic --all-targets -- -D warnings
 
 # Format
 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt
