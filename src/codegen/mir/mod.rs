@@ -1191,6 +1191,103 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_flow_helper_result_shares_one_mir_across_four_consumers() {
+        let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry_helper_result.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("recoverable Flow helper Result must lower to canonical MIR");
+
+        let transition = crate::core::NodeId("transition:Account::withdraw::Active".into());
+        let transition_body = program
+            .functions()
+            .get(&transition)
+            .expect("recoverable transition MIR");
+        let helper_receipts = transition_body
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Call {
+                    variant_call_contract: Some(receipt),
+                    ..
+                } => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(helper_receipts.len(), 1);
+        let receipt = helper_receipts[0];
+        assert_eq!(receipt.callee.0, "function:validate_amount");
+        assert_eq!(
+            receipt.mode,
+            crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+        );
+        assert_eq!(
+            receipt.return_mode,
+            crate::core::mir::types::MirVariantCallReturnMode::AggregateEnvelopeMerge
+        );
+        assert_eq!(receipt.payload_types.len(), 2);
+        program
+            .type_catalog()
+            .validate_variant_call_abi_receipt(
+                &receipt.callee,
+                &receipt.type_arguments,
+                &receipt.parameter_types,
+                &receipt.result_ty,
+                receipt,
+            )
+            .expect("helper Result receipt must be TypeDesc-derived");
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference helper Result execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "100\n100\n95\n");
+
+        let mut bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("helper Result MIR bytecode"));
+        let bytecode_value = bytecode
+            .run_value()
+            .expect("bytecode helper Result execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), "100\n100\n95\n");
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for helper Result Flow");
+        let verification = crate::verifier::verify_mir(&program, String::new())
+            .expect("verifier consumes helper Result Flow MIR");
+        let proof = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("retry_balance_contract"))
+            .expect("helper Result fixture must contain a contract result");
+        assert_eq!(proof.status, crate::verifier::VerifStatus::Proven);
+        assert!(proof.constraint_count > 0);
+        let artifact = proof
+            .artifact
+            .as_ref()
+            .expect("helper Result Proven result must carry a proof artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, program.canonical_digest());
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_m3_flow_retry_helper_result_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native helper Result Flow lowering");
+        generator
+            .module
+            .verify()
+            .expect("native helper Result Flow module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native helper Result Flow execution");
+        assert_eq!(native.stdout, "100\n100\n95\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
     fn cross_state_result_match_uses_one_mir_across_reference_bytecode_and_native() {
         let program = canonical_program(include_str!(
             "../../../tests/real_world/flow_state_match_fail_result_dual_backend.mimi"

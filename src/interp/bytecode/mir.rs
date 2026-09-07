@@ -1594,6 +1594,16 @@ impl<'a> FunctionEmitter<'a> {
             .type_catalog()
             .validate_result_move_variant(&target.result)
             .is_ok();
+        let recoverable_result = self
+            .program
+            .type_catalog()
+            .validate_recoverable_result_variant(&target.result)
+            .is_ok();
+        let recoverable_transition_body = self
+            .program
+            .transitions()
+            .get(&self.function.owner)
+            .is_some_and(|contract| contract.effect.is_recoverable());
         if flat_variant_result || move_owned_result {
             let Some(receipt) = variant_call_contract else {
                 self.error(if flat_variant_result {
@@ -1625,6 +1635,36 @@ impl<'a> FunctionEmitter<'a> {
                     self.error(message);
                     return;
                 }
+            }
+        } else if recoverable_result {
+            if !recoverable_transition_body {
+                self.error(
+                    "recoverable aggregate Result call is only valid inside a recoverable Flow transition",
+                );
+                return;
+            }
+            let Some(receipt) = variant_call_contract else {
+                self.error("recoverable aggregate Result call has no canonical ABI receipt");
+                return;
+            };
+            if receipt.mode != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+            {
+                self.error("recoverable aggregate Result call has the wrong ABI receipt mode");
+                return;
+            }
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_variant_call_abi_receipt(
+                    &owner,
+                    type_arguments,
+                    &parameter_types,
+                    &target.result,
+                    receipt,
+                )
+            {
+                self.error(message);
+                return;
             }
         } else if variant_call_contract.is_some() {
             self.error("variant call ABI receipt is attached to an unsupported variant result");

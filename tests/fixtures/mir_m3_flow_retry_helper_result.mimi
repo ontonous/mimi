@@ -1,0 +1,50 @@
+// M3 composition: the recoverable transition uses an ordinary helper Result
+// with `?`, then returns its Flow source on failure. The caller destructures
+// the returned failure tuple and retries the exact source once.
+func validate_amount(amount: i32) -> Result<i32, string> {
+    if amount <= 0 {
+        Err("invalid amount")
+    } else {
+        Ok(amount)
+    }
+}
+
+flow Account {
+    state Active { balance: i32 }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        println(self.balance)
+        let checked = validate_amount(amount)?
+        return Active { balance: self.balance - checked }
+    }
+}
+
+func retry_balance_contract(balance: i32, amount: i32) -> i32 {
+    requires: balance == 100
+    requires: amount == 5
+    ensures: result == 95
+    balance - amount
+}
+
+func main() -> i32 {
+    let source = Active { balance: 100 }
+    let rejected = Account::withdraw(source, 0)
+    match rejected {
+        Ok(success) => {
+            drop(success)
+            1000
+        },
+        Err((returned, error)) => {
+            drop(error)
+            let retried = Account::withdraw(returned, 5)
+            match retried {
+                Ok(success) => {
+                    println(success.balance)
+                    drop(success)
+                    0
+                },
+                Err(_) => 1001,
+            }
+        },
+    }
+}

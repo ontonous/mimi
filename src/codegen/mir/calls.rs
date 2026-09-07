@@ -978,6 +978,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validate_result_move_variant(&target.result)
             .is_ok();
+        let recoverable_result = self
+            .program
+            .type_catalog()
+            .validate_recoverable_result_variant(&target.result)
+            .is_ok();
+        let recoverable_transition_body = self
+            .program
+            .transitions()
+            .get(&self.function.owner)
+            .is_some_and(|contract| contract.effect.is_recoverable());
         if flat_variant_result || move_owned_result {
             let receipt = variant_call_contract.ok_or_else(|| {
                 NativeMirError::new(
@@ -1006,6 +1016,36 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )
                 .map_err(|message| NativeMirError::new(subject, message))?;
             }
+        } else if recoverable_result {
+            if !recoverable_transition_body {
+                return Err(NativeMirError::new(
+                    subject,
+                    "recoverable aggregate Result call is only valid inside a recoverable Flow transition",
+                ));
+            }
+            let receipt = variant_call_contract.ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "recoverable aggregate Result call has no canonical ABI receipt",
+                )
+            })?;
+            if receipt.mode != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "recoverable aggregate Result call has the wrong ABI receipt mode",
+                ));
+            }
+            self.program
+                .type_catalog()
+                .validate_variant_call_abi_receipt(
+                    &owner,
+                    type_arguments,
+                    &parameter_types,
+                    &target.result,
+                    receipt,
+                )
+                .map_err(|message| NativeMirError::new(subject, message))?;
         } else if variant_call_contract.is_some() {
             return Err(NativeMirError::new(
                 subject,

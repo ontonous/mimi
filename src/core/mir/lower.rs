@@ -9828,17 +9828,27 @@ impl<'a> Lowerer<'a> {
         } else if matches!(result_desc.kind, super::types::MirTypeKind::Result) {
             // A recoverable Flow transition may call a helper returning an
             // intermediate `Result<T, E>` that is immediately consumed by
-            // `?`. That Result is governed by the shared aggregate envelope
-            // and the surrounding transition receipt, not by the direct
-            // managed Result-call ABI (`Result<owned, i32>`). Do not invent a
-            // managed call receipt here and let the Flow `Try` lowering carry
-            // the exact source-return boundary.
+            // `?`. Carry an explicit aggregate-envelope receipt for that
+            // helper; the surrounding Flow Try lowering still owns the
+            // exact source-return boundary and is not a managed direct-call
+            // ABI (`Result<owned, i32>`).
             if self.transition_result.is_some()
                 && type_catalog
                     .validate_recoverable_result_variant(&result_ty)
                     .is_ok()
             {
-                return None;
+                return match type_catalog.validated_recoverable_result_call_abi_contract(
+                    owner,
+                    type_arguments,
+                    &parameter_types,
+                    &result_ty,
+                ) {
+                    Ok(contract) => Some(contract),
+                    Err(message) => {
+                        self.error(node_id, message);
+                        None
+                    }
+                };
             }
             type_catalog.validated_result_move_call_abi_contract(
                 owner,

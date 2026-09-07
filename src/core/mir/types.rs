@@ -1014,6 +1014,10 @@ pub struct MirVariantPredicateContract {
 pub enum MirVariantCallAbiMode {
     FlatCopy,
     MoveOwned,
+    /// An aggregate `Result<T, E>` call made inside a recoverable Flow
+    /// transition.  The enclosing `?` owns the source-return boundary; this
+    /// receipt only proves the helper's complete TypeDesc envelope.
+    RecoverableAggregate,
 }
 
 /// The return-path merge proof attached to a direct variant-call receipt.
@@ -1028,6 +1032,7 @@ pub enum MirVariantCallAbiMode {
 pub enum MirVariantCallReturnMode {
     FlatCopyMerge,
     OwnershipPathExclusiveMerge,
+    AggregateEnvelopeMerge,
 }
 
 /// Backend-independent ABI receipt for a direct call whose result is an
@@ -8488,6 +8493,58 @@ impl MirTypeCatalog {
         })
     }
 
+    /// Materialize the aggregate envelope for a helper Result consumed by
+    /// `?` inside a recoverable Flow transition.  This is intentionally not a
+    /// managed direct-call ABI: the helper's Ok/Err payloads are preserved as
+    /// one TypeDesc-owned aggregate and the surrounding transition owns the
+    /// source-return effect.
+    pub fn validated_recoverable_result_call_abi_contract(
+        &self,
+        callee: &NodeId,
+        type_arguments: &[ResolvedTypeId],
+        parameter_types: &[ResolvedTypeId],
+        result_ty: &ResolvedTypeId,
+    ) -> Result<MirVariantCallAbiContract, String> {
+        self.validate_recoverable_result_variant(result_ty)?;
+        let (nominal, variants) = self.variant_layout(result_ty).ok_or_else(|| {
+            format!(
+                "recoverable Result call result '{}' has no canonical variant layout",
+                result_ty.as_str()
+            )
+        })?;
+        let (ok, error) = match self.get(result_ty).map(|descriptor| &descriptor.layout) {
+            Some(MirLayout::Result { ok, error, .. }) => (ok.clone(), error.clone()),
+            _ => {
+                return Err(format!(
+                    "recoverable Result call result '{}' is not a canonical Result layout",
+                    result_ty.as_str()
+                ));
+            }
+        };
+        let variants = variants
+            .iter()
+            .map(|variant| MirVariantCallVariant {
+                id: variant.id.clone(),
+                name: variant.name.clone(),
+                discriminant: variant.discriminant,
+                payload_field: variant.fields.first().map(|field| field.id.clone()),
+                payload_arity: variant.fields.len(),
+            })
+            .collect();
+        Ok(MirVariantCallAbiContract {
+            callee: callee.clone(),
+            type_arguments: type_arguments.to_vec(),
+            parameter_types: parameter_types.to_vec(),
+            result_ty: result_ty.clone(),
+            mode: MirVariantCallAbiMode::RecoverableAggregate,
+            return_mode: MirVariantCallReturnMode::AggregateEnvelopeMerge,
+            payload_ty: ok.clone(),
+            payload_types: vec![ok, error],
+            nominal: NominalTypeId::new(nominal).expect("static canonical variant nominal"),
+            variants,
+        })
+    }
+
     /// Preserve the original narrow direct-call boundary for callers that
     /// specifically require `Result<string, i32>`; generic managed Result
     /// calls use [`Self::validated_result_move_call_abi_contract`].
@@ -8540,6 +8597,13 @@ impl MirTypeCatalog {
                 parameter_types,
                 result_ty,
             )?,
+            MirVariantCallAbiMode::RecoverableAggregate => self
+                .validated_recoverable_result_call_abi_contract(
+                    callee,
+                    type_arguments,
+                    parameter_types,
+                    result_ty,
+                )?,
         };
         if receipt != &expected {
             return Err("variant call ABI receipt disagrees with TypeDesc".into());

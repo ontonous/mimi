@@ -3883,11 +3883,34 @@ fn eval_direct_variant_call(
     }
     let flat_variant_result = catalog.validate_flat_copy_variant(&target.result).is_ok();
     let move_owned_result = catalog.validate_result_move_variant(&target.result).is_ok();
-    if !flat_variant_result && !move_owned_result {
+    let recoverable_result = catalog
+        .validate_recoverable_result_variant(&target.result)
+        .is_ok();
+    let recoverable_transition_body = program
+        .transitions()
+        .get(&function.owner)
+        .is_some_and(|contract| contract.effect.is_recoverable());
+    if !flat_variant_result && !move_owned_result && !recoverable_result {
         return Err(
             "MIR verifier direct variant call result is outside the canonical call ABI contract"
                 .into(),
         );
+    }
+    if recoverable_result && !flat_variant_result && !move_owned_result {
+        if !recoverable_transition_body {
+            return Err(
+                "MIR verifier recoverable aggregate Result call is outside a recoverable Flow transition"
+                    .into(),
+            );
+        }
+        if receipt.is_none_or(|receipt| {
+            receipt.mode != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+        }) {
+            return Err(
+                "MIR verifier recoverable aggregate Result call has no canonical ABI receipt"
+                    .into(),
+            );
+        }
     }
     let receipt = receipt.ok_or_else(|| {
         if flat_variant_result {
@@ -3905,6 +3928,13 @@ fn eval_direct_variant_call(
     )?;
     if move_owned_result {
         crate::core::mir::validate_move_owned_result_return_merge(target, catalog)?;
+    } else if recoverable_result {
+        if receipt.mode != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate {
+            return Err(
+                "MIR verifier recoverable aggregate Result call has the wrong ABI receipt mode"
+                    .into(),
+            );
+        }
     } else {
         crate::core::mir::validate_variant_call_return_coverage(target)?;
     }
@@ -3931,7 +3961,7 @@ fn eval_direct_variant_call(
                 "MIR verifier direct variant call argument TypeDesc disagrees with target".into(),
             );
         }
-        let symbolic = if !move_owned_result {
+        let symbolic = if !move_owned_result && !recoverable_result {
             ensure_copy_value(function, catalog, argument)?;
             state.values.get(argument).cloned().ok_or_else(|| {
                 format!(
@@ -3983,6 +4013,8 @@ fn eval_direct_variant_call(
     }
     let returned = if move_owned_result {
         merge_move_owned_result_return_paths(catalog, &target.result, &returns)?
+    } else if recoverable_result {
+        merge_recoverable_result_return_paths(catalog, &target.result, &returns)?
     } else {
         merge_direct_variant_return_paths(catalog, &target.result, &returns)?
     };

@@ -2104,6 +2104,12 @@ fn validate_call_graph(
                 let move_owned_result = type_catalog
                     .validate_result_move_variant(&target.result)
                     .is_ok();
+                let recoverable_result = type_catalog
+                    .validate_recoverable_result_variant(&target.result)
+                    .is_ok();
+                let recoverable_transition_body = transitions
+                    .get(&function.owner)
+                    .is_some_and(|contract| contract.effect.is_recoverable());
                 if flat_variant_result || move_owned_result {
                     let Some(receipt) = variant_call_contract.as_ref() else {
                         errors.push(super::MirValidationError {
@@ -2133,6 +2139,44 @@ fn validate_call_graph(
                         if let Err(message) =
                             super::validate_move_owned_result_return_merge(target, type_catalog)
                         {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message,
+                            });
+                        }
+                    }
+                } else if recoverable_result {
+                    if !recoverable_transition_body {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message:
+                                "recoverable aggregate Result call is only valid inside a recoverable Flow transition".into(),
+                        });
+                    } else {
+                        let Some(receipt) = variant_call_contract.as_ref() else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message:
+                                    "recoverable aggregate Result call has no canonical ABI receipt"
+                                        .into(),
+                            });
+                            continue;
+                        };
+                        if receipt.mode
+                            != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message:
+                                    "recoverable aggregate Result call has the wrong ABI receipt mode".into(),
+                            });
+                        } else if let Err(message) = type_catalog.validate_variant_call_abi_receipt(
+                            &target_owner,
+                            type_arguments,
+                            &target_parameter_types,
+                            &target.result,
+                            receipt,
+                        ) {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
                                 message,
@@ -5414,6 +5458,16 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .type_catalog()
                     .validate_result_move_variant(&callee.result)
                     .is_ok();
+                let recoverable_result = self
+                    .program
+                    .type_catalog()
+                    .validate_recoverable_result_variant(&callee.result)
+                    .is_ok();
+                let recoverable_transition_body = self
+                    .program
+                    .transitions()
+                    .get(&function.owner)
+                    .is_some_and(|contract| contract.effect.is_recoverable());
                 if flat_variant_result || move_owned_result {
                     let receipt = variant_call_contract.as_ref().ok_or_else(|| {
                         self.error(
@@ -5442,6 +5496,37 @@ impl<'a> MirReferenceInterpreter<'a> {
                         )
                         .map_err(|message| self.error(&function.owner, message))?;
                     }
+                } else if recoverable_result {
+                    if !recoverable_transition_body {
+                        return Err(self.error(
+                            &function.owner,
+                            "recoverable aggregate Result call is only valid inside a recoverable Flow transition",
+                        ));
+                    }
+                    let receipt = variant_call_contract.as_ref().ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "recoverable aggregate Result call has no canonical ABI receipt",
+                        )
+                    })?;
+                    if receipt.mode
+                        != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+                    {
+                        return Err(self.error(
+                            &function.owner,
+                            "recoverable aggregate Result call has the wrong ABI receipt mode",
+                        ));
+                    }
+                    self.program
+                        .type_catalog()
+                        .validate_variant_call_abi_receipt(
+                            &owner,
+                            type_arguments,
+                            &parameter_types,
+                            &callee.result,
+                            receipt,
+                        )
+                        .map_err(|message| self.error(&function.owner, message))?;
                 } else if variant_call_contract.is_some() {
                     return Err(self.error(
                         &function.owner,

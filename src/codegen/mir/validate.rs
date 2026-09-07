@@ -2376,6 +2376,16 @@ impl<'a> NativeMirValidator<'a> {
             .type_catalog()
             .validate_result_move_variant(&target.result)
             .is_ok();
+        let recoverable_result = self
+            .program
+            .type_catalog()
+            .validate_recoverable_result_variant(&target.result)
+            .is_ok();
+        let recoverable_transition_body = self
+            .program
+            .transitions()
+            .get(&function.owner)
+            .is_some_and(|contract| contract.effect.is_recoverable());
         if flat_variant_result || move_owned_result {
             let Some(receipt) = variant_call_contract else {
                 self.errors.push(NativeMirError::new(
@@ -2406,6 +2416,41 @@ impl<'a> NativeMirValidator<'a> {
                     target,
                     self.program.type_catalog(),
                 ) {
+                    self.errors.push(NativeMirError::new(subject, message));
+                }
+            }
+        } else if recoverable_result {
+            if !recoverable_transition_body {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "recoverable aggregate Result call is only valid inside a recoverable Flow transition",
+                ));
+            } else {
+                let Some(receipt) = variant_call_contract else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "recoverable aggregate Result call has no canonical ABI receipt",
+                    ));
+                    return;
+                };
+                if receipt.mode
+                    != crate::core::mir::types::MirVariantCallAbiMode::RecoverableAggregate
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "recoverable aggregate Result call has the wrong ABI receipt mode",
+                    ));
+                } else if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_variant_call_abi_receipt(
+                        &owner,
+                        type_arguments,
+                        &parameter_types,
+                        &target.result,
+                        receipt,
+                    )
+                {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }
