@@ -1175,14 +1175,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
             )]
         })?;
-        if results.iter().any(|result| {
-            !matches!(
-                result.status,
-                crate::verifier::VerifStatus::Proven
-                    | crate::verifier::VerifStatus::NoObligations
-                    | crate::verifier::VerifStatus::Disproven
-            )
-        }) {
+        if !crate::verifier::canonical_execution_route_verifier_ready(
+            &results,
+            crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
+        ) {
             return Err(vec![crate::diagnostic::Diagnostic::error_code(
                 "MIR-VERIFY-001",
                 format!(

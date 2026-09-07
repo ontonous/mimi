@@ -6507,6 +6507,90 @@ fn canonical_mir_m1_m3_cli_acceptance_has_real_proofs_and_business_observations(
 }
 
 #[test]
+fn canonical_f64_flow_cli_uses_mir_execution_and_reports_float_verifier_boundary() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_r6_flow_f64_cross_state_receipt.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default f64 Flow run");
+    assert!(
+        run.status.success(),
+        "default f64 Flow run failed:\n{}\n{}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&run.stderr), "");
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-f64-flow-default-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default f64 Flow native build");
+    assert!(
+        build.status.success(),
+        "default f64 Flow native build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute default f64 Flow native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&native.stderr), "");
+
+    let verification = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default f64 Flow verifier");
+    assert!(
+        verification.status.success(),
+        "default f64 Flow verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&verification.stderr),
+        String::from_utf8_lossy(&verification.stdout)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verification.stdout);
+    assert!(verify_stdout.contains("MIR-VERIFIER-FLOAT-001"));
+    assert!(verify_stdout.contains("0/1 verified"));
+    assert!(!verify_stdout.contains("No contracts to verify"));
+    assert!(!verify_stdout.contains("canonical MIR ensures contract proven"));
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn f64 Flow MIR inspection");
+    assert!(
+        mir.status.success(),
+        "f64 Flow MIR inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir.stderr),
+        String::from_utf8_lossy(&mir.stdout)
+    );
+    let mir_stdout = String::from_utf8_lossy(&mir.stdout);
+    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("Float { bits: 64 }"));
+}
+
+#[test]
 fn canonical_mir_record_contract_matches_reference_native_and_verifier() {
     let fixture = project_root()
         .join("tests")

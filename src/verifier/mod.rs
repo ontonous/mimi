@@ -32,6 +32,33 @@ pub fn verify_mir(
     mir::verify_program(program, source_hash)
 }
 
+/// Decide whether verifier observations are compatible with an execution
+/// route.  This is not a proof verdict: `NotInTrustedSubset` remains visible
+/// to callers and is only tolerated for the one recoverable Flow/f64 boundary
+/// whose native and bytecode consumers have an executable MIR contract.
+pub fn canonical_execution_route_verifier_ready(
+    results: &[VerificationResult],
+    allow_recoverable_float_boundary: bool,
+) -> bool {
+    let runtime_only_float_boundary = allow_recoverable_float_boundary
+        && results.iter().any(|result| {
+            result.status == VerifStatus::NotInTrustedSubset
+                && result
+                    .message
+                    .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE)
+        });
+    results.iter().all(|result| {
+        matches!(
+            result.status,
+            VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
+        ) || (runtime_only_float_boundary
+            && result.status == VerifStatus::NotInTrustedSubset
+            && result
+                .message
+                .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE))
+    })
+}
+
 /// Check whether a canonical MIR program is fully consumable by the current
 /// MIR verifier capability.  This is a structural route gate, not a contract
 /// verdict; callers use it before selecting a default producer/consumer
@@ -77,9 +104,9 @@ pub fn verify_source_with(
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
 /// tamper detection). Pass an empty string if source text is unavailable.
 ///
-/// Closed scalar collection, flat Copy-record, S8 Flow, and exact non-Copy
-/// `Option<string>` programs are verified from one canonical MIR graph. Other
-/// programs remain on the explicit compatibility
+/// Closed scalar collection, flat Copy-record, S8 Flow, recoverable Flow, and
+/// exact non-Copy `Option<string>` programs are verified from one canonical
+/// MIR graph. Other programs remain on the explicit compatibility
 /// boundary: when Z3 is available, they delegate to the Flow verifier state
 /// machine (which still uses `legacy_body_file()` for AST-based function body
 /// encoding); when Z3 is unavailable, they use CheckedProgram-based mock

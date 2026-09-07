@@ -1205,6 +1205,33 @@ fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
 }
 
 #[test]
+fn public_checked_verifier_reports_f64_flow_float_boundary_from_mir() {
+    require_z3!();
+    let source = include_str!("../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
+    let file = parse_memory_source(source, "mir-f64-flow-source-receipt-public-api")
+        .expect("parse f64 Flow source receipt");
+    let program = crate::core::check_program(&file).expect("typecheck f64 Flow source receipt");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).flow_failure_retry);
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let results = verify_checked(&program, source_hash).expect("public f64 Flow MIR verify");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("f64 Flow verifier boundary result");
+    assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+    assert_eq!(result.constraint_count, 0);
+    assert!(result
+        .message
+        .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE));
+    assert!(result.artifact.is_none());
+}
+
+#[test]
 fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_test_scalar_collection_mixed.mimi");

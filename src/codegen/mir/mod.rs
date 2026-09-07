@@ -7679,6 +7679,74 @@ func main() -> i32 {
     }
 
     #[test]
+    fn f64_cross_state_flow_receipt_shares_one_mir_and_preserves_verifier_boundary() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi"
+        ));
+        let digest = program.canonical_digest();
+        let transition = program
+            .transitions()
+            .get(&crate::core::NodeId(
+                "transition:Account::settle::Active".into(),
+            ))
+            .expect("f64 recoverable transition MIR");
+        assert_eq!(
+            transition.effect,
+            crate::core::mir::MirTransitionEffect::RecoverableBoundary
+        );
+        assert!(program.type_catalog().iter().any(|(_, descriptor)| {
+            descriptor.abi == crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference f64 recoverable Flow execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "");
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("f64 recoverable Flow MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode f64 recoverable Flow execution");
+        assert!(matches!(bytecode, Value::Int(0)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("f64 recoverable Flow canonical capability gate");
+        let verifier = crate::verifier::verify_mir(&program, "f64-flow-test".into())
+            .expect("f64 recoverable Flow verifier result");
+        let main_result = verifier
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("f64 recoverable Flow verifier result for main");
+        assert_eq!(
+            main_result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert!(main_result
+            .message
+            .contains(crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE));
+        assert!(main_result.artifact.is_none());
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_f64_cross_state_flow_receipt");
+        generator
+            .compile_mir_native(&program)
+            .expect("native f64 recoverable Flow lowering");
+        generator
+            .module
+            .verify()
+            .expect("native f64 recoverable Flow module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native f64 recoverable Flow execution");
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+        assert_eq!(program.canonical_digest(), digest);
+    }
+
+    #[test]
     fn native_validator_rejects_checker_materialized_enum_before_llvm() {
         let fixture = crate::core::mir::test_support::direct_enum_switch_move_fixture();
         let context = Context::create();

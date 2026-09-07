@@ -349,6 +349,28 @@ fn direct_native_entry_routes_multifield_flow_source_receipt_through_canonical_m
 }
 
 #[test]
+fn direct_native_entry_routes_f64_flow_source_receipt_through_canonical_mir() {
+    let source = include_str!("../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).flow_failure_retry);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "r6_canonical_f64_flow_entry");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native entry must select canonical f64 Flow source receipt");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "f64 Flow direct native entry must not access retained legacy bodies"
+    );
+}
+
+#[test]
 fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
     let source = r#"
         func main() -> i32 {

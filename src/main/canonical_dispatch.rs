@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use mimi::ast::File;
 use mimi::core::mir::reference::MirProgram;
 use mimi::core::CheckedProgram;
-use mimi::verifier::VerifStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyRouteReason {
@@ -815,6 +814,8 @@ pub(crate) fn select_default_route(
         flow_candidate || materialized_flow_candidate || flow_failure_retry_hint;
     let flow_failure_route_candidate =
         flow_failure_retry_hint || materialized_flow_failure_retry_candidate;
+    let exact_f64_flow_failure_route_candidate =
+        mimi::core::mir::is_exact_cross_state_f64_failure_receipt(checked);
     let flow_transition_operation =
         mimi::core::mir::contains_s8_flow_transition_candidate(canonical);
     // Mixed coverage remains a compatibility boundary only when construction
@@ -1256,12 +1257,10 @@ pub(crate) fn select_default_route(
     // or inconclusive verifier result means this program is not yet a complete
     // default-switch island.
     let verifier_ready = match mimi::verifier::verify_mir(&canonical, String::new()) {
-        Ok(results) => results.iter().all(|result| {
-            matches!(
-                result.status,
-                VerifStatus::Proven | VerifStatus::NoObligations | VerifStatus::Disproven
-            )
-        }),
+        Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
+            &results,
+            exact_f64_flow_failure_route_candidate,
+        ),
         Err(error) => {
             if materialized_managed_result_call_candidate {
                 return DefaultMirRoute::Rejected(format!(

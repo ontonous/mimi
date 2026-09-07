@@ -82,7 +82,112 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
 
     local_retry
         || is_exact_cross_state_result_match(program, transition, flow)
+        || is_exact_cross_state_f64_failure_receipt(program)
         || is_exact_multifield_cross_state_record_receipt(program, transition, flow)
+}
+
+/// Whether the checked program is the exact f64 recoverable Flow profile.
+/// This public predicate is also used by execution-route verifier gates so a
+/// generic recoverable Flow receipt cannot accidentally inherit the f64
+/// execution-only allowance.
+pub fn is_exact_cross_state_f64_failure_receipt(program: &CheckedProgram) -> bool {
+    if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
+        return false;
+    }
+    let implemented = program
+        .transitions()
+        .values()
+        .filter(|transition| {
+            !transition.is_fallback
+                && transition.fails.is_some()
+                && program.resolved_body(&transition.node_id).is_some()
+        })
+        .collect::<Vec<_>>();
+    let [transition] = implemented.as_slice() else {
+        return false;
+    };
+    let Some(flow) = program.flows().get(&transition.id.flow) else {
+        return false;
+    };
+    is_exact_cross_state_f64_failure_receipt_for_transition(program, transition, flow)
+}
+
+/// The bounded floating-point counterpart of the F2 recoverable Flow island.
+///
+/// This opens only a Copy `f64` payload on both sides of one synchronous
+/// cross-state `fails string` transition.  The symbolic verifier deliberately
+/// keeps finite-only f64 arithmetic outside its trusted theory, so this is an
+/// execution/ABI migration profile: native and bytecode consume the canonical
+/// graph, while `verify` must report the explicit float capability boundary
+/// instead of falling back to the AST Flow verifier.
+fn is_exact_cross_state_f64_failure_receipt_for_transition(
+    program: &CheckedProgram,
+    transition: &crate::core::resolved::ResolvedTransition,
+    flow: &crate::core::resolved::ResolvedFlow,
+) -> bool {
+    if transition.silent_transition
+        || transition.targets.len() != 1
+        || transition.targets[0] == transition.id.source
+        || transition.params.len() != 1
+        || transition
+            .fails
+            .as_ref()
+            .is_none_or(|ty| !is_concrete_string_type(ty))
+        || transition.is_fallback
+        || transition.is_ffi_pinned
+        || !flow.persistent_fields.is_empty()
+        || flow
+            .states
+            .keys()
+            .filter(|name| name.as_str() != "Fault")
+            .count()
+            != 2
+        || program
+            .transitions()
+            .values()
+            .filter(|item| !item.is_fallback && program.resolved_body(&item.node_id).is_some())
+            .count()
+            != 1
+        || !is_concrete_i32_type(&transition.params[0].1)
+    {
+        return false;
+    }
+    let Some(source_state) = flow.states.get(&transition.id.source.name) else {
+        return false;
+    };
+    let Some(target_id) = transition.targets.first() else {
+        return false;
+    };
+    let Some(target_state) = flow.states.get(&target_id.name) else {
+        return false;
+    };
+    let [(source_field, source_ty)] = source_state.payload.as_slice() else {
+        return false;
+    };
+    let [(target_field, target_ty)] = target_state.payload.as_slice() else {
+        return false;
+    };
+    if source_field != target_field
+        || !is_concrete_f64_type(source_ty)
+        || !is_concrete_f64_type(target_ty)
+    {
+        return false;
+    }
+    let Some(signature) = program.resolved_signature(&transition.node_id) else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&signature.result),
+        Some(ResolvedType::Result { .. })
+    ) {
+        return false;
+    }
+    program
+        .resolved_body(&transition.node_id)
+        .is_some_and(|body| {
+            block_contains_try(&body.root)
+                && !block_contains_unsupported_f64_shape(program, &body.root)
+        })
 }
 
 /// The bounded F1 record-residual shape: a failing cross-state transition
@@ -1050,6 +1155,205 @@ fn expr_contains_try(expression: &ResolvedExpr) -> bool {
     }
 }
 
+/// The current f64 Flow receipt admits the same finite-only Copy arithmetic as
+/// the scalar MIR contract: f64 Add/Sub/Negate with identical f64 TypeDesc
+/// operands.  In particular, a checker-inserted numeric widening or an f64
+/// Multiply must remain outside the route until its own MIR conversion/ABI
+/// contract exists.  Keeping this filter in typed Resolved IR prevents a
+/// construction failure from becoming an accidental route admission.
+fn block_contains_unsupported_f64_shape(
+    program: &CheckedProgram,
+    block: &crate::core::ir::ResolvedBlock,
+) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| match &statement.kind {
+            ResolvedStmtKind::Bind { initializer, .. } => initializer
+                .as_ref()
+                .is_some_and(|expression| expr_contains_unsupported_f64_shape(program, expression)),
+            ResolvedStmtKind::Assign { value, .. }
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => expr_contains_unsupported_f64_shape(program, value),
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+                .as_ref()
+                .is_some_and(|expression| expr_contains_unsupported_f64_shape(program, expression)),
+            ResolvedStmtKind::Expr(expression) => {
+                expr_contains_unsupported_f64_shape(program, expression)
+            }
+            ResolvedStmtKind::While { condition, body } => {
+                expr_contains_unsupported_f64_shape(program, condition)
+                    || block_contains_unsupported_f64_shape(program, body)
+            }
+            ResolvedStmtKind::WhileLet {
+                initializer, body, ..
+            } => {
+                expr_contains_unsupported_f64_shape(program, initializer)
+                    || block_contains_unsupported_f64_shape(program, body)
+            }
+            ResolvedStmtKind::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                expr_contains_unsupported_f64_shape(program, initializer)
+                    || block_contains_unsupported_f64_shape(program, then_block)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|body| block_contains_unsupported_f64_shape(program, body))
+            }
+            ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                block_contains_unsupported_f64_shape(program, body)
+            }
+            ResolvedStmtKind::For { iterable, body, .. } => {
+                expr_contains_unsupported_f64_shape(program, iterable)
+                    || block_contains_unsupported_f64_shape(program, body)
+            }
+            ResolvedStmtKind::Math(expressions) => expressions
+                .iter()
+                .any(|expression| expr_contains_unsupported_f64_shape(program, expression)),
+            ResolvedStmtKind::Pinned { value, body, .. } => {
+                expr_contains_unsupported_f64_shape(program, value)
+                    || block_contains_unsupported_f64_shape(program, body)
+            }
+            ResolvedStmtKind::Continue
+            | ResolvedStmtKind::Drop(_)
+            | ResolvedStmtKind::NestedCallable(_) => false,
+        })
+        || block
+            .result
+            .as_deref()
+            .is_some_and(|expression| expr_contains_unsupported_f64_shape(program, expression))
+}
+
+fn expr_contains_unsupported_f64_shape(
+    program: &CheckedProgram,
+    expression: &ResolvedExpr,
+) -> bool {
+    if let ResolvedExprKind::Binary { op, left, right } = &expression.kind {
+        if is_concrete_f64_resolved_type(program, &expression.ty)
+            && !matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract)
+        {
+            return true;
+        }
+        return expr_contains_unsupported_f64_shape(program, left)
+            || expr_contains_unsupported_f64_shape(program, right);
+    }
+    if let ResolvedExprKind::Cast { value, .. } = &expression.kind {
+        if is_concrete_f64_resolved_type(program, &expression.ty) {
+            return true;
+        }
+        return expr_contains_unsupported_f64_shape(program, value);
+    }
+    match &expression.kind {
+        ResolvedExprKind::Project { value, projection } => {
+            expr_contains_unsupported_f64_shape(program, value)
+                || matches!(projection, ResolvedValueProjection::Index(index) if expr_contains_unsupported_f64_shape(program, index))
+        }
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::TypeOf(operand)
+        | ResolvedExprKind::Old(operand)
+        | ResolvedExprKind::Spawn(operand)
+        | ResolvedExprKind::Await(operand) => expr_contains_unsupported_f64_shape(program, operand),
+        ResolvedExprKind::Call(call) => call
+            .arguments
+            .iter()
+            .any(|argument| expr_contains_unsupported_f64_shape(program, &argument.value)),
+        ResolvedExprKind::Tuple(values)
+        | ResolvedExprKind::List(values)
+        | ResolvedExprKind::Set(values) => values
+            .iter()
+            .any(|value| expr_contains_unsupported_f64_shape(program, value)),
+        ResolvedExprKind::Map(entries) => entries.iter().any(|(key, value)| {
+            expr_contains_unsupported_f64_shape(program, key)
+                || expr_contains_unsupported_f64_shape(program, value)
+        }),
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => {
+            expr_contains_unsupported_f64_shape(program, value)
+                || expr_contains_unsupported_f64_shape(program, iterable)
+                || guard
+                    .as_deref()
+                    .is_some_and(|guard| expr_contains_unsupported_f64_shape(program, guard))
+        }
+        ResolvedExprKind::OptionalChain { receiver, .. } => {
+            expr_contains_unsupported_f64_shape(program, receiver)
+        }
+        ResolvedExprKind::Record { fields, rest, .. } => {
+            fields
+                .iter()
+                .any(|field| expr_contains_unsupported_f64_shape(program, &field.value))
+                || rest
+                    .as_deref()
+                    .is_some_and(|rest| expr_contains_unsupported_f64_shape(program, rest))
+        }
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Scope { body: block, .. }
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => block_contains_unsupported_f64_shape(program, block),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_contains_unsupported_f64_shape(program, condition)
+                || block_contains_unsupported_f64_shape(program, then_block)
+                || block_contains_unsupported_f64_shape(program, else_block)
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            expr_contains_unsupported_f64_shape(program, scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|guard| expr_contains_unsupported_f64_shape(program, guard))
+                        || expr_contains_unsupported_f64_shape(program, &arm.body)
+                })
+        }
+        ResolvedExprKind::Try { value, .. } => expr_contains_unsupported_f64_shape(program, value),
+        ResolvedExprKind::Range { start, end } => {
+            expr_contains_unsupported_f64_shape(program, start)
+                || expr_contains_unsupported_f64_shape(program, end)
+        }
+        ResolvedExprKind::Slice { target, start, end } => {
+            expr_contains_unsupported_f64_shape(program, target)
+                || start
+                    .as_deref()
+                    .is_some_and(|start| expr_contains_unsupported_f64_shape(program, start))
+                || end
+                    .as_deref()
+                    .is_some_and(|end| expr_contains_unsupported_f64_shape(program, end))
+        }
+        ResolvedExprKind::Lambda(lambda) => {
+            block_contains_unsupported_f64_shape(program, &lambda.body)
+        }
+        ResolvedExprKind::Literal(_)
+        | ResolvedExprKind::FString(_)
+        | ResolvedExprKind::Load(_)
+        | ResolvedExprKind::Constant(_)
+        | ResolvedExprKind::Callable(_)
+        | ResolvedExprKind::DefaultArgument { .. }
+        | ResolvedExprKind::ComptimeValue(_)
+        | ResolvedExprKind::TypeValue(_) => false,
+        ResolvedExprKind::Binary { .. } | ResolvedExprKind::Cast { .. } => unreachable!(),
+    }
+}
+
+fn is_concrete_f64_resolved_type(
+    program: &CheckedProgram,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    matches!(
+        program.resolved_types().get(ty),
+        Some(ResolvedType::Primitive(crate::core::PrimitiveType::F64))
+    )
+}
+
 /// Whether `program` contains an S8-shaped Flow transition candidate.
 ///
 /// S8 is deliberately narrower than "a Flow that happens to compile": one
@@ -1286,6 +1590,14 @@ fn is_concrete_string_type(ty: &Type) -> bool {
     }
 }
 
+fn is_concrete_f64_type(ty: &Type) -> bool {
+    match ty {
+        Type::Located { ty, .. } => is_concrete_f64_type(ty),
+        Type::Name(name, arguments) => name == "f64" && arguments.is_empty(),
+        _ => false,
+    }
+}
+
 /// The local recoverable retry island carries the state through the failure
 /// envelope and back into the same transition.  Keep the admission explicit:
 /// the payload may be a Copy `i32` or one owned `string`, whose aggregate
@@ -1303,8 +1615,8 @@ fn is_supported_local_retry_state_type(ty: &Type) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_exact_s8_flow_transition, is_flow_failure_retry_candidate,
-        is_s8_flow_transition_candidate,
+        is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
+        is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
     };
 
     fn checked(source: &str) -> crate::core::CheckedProgram {
@@ -1355,6 +1667,41 @@ mod tests {
         );
         let program = checked(source);
         assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn cross_state_f64_failure_receipt_is_an_execution_candidate() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
+        let program = checked(source);
+        assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn cross_state_f64_failure_receipt_rejects_mismatched_state_field_types() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
+        let mutated = source
+            .replace(
+                "state Settled { balance: f64 }",
+                "state Settled { balance: i32 }",
+            )
+            .replace(
+                "return Settled { balance: next }",
+                "return Settled { balance: 1 }",
+            );
+        let program = checked(&mutated);
+        assert!(!is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn cross_state_f64_failure_receipt_rejects_uncovered_float_operation() {
+        let source =
+            include_str!("../../../tests/fixtures/mir_r6_flow_f64_cross_state_receipt.mimi");
+        let mutated = source.replace("Ok(self.balance + 1.0)", "Ok((self.balance + 1.0) * 2.0)");
+        let program = checked(&mutated);
+        assert!(!is_exact_cross_state_f64_failure_receipt(&program));
+        assert!(!is_flow_failure_retry_candidate(&program));
     }
 
     #[test]

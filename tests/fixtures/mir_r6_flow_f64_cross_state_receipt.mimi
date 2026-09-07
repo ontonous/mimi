@@ -1,0 +1,27 @@
+flow Account {
+    state Active { balance: f64 }
+    state Settled { balance: f64 }
+
+    transition settle(Active, amount: i32) -> Settled fails string {
+        let checked: Result<f64, string> = if amount == 0 {
+            Err("rejected")
+        } else {
+            Ok(self.balance + 1.0)
+        }
+        let next = checked?
+        return Settled { balance: next }
+    }
+}
+
+func main() -> i32 {
+    ensures: result == 0
+    let result = Account::settle(Active { balance: 1.5 }, 0)
+    match result {
+        Ok(Settled { balance }) => 99,
+        Err((source, error)) => {
+            drop(source)
+            drop(error)
+            0
+        },
+    }
+}
