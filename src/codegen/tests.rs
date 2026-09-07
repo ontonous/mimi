@@ -386,6 +386,28 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_routes_exact_nested_option_tuple_through_canonical_mir() {
+    let source = include_str!("../../tests/real_world/mir_nested_tuple_option.mimi");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_option_nested_tuple_variant_admission(&program),
+        crate::core::mir::OptionNestedTupleVariantAdmission::CompleteCoverage
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "nested_option_tuple_default_route");
+    codegen
+        .compile_checked(&program)
+        .expect("direct native entry must use the canonical nested Option tuple consumer");
+    assert!(codegen.module.get_function("main").is_some());
+    assert!(codegen.resolved_failed_functions().is_empty());
+}
+
+#[test]
 fn direct_native_entry_rejects_non_exhaustive_option_string_switch_without_fallback() {
     let source =
         include_str!("../../tests/fixtures/mir_native_option_string_default_rejected.mimi");

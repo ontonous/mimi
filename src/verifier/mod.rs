@@ -355,12 +355,13 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 16] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 17] = [
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
         crate::core::mir::CanonicalMirRouteProfile::FlowFailureRetry,
         crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjection,
         crate::core::mir::CanonicalMirRouteProfile::GenericOptionProjectionFallback,
@@ -411,6 +412,15 @@ fn verify_closed_mir_profile(
                 |errors| {
                     format!(
                         "MIR-CAPABILITY-001: canonical verifier rejected the Option<string> variant island: {errors:?}"
+                    )
+                },
+            )?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant => {
+            crate::core::mir::validate_option_nested_tuple_variant_island(&canonical).map_err(
+                |errors| {
+                    format!(
+                        "MIR-CAPABILITY-001: canonical verifier rejected the nested Option tuple variant island: {errors:?}"
                     )
                 },
             )?;

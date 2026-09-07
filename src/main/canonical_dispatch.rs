@@ -142,6 +142,7 @@ pub(crate) fn select_default_route(
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
     let collection_admission = admission.collection;
     let option_string_admission = admission.option_string;
+    let option_nested_tuple_admission = admission.option_nested_tuple;
     let generic_variant_admission = admission.generic_variant;
     let generic_option_projection_admission = admission.generic_option_projection;
     let generic_option_projection_fallback_admission = admission.generic_option_projection_fallback;
@@ -195,6 +196,14 @@ pub(crate) fn select_default_route(
     let complete_option_string_candidate = matches!(
         option_string_admission,
         mimi::core::mir::OptionStringVariantAdmission::CompleteCoverage
+    );
+    let option_nested_tuple_hint = !matches!(
+        option_nested_tuple_admission,
+        mimi::core::mir::OptionNestedTupleVariantAdmission::OutsideProfile
+    );
+    let complete_option_nested_tuple_candidate = matches!(
+        option_nested_tuple_admission,
+        mimi::core::mir::OptionNestedTupleVariantAdmission::CompleteCoverage
     );
     let generic_variant_hint = !matches!(
         generic_variant_admission,
@@ -305,6 +314,7 @@ pub(crate) fn select_default_route(
         && !flow_candidate
         && !flow_failure_retry_hint
         && !option_string_hint
+        && !option_nested_tuple_hint
         && !generic_variant_hint
         && !generic_option_projection_hint
         && !generic_option_projection_fallback_hint
@@ -420,6 +430,15 @@ pub(crate) fn select_default_route(
             copy_option_f64_hint,
             true,
             "Copy Result<i32, i32> projection candidate is outside complete coverage",
+        );
+    }
+    if option_nested_tuple_hint && !complete_option_nested_tuple_candidate {
+        return reject_migrated_candidates(
+            flow_candidate,
+            false,
+            false,
+            true,
+            "nested Option tuple variant candidate is outside complete coverage",
         );
     }
 
@@ -546,6 +565,7 @@ pub(crate) fn select_default_route(
                 matches!(
                     profile,
                     mimi::core::mir::CanonicalMirRouteProfile::NonCopyOptionStringVariant
+                        | mimi::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant
                 ),
                 matches!(
                     profile,
@@ -680,6 +700,15 @@ pub(crate) fn select_default_route(
                     "canonical MIR candidate materialization failed",
                 );
             }
+            if option_nested_tuple_hint {
+                return reject_migrated_candidates(
+                    false,
+                    false,
+                    false,
+                    true,
+                    "canonical nested Option tuple candidate did not materialize a supported MIR shape",
+                );
+            }
             if option_string_hint {
                 return reject_migrated_candidates(
                     false,
@@ -764,6 +793,8 @@ pub(crate) fn select_default_route(
     let materialized_flow_candidate = route.materialized_flow_candidate;
     let materialized_flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
     let materialized_option_string_candidate = route.materialized_option_string_candidate;
+    let materialized_option_nested_tuple_candidate =
+        route.materialized_option_nested_tuple_candidate;
     let materialized_generic_variant_candidate = route.materialized_generic_variant_candidate;
     let materialized_generic_option_projection_candidate =
         route.materialized_generic_option_projection_candidate;
@@ -806,7 +837,9 @@ pub(crate) fn select_default_route(
     let record_route_candidate =
         complete_record_candidate || (record_hint && copy_record) || generic_route_candidate;
     let option_string_route_candidate = complete_option_string_candidate
-        || (option_string_hint && materialized_option_string_candidate);
+        || (option_string_hint && materialized_option_string_candidate)
+        || (complete_option_nested_tuple_candidate
+            || (option_nested_tuple_hint && materialized_option_nested_tuple_candidate));
     let copy_option_i32_route_candidate = complete_copy_option_i32_candidate
         || (copy_option_i32_hint && materialized_copy_option_i32_candidate);
     let copy_option_bool_route_candidate = complete_copy_option_bool_candidate
@@ -873,7 +906,22 @@ pub(crate) fn select_default_route(
             "flat Copy record materialized inside mixed coverage",
         );
     }
-    if option_string_route_candidate && !complete_option_string_candidate {
+    if option_nested_tuple_hint
+        && !complete_option_nested_tuple_candidate
+        && materialized_option_nested_tuple_candidate
+    {
+        return reject_migrated_candidates(
+            flow_route_candidate,
+            collection_route_candidate,
+            record_route_candidate,
+            true,
+            "nested Option tuple variant materialized inside mixed coverage",
+        );
+    }
+    if option_string_route_candidate
+        && !complete_option_string_candidate
+        && !complete_option_nested_tuple_candidate
+    {
         return reject_migrated_candidates_with_copy_f64(
             flow_route_candidate,
             collection_route_candidate,
@@ -987,6 +1035,28 @@ pub(crate) fn select_default_route(
                 format!(
                     "{} capability gate failed: {errors:?}",
                     mimi::core::mir::NON_COPY_OPTION_STRING_VARIANT_ISLAND
+                ),
+            );
+        }
+    }
+
+    if materialized_option_nested_tuple_candidate {
+        if let Err(errors) =
+            mimi::core::mir::validate_option_nested_tuple_variant_island(&canonical)
+        {
+            return reject_migrated_candidates_with_copy_f64(
+                flow_route_candidate,
+                collection_route_candidate,
+                record_route_candidate,
+                true,
+                copy_option_i32_route_candidate,
+                copy_option_bool_route_candidate,
+                copy_option_i64_route_candidate,
+                copy_option_f64_route_candidate,
+                copy_result_i32_route_candidate,
+                format!(
+                    "nested Option tuple variant {} capability gate failed: {errors:?}",
+                    mimi::core::mir::NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND,
                 ),
             );
         }
@@ -1267,6 +1337,11 @@ fn reject_migrated_candidates(
     } else if reason.contains("generic Result projection") {
         DefaultMirRoute::Rejected(format!(
             "generic Result projection candidate is not eligible for the default route: {}",
+            reason
+        ))
+    } else if reason.contains("nested Option tuple") {
+        DefaultMirRoute::Rejected(format!(
+            "non-Copy nested Option tuple variant candidate is not eligible for the default route: {}",
             reason
         ))
     } else if record_candidate {
@@ -3639,6 +3714,40 @@ mod tests {
                 })
             })
         }));
+    }
+
+    #[test]
+    fn nested_option_tuple_variant_enters_canonical_default_route() {
+        let (checked, file) = checked(include_str!(
+            "../../tests/real_world/mir_nested_tuple_option.mimi"
+        ));
+        assert_eq!(
+            mimi::core::mir::classify_option_nested_tuple_variant_admission(&checked),
+            mimi::core::mir::OptionNestedTupleVariantAdmission::CompleteCoverage
+        );
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Canonical(program) = route else {
+            panic!("nested Option tuple variant must select canonical MIR: {route:?}");
+        };
+        assert!(mimi::core::mir::contains_option_nested_tuple_variant_candidate(&program));
+        mimi::core::mir::validate_option_nested_tuple_variant_island(&program)
+            .expect("nested Option tuple route must pass its capability gate");
+    }
+
+    #[test]
+    fn nested_option_tuple_variant_with_non_projecting_pattern_fails_closed() {
+        let (checked, file) = checked(
+            "func main() -> i32 { let value: Option<(string, i32)> = Some((\"owned\", 41)); match value { Some(_) => 0, None => 0 } }",
+        );
+        assert_eq!(
+            mimi::core::mir::classify_option_nested_tuple_variant_admission(&checked),
+            mimi::core::mir::OptionNestedTupleVariantAdmission::MixedCoverage
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("non-projecting nested Option tuple patterns must fail closed");
+        };
+        assert!(reason.contains("nested Option tuple"), "{reason}");
+        assert!(!reason.contains("legacy"), "{reason}");
     }
 
     #[test]

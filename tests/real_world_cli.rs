@@ -332,6 +332,73 @@ fn canonical_mir_nested_tuple_variant_matches_reference_and_native() {
 }
 
 #[test]
+fn default_route_nested_tuple_variant_uses_canonical_mir_for_all_cli_consumers() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("mir_nested_tuple_option.mimi");
+
+    let run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default nested tuple run");
+    assert!(
+        run.status.success(),
+        "default nested tuple run failed:\n{}\n{}",
+        String::from_utf8_lossy(&run.stderr),
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "7\n");
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .output()
+        .expect("failed to spawn default nested tuple verifier");
+    assert!(
+        verify.status.success(),
+        "default nested tuple verifier failed:\n{}\n{}",
+        String::from_utf8_lossy(&verify.stderr),
+        String::from_utf8_lossy(&verify.stdout)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(verify_stdout.contains("canonical MIR"), "{verify_stdout}");
+    assert!(verify_stdout.contains("1/1 verified"), "{verify_stdout}");
+    assert!(
+        verify_stdout.contains("2 total constraints"),
+        "{verify_stdout}"
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-default-native-option-nested-tuple-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn default nested tuple native build");
+    assert!(
+        build.status.success(),
+        "default nested tuple native build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute default nested tuple native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native_run.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native_run.stdout), "7\n");
+}
+
+#[test]
 fn canonical_flow_state_match_uses_default_mir_route_and_native_output() {
     let fixture = project_root()
         .join("tests")

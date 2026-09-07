@@ -266,6 +266,7 @@ mod eligibility;
 mod islands;
 pub mod lower;
 mod option_island;
+mod option_nested_tuple_island;
 mod receipt;
 pub mod reference;
 mod route;
@@ -327,6 +328,11 @@ pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
     validate_option_string_variant_island, OptionStringVariantAdmission,
     NON_COPY_OPTION_STRING_VARIANT_ISLAND,
+};
+pub use option_nested_tuple_island::{
+    classify_option_nested_tuple_variant_admission, contains_option_nested_tuple_variant_candidate,
+    validate_option_nested_tuple_variant_island, OptionNestedTupleVariantAdmission,
+    NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND,
 };
 pub use receipt::{
     CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA,

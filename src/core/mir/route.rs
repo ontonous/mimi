@@ -24,23 +24,24 @@ use super::{
     classify_generic_result_projection_admission,
     classify_generic_result_projection_fallback_admission,
     classify_generic_variant_predicate_admission, classify_managed_result_call_admission,
-    classify_option_string_variant_admission, classify_scalar_collection_admission,
-    contains_copy_option_i32_variant_candidate, contains_copy_option_variant_candidate,
-    contains_copy_result_i32_variant_candidate, contains_flat_copy_record_candidate,
-    contains_flow_failure_retry_candidate, contains_generic_option_projection_candidate,
+    classify_option_nested_tuple_variant_admission, classify_option_string_variant_admission,
+    classify_scalar_collection_admission, contains_copy_option_i32_variant_candidate,
+    contains_copy_option_variant_candidate, contains_copy_result_i32_variant_candidate,
+    contains_flat_copy_record_candidate, contains_flow_failure_retry_candidate,
+    contains_generic_option_projection_candidate,
     contains_generic_option_projection_fallback_candidate,
     contains_generic_result_projection_candidate,
     contains_generic_result_projection_fallback_candidate,
     contains_generic_variant_predicate_candidate, contains_managed_result_call_candidate,
-    contains_option_string_variant_candidate, contains_owned_record_projection_candidate,
+    contains_option_nested_tuple_variant_candidate, contains_option_string_variant_candidate,
     contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
     contains_scalar_collection_operation_candidate, is_exact_s8_flow_transition,
     is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
     CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
     GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
     GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
-    GenericVariantPredicateAdmission, ManagedResultCallAdmission, OptionStringVariantAdmission,
-    ScalarCollectionAdmission,
+    GenericVariantPredicateAdmission, ManagedResultCallAdmission,
+    OptionNestedTupleVariantAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
 };
 
 #[cfg(test)]
@@ -68,6 +69,7 @@ pub enum CanonicalMirRouteProfile {
     S8FlowTransition,
     FlowFailureRetry,
     NonCopyOptionStringVariant,
+    NonCopyOptionNestedTupleVariant,
     GenericOptionPredicate,
     GenericOptionProjection,
     GenericOptionProjectionFallback,
@@ -89,6 +91,9 @@ impl CanonicalMirRouteProfile {
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
             Self::FlowFailureRetry => "recoverable-flow-result-v2",
             Self::NonCopyOptionStringVariant => super::NON_COPY_OPTION_STRING_VARIANT_ISLAND,
+            Self::NonCopyOptionNestedTupleVariant => {
+                super::NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND
+            }
             Self::GenericOptionPredicate => super::GENERIC_VARIANT_PREDICATE_ISLAND,
             Self::GenericOptionProjection => super::GENERIC_OPTION_PROJECTION_ISLAND,
             Self::GenericOptionProjectionFallback => {
@@ -119,6 +124,7 @@ impl CanonicalMirRouteProfile {
             Self::S8FlowTransition => admission.flow_complete(),
             Self::FlowFailureRetry => admission.flow_failure_retry,
             Self::NonCopyOptionStringVariant => admission.option_string_complete(),
+            Self::NonCopyOptionNestedTupleVariant => admission.option_nested_tuple_complete(),
             Self::GenericOptionPredicate => admission.generic_variant_complete(),
             Self::GenericOptionProjection => admission.generic_option_projection_complete(),
             Self::GenericOptionProjectionFallback => {
@@ -146,6 +152,9 @@ impl CanonicalMirRouteProfile {
             Self::S8FlowTransition => route.materialized_flow_candidate,
             Self::FlowFailureRetry => route.materialized_flow_failure_retry_candidate,
             Self::NonCopyOptionStringVariant => route.materialized_option_string_candidate,
+            Self::NonCopyOptionNestedTupleVariant => {
+                route.materialized_option_nested_tuple_candidate
+            }
             Self::GenericOptionPredicate => route.materialized_generic_variant_candidate,
             Self::GenericOptionProjection => route.materialized_generic_option_projection_candidate,
             Self::GenericOptionProjectionFallback => {
@@ -234,6 +243,7 @@ pub struct CanonicalMirRouteAdmission {
     pub flow: S8FlowAdmission,
     pub flow_failure_retry: bool,
     pub option_string: OptionStringVariantAdmission,
+    pub option_nested_tuple: OptionNestedTupleVariantAdmission,
     pub generic_variant: GenericVariantPredicateAdmission,
     pub generic_option_projection: GenericOptionProjectionAdmission,
     pub generic_option_projection_fallback: GenericOptionProjectionFallbackAdmission,
@@ -256,6 +266,10 @@ impl CanonicalMirRouteAdmission {
             || !matches!(
                 self.option_string,
                 OptionStringVariantAdmission::OutsideProfile
+            )
+            || !matches!(
+                self.option_nested_tuple,
+                OptionNestedTupleVariantAdmission::OutsideProfile
             )
             || !matches!(
                 self.generic_variant,
@@ -319,6 +333,13 @@ impl CanonicalMirRouteAdmission {
         matches!(
             self.option_string,
             OptionStringVariantAdmission::CompleteCoverage
+        )
+    }
+
+    pub const fn option_nested_tuple_complete(self) -> bool {
+        matches!(
+            self.option_nested_tuple,
+            OptionNestedTupleVariantAdmission::CompleteCoverage
         )
     }
 
@@ -413,6 +434,7 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_flow_candidate: bool,
     pub materialized_flow_failure_retry_candidate: bool,
     pub materialized_option_string_candidate: bool,
+    pub materialized_option_nested_tuple_candidate: bool,
     pub materialized_generic_variant_candidate: bool,
     pub materialized_generic_option_projection_candidate: bool,
     pub materialized_generic_option_projection_fallback_candidate: bool,
@@ -436,6 +458,7 @@ pub fn classify_canonical_mir_route_admission(
         flow: classify_s8_flow_admission(program),
         flow_failure_retry: is_flow_failure_retry_candidate(program),
         option_string: classify_option_string_variant_admission(program),
+        option_nested_tuple: classify_option_nested_tuple_variant_admission(program),
         generic_variant: classify_generic_variant_predicate_admission(program),
         generic_option_projection: classify_generic_option_projection_admission(program),
         generic_option_projection_fallback: classify_generic_option_projection_fallback_admission(
@@ -510,6 +533,8 @@ pub fn materialize_canonical_mir_route(
     let materialized_flow_failure_retry_candidate =
         contains_flow_failure_retry_candidate(&canonical);
     let materialized_option_string_candidate = contains_option_string_variant_candidate(&canonical);
+    let materialized_option_nested_tuple_candidate =
+        contains_option_nested_tuple_variant_candidate(&canonical);
     let materialized_generic_variant_candidate =
         contains_generic_variant_predicate_candidate(&canonical);
     let materialized_generic_option_projection_candidate =
@@ -570,6 +595,15 @@ pub fn materialize_canonical_mir_route(
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "complete Option<string> admission did not materialize a variant boundary"
                 .into(),
+        });
+    }
+    if admission.option_nested_tuple_complete() && !materialized_option_nested_tuple_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "complete nested Option tuple admission did not materialize a nested tuple receipt"
+                    .into(),
         });
     }
     if admission.generic_variant_complete() && !materialized_generic_variant_candidate {
@@ -688,6 +722,7 @@ pub fn materialize_canonical_mir_route(
         materialized_flow_candidate,
         materialized_flow_failure_retry_candidate,
         materialized_option_string_candidate,
+        materialized_option_nested_tuple_candidate,
         materialized_generic_variant_candidate,
         materialized_generic_option_projection_candidate,
         materialized_generic_option_projection_fallback_candidate,
@@ -740,6 +775,12 @@ fn match_complete_or_compatibility(
     } else if admission.option_string_complete() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::NonCopyOptionStringVariant,
+            stage,
+            message,
+        }
+    } else if admission.option_nested_tuple_complete() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant,
             stage,
             message,
         }
@@ -889,6 +930,7 @@ mod tests {
             flow: S8FlowAdmission::OutsideProfile,
             flow_failure_retry: false,
             option_string: OptionStringVariantAdmission::OutsideProfile,
+            option_nested_tuple: OptionNestedTupleVariantAdmission::OutsideProfile,
             generic_variant: GenericVariantPredicateAdmission::OutsideProfile,
             generic_option_projection: GenericOptionProjectionAdmission::OutsideProfile,
             generic_option_projection_fallback:

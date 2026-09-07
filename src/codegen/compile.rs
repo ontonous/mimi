@@ -29,8 +29,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
         // S12/S15/S25/S30: the S8 Flow, scalar collection, flat Copy-record,
-        // and exact non-Copy Option<string> production islands have crossed the default
-        // route boundary.  This direct
+        // exact non-Copy Option<string>, and exact nested Option-tuple production
+        // islands have crossed the default route boundary.  This direct
         // native API is also an old production entry point, so an admitted
         // graph must not continue into the old AST body compiler merely
         // because a caller bypassed the CLI selector.  The helper performs
@@ -662,6 +662,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                         ),
                     ),
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "complete nested Option tuple variant MIR island construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::NonCopyOptionNestedTupleVariant,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "complete nested Option tuple variant MIR island materialization failed: {message}"
+                        ),
+                    ),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::GenericOptionPredicate,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (
@@ -907,6 +925,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )]);
                 }
                 if !matches!(
+                    admission.option_nested_tuple,
+                    crate::core::mir::OptionNestedTupleVariantAdmission::OutsideProfile
+                ) {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "recognized nested Option tuple variant candidate could not materialize canonical MIR: {message}"
+                        ),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]);
+                }
+                if !matches!(
                     admission.copy_option_i32,
                     crate::core::mir::CopyOptionI32VariantAdmission::OutsideProfile
                 ) {
@@ -974,6 +1004,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
         let option_string_candidate = route.materialized_option_string_candidate;
+        let option_nested_tuple_candidate = route.materialized_option_nested_tuple_candidate;
         let copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
         let copy_option_bool_candidate = route.materialized_copy_option_bool_candidate;
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
@@ -983,6 +1014,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !flat_copy_record_candidate
             && !flow_transition_candidate
             && !option_string_candidate
+            && !option_nested_tuple_candidate
             && !copy_option_i32_candidate
             && !copy_option_bool_candidate
             && !copy_option_i64_candidate
@@ -1003,6 +1035,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             "flat Copy record island"
         } else if option_string_candidate {
             "non-Copy Option<string> variant island"
+        } else if option_nested_tuple_candidate {
+            "non-Copy nested Option tuple variant island"
         } else if copy_option_i32_candidate {
             "Copy Option<i32> variant island"
         } else if copy_option_bool_candidate {
@@ -1028,6 +1062,18 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         if option_string_candidate {
             if let Err(errors) = crate::core::mir::validate_option_string_variant_island(&canonical)
+            {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR island contract",
+                    island,
+                    &errors,
+                ));
+            }
+        }
+        if option_nested_tuple_candidate {
+            if let Err(errors) =
+                crate::core::mir::validate_option_nested_tuple_variant_island(&canonical)
             {
                 return Err(Self::mir_gate_diagnostics(
                     program,

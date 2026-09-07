@@ -48,6 +48,10 @@ struct CapabilityGate<'a> {
     /// closed.
     allow_result_move_variant: bool,
     allow_recoverable_flow_result: bool,
+    /// A non-Copy tuple payload is admitted only when this canonical graph
+    /// contains the explicit nested tuple projection receipt.  This keeps a
+    /// bare `Option<(...)>` constructor/drop body outside the profile.
+    allow_nested_option_tuple_variant: bool,
 }
 
 impl<'a> CapabilityGate<'a> {
@@ -102,6 +106,15 @@ impl<'a> CapabilityGate<'a> {
                 .transitions()
                 .values()
                 .any(|transition| transition.effect.is_recoverable()),
+            allow_nested_option_tuple_variant: program.functions().values().any(|function| {
+                function.blocks.values().any(|block| {
+                    matches!(
+                        &block.terminator,
+                        MirTerminator::SwitchMove { arms, .. }
+                            if arms.iter().any(|arm| arm.bindings.iter().any(|binding| binding.nested_tuple.is_some()))
+                    )
+                })
+            }),
         }
     }
 
@@ -1231,6 +1244,15 @@ impl<'a> CapabilityGate<'a> {
                         }
                     })
                     .or_else(|_| {
+                        if self.allow_nested_option_tuple_variant {
+                            catalog
+                                .validate_option_nested_tuple_variant(&result_ty)
+                                .map(|_| ())
+                        } else {
+                            Err("nested Option tuple construction requires the explicit projection receipt".into())
+                        }
+                    })
+                    .or_else(|_| {
                         if self.allow_result_move_variant {
                             catalog
                                 .validate_result_move_projection_variant(&result_ty)
@@ -1882,6 +1904,19 @@ impl<'a> CapabilityGate<'a> {
                         }
                     })
                     .or_else(|_| {
+                        if self.allow_nested_option_tuple_variant {
+                            self.program
+                                .type_catalog()
+                                .validate_option_nested_tuple_variant(&scrutinee_ty)
+                                .map(|_| scrutinee_ty.clone())
+                        } else {
+                            Err(
+                                "nested Option tuple switch is outside this verifier profile"
+                                    .into(),
+                            )
+                        }
+                    })
+                    .or_else(|_| {
                         if self.allow_result_move_variant {
                             self.program
                                 .type_catalog()
@@ -1981,9 +2016,20 @@ impl<'a> CapabilityGate<'a> {
                             "{subject} SwitchMove edge arguments and payload bindings disagree with block parameter arity"
                         ));
                     }
+                    // A nested tuple receipt intentionally projects more than
+                    // one leaf from the same outer Option::Some payload field.
+                    // Keep duplicate detection at receipt granularity; a
+                    // plain payload projection remains exactly-once.
                     let mut binding_fields = BTreeSet::new();
                     for (index, binding) in arm.bindings.iter().enumerate() {
-                        if !binding_fields.insert(binding.projection.field.clone()) {
+                        let binding_key = (
+                            binding.projection.field.clone(),
+                            binding
+                                .nested_tuple
+                                .as_ref()
+                                .map(|nested| nested.field_index),
+                        );
+                        if !binding_fields.insert(binding_key) {
                             self.error(format!(
                                 "{subject} SwitchMove payload field '{}' is bound more than once",
                                 binding.projection.field.0
