@@ -373,6 +373,26 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
     assert!(mir_stdout.contains("ReadPath"));
     assert!(mir_stdout.contains("drop.0"));
 
+    for args in [vec!["verify"], vec!["verify", "--mir"]] {
+        let verify = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(args)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn recoverable cross-state verifier");
+        assert!(
+            verify.status.success(),
+            "recoverable cross-state verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&verify.stderr),
+            String::from_utf8_lossy(&verify.stdout)
+        );
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        assert!(verify_stdout.contains("canonical MIR ensures contract proven"));
+        assert!(verify_stdout.contains("1/1 verified"));
+        assert!(verify_stdout.contains("[15 constraints]"));
+        assert!(verify.stderr.is_empty());
+    }
+
     for args in [vec!["run"], vec!["run", "--mir"]] {
         let run = Command::new(mimi_bin())
             .current_dir(project_root())
@@ -415,6 +435,28 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
     assert_eq!(native.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n");
     assert!(native.stderr.is_empty());
+}
+
+#[test]
+fn canonical_flow_failure_verifier_reports_a_real_counterexample() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("flow_state_match_fail_result_failure_disproven_dual_backend.mimi");
+    for args in [vec!["verify"], vec!["verify", "--mir"]] {
+        let verify = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(args)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn recoverable cross-state counterexample verifier");
+        assert!(!verify.status.success());
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        assert!(verify_stdout.contains("canonical MIR ensures contract is disproven"));
+        assert!(verify_stdout.contains("[15 constraints]"));
+        assert!(!verify_stdout.contains("No contracts to verify"));
+        assert!(!verify_stdout.contains("flow_ast"));
+    }
 }
 
 #[test]

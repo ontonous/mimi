@@ -1090,7 +1090,7 @@ fn explore_variant_switch(
         .map(|value| value.ty.clone())
         .ok_or_else(|| format!("switch scrutinee '{}' has no TypeDesc", scrutinee))?;
     if consume_scrutinee {
-        catalog.validate_non_copy_variant_contract(&scrutinee_ty)?;
+        validate_consuming_variant_contract(function, program, catalog, &scrutinee_ty)?;
         catalog.validate_variant_switch_move_contract(&scrutinee_ty, arms)?;
         validate_explicit_variant_switch_move(catalog, &scrutinee_ty, arms)?;
     } else {
@@ -1221,6 +1221,53 @@ fn explore_variant_switch(
         )?;
     }
     Ok(())
+}
+
+/// Admit a consuming variant switch only through a TypeDesc contract that is
+/// justified by the canonical program profile.  Recoverable Flow transitions
+/// intentionally return an aggregate `Result<target, (source, error)>`, which
+/// is not the older managed `Result<owned/scalar, i32>` island.  The
+/// recoverable validator is therefore selected only when this MIR graph
+/// contains a canonical recoverable transition producing the exact result
+/// TypeDesc; an unrelated non-Copy Result remains fail-closed at the older
+/// validator boundary.
+fn validate_consuming_variant_contract(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(), String> {
+    match catalog.validate_non_copy_variant_contract(ty) {
+        Ok(()) => Ok(()),
+        Err(managed_error) => {
+            // A recoverable transition may contain an intermediate Result
+            // (for example the value consumed by `?`) whose payload shape is
+            // not the transition's final `Result<target, (source, error)>`.
+            // Keep that admission scoped to the transition body itself; a
+            // caller function may consume only the exact transition result
+            // TypeDesc. This mirrors the checker-owned effect boundary while
+            // preventing an unrelated non-Copy Result from becoming a global
+            // verifier island merely because another transition exists.
+            let is_recoverable_result = program.transitions().values().any(|transition| {
+                transition.effect.is_recoverable()
+                    && (transition.owner == function.owner || transition.result == *ty)
+                    && catalog
+                        .get(ty)
+                        .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
+            });
+            if is_recoverable_result {
+                catalog
+                    .validate_recoverable_result_variant(ty)
+                    .map_err(|recoverable_error| {
+                        format!(
+                            "canonical recoverable Flow Result variant is invalid: {recoverable_error} (managed variant check: {managed_error})"
+                        )
+                    })
+            } else {
+                Err(managed_error)
+            }
+        }
+    }
 }
 
 /// The verifier's admitted move-variant island has no symbolic encoding for a
@@ -2987,21 +3034,36 @@ fn eval_flow_transition(
         &mut returns,
         &mut traps,
     )?;
-    if !traps.is_empty() {
-        return Err(format!(
-            "MIR verifier transition '{}' has a trapping execution path",
-            transition.0
-        ));
+    let caller_constraints = state.constraints.clone();
+    if recoverable {
+        // A recoverable transition is total over two ordinary MIR return
+        // paths: `Ok(target)` and `Err((source, error))`.  It is not a trap
+        // edge, and selecting one path here would erase the failure identity
+        // before the caller's SwitchMove. Preserve both path conditions in a
+        // single symbolic Result and carry any genuine arithmetic traps to
+        // the enclosing verifier obligation for satisfiability checking.
+        state.traps.extend(traps);
+        let returned = merge_recoverable_result_return_paths(catalog, &contract.result, &returns)?;
+        state.constraints = caller_constraints;
+        ensure_result_shape(function, catalog, result, &returned)?;
+        state.values.insert(result.clone(), returned);
+    } else {
+        if !traps.is_empty() {
+            return Err(format!(
+                "MIR verifier transition '{}' has a trapping execution path",
+                transition.0
+            ));
+        }
+        let [returned] = returns.as_slice() else {
+            return Err(format!(
+                "MIR verifier transition '{}' must have exactly one non-trapping return path",
+                transition.0
+            ));
+        };
+        state.constraints = returned.constraints.clone();
+        ensure_result_shape(function, catalog, result, &returned.value)?;
+        state.values.insert(result.clone(), returned.value.clone());
     }
-    let [returned] = returns.as_slice() else {
-        return Err(format!(
-            "MIR verifier transition '{}' must have exactly one non-trapping return path",
-            transition.0
-        ));
-    };
-    state.constraints = returned.constraints.clone();
-    ensure_result_shape(function, catalog, result, &returned.value)?;
-    state.values.insert(result.clone(), returned.value.clone());
     Ok(())
 }
 
@@ -4009,6 +4071,50 @@ fn merge_move_owned_result_return_paths(
     Ok(merged)
 }
 
+/// Merge the two path-shaped returns of a recoverable Flow transition.  This
+/// uses the same path-exclusive variant merge as the managed Result islands,
+/// but the TypeDesc boundary is the dedicated aggregate
+/// `Result<target, (source, error)>` contract.
+fn merge_recoverable_result_return_paths(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ResolvedTypeId,
+    returns: &[ReturnPath],
+) -> Result<SymbolicValue, String> {
+    if returns.is_empty() {
+        return Err("MIR verifier recoverable Flow transition has no return paths to merge".into());
+    }
+    catalog.validate_recoverable_result_variant(result_ty)?;
+    let Some((expected_nominal, variants)) = catalog.variant_layout(result_ty) else {
+        return Err("MIR verifier recoverable Flow transition has no Result layout".into());
+    };
+    let nominal =
+        crate::core::ir::NominalTypeId::new(expected_nominal).map_err(|error| error.to_string())?;
+    let all_fields = variants
+        .iter()
+        .flat_map(|variant| variant.fields.iter())
+        .map(|field| (field.id.clone(), field.ty.clone()))
+        .collect::<Vec<_>>();
+    let mut normalized = Vec::with_capacity(returns.len());
+    for path in returns {
+        let value = normalize_direct_variant_return(
+            catalog,
+            result_ty,
+            &nominal,
+            &all_fields,
+            &path.value,
+        )?;
+        normalized.push((conjunction(&path.constraints), value));
+    }
+    let (_, last) = normalized
+        .pop()
+        .expect("validated non-empty recoverable return paths");
+    let mut merged = last;
+    for (condition, value) in normalized.into_iter().rev() {
+        merged = merge_symbolic_variants(&condition, value, merged)?;
+    }
+    Ok(merged)
+}
+
 fn normalize_direct_variant_return(
     catalog: &crate::core::mir::types::MirTypeCatalog,
     result_ty: &crate::core::ResolvedTypeId,
@@ -4070,6 +4176,32 @@ fn symbolic_zero_for_type(
         return Ok(SymbolicValue::List {
             length: Int::from_i64(0),
         });
+    }
+    match &descriptor.layout {
+        MirLayout::Unit if descriptor.abi == MirAbiClass::Unit => {
+            return Ok(SymbolicValue::Unit);
+        }
+        MirLayout::Tuple(elements) => {
+            let values = elements
+                .iter()
+                .map(|element| symbolic_zero_for_type(catalog, element))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(SymbolicValue::Tuple(values));
+        }
+        MirLayout::Record { nominal, fields } => {
+            let values = fields
+                .iter()
+                .map(|field| {
+                    symbolic_zero_for_type(catalog, &field.ty)
+                        .map(|value| (field.id.clone(), value))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            return Ok(SymbolicValue::Record {
+                nominal: nominal.clone(),
+                fields: values,
+            });
+        }
+        _ => {}
     }
     match descriptor.abi {
         MirAbiClass::Integer {
@@ -4157,6 +4289,48 @@ fn merge_symbolic_scalars(
         (SymbolicValue::List { length: when_true }, SymbolicValue::List { length: when_false }) => {
             Ok(SymbolicValue::List {
                 length: condition.ite(&when_true, &when_false),
+            })
+        }
+        (SymbolicValue::Unit, SymbolicValue::Unit) => Ok(SymbolicValue::Unit),
+        (SymbolicValue::Tuple(when_true), SymbolicValue::Tuple(when_false))
+            if when_true.len() == when_false.len() =>
+        {
+            Ok(SymbolicValue::Tuple(
+                when_true
+                    .into_iter()
+                    .zip(when_false)
+                    .map(|(when_true, when_false)| {
+                        merge_symbolic_scalars(condition, when_true, when_false)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        (
+            SymbolicValue::Record {
+                nominal: true_nominal,
+                fields: true_fields,
+            },
+            SymbolicValue::Record {
+                nominal: false_nominal,
+                fields: false_fields,
+            },
+        ) if true_nominal == false_nominal && true_fields.len() == false_fields.len() => {
+            let mut fields = BTreeMap::new();
+            for (field, true_value) in true_fields {
+                let false_value = false_fields.get(&field).cloned().ok_or_else(|| {
+                    format!(
+                        "MIR verifier symbolic record merge is missing field '{}'",
+                        field.0
+                    )
+                })?;
+                fields.insert(
+                    field,
+                    merge_symbolic_scalars(condition, true_value, false_value)?,
+                );
+            }
+            Ok(SymbolicValue::Record {
+                nominal: true_nominal,
+                fields,
             })
         }
         _ => Err(

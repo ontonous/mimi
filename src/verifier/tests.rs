@@ -891,6 +891,69 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
 }
 
 #[test]
+fn recoverable_cross_state_flow_verifier_proves_from_the_same_mir_identity() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi"
+    );
+    let file = parse_memory_source(source, "mir-recoverable-cross-state-proof").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical recoverable cross-state MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("recoverable cross-state verifier capability");
+
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("recoverable cross-state MIR verifier");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("recoverable cross-state main proof");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result
+        .artifact
+        .as_ref()
+        .expect("recoverable cross-state proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+}
+
+#[test]
+fn recoverable_cross_state_flow_verifier_reports_a_real_counterexample() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/real_world/flow_state_match_fail_result_failure_disproven_dual_backend.mimi"
+    );
+    let file =
+        parse_memory_source(source, "mir-recoverable-cross-state-counterexample").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical recoverable cross-state MIR");
+    crate::verifier::validate_mir_capabilities(&canonical)
+        .expect("recoverable cross-state verifier capability");
+
+    let results = crate::verifier::verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("recoverable cross-state MIR verifier");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "function:main")
+        .expect("recoverable cross-state counterexample");
+    assert_eq!(result.status, VerifStatus::Disproven);
+    assert!(result.constraint_count > 0);
+    assert!(result.message.contains("ensures contract is disproven"));
+    let artifact = result.artifact.as_ref().expect("counterexample artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+}
+
+#[test]
 fn compatibility_verifier_access_is_explicitly_tagged() {
     require_z3!();
     let source = r#"

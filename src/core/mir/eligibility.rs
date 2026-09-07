@@ -408,7 +408,8 @@ fn exact_cross_state_failure_match_main(
     flow: &crate::core::resolved::ResolvedFlow,
     target: &crate::core::StateId,
 ) -> bool {
-    let (first, match_expression) = match body.root.statements.as_slice() {
+    let statements = executable_statements(&body.root);
+    let (first, match_expression) = match statements.as_slice() {
         [first, second]
             if body.root.result.as_deref().is_some_and(|result| {
                 matches!(
@@ -572,6 +573,17 @@ fn exact_failure_match_arm(expression: &ResolvedExpr, error_local: &ResolvedLoca
     )
 }
 
+fn executable_statements(
+    block: &crate::core::ir::ResolvedBlock,
+) -> Vec<crate::core::ir::ResolvedStmt> {
+    block
+        .statements
+        .iter()
+        .filter(|statement| !matches!(statement.kind, ResolvedStmtKind::Contract { .. }))
+        .cloned()
+        .collect()
+}
+
 fn exact_println_then_value_block(
     expression: &ResolvedExpr,
     expected_local: &ResolvedLocalId,
@@ -615,7 +627,8 @@ fn exact_cross_state_match_main(
     flow: &crate::core::resolved::ResolvedFlow,
     target: &crate::core::StateId,
 ) -> bool {
-    let (first, match_expression) = match body.root.statements.as_slice() {
+    let statements = executable_statements(&body.root);
+    let (first, match_expression) = match statements.as_slice() {
         [first, second]
             if body.root.result.as_deref().is_some_and(|result| {
                 matches!(
