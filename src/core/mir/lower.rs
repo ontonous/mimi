@@ -28,9 +28,9 @@ use super::types::MirTypeCatalog;
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction,
     MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction, MirInstructionId,
-    MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary,
-    MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator,
-    MirValue, MirValueId, MirVariantPredicate,
+    MirInstructionKind, MirListOperation, MirOwnershipEvent, MirOwnershipEventKind,
+    MirOwnershipSummary, MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding,
+    MirSwitchCase, MirTerminator, MirValue, MirValueId, MirVariantPredicate,
 };
 
 struct NestedRecordMatchSetup {
@@ -7046,6 +7046,117 @@ impl<'a> Lowerer<'a> {
         Ok(value)
     }
 
+    /// Return extra transition parameters whose TypeDesc requires an explicit
+    /// runtime discharge when the transition body does not move them into its
+    /// result. The first parameter is the Flow source and is deliberately
+    /// excluded: recoverable transitions return it in `Err((source, error))`.
+    fn linear_transition_parameter_values(&self) -> Vec<MirValueId> {
+        let Some(catalog) = self.type_catalog else {
+            return Vec::new();
+        };
+        self.body
+            .parameters
+            .iter()
+            .skip(1)
+            .filter_map(|parameter| self.locals.get(parameter))
+            .filter(|value| {
+                catalog
+                    .get(&self.values[value].ty)
+                    .is_some_and(|descriptor| descriptor.ownership.needs_drop())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Check the explicit consuming boundaries already lowered before a
+    /// recoverable `?` error block. This intentionally follows value identity
+    /// only; a Clone of a parameter leaves the original obligation live.
+    fn existing_blocks_consume_value(&self, value: &MirValueId) -> bool {
+        self.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| match &instruction.kind {
+                    MirInstructionKind::Move { source, .. }
+                    | MirInstructionKind::MoveProject { base: source, .. }
+                    | MirInstructionKind::MoveProjectDrop { base: source, .. }
+                    | MirInstructionKind::VariantProjectMove { base: source, .. }
+                    | MirInstructionKind::Drop { value: source } => source == value,
+                    MirInstructionKind::ConstructVariantMove { fields, .. } => {
+                        fields.iter().any(|(_, field)| field == value)
+                    }
+                    MirInstructionKind::ListOp {
+                        operation: MirListOperation::Concat,
+                        list,
+                        argument,
+                        ..
+                    } => list == value || argument.as_ref() == Some(value),
+                    MirInstructionKind::SetOp {
+                        operation: MirSetOperation::Insert | MirSetOperation::Remove,
+                        set,
+                        ..
+                    } => set == value,
+                    MirInstructionKind::Call { arguments, .. }
+                    | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        arguments.iter().any(|argument| argument == value)
+                    }
+                    MirInstructionKind::BuiltinCall {
+                        arguments,
+                        string_field_contract,
+                        ..
+                    } => {
+                        string_field_contract.is_none()
+                            && arguments.iter().any(|argument| argument == value)
+                    }
+                    MirInstructionKind::SessionCall { endpoint, .. } => endpoint == value,
+                    _ => false,
+                })
+        })
+    }
+
+    /// A direct owned parameter may be cloned into a returned record because
+    /// ordinary expression lowering keeps the local available for other
+    /// paths. Discharge that original only in the success block where the
+    /// Clone is actually present; a direct Move return remains untouched.
+    fn emit_success_parameter_drops(&mut self, node: &NodeId) {
+        let parameters = self.linear_transition_parameter_values();
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            let cloned_here = self.blocks.get(&self.current).is_some_and(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::Clone { source, .. } if source == &parameter
+                    )
+                })
+            });
+            if cloned_here {
+                self.emit(
+                    node,
+                    &format!("transition_parameter_success_drop.{index}"),
+                    MirInstructionKind::Drop { value: parameter },
+                );
+            }
+        }
+    }
+
+    /// A recoverable `?` returns only the source state and error payload. Any
+    /// extra linear parameter that has not crossed an explicit consuming
+    /// boundary must therefore be dropped on the error edge before the
+    /// failure envelope is constructed.
+    fn emit_failure_parameter_drops(&mut self, node: &NodeId) {
+        let parameters = self.linear_transition_parameter_values();
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            if self.existing_blocks_consume_value(&parameter) {
+                continue;
+            }
+            self.emit(
+                node,
+                &format!("transition_parameter_failure_drop.{index}"),
+                MirInstructionKind::Drop { value: parameter },
+            );
+        }
+    }
+
     /// Recognize the one bounded borrowed managed-field observation admitted
     /// by the canonical `println` contract. The call argument is represented
     /// by a direct one-field place (`state.label`); lower it as the owning
@@ -8426,6 +8537,7 @@ impl<'a> Lowerer<'a> {
             ],
         });
         self.switch_to(err_block);
+        self.emit_failure_parameter_drops(node);
         let failure_payload = self
             .id("flow.failure.payload", node)
             .unwrap_or_else(|| self.fallback_value_for_type(&outer_error, node));
@@ -8769,6 +8881,7 @@ impl<'a> Lowerer<'a> {
     fn lower_transition_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
         let value = self.lower_return_expr(expression);
         if self.transition_result.is_some() {
+            self.emit_success_parameter_drops(&expression.node_id);
             self.wrap_transition_success(&expression.node_id, value)
         } else {
             value

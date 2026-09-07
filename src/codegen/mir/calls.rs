@@ -634,6 +634,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     "mir_println_string_newline_call",
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            if string_field_contract.is_none() {
+                // The MIR ownership ledger gives a direct String println a
+                // transferred owned temporary (the lowerer inserts Clone
+                // when the source local must remain live).  The borrowed
+                // record-field receipt is the only non-consuming shape.
+                self.emit_owned_string_drop_value(value.into(), subject)?;
+            }
             return Ok(self.generator.context.i64_type().const_zero().into());
         }
         let left = self

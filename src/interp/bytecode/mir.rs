@@ -976,10 +976,19 @@ impl<'a> FunctionEmitter<'a> {
             let Some(source) = self.reg(argument) else {
                 return;
             };
-            self.proto.emit(Op::Mov {
-                rd: destination,
-                rs: source,
-            });
+            let consume = kind == crate::core::mir::types::MirBuiltinKind::PrintlnString
+                && string_field_contract.is_none();
+            if consume {
+                self.proto.emit(Op::Move {
+                    rd: destination,
+                    rs: source,
+                });
+            } else {
+                self.proto.emit(Op::Mov {
+                    rd: destination,
+                    rs: source,
+                });
+            }
         }
         let registry = super::registry::create_registry();
         let Some(builtin) = registry.lookup(contract.name) else {

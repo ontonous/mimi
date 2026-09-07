@@ -1544,6 +1544,29 @@ mod tests {
             .iter()
             .all(|receipt| { receipt.transition == ship || receipt.transition == deliver }));
 
+        let pay = program
+            .functions()
+            .get(&crate::core::NodeId(
+                "transition:Order::pay::Pending".into(),
+            ))
+            .expect("pay transition MIR");
+        let pay_parameter = pay.parameters.get(1).expect("pay transaction parameter");
+        let pay_parameter_drops = pay
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value } if value == pay_parameter
+                )
+            })
+            .count();
+        assert_eq!(
+            pay_parameter_drops, 2,
+            "the extra linear transaction parameter must be discharged on both ? paths"
+        );
+
         let owner = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&program)
             .execute_with_output(&owner, &[])

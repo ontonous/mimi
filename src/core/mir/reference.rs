@@ -5406,7 +5406,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 self.program.type_catalog(),
                             )?
                         } else {
-                            self.read_value(function, values, argument)?
+                            // A direct String println consumes the owned
+                            // argument. The lowerer materializes a Clone
+                            // when the source local must remain live; the
+                            // record-field receipt above is the sole
+                            // borrowed observation shape.
+                            self.take_transfer_value(function, values, argument)?
                         };
                         let MirRuntimeValue::String(value) = argument else {
                             return Err(self.error(
