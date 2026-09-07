@@ -1356,6 +1356,7 @@ impl<'a> CapabilityGate<'a> {
                         | crate::core::mir::types::MirBuiltinKind::Max
                         | crate::core::mir::types::MirBuiltinKind::PrintlnBool
                         | crate::core::mir::types::MirBuiltinKind::PrintlnInt
+                        | crate::core::mir::types::MirBuiltinKind::PrintlnString
                         | crate::core::mir::types::MirBuiltinKind::SessionOpen
                         | crate::core::mir::types::MirBuiltinKind::SessionPair
                 ) {

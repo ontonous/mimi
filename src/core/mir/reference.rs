@@ -388,7 +388,13 @@ impl MirProgram {
                 function,
                 &type_catalog,
             ));
-            errors.extend(validate_builtin_calls(function, &type_catalog));
+            errors.extend(validate_builtin_calls(
+                function,
+                &type_catalog,
+                transitions
+                    .values()
+                    .any(|contract| contract.effect.is_recoverable()),
+            ));
             errors.extend(validate_conversions(function, &type_catalog));
             errors.extend(super::contracts::validate_contracts(
                 function,
@@ -1408,6 +1414,7 @@ fn validate_conversions(
 fn validate_builtin_calls(
     function: &MirFunction,
     type_catalog: &MirTypeCatalog,
+    allow_string_stdout: bool,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
     for block in function.blocks.values() {
@@ -1421,6 +1428,16 @@ fn validate_builtin_calls(
                 continue;
             };
             let contract = super::types::MirBuiltinContract::for_kind(*kind);
+            if *kind == super::types::MirBuiltinKind::PrintlnString && !allow_string_stdout {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "builtin '{}' does not support StringHandle outside the recoverable Flow stdout contract; canonical contract accepts signed i32 or i64",
+                        contract.name
+                    ),
+                });
+                continue;
+            }
             if arguments.len() != contract.arity {
                 errors.push(super::MirValidationError {
                     subject: instruction.id.to_string(),
@@ -5181,6 +5198,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                             ));
                         };
                         self.output.borrow_mut().push_str(&format!("{value}\n"));
+                        MirRuntimeValue::Unit
+                    }
+                    super::types::MirBuiltinKind::PrintlnString => {
+                        let argument = arguments.first().ok_or_else(|| {
+                            self.error(&function.owner, "println argument is absent")
+                        })?;
+                        let argument = self.read_value(function, values, argument)?;
+                        let MirRuntimeValue::String(value) = argument else {
+                            return Err(self.error(
+                                &function.owner,
+                                "builtin 'println' received a non-string value",
+                            ));
+                        };
+                        self.output.borrow_mut().push_str(&value);
+                        self.output.borrow_mut().push('\n');
                         MirRuntimeValue::Unit
                     }
                     super::types::MirBuiltinKind::SessionOpen => {

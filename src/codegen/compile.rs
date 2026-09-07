@@ -1003,6 +1003,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
+        let flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
         let option_string_candidate = route.materialized_option_string_candidate;
         let option_nested_tuple_candidate = route.materialized_option_nested_tuple_candidate;
         let copy_option_i32_candidate = route.materialized_copy_option_i32_candidate;
@@ -1013,6 +1014,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         if !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
+            && !flow_failure_retry_candidate
             && !option_string_candidate
             && !option_nested_tuple_candidate
             && !copy_option_i32_candidate
@@ -1029,7 +1031,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // validator then rejects the unsupported combination.  This keeps the
         // candidate precedence identical to canonical_dispatch and prevents
         // a flat record from accidentally widening the collection envelope.
-        let island = if scalar_collection_candidate {
+        let island = if flow_failure_retry_candidate {
+            "recoverable Flow failure island"
+        } else if scalar_collection_candidate {
             "scalar collection island"
         } else if flat_copy_record_candidate {
             "flat Copy record island"

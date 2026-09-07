@@ -566,6 +566,62 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .ok_or_else(|| NativeMirError::new(subject, "session_lo returned void"))?;
             return Ok(value);
         }
+        if kind == MirBuiltinKind::PrintlnString {
+            let value = self
+                .value(
+                    arguments.first().ok_or_else(|| {
+                        NativeMirError::new(subject, "builtin argument is absent")
+                    })?,
+                    subject,
+                )?
+                .into_struct_value();
+            let data = self
+                .generator
+                .builder
+                .build_extract_value(value, 0, "mir_println_string_data")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_pointer_value();
+            let len = self
+                .generator
+                .builder
+                .build_extract_value(value, 1, "mir_println_string_len")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                .into_int_value();
+            let print_bytes = self
+                .generator
+                .get_runtime_fn("mimi_print_bytes")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(
+                    print_bytes,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(data),
+                        BasicMetadataValueEnum::IntValue(len),
+                    ],
+                    "mir_println_string_bytes",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let newline = self
+                .generator
+                .builder
+                .build_global_string_ptr("\n", "mir_println_string_newline")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(
+                    print_bytes,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(newline.as_pointer_value()),
+                        BasicMetadataValueEnum::IntValue(
+                            self.generator.context.i64_type().const_int(1, false),
+                        ),
+                    ],
+                    "mir_println_string_newline_call",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            return Ok(self.generator.context.i64_type().const_zero().into());
+        }
         let left = self
             .value(
                 arguments
@@ -651,6 +707,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             MirBuiltinKind::Abs => unreachable!(),
                             MirBuiltinKind::PrintlnBool => unreachable!(),
                             MirBuiltinKind::PrintlnInt => unreachable!(),
+                            MirBuiltinKind::PrintlnString => unreachable!(),
                             MirBuiltinKind::SessionOpen => unreachable!(),
                             MirBuiltinKind::SessionPair => unreachable!(),
                         },
@@ -742,6 +799,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 // Unit has no physical LLVM value. Keep the same inert
                 // placeholder convention as PrintlnBool for the value map.
                 Ok(self.generator.context.i64_type().const_zero().into())
+            }
+            MirBuiltinKind::PrintlnString => {
+                unreachable!("PrintlnString handled before scalar dispatch")
             }
             MirBuiltinKind::SessionOpen => {
                 unreachable!("SessionOpen handled before scalar dispatch")

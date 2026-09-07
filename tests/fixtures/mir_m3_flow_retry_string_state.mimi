@@ -1,0 +1,44 @@
+// R6-06 probe: the recoverable source state owns a String payload. The failed
+// attempt must return that exact state so the caller can retry it once.
+func validate_amount(amount: i32) -> Result<i32, string> {
+    if amount <= 0 {
+        Err("invalid amount")
+    } else {
+        Ok(amount)
+    }
+}
+
+flow Account {
+    state Active { label: string }
+
+    transition withdraw(Active, amount: i32) -> Active fails string {
+        let checked = validate_amount(amount)?
+        return Active { label: self.label }
+    }
+}
+
+func retry_string_state_contract(observed: i32) -> i32 {
+    requires: observed == 1
+    ensures: result == 1
+    observed
+}
+
+func main() -> i32 {
+    let source = Active { label: "credit" }
+    let rejected = Account::withdraw(source, 0)
+    match rejected {
+        Ok(success) => { drop(success); 1000 },
+        Err((returned, error)) => {
+            println(error)
+            drop(error)
+            let retried = Account::withdraw(returned, 5)
+            match retried {
+                Ok(success) => {
+                    println(success.label)
+                    0
+                },
+                Err(_) => 1001,
+            }
+        },
+    }
+}

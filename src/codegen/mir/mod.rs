@@ -855,7 +855,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 mod tests {
     use super::CodeGenerator;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
-    use crate::core::mir::types::MirLayout;
+    use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout};
     use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
     use crate::interp::Value;
     use crate::lexer::Lexer;
@@ -1285,6 +1285,150 @@ mod tests {
         assert_eq!(native.stdout, "100\n100\n95\n");
         assert_eq!(native.stderr, "");
         assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn recoverable_flow_string_state_shares_one_mir_across_four_consumers() {
+        let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry_string_state.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("recoverable Flow String state must lower to canonical MIR");
+
+        let transition = crate::core::NodeId("transition:Account::withdraw::Active".into());
+        let contract = program
+            .transitions()
+            .get(&transition)
+            .expect("recoverable String transition contract");
+        assert_eq!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::RecoverableLocal
+        );
+        let state_desc = program
+            .type_catalog()
+            .get(&contract.source)
+            .expect("String-bearing Flow state TypeDesc");
+        assert!(matches!(state_desc.layout, MirLayout::Record { .. }));
+        assert_eq!(state_desc.glue.move_out, MirGlueKind::Aggregate);
+        assert!(state_desc.drop_plan.as_ref().is_some_and(|plan| plan
+            .fields
+            .iter()
+            .any(|field| { field.glue == MirGlueKind::OwnedString })));
+        let println_string_calls = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::BuiltinCall {
+                        kind: MirBuiltinKind::PrintlnString,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(println_string_calls, 2);
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference recoverable String Flow execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "invalid amount\ncredit\n");
+
+        let mut bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("String state MIR bytecode"));
+        let bytecode_value = bytecode
+            .run_value()
+            .expect("bytecode recoverable String Flow execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), "invalid amount\ncredit\n");
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for String state Flow");
+        let verification = crate::verifier::verify_mir(&program, String::new())
+            .expect("verifier consumes String state Flow MIR");
+        let proof = verification
+            .iter()
+            .find(|result| result.func_name.ends_with("retry_string_state_contract"))
+            .expect("String state fixture must contain a contract result");
+        assert_eq!(proof.status, crate::verifier::VerifStatus::Proven);
+        assert!(proof.constraint_count > 0);
+        let artifact = proof
+            .artifact
+            .as_ref()
+            .expect("String state Proven result must carry a proof artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, program.canonical_digest());
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_m3_flow_retry_string_state_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native String state Flow lowering");
+        generator
+            .module
+            .verify()
+            .expect("native String state Flow module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native String state Flow execution");
+        assert_eq!(native.stdout, "invalid amount\ncredit\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn canonical_mir_rejects_forged_string_println_abi_before_consumers() {
+        let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry_string_state.mimi");
+        let program = canonical_program(source);
+        let mut functions = program.functions().clone();
+        let mut replaced = false;
+        for function in functions.values_mut() {
+            for block in function.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    if let crate::core::mir::MirInstructionKind::BuiltinCall { kind, .. } =
+                        &mut instruction.kind
+                    {
+                        if *kind == MirBuiltinKind::PrintlnString {
+                            *kind = MirBuiltinKind::PrintlnInt;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                }
+                if replaced {
+                    break;
+                }
+            }
+            if replaced {
+                break;
+            }
+        }
+        assert!(
+            replaced,
+            "String state fixture must contain a String println"
+        );
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged StringHandle -> integer println must fail closed");
+        let messages = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("does not support argument")
+                    || message.contains("requires Copy arguments")
+            }),
+            "unexpected forged builtin diagnostics: {messages:?}"
+        );
     }
 
     #[test]

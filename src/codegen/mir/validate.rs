@@ -1111,6 +1111,7 @@ impl<'a> NativeMirValidator<'a> {
                         | MirBuiltinKind::Max
                         | MirBuiltinKind::PrintlnBool
                         | MirBuiltinKind::PrintlnInt
+                        | MirBuiltinKind::PrintlnString
                 );
                 if !supported_kind {
                     self.errors.push(NativeMirError::new(
@@ -1126,9 +1127,17 @@ impl<'a> NativeMirValidator<'a> {
                     else {
                         continue;
                     };
+                    let ownership_ok = if *kind == MirBuiltinKind::PrintlnString {
+                        self.program
+                            .type_catalog()
+                            .validate_owned_string(&function.values[argument].ty)
+                            .is_ok()
+                    } else {
+                        desc.ownership == MirOwnership::Copy
+                    };
                     if !contract.accepts_abi(desc.abi)
                         || !contract.accepts_layout(&desc.layout)
-                        || desc.ownership != MirOwnership::Copy
+                        || !ownership_ok
                         || (matches!(
                             kind,
                             MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max

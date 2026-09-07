@@ -1614,6 +1614,10 @@ fn eval_instruction(
                 }
                 (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
                 (MirBuiltinKind::PrintlnInt, [SymbolicValue::Int(_)]) => SymbolicValue::Unit,
+                (MirBuiltinKind::PrintlnString, [SymbolicValue::Opaque { ty }]) => {
+                    catalog.validate_owned_string(ty)?;
+                    SymbolicValue::Unit
+                }
                 (MirBuiltinKind::SessionOpen, []) => {
                     let result_ty = function
                         .values

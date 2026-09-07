@@ -71,8 +71,8 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
         && flow.persistent_fields.is_empty()
         && source_state.payload.len() == 1
         && target_state.payload.len() == 1
-        && is_concrete_i32_type(&source_state.payload[0].1)
-        && is_concrete_i32_type(&target_state.payload[0].1)
+        && is_supported_local_retry_state_type(&source_state.payload[0].1)
+        && is_supported_local_retry_state_type(&target_state.payload[0].1)
         && transition.params.len() == 1
         && is_concrete_i32_type(&transition.params[0].1)
         && result_is_result
@@ -1195,6 +1195,20 @@ fn is_concrete_i32_type(ty: &Type) -> bool {
     }
 }
 
+/// The local recoverable retry island carries the state through the failure
+/// envelope and back into the same transition.  Keep the admission explicit:
+/// the payload may be a Copy `i32` or one owned `string`, whose aggregate
+/// move/drop contract is now materialized by Canonical MIR.  Other payloads
+/// remain outside the profile until their receipts and all four consumers are
+/// closed.
+fn is_supported_local_retry_state_type(ty: &Type) -> bool {
+    match ty {
+        Type::Located { ty, .. } => is_supported_local_retry_state_type(ty),
+        Type::Name(name, arguments) => arguments.is_empty() && (name == "i32" || name == "string"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1233,6 +1247,13 @@ mod tests {
             .parse_file()
             .expect("parse");
         let program = crate::core::check_program(&file).expect("check");
+        assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn local_retry_with_owned_string_state_is_a_narrow_candidate() {
+        let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry_string_state.mimi");
+        let program = checked(source);
         assert!(is_flow_failure_retry_candidate(&program));
     }
 

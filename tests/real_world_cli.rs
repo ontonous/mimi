@@ -6289,6 +6289,12 @@ fn canonical_mir_m1_m3_cli_acceptance_has_real_proofs_and_business_observations(
             "100\n100\n95\n",
             "1/1 verified",
         ),
+        (
+            "mir_m3_flow_retry_string_state.mimi",
+            Some(0),
+            "invalid amount\ncredit\n",
+            "1/1 verified",
+        ),
     ];
 
     for (fixture_name, expected_exit, expected_stdout, expected_summary) in cases {
