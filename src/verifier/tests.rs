@@ -1091,6 +1091,91 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
 }
 
 #[test]
+fn public_checked_verifier_routes_recoverable_cross_state_flow_to_mir() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi"
+    );
+    let file = parse_memory_source(source, "mir-recoverable-cross-state-public-api")
+        .expect("parse recoverable cross-state Flow");
+    let program =
+        crate::core::check_program(&file).expect("typecheck recoverable cross-state Flow");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).flow_failure_retry);
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let results = verify_checked(&program, source_hash.clone()).expect("public MIR verify");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed recoverable Flow verifier must not access the compatibility body"
+    );
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("recoverable cross-state public proof");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical recoverable cross-state MIR");
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let dual = verify_checked_dual(&program, source_hash).expect("public dual MIR verify");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "closed recoverable Flow dual verifier must not access the compatibility body"
+    );
+    let dual_result = dual
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("recoverable cross-state public dual proof");
+    assert_eq!(dual_result.status, VerifStatus::Proven);
+    assert!(dual_result.constraint_count > 0);
+    assert_eq!(
+        dual_result
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
+fn public_checked_verifier_reports_recoverable_cross_state_counterexample_from_mir() {
+    require_z3!();
+    let source = include_str!(
+        "../../tests/real_world/flow_state_match_fail_result_failure_disproven_dual_backend.mimi"
+    );
+    let file = parse_memory_source(source, "mir-recoverable-cross-state-public-counterexample")
+        .expect("parse recoverable cross-state counterexample");
+    let program = crate::core::check_program(&file).expect("typecheck counterexample");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let results = verify_checked(&program, source_hash).expect("public MIR counterexample");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("recoverable cross-state public counterexample");
+    assert_eq!(result.status, VerifStatus::Disproven);
+    assert!(result.constraint_count > 0);
+    assert!(result.message.contains("ensures contract is disproven"));
+    let artifact = result.artifact.as_ref().expect("counterexample artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert!(!artifact.mir_hash.is_empty());
+}
+
+#[test]
 fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_test_scalar_collection_mixed.mimi");
