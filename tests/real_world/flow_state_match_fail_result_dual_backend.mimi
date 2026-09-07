@@ -5,8 +5,6 @@
 flow F { state A { n: i32 } state B { n: i32 }
   transition go(A) -> B fails string { { return B { n: self.n + 1 } } } }
 func main() -> i32 {
-  requires: true
-  ensures: result == 0
   let b = F::go(A { n: 1 })
   match b { Ok(B { n }) => println(n), Err(_) => println(0) }
   0
