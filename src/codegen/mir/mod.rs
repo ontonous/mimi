@@ -1102,6 +1102,108 @@ mod tests {
     }
 
     #[test]
+    fn generated_cross_state_flow_cases_share_one_mir_across_three_consumers() {
+        // Keep the generator deterministic and centered on the R6 Flow
+        // contract: one input takes the recoverable Err((source, error))
+        // branch, while the remaining inputs take the Ok(target) branch.
+        // Every iteration constructs exactly one MirProgram and gives that
+        // same object to reference, MIR bytecode, and native LLVM. There is
+        // deliberately no legacy compile_file comparison here: a canonical
+        // rejection or consumer mismatch must remain visible.
+        let template = r#"
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+
+    transition go(A) -> B fails string {
+        let checked: Result<i32, string> = if self.n == 1 {
+            Err("bad")
+        } else {
+            Ok(self.n + 1)
+        }
+        let next = checked?
+        return B { n: next }
+    }
+}
+
+func main() -> i32 {
+    let result = F::go(A { n: INPUT })
+    match result {
+        Ok(B { n }) => {
+            println(n)
+            99
+        },
+        Err((source, error)) => {
+            println(source.n)
+            drop(source)
+            drop(error)
+            0
+        },
+    }
+}
+"#;
+
+        for input in [-7_i32, 0, 1, 2, 41] {
+            let source = template.replace("INPUT", &input.to_string());
+            let program = canonical_program(&source);
+            let owner = crate::core::NodeId("function:main".into());
+            let mir_digest = program.canonical_digest();
+            assert!(
+                crate::core::mir::contains_flow_failure_retry_candidate(&program),
+                "generated input {input} must materialize a recoverable Flow boundary"
+            );
+            let (expected_int, expected_output, expected_exit) = if input == 1 {
+                (0_i64, "1\n".to_owned(), 0)
+            } else {
+                (99_i64, format!("{}\n", input + 1), 99)
+            };
+            let expected_value = MirRuntimeValue::Int(expected_int);
+
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute_with_output(&owner, &[])
+                .expect("generated cross-state Flow reference execution");
+            assert_eq!(reference.value, expected_value, "input {input}");
+            assert_eq!(reference.output, expected_output, "input {input}");
+
+            let mut bytecode = BytecodeVM::new(
+                compile_mir_program(&program)
+                    .expect("generated cross-state Flow MIR bytecode compilation"),
+            );
+            let bytecode_value = bytecode
+                .run_value()
+                .expect("generated cross-state Flow bytecode execution");
+            assert!(
+                matches!(bytecode_value, Value::Int(value) if value == expected_int),
+                "input {input}"
+            );
+            assert_eq!(bytecode.take_stdout(), expected_output, "input {input}");
+
+            crate::verifier::validate_mir_capabilities(&program)
+                .expect("generated cross-state Flow verifier capability");
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_generated_cross_state_flow");
+            generator
+                .compile_mir_native(&program)
+                .expect("generated cross-state Flow native lowering");
+            generator
+                .module
+                .verify()
+                .expect("generated cross-state Flow native module verifies");
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("generated cross-state Flow native execution");
+            assert_eq!(native.stdout, expected_output, "input {input}");
+            assert_eq!(native.stderr, "", "input {input}");
+            assert_eq!(native.exit_code, Some(expected_exit), "input {input}");
+            assert_eq!(
+                program.canonical_digest(),
+                mir_digest,
+                "a consumer mutated the shared MIR for input {input}"
+            );
+        }
+    }
+
+    #[test]
     fn recoverable_flow_failure_returns_source_and_retries_across_four_consumers() {
         let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");
