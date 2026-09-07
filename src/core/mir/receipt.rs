@@ -7,6 +7,7 @@
 //! compare the receipt, but they never use it to reconstruct frontend facts.
 
 use crate::core::mir::reference::MirProgram;
+use crate::core::mir::MirValueId;
 use crate::core::NodeId;
 
 /// Schema version for the cross-consumer route receipt.
@@ -98,11 +99,23 @@ fn canonical_mir_text(program: &MirProgram) -> String {
         text.push_str(contract.instruction.as_str());
         text.push(' ');
         text.push_str(contract.callee.0.as_str());
+        text.push_str(" symbol=");
+        text.push_str(&contract.symbol);
+        text.push_str(" abi=");
+        text.push_str(&contract.abi);
         text.push_str(" args=");
         for argument in &contract.arguments {
             text.push_str(argument.as_str());
             text.push(',');
         }
+        text.push_str(" result=");
+        text.push_str(
+            contract
+                .result
+                .as_ref()
+                .map(MirValueId::as_str)
+                .unwrap_or("unit"),
+        );
         text.push_str(" requires=");
         text.push_str(
             contract

@@ -2152,17 +2152,42 @@ fn validate_call_graph(
                         });
                         continue;
                     };
-                    if contract.caller != function.owner || contract.callee != *callee_owner {
+                    if contract.caller != function.owner
+                        || contract.instruction != instruction.id
+                        || contract.callee != *callee_owner
+                    {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message: "extern call FFI contract identity disagrees with MIR call"
                                 .into(),
                         });
                     }
+                    if contract.symbol.trim().is_empty() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI contract has an empty C symbol".into(),
+                        });
+                    }
+                    if contract.abi != "C" {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern call FFI contract ABI '{}' is outside the canonical C ABI",
+                                contract.abi
+                            ),
+                        });
+                    }
                     if contract.arguments != *arguments {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message: "extern call FFI contract arguments disagree with MIR call"
+                                .into(),
+                        });
+                    }
+                    if contract.result.as_ref() != result.as_ref() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI contract result disagrees with MIR call"
                                 .into(),
                         });
                     }
@@ -2582,12 +2607,27 @@ fn materialize_ffi_call_contracts(
                 else {
                     continue;
                 };
-                let signature = program
-                    .extern_blocks()
-                    .values()
-                    .flat_map(|block| block.signatures.iter())
-                    .find(|signature| signature.node_id == *callee);
-                let Some(signature) = signature else {
+                let declaration = program.extern_blocks().values().find(|block| {
+                    block
+                        .signatures
+                        .iter()
+                        .any(|signature| signature.node_id == *callee)
+                });
+                let Some(declaration) = declaration else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "extern call '{}' has no checker-owned declaration identity",
+                            callee.0
+                        ),
+                    });
+                    continue;
+                };
+                let Some(signature) = declaration
+                    .signatures
+                    .iter()
+                    .find(|signature| signature.node_id == *callee)
+                else {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
@@ -2643,7 +2683,13 @@ fn materialize_ffi_call_contracts(
                         caller: function.owner.clone(),
                         instruction: instruction.id.clone(),
                         callee: callee.clone(),
+                        symbol: signature.name.clone(),
+                        abi: declaration.abi.clone(),
                         arguments: arguments.clone(),
+                        result: match &instruction.kind {
+                            super::MirInstructionKind::Call { result, .. } => result.clone(),
+                            _ => unreachable!("FFI receipt materializes only Call instructions"),
+                        },
                         requires,
                         span,
                     },
@@ -10617,6 +10663,10 @@ func main() -> i64 { caller(0 as i64) }
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let canonical = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+        let ffi_receipt = canonical.ffi_calls().values().next().expect("FFI receipt");
+        assert_eq!(ffi_receipt.symbol, "read");
+        assert_eq!(ffi_receipt.abi, "C");
+        assert!(ffi_receipt.result.is_some());
 
         let missing = MirProgram::with_type_catalog_and_instances_and_transitions(
             canonical.functions().clone(),
@@ -10653,6 +10703,43 @@ func main() -> i64 { caller(0 as i64) }
                     .contains("FFI contract identity disagrees with MIR call")
             }),
             "{forged:?}"
+        );
+
+        let mut forged_abi = canonical.ffi_calls().clone();
+        forged_abi.values_mut().next().expect("FFI receipt").abi = "Rust".into();
+        let abi = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            canonical.functions().clone(),
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            canonical.transitions().clone(),
+            forged_abi,
+        )
+        .expect_err("non-C FFI ABI must fail before execution");
+        assert!(
+            abi.iter()
+                .any(|error| error.message.contains("outside the canonical C ABI")),
+            "{abi:?}"
+        );
+
+        let mut forged_result = canonical.ffi_calls().clone();
+        forged_result
+            .values_mut()
+            .next()
+            .expect("FFI receipt")
+            .result = Some(super::MirValueId::new("value:forged-result").expect("MIR value id"));
+        let result = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            canonical.functions().clone(),
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            canonical.transitions().clone(),
+            forged_result,
+        )
+        .expect_err("forged FFI result identity must fail before execution");
+        assert!(
+            result
+                .iter()
+                .any(|error| error.message.contains("FFI contract result disagrees")),
+            "{result:?}"
         );
     }
 }

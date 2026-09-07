@@ -1022,7 +1022,15 @@ pub struct MirFfiCallContract {
     pub caller: NodeId,
     pub instruction: MirInstructionId,
     pub callee: NodeId,
+    /// Checker-resolved C symbol. Consumers must use this identity directly;
+    /// they must not recover an extern name from retained surface syntax.
+    pub symbol: String,
+    /// Checker-resolved ABI spelling. The current production island admits
+    /// only the canonical `C` ABI, but keeps the fact in MIR so future ABI
+    /// islands cannot silently infer it from a backend declaration.
+    pub abi: String,
     pub arguments: Vec<MirValueId>,
+    pub result: Option<MirValueId>,
     pub requires: Option<MirContractExpr>,
     pub span: crate::span::Span,
 }
