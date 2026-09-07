@@ -400,11 +400,16 @@ fn compile_checked_routes_exact_nested_option_tuple_through_canonical_mir() {
 
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "nested_option_tuple_default_route");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     codegen
         .compile_checked(&program)
         .expect("direct native entry must use the canonical nested Option tuple consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct nested Option tuple native route must not access retained legacy bodies"
+    );
 }
 
 #[test]

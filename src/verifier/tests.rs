@@ -1035,6 +1035,62 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
 }
 
 #[test]
+fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
+    require_z3!();
+    let source = include_str!("../../tests/real_world/mir_nested_tuple_option.mimi");
+    let file = parse_memory_source(source, "mir-nested-option-tuple-public-api").expect("parse");
+    let program = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_option_nested_tuple_variant_admission(&program),
+        crate::core::mir::OptionNestedTupleVariantAdmission::CompleteCoverage
+    );
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let results =
+        verify_checked(&program, source_hash.clone()).expect("nested Option tuple MIR verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "nested Option tuple verifier must not access retained legacy bodies"
+    );
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("nested Option tuple contract result");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert_eq!(result.constraint_count, 2);
+    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical nested Option tuple MIR");
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let dual = verify_checked_dual(&program, source_hash).expect("nested Option tuple dual verify");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "nested Option tuple dual verifier must not access retained legacy bodies"
+    );
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    let dual_result = dual
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("nested Option tuple dual contract result");
+    assert_eq!(dual_result.status, VerifStatus::Proven);
+    assert_eq!(dual_result.constraint_count, 2);
+    assert_eq!(
+        dual_result
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR)
+    );
+}
+
+#[test]
 fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_test_scalar_collection_mixed.mimi");
