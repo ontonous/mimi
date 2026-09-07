@@ -1685,6 +1685,68 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_flow_parameter_cleanup_uses_checker_join_fact() {
+        let program = canonical_program(
+            r#"
+func validate_price(price: i32) -> Result<i32, string> {
+    if price <= 0 { Err("invalid") } else { Ok(price) }
+}
+
+flow Order {
+    state Pending { price: i32 }
+    state Paid { price: i32 }
+
+    transition pay(Pending, txn_id: string) -> Paid fails string {
+        if self.price > 0 {
+            drop(txn_id)
+        } else {
+            drop(txn_id)
+        }
+        let valid_price = validate_price(self.price)?
+        return Paid { price: valid_price }
+    }
+}
+
+func main() -> i32 {
+    let pending = Pending { price: 1 }
+    match Order::pay(pending, "TXN") {
+        Ok(paid) => { println(paid.price) drop(paid) 0 },
+        Err((source, error)) => { drop(error) drop(source) 0 },
+    }
+}
+"#,
+        );
+        let transition = crate::core::NodeId("transition:Order::pay::Pending".into());
+        let body = program
+            .functions()
+            .get(&transition)
+            .expect("recoverable transition MIR");
+        let parameter = body.parameters.get(1).expect("transaction parameter");
+        let explicit_drops = body
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value } if value == parameter
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            explicit_drops.len(),
+            2,
+            "both mutually exclusive branches explicitly consume txn_id"
+        );
+        assert!(explicit_drops.iter().all(|instruction| {
+            !instruction
+                .id
+                .as_str()
+                .contains("transition_parameter_failure_drop")
+        }));
+    }
+
+    #[test]
     fn cross_state_failure_returns_source_and_drops_one_failure_tuple_across_consumers() {
         let program = canonical_program(include_str!(
             "../../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi"

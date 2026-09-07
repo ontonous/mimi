@@ -7068,11 +7068,45 @@ impl<'a> Lowerer<'a> {
             .collect()
     }
 
-    /// Check the explicit consuming boundaries already lowered before a
-    /// recoverable `?` error block. This intentionally follows value identity
-    /// only; a Clone of a parameter leaves the original obligation live.
-    fn existing_blocks_consume_value(&self, value: &MirValueId) -> bool {
-        self.blocks.values().any(|block| {
+    /// Check whether a value has already crossed a consuming boundary on
+    /// every MIR path reaching the current block.  This is intentionally a
+    /// MIR-CFG query, not a scan over all blocks: a Drop in a sibling branch
+    /// must not suppress the error-edge Drop for a path that did not consume
+    /// the parameter.  A cycle or incomplete predecessor graph is treated as
+    /// "not proven", so the caller emits cleanup conservatively.
+    fn value_consumed_on_all_paths_to_current(&self, value: &MirValueId) -> bool {
+        fn visit(
+            lowerer: &Lowerer<'_>,
+            block_id: &MirBlockId,
+            value: &MirValueId,
+            memo: &mut BTreeMap<MirBlockId, bool>,
+            visiting: &mut HashSet<MirBlockId>,
+        ) -> bool {
+            if let Some(consumed) = memo.get(block_id) {
+                return *consumed;
+            }
+            if !visiting.insert(block_id.clone()) {
+                return false;
+            }
+            let direct = lowerer
+                .blocks
+                .get(block_id)
+                .is_some_and(|block| block_consumes_value(block, value));
+            let result = if direct {
+                true
+            } else {
+                let predecessors = lowerer.predecessors(block_id);
+                !predecessors.is_empty()
+                    && predecessors
+                        .iter()
+                        .all(|predecessor| visit(lowerer, predecessor, value, memo, visiting))
+            };
+            visiting.remove(block_id);
+            memo.insert(block_id.clone(), result);
+            result
+        }
+
+        fn block_consumes_value(block: &BlockDraft, value: &MirValueId) -> bool {
             block
                 .instructions
                 .iter()
@@ -7111,7 +7145,37 @@ impl<'a> Lowerer<'a> {
                     MirInstructionKind::SessionCall { endpoint, .. } => endpoint == value,
                     _ => false,
                 })
-        })
+        }
+
+        let mut memo = BTreeMap::new();
+        let mut visiting = HashSet::new();
+        visit(self, &self.current, value, &mut memo, &mut visiting)
+    }
+
+    fn predecessors(&self, target: &MirBlockId) -> Vec<MirBlockId> {
+        self.blocks
+            .iter()
+            .filter_map(|(id, block)| {
+                let reaches = match block.terminator.as_ref() {
+                    Some(MirTerminator::Goto { target: next, .. }) => next == target,
+                    Some(MirTerminator::Branch {
+                        then_target,
+                        else_target,
+                        ..
+                    }) => then_target == target || else_target == target,
+                    Some(MirTerminator::Switch { arms, .. })
+                    | Some(MirTerminator::SwitchMove { arms, .. }) => {
+                        arms.iter().any(|arm| &arm.target == target)
+                    }
+                    Some(MirTerminator::Return { .. })
+                    | Some(MirTerminator::Trap { .. })
+                    | Some(MirTerminator::Fault { .. })
+                    | Some(MirTerminator::Unreachable)
+                    | None => false,
+                };
+                reaches.then_some(id.clone())
+            })
+            .collect()
     }
 
     /// A direct owned parameter may be cloned into a returned record because
@@ -7146,7 +7210,7 @@ impl<'a> Lowerer<'a> {
     fn emit_failure_parameter_drops(&mut self, node: &NodeId) {
         let parameters = self.linear_transition_parameter_values();
         for (index, parameter) in parameters.into_iter().enumerate() {
-            if self.existing_blocks_consume_value(&parameter) {
+            if self.value_consumed_on_all_paths_to_current(&parameter) {
                 continue;
             }
             self.emit(
