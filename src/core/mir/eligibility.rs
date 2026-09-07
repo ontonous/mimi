@@ -4,6 +4,8 @@
 //! They intentionally inspect only checker-owned facts; a backend must not
 //! rediscover a migrated shape from the retained surface AST.
 
+use std::collections::BTreeSet;
+
 use crate::ast::Type;
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
@@ -50,7 +52,7 @@ fn scalar_ffi_contract_expr(expression: &crate::ast::Expr) -> bool {
     }
 }
 
-fn direct_scalar_ffi_callee(body: &ResolvedBody) -> Option<NodeId> {
+fn direct_scalar_ffi_callees(body: &ResolvedBody) -> Option<Vec<NodeId>> {
     let non_contract_statements = body
         .root
         .statements
@@ -82,13 +84,31 @@ fn direct_scalar_ffi_callee(body: &ResolvedBody) -> Option<NodeId> {
         ) => Some(expression),
         _ => None,
     }?;
-    let ResolvedExprKind::Call(call) = &expression.kind else {
-        return None;
-    };
-    let ResolvedCallee::Extern(callee) = &call.callee else {
-        return None;
-    };
-    Some(callee.clone())
+    fn collect(expression: &ResolvedExpr, callees: &mut Vec<NodeId>) -> bool {
+        match &expression.kind {
+            ResolvedExprKind::Call(call) => {
+                let ResolvedCallee::Extern(callee) = &call.callee else {
+                    return false;
+                };
+                callees.push(callee.clone());
+                // A nested call in an extern argument would not be represented
+                // by this direct expression shape; the global call-site count
+                // check below rejects that mismatch before admission.
+                true
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                collect(left, callees) && collect(right, callees)
+            }
+            ResolvedExprKind::Unary { operand, .. } => collect(operand, callees),
+            ResolvedExprKind::Literal(_) | ResolvedExprKind::Load(_) => true,
+            _ => false,
+        }
+    }
+
+    let mut callees = Vec::new();
+    collect(expression, &mut callees)
+        .then_some(callees)
+        .filter(|callees| !callees.is_empty())
 }
 
 /// Exact admission predicate for the canonical scalar FFI verifier profile.
@@ -100,12 +120,30 @@ pub fn contains_scalar_ffi_contract_candidate(program: &CheckedProgram) -> bool 
         .values()
         .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
         .collect::<Vec<_>>();
-    let direct_extern_callee = extern_sites.first().and_then(|site| {
-        program
-            .resolved_body(&NodeId(site.owner.clone()))
-            .and_then(direct_scalar_ffi_callee)
-    });
-    let has_requires = direct_extern_callee.as_ref().is_some_and(|callee| {
+    if extern_sites.is_empty() {
+        return false;
+    }
+    let owners = extern_sites
+        .iter()
+        .map(|site| site.owner.clone())
+        .collect::<BTreeSet<_>>();
+    let direct_callees = owners
+        .iter()
+        .map(|owner| {
+            program
+                .resolved_body(&NodeId(owner.clone()))
+                .and_then(direct_scalar_ffi_callees)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(direct_callees) = direct_callees else {
+        return false;
+    };
+    let direct_callee_count = direct_callees.iter().map(Vec::len).sum::<usize>();
+    if direct_callee_count != extern_sites.len() {
+        return false;
+    }
+    let all_callees = direct_callees.into_iter().flatten().collect::<Vec<_>>();
+    let has_requires = all_callees.iter().all(|callee| {
         program.extern_blocks().values().any(|block| {
             block.signatures.iter().any(|signature| {
                 signature.node_id == *callee
@@ -119,7 +157,7 @@ pub fn contains_scalar_ffi_contract_candidate(program: &CheckedProgram) -> bool 
             })
         })
     });
-    if extern_sites.len() != 1 || !has_requires {
+    if !has_requires {
         return false;
     }
     if program.callables().values().any(|callable| {

@@ -738,19 +738,20 @@ extern "C" {
     func write(fd: i64, buf: i64, size: i64) -> i64
         requires: fd >= 0;
 }
-func ok_caller(fd: i64) -> i64 {
+func ok_caller(fd: i64) -> bool {
     requires: fd >= 0
-    read(fd, 0, 1) + write(fd, 0, 1)
+    read(fd, 0, 1) == write(fd, 0, 1)
 }
-func bad_caller(fd: i64) -> i64 {
-    read(fd, 0, 1) + write(fd, 0, 1)
+func bad_caller(fd: i64) -> bool {
+    read(fd, 0, 1) == write(fd, 0, 1)
 }
 "#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = verify_ffi_source(src).expect("src/verifier/tests.rs:476 unwrap failed");
     assert_eq!(results.len(), 4);
     let ok_results: Vec<_> = results
         .iter()
-        .filter(|r| r.func_name.starts_with("ok_caller"))
+        .filter(|r| r.func_name.ends_with("ok_caller"))
         .collect();
     assert_eq!(ok_results.len(), 2);
     assert!(
@@ -760,13 +761,25 @@ func bad_caller(fd: i64) -> i64 {
     );
     let bad_results: Vec<_> = results
         .iter()
-        .filter(|r| r.func_name.starts_with("bad_caller"))
+        .filter(|r| r.func_name.ends_with("bad_caller"))
         .collect();
     assert_eq!(bad_results.len(), 2);
     assert!(
         bad_results.iter().any(|r| r.status == VerifStatus::Failed),
         "bad_caller should have at least one failure: {:?}",
         bad_results
+    );
+    assert!(
+        results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            })
+        }),
+        "all direct scalar multi-FFI results must be MIR artifacts: {results:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "direct scalar multi-FFI verification must not enter the retained AST verifier"
     );
 }
 
