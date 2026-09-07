@@ -6364,6 +6364,12 @@ fn canonical_mir_m1_m3_cli_acceptance_has_real_proofs_and_business_observations(
             "invalid amount\ncredit\n",
             "1/1 verified",
         ),
+        (
+            "mir_m3_flow_multifield_string_source_receipt.mimi",
+            Some(0),
+            "source\n",
+            "1/1 verified",
+        ),
     ];
 
     for (fixture_name, expected_exit, expected_stdout, expected_summary) in cases {
