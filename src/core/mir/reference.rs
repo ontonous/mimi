@@ -3192,11 +3192,17 @@ fn validate_recoverable_failure_consumption(
                 {
                     continue;
                 }
-                let Some(binding) = arm
-                    .bindings
-                    .iter()
-                    .find(|binding| binding.projection.field_ty == failure_ty)
-                else {
+                let Some(binding) = arm.bindings.iter().find(|binding| {
+                    if let Some(nested) = &binding.nested_tuple {
+                        function
+                            .values
+                            .get(&binding.parameter)
+                            .is_some_and(|value| value.ty == contract.source)
+                            && nested.element_ty == contract.source
+                    } else {
+                        binding.projection.field_ty == failure_ty
+                    }
+                }) else {
                     // An unbound Err payload is released by the canonical
                     // variant drop plan. There is no caller-visible source
                     // residual to follow in that shape.

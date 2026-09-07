@@ -490,8 +490,8 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
     );
     let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
     assert!(mir_stdout.contains("RecoverableBoundary"));
-    assert!(mir_stdout.contains("project.read_path"));
-    assert!(mir_stdout.contains("ReadPath"));
+    assert!(mir_stdout.contains("nested=Some"));
+    assert!(mir_stdout.contains("switch_move"));
     assert!(mir_stdout.contains("drop.0"));
 
     for args in [vec!["verify"], vec!["verify", "--mir"]] {

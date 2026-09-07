@@ -10,13 +10,19 @@ use crate::core::ir::{
     ResolvedPatternKind, ResolvedProjection, ResolvedStmtKind, ResolvedType,
     ResolvedValueProjection,
 };
-use crate::core::{CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, TransitionId};
+use crate::core::{
+    CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResolvedPattern, ResolvedStmt,
+    TransitionId,
+};
 
 /// Whether the checked program is one of the deliberately narrow recoverable
 /// Flow profiles. M3 is the single-state retry profile; F2 is the cross-state
 /// `Result<state, (source, error)>` match profile. The predicate is only
 /// admission; the canonical MIR graph and all consumer gates still prove the
-/// concrete Result/source-transfer contract.
+/// concrete Result/source-transfer contract. The failure arm may either bind
+/// the complete tuple and use a checked read projection, or destructure it
+/// into direct source/error bindings; both forms retain one nested Move
+/// receipt for the complete failure payload.
 pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
     if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
         return false;
@@ -510,14 +516,12 @@ fn exact_cross_state_failure_match_main(
                 let [(field, payload)] = fields.as_slice() else {
                     return false;
                 };
-                let ResolvedPatternKind::Binding {
-                    local,
-                    by_reference: None,
-                } = &payload.kind
-                else {
-                    return false;
-                };
-                if field.0.is_empty() || !exact_failure_match_arm(&arm.body, local) {
+                if field.0.is_empty()
+                    || (!matches!(&payload.kind, ResolvedPatternKind::Binding { .. })
+                        && !matches!(&payload.kind, ResolvedPatternKind::Tuple(_)))
+                    || (!exact_failure_match_arm(&arm.body, payload)
+                        && !exact_destructured_failure_match_arm(&arm.body, payload))
+                {
                     return false;
                 }
                 saw_err = true;
@@ -528,7 +532,21 @@ fn exact_cross_state_failure_match_main(
     saw_ok && saw_err
 }
 
-fn exact_failure_match_arm(expression: &ResolvedExpr, error_local: &ResolvedLocalId) -> bool {
+fn exact_failure_match_arm(expression: &ResolvedExpr, payload: &ResolvedPattern) -> bool {
+    let ResolvedPatternKind::Binding {
+        local,
+        by_reference: None,
+    } = &payload.kind
+    else {
+        return false;
+    };
+    exact_failure_match_arm_for_local(expression, &local)
+}
+
+fn exact_failure_match_arm_for_local(
+    expression: &ResolvedExpr,
+    error_local: &ResolvedLocalId,
+) -> bool {
     let ResolvedExprKind::Block(block) = &expression.kind else {
         return false;
     };
@@ -571,6 +589,75 @@ fn exact_failure_match_arm(expression: &ResolvedExpr, error_local: &ResolvedLoca
         block.result.as_deref().map(|result| &result.kind),
         Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(0)))
     )
+}
+
+fn exact_destructured_failure_match_arm(
+    expression: &ResolvedExpr,
+    payload: &ResolvedPattern,
+) -> bool {
+    let ResolvedPatternKind::Tuple(elements) = &payload.kind else {
+        return false;
+    };
+    let [source, error] = elements.as_slice() else {
+        return false;
+    };
+    let ResolvedPatternKind::Binding {
+        local: source_local,
+        by_reference: None,
+    } = &source.kind
+    else {
+        return false;
+    };
+    let ResolvedPatternKind::Binding {
+        local: error_local,
+        by_reference: None,
+    } = &error.kind
+    else {
+        return false;
+    };
+    let ResolvedExprKind::Block(block) = &expression.kind else {
+        return false;
+    };
+    let [print_statement, drop_source, drop_error] = block.statements.as_slice() else {
+        return false;
+    };
+    let ResolvedStmtKind::Expr(ResolvedExpr {
+        kind: ResolvedExprKind::Call(print_call),
+        ..
+    }) = &print_statement.kind
+    else {
+        return false;
+    };
+    if !matches!(&print_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "println")
+        || !print_call.type_arguments.is_empty()
+        || !print_call.session.is_empty()
+        || print_call.arguments.len() != 1
+    {
+        return false;
+    }
+    let ResolvedExprKind::Load(crate::core::ir::ResolvedPlace { base, projections }) =
+        &print_call.arguments[0].value.kind
+    else {
+        return false;
+    };
+    if base != source_local
+        || projections.len() != 1
+        || !matches!(projections[0], ResolvedProjection::Field { .. })
+    {
+        return false;
+    }
+    let is_drop = |statement: &ResolvedStmt, local: &ResolvedLocalId| {
+        matches!(&statement.kind, ResolvedStmtKind::Drop(places)
+            if places.len() == 1
+                && places[0].base == *local
+                && places[0].projections.is_empty())
+    };
+    is_drop(drop_source, source_local)
+        && is_drop(drop_error, error_local)
+        && matches!(
+            block.result.as_deref().map(|result| &result.kind),
+            Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(0)))
+        )
 }
 
 fn executable_statements(

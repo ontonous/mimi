@@ -1277,16 +1277,21 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(read_paths.len(), 1);
-        assert_eq!(read_paths[0].steps.len(), 2);
-        assert!(matches!(
-            read_paths[0].steps[0].projection,
-            crate::core::mir::types::MirReadProjectionKind::Tuple(0)
-        ));
-        assert!(matches!(
-            read_paths[0].steps[1].projection,
-            crate::core::mir::types::MirReadProjectionKind::Field(_)
-        ));
+        assert!(
+            read_paths.is_empty(),
+            "nested source binding must not synthesize a read path"
+        );
+        let nested_receipts = main
+            .blocks
+            .values()
+            .flat_map(|block| match &block.terminator {
+                crate::core::mir::MirTerminator::SwitchMove { arms, .. } => arms.as_slice(),
+                _ => &[] as &[crate::core::mir::MirSwitchArm],
+            })
+            .flat_map(|arm| arm.bindings.iter())
+            .filter(|binding| binding.nested_tuple.is_some())
+            .count();
+        assert_eq!(nested_receipts, 2);
         assert!(main.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
                 matches!(

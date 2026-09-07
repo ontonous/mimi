@@ -440,13 +440,20 @@ fn is_direct_nested_tuple_match(arms: &[MatchArm]) -> bool {
 pub fn contains_option_nested_tuple_variant_candidate(program: &MirProgram) -> bool {
     program.functions().values().any(|function| {
         function.blocks.values().any(|block| {
-            matches!(
-                &block.terminator,
-                MirTerminator::SwitchMove { arms, .. }
-                    if arms.iter().any(|arm| {
-                        arm.bindings.iter().any(|binding| binding.nested_tuple.is_some())
+            let MirTerminator::SwitchMove { scrutinee, arms } = &block.terminator else {
+                return false;
+            };
+            function.values.get(scrutinee).is_some_and(|value| {
+                program
+                    .type_catalog()
+                    .get(&value.ty)
+                    .is_some_and(|descriptor| descriptor.kind == super::types::MirTypeKind::Option)
+                    && arms.iter().any(|arm| {
+                        arm.bindings
+                            .iter()
+                            .any(|binding| binding.nested_tuple.is_some())
                     })
-            )
+            })
         })
     })
 }
@@ -475,7 +482,11 @@ pub fn validate_option_nested_tuple_variant_island(
                     .iter()
                     .any(|binding| binding.nested_tuple.is_some())
             });
-            if has_nested {
+            let is_option = program
+                .type_catalog()
+                .get(&scrutinee_value.ty)
+                .is_some_and(|descriptor| descriptor.kind == super::types::MirTypeKind::Option);
+            if has_nested && is_option {
                 saw_nested = true;
                 if let Err(error) = program
                     .type_catalog()
@@ -489,7 +500,7 @@ pub fn validate_option_nested_tuple_variant_island(
                 {
                     errors.insert(error);
                 }
-            } else if program
+            } else if !has_nested && program
                 .type_catalog()
                 .get(&scrutinee_value.ty)
                 .is_some_and(|descriptor| {

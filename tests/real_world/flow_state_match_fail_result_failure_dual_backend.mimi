@@ -25,8 +25,9 @@ func main() -> i32 {
             println(n)
             99
         },
-        Err(error) => {
-            println(error.0.n)
+        Err((source, error)) => {
+            println(source.n)
+            drop(source)
             drop(error)
             0
         },

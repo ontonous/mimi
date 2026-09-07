@@ -9034,6 +9034,64 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the outer failure Result used by a recoverable Flow boundary.
+    /// This is stricter than the reusable aggregate Result envelope above:
+    /// its Err payload must be the two-field `(source_state, error)` product,
+    /// and the first field must carry a checker-owned Flow-state identity.
+    /// Inner `Result<T, E>` values used by `?` deliberately use the broader
+    /// envelope and do not inherit the nested source/error binding receipt.
+    pub fn validate_recoverable_source_result_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        self.validate_recoverable_result_variant(ty)?;
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        let MirLayout::Result { error, .. } = &descriptor.layout else {
+            return Err("recoverable Flow source Result has no Result layout".into());
+        };
+        let error_desc = self.get(error).ok_or_else(|| {
+            format!(
+                "recoverable Flow source Result error type '{}' is absent from MIR type catalog",
+                error.as_str()
+            )
+        })?;
+        let MirLayout::Tuple(fields) = &error_desc.layout else {
+            return Err(
+                "recoverable Flow source Result Err payload must be a canonical (source, error) tuple"
+                    .into(),
+            );
+        };
+        if fields.len() != 2 {
+            return Err(format!(
+                "recoverable Flow source Result Err payload requires exactly two fields, got {}",
+                fields.len()
+            ));
+        }
+        let source_desc = self.get(&fields[0]).ok_or_else(|| {
+            format!(
+                "recoverable Flow source Result source type '{}' is absent from MIR type catalog",
+                fields[0].as_str()
+            )
+        })?;
+        let MirLayout::Record { nominal, .. } = &source_desc.layout else {
+            return Err(
+                "recoverable Flow source Result first Err field must be a canonical Flow-state record"
+                    .into(),
+            );
+        };
+        if !nominal.as_str().starts_with("state:") {
+            return Err(format!(
+                "recoverable Flow source Result first Err field '{}' is not a Flow-state identity",
+                nominal.as_str()
+            ));
+        }
+        self.validate_aggregate_glue(error, MirGlueOperation::MoveOut)?;
+        self.validate_aggregate_glue(error, MirGlueOperation::Drop)?;
+        Ok(())
+    }
+
     /// Return the canonical active/inactive variant descriptors for the
     /// materialized non-Copy Option<string> ABI.  The validator above proves
     /// the complete recursive MoveOut/Clone/Drop contract and exact
@@ -9299,6 +9357,9 @@ impl MirTypeCatalog {
     /// `Variant { payload: (field0, field1, ...) }`. The outer variant field
     /// is moved once and the nested tuple receipt proves that the arm binds
     /// tuple elements rather than independently cloning a non-Copy payload.
+    /// The receipt is shared by the bounded non-Copy `Option` island and the
+    /// recoverable Flow `Result<state, (source, error)>` island. A plain
+    /// managed Result still has to pass its own direct-call contract.
     pub fn validate_variant_nested_tuple_payload_projection_receipt(
         &self,
         scrutinee_ty: &ResolvedTypeId,
@@ -9307,12 +9368,18 @@ impl MirTypeCatalog {
         projection: &MirVariantProjectionContract,
         nested: &MirTupleProjectionContract,
     ) -> Result<(), String> {
-        if self
+        let is_option = self
             .get(scrutinee_ty)
-            .is_none_or(|descriptor| descriptor.kind != MirTypeKind::Option)
-        {
+            .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Option);
+        let is_recoverable_result = self
+            .get(scrutinee_ty)
+            .is_some_and(|descriptor| descriptor.kind == MirTypeKind::Result)
+            && self
+                .validate_recoverable_source_result_variant(scrutinee_ty)
+                .is_ok();
+        if !is_option && !is_recoverable_result {
             return Err(
-                "nested consuming tuple payload binding is currently restricted to canonical Option variants"
+                "nested consuming tuple payload binding requires canonical Option or recoverable Flow Result variants"
                     .into(),
             );
         }
