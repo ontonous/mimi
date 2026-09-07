@@ -95,6 +95,7 @@ fn materializes_session_open_as_canonical_builtin_with_backend_neutral_oracle() 
                 result,
                 kind: crate::core::mir::types::MirBuiltinKind::SessionOpen,
                 arguments,
+                ..
             } => Some((result.clone(), arguments.len())),
             _ => None,
         })
@@ -191,6 +192,7 @@ fn materializes_plain_session_pair_as_copy_tuple_for_all_consumers() {
                 result,
                 kind: crate::core::mir::types::MirBuiltinKind::SessionPair,
                 arguments,
+                ..
             } => {
                 assert!(arguments.is_empty(), "session_pair has no value arguments");
                 Some(result.clone())

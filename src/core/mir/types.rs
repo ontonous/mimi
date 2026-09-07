@@ -856,6 +856,31 @@ pub struct MirRecordProjectionContract {
     pub field_ty: ResolvedTypeId,
 }
 
+/// Backend-independent receipt for observing one managed String field through
+/// a borrowed `println` call. The record remains owned by its caller; the
+/// selected String bytes are read for output and no record field is moved or
+/// dropped by the builtin. The source TypeDesc and full record projection
+/// identity travel together so consumers cannot recover the field from a
+/// native aggregate or VM record map.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirStringFieldBorrowContract {
+    pub source_ty: ResolvedTypeId,
+    pub projection: MirRecordProjectionContract,
+}
+
+/// Checker-owned receipt for a non-recoverable Flow transition whose effect
+/// crosses the local transition island. The receipt repeats the complete
+/// call-side TypeDesc shape so a backend cannot turn a Boundary transition
+/// into an implicit local call or infer its source/result from a physical ABI.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirFlowEffectReceipt {
+    pub transition: NodeId,
+    pub source: ResolvedTypeId,
+    pub parameters: Vec<ResolvedTypeId>,
+    pub result: ResolvedTypeId,
+    pub target: ResolvedTypeId,
+}
+
 /// Backend-independent receipt for one bounded Copy-record update.  The base
 /// and result must be the same checker-owned nominal Record TypeDesc; each
 /// explicit override carries its stable field identity, declaration-order
@@ -6139,6 +6164,69 @@ impl MirTypeCatalog {
             arity: fields.len(),
             field_ty: field.ty.clone(),
         })
+    }
+
+    /// Materialize the borrowed managed-String field receipt used by the
+    /// canonical `println` observation shape. The source record is retained
+    /// by the caller, so the selected field must be the complete owned String
+    /// contract rather than a Copy projection or a move-owned field.
+    pub fn validated_string_field_borrow_contract(
+        &self,
+        source_ty: &ResolvedTypeId,
+        field_id: &NodeId,
+    ) -> Result<MirStringFieldBorrowContract, String> {
+        let descriptor = self.get(source_ty).ok_or_else(|| {
+            format!(
+                "String-field borrow source type '{}' is absent from MIR type catalog",
+                source_ty.as_str()
+            )
+        })?;
+        let MirLayout::Record { fields, .. } = &descriptor.layout else {
+            return Err(format!(
+                "String-field borrow source '{}' has no canonical record layout",
+                source_ty.as_str()
+            ));
+        };
+        let field_ty = fields
+            .iter()
+            .find(|field| field.id == *field_id)
+            .map(|field| field.ty.clone())
+            .ok_or_else(|| {
+                format!(
+                    "String-field borrow field '{}' is absent from source record",
+                    field_id.0
+                )
+            })?;
+        self.validate_owned_string(&field_ty).map_err(|message| {
+            format!(
+                "String-field borrow selected field '{}' is not an owned String: {message}",
+                field_id.0
+            )
+        })?;
+        let projection =
+            self.validated_record_field_projection_contract(source_ty, field_id, &field_ty)?;
+        Ok(MirStringFieldBorrowContract {
+            source_ty: source_ty.clone(),
+            projection,
+        })
+    }
+
+    /// Validate a materialized borrowed String-field receipt against the
+    /// checker-owned record and String TypeDesc identities.
+    pub fn validate_string_field_borrow_receipt(
+        &self,
+        source_ty: &ResolvedTypeId,
+        receipt: &MirStringFieldBorrowContract,
+    ) -> Result<(), String> {
+        if receipt.source_ty != *source_ty {
+            return Err("String-field borrow receipt disagrees with source TypeDesc".into());
+        }
+        let expected =
+            self.validated_string_field_borrow_contract(source_ty, &receipt.projection.field)?;
+        if receipt != &expected {
+            return Err("String-field borrow receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
     }
 
     /// Build the non-executable placeholder receipt for the generic record

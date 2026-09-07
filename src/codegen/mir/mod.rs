@@ -741,8 +741,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 kind,
                 arguments,
+                string_field_contract,
             } => {
-                let value = self.emit_builtin(result, *kind, arguments, subject)?;
+                let value = self.emit_builtin(
+                    result,
+                    *kind,
+                    arguments,
+                    string_field_contract.as_ref(),
+                    subject,
+                )?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::SessionCall {
@@ -797,8 +804,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 result,
                 transition,
                 arguments,
+                effect_receipt,
             } => {
-                self.emit_flow_transition(result, transition, arguments, subject)?;
+                self.emit_flow_transition(
+                    result,
+                    transition,
+                    arguments,
+                    effect_receipt.as_ref(),
+                    subject,
+                )?;
             }
             MirInstructionKind::Nop => {}
             _ => {
@@ -1149,15 +1163,18 @@ mod tests {
 
         let owner = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&program)
-            .execute(&owner, &[])
+            .execute_with_output(&owner, &[])
             .expect("reference recoverable Flow execution");
-        assert_eq!(reference, MirRuntimeValue::Int(0));
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "100\n95\n");
 
-        let bytecode =
-            BytecodeVM::new(compile_mir_program(&program).expect("recoverable Flow MIR bytecode"))
-                .run_value()
-                .expect("bytecode recoverable Flow execution");
-        assert!(matches!(bytecode, Value::Int(0)));
+        let mut bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("recoverable Flow MIR bytecode"));
+        let bytecode_value = bytecode
+            .run_value()
+            .expect("bytecode recoverable Flow execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), reference.output);
 
         crate::verifier::validate_mir_capabilities(&program)
             .expect("verifier capability for recoverable Flow");
@@ -1485,6 +1502,163 @@ mod tests {
         assert_eq!(native.stdout, "2\n");
         assert_eq!(native.stderr, "");
         assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn boundary_flow_effect_receipt_preserves_order_state_across_three_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/flow_order_system.mimi"
+        ));
+        let ship = crate::core::NodeId("transition:Order::ship::Paid".into());
+        let deliver = crate::core::NodeId("transition:Order::deliver::Shipped".into());
+        for transition in [&ship, &deliver] {
+            let contract = program
+                .transitions()
+                .get(transition)
+                .expect("boundary transition contract");
+            assert_eq!(
+                contract.effect,
+                crate::core::mir::MirTransitionEffect::Boundary
+            );
+            assert_eq!(contract.targets.len(), 1);
+        }
+        let main = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("order main MIR");
+        let receipts = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::FlowTransition {
+                    transition,
+                    effect_receipt: Some(receipt),
+                    ..
+                } if transition == &ship || transition == &deliver => Some(receipt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 2, "both cross-state calls need receipts");
+        assert!(receipts
+            .iter()
+            .all(|receipt| { receipt.transition == ship || receipt.transition == deliver }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference order Flow execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(
+            reference.output,
+            "TXN-42\nTRK-001\nbook\ninvalid price\n0\n"
+        );
+
+        let mut bytecode =
+            BytecodeVM::new(compile_mir_program(&program).expect("order Flow MIR bytecode"));
+        let bytecode_value = bytecode.run_value().expect("bytecode order Flow execution");
+        assert!(matches!(bytecode_value, Value::Int(0)));
+        assert_eq!(bytecode.take_stdout(), reference.output);
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for Boundary Flow receipt");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_boundary_flow_order_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native order Flow lowering");
+        generator
+            .module
+            .verify()
+            .expect("native order Flow module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native order Flow execution");
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn boundary_flow_effect_receipt_missing_or_forged_is_rejected_before_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/flow_order_system.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let transition = crate::core::NodeId("transition:Order::ship::Paid".into());
+
+        let mut missing = program.functions().clone();
+        let instruction = missing
+            .get_mut(&owner)
+            .expect("order main")
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::FlowTransition {
+                        transition: ref actual,
+                        ..
+                    } if actual == &transition
+                )
+            })
+            .expect("ship FlowTransition");
+        let MirInstructionKind::FlowTransition { effect_receipt, .. } = &mut instruction.kind
+        else {
+            unreachable!();
+        };
+        *effect_receipt = None;
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions(
+            missing,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("missing Boundary receipt must fail before consumers");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("Boundary transition without an effect receipt")
+        }));
+
+        let mut forged = program.functions().clone();
+        let instruction = forged
+            .get_mut(&owner)
+            .expect("order main")
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::FlowTransition {
+                        transition: ref actual,
+                        ..
+                    } if actual == &transition
+                )
+            })
+            .expect("ship FlowTransition");
+        let MirInstructionKind::FlowTransition {
+            effect_receipt: Some(receipt),
+            ..
+        } = &mut instruction.kind
+        else {
+            unreachable!();
+        };
+        receipt.parameters.clear();
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions(
+            forged,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+        )
+        .expect_err("forged Boundary receipt must fail before consumers");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("Flow Boundary effect receipt parameter TypeDesc identities disagree")
+        }));
     }
 
     #[test]
@@ -7277,6 +7451,24 @@ mod tests {
         let owner = crate::core::NodeId("function:main".into());
         let main = program.functions().get(&owner).expect("main MIR");
         assert!(main.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::BuiltinCall {
+                        kind: MirBuiltinKind::PrintlnString,
+                        string_field_contract: Some(_),
+                        ..
+                    }
+                )
+            })
+        }));
+        let transition = program
+            .functions()
+            .get(&crate::core::NodeId(
+                "transition:Account::close::Active".into(),
+            ))
+            .expect("close transition MIR");
+        assert!(transition.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
                 matches!(instruction.kind, MirInstructionKind::MoveProjectDrop { .. })
             })

@@ -731,12 +731,14 @@ impl<'a> FunctionEmitter<'a> {
                 result,
                 transition,
                 arguments,
-            } => self.emit_flow_transition(result, transition, arguments),
+                effect_receipt,
+            } => self.emit_flow_transition(result, transition, arguments, effect_receipt.as_ref()),
             MirInstructionKind::BuiltinCall {
                 result,
                 kind,
                 arguments,
-            } => self.emit_builtin_call(result, *kind, arguments),
+                string_field_contract,
+            } => self.emit_builtin_call(result, *kind, arguments, string_field_contract.as_ref()),
             MirInstructionKind::SessionCall {
                 result,
                 operation,
@@ -763,6 +765,7 @@ impl<'a> FunctionEmitter<'a> {
         result: &MirValueId,
         kind: crate::core::mir::types::MirBuiltinKind,
         arguments: &[MirValueId],
+        string_field_contract: Option<&crate::core::mir::types::MirStringFieldBorrowContract>,
     ) {
         let contract = crate::core::mir::types::MirBuiltinContract::for_kind(kind);
         if arguments.len() != contract.arity {
@@ -772,6 +775,69 @@ impl<'a> FunctionEmitter<'a> {
                 arguments.len(),
                 contract.arity
             ));
+            return;
+        }
+        if let Some(receipt) = string_field_contract {
+            if kind != crate::core::mir::types::MirBuiltinKind::PrintlnString
+                || arguments.len() != 1
+            {
+                self.error("borrowed String-field receipt has an invalid println shape");
+                return;
+            }
+            let Some(source_info) = self.function.values.get(&arguments[0]) else {
+                self.error("borrowed String-field source is absent from MIR values");
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_string_field_borrow_receipt(&source_info.ty, receipt)
+            {
+                self.error(format!(
+                    "borrowed String-field receipt is unsupported: {message}"
+                ));
+                return;
+            }
+            if let Err(message) = self.supported_type_for_value(result) {
+                self.error(format!(
+                    "builtin result '{}' is unsupported: {message}",
+                    result
+                ));
+                return;
+            }
+            let Some(source_reg) = self.reg(&arguments[0]) else {
+                return;
+            };
+            let field = self
+                .proto
+                .add_const(ConstValue::Str(receipt.projection.name.clone()));
+            let Some(contract) = self.add_record_projection_contract(&receipt.projection) else {
+                return;
+            };
+            let field_reg = self.proto.alloc_reg();
+            self.proto.emit(Op::RecordGet {
+                rd: field_reg,
+                ra: source_reg,
+                field,
+                contract: Some(contract),
+            });
+            let Some(rd) = self.reg(result) else { return };
+            let args_base = self.proto.alloc_reg();
+            self.proto.emit(Op::Mov {
+                rd: args_base,
+                rs: field_reg,
+            });
+            let registry = super::registry::create_registry();
+            let Some(builtin) = registry.lookup("println") else {
+                self.error("builtin 'println' has no bytecode registry implementation");
+                return;
+            };
+            self.proto.emit(Op::CallBuiltin {
+                rd,
+                builtin,
+                args_base,
+                argc: 1,
+            });
             return;
         }
         for value in arguments.iter().chain(std::iter::once(result)) {
@@ -1688,6 +1754,7 @@ impl<'a> FunctionEmitter<'a> {
         result: &MirValueId,
         transition: &NodeId,
         arguments: &[MirValueId],
+        effect_receipt: Option<&crate::core::mir::types::MirFlowEffectReceipt>,
     ) {
         let Some(contract) = self.program.transitions().get(transition) else {
             self.error(format!(
@@ -1697,7 +1764,12 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         let recoverable = contract.effect.is_recoverable();
-        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
+        if (!recoverable
+            && !matches!(
+                contract.effect,
+                crate::core::mir::MirTransitionEffect::SilentLocal
+                    | crate::core::mir::MirTransitionEffect::Boundary
+            ))
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
@@ -1708,6 +1780,35 @@ impl<'a> FunctionEmitter<'a> {
                 "flow transition '{}' is outside the bytecode production contract",
                 transition.0
             ));
+            return;
+        }
+        let argument_types = arguments
+            .iter()
+            .filter_map(|argument| {
+                self.function
+                    .values
+                    .get(argument)
+                    .map(|value| value.ty.clone())
+            })
+            .collect::<Vec<_>>();
+        if argument_types.len() != arguments.len() {
+            self.error("FlowTransition argument is absent from the MIR value catalog");
+            return;
+        }
+        let result_ty = self
+            .function
+            .values
+            .get(result)
+            .map(|value| value.ty.clone())
+            .unwrap_or_else(|| contract.result.clone());
+        if let Err(message) = crate::core::mir::validate_flow_effect_receipt(
+            transition,
+            contract,
+            &argument_types,
+            &result_ty,
+            effect_receipt,
+        ) {
+            self.error(message);
             return;
         }
         let Some(&func) = self.indices.get(&contract.owner) else {

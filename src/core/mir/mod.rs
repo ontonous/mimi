@@ -541,6 +541,46 @@ impl MirTransitionEffect {
     }
 }
 
+/// Validate the complete identity carried by a Flow Boundary effect receipt.
+/// This is shared by MIR admission and all four consumers so a receipt cannot
+/// become a backend-local permission to call an otherwise unsupported target.
+pub(crate) fn validate_flow_effect_receipt(
+    transition: &NodeId,
+    contract: &MirTransitionContract,
+    argument_types: &[ResolvedTypeId],
+    result_ty: &ResolvedTypeId,
+    receipt: Option<&types::MirFlowEffectReceipt>,
+) -> Result<(), String> {
+    match (contract.effect, receipt) {
+        (MirTransitionEffect::Boundary, Some(receipt)) => {
+            if receipt.transition != *transition {
+                return Err(
+                    "Flow Boundary effect receipt transition identity disagrees with instruction"
+                        .into(),
+                );
+            }
+            if receipt.source != contract.source {
+                return Err("Flow Boundary effect receipt source TypeDesc disagrees with transition contract".into());
+            }
+            if receipt.parameters != argument_types || receipt.parameters != contract.parameters {
+                return Err("Flow Boundary effect receipt parameter TypeDesc identities disagree with transition contract".into());
+            }
+            if receipt.result != *result_ty || receipt.result != contract.result {
+                return Err("Flow Boundary effect receipt result TypeDesc disagrees with transition contract".into());
+            }
+            if contract.targets.len() != 1 || receipt.target != contract.targets[0] {
+                return Err("Flow Boundary effect receipt target identity disagrees with transition contract".into());
+            }
+            Ok(())
+        }
+        (MirTransitionEffect::Boundary, None) => {
+            Err("Boundary effect requires an explicit canonical effect receipt".into())
+        }
+        (_, Some(_)) => Err("Flow effect receipt is attached to a non-Boundary transition".into()),
+        (_, None) => Ok(()),
+    }
+}
+
 /// Checker-owned ABI/ownership/effect contract for a Flow transition.
 /// `parameters` includes the consumed source state as its first entry.  The
 /// transition instruction refers to `owner` rather than re-encoding a surface
@@ -914,6 +954,11 @@ pub enum MirInstructionKind {
         result: MirValueId,
         transition: NodeId,
         arguments: Vec<MirValueId>,
+        /// Explicit checker-owned effect receipt for a non-recoverable
+        /// cross-state Boundary transition. Silent and recoverable
+        /// transitions have their own contracts and must not carry this
+        /// receipt.
+        effect_receipt: Option<types::MirFlowEffectReceipt>,
     },
     /// A builtin whose ABI, trap behavior, and ownership boundary have been
     /// fully materialized in the canonical MIR contract. Surface builtin
@@ -922,6 +967,11 @@ pub enum MirInstructionKind {
         result: MirValueId,
         kind: types::MirBuiltinKind,
         arguments: Vec<MirValueId>,
+        /// Optional borrowed String-field receipt for `println`. When
+        /// present, the single argument is the owning record rather than the
+        /// selected String value; consumers read the field without consuming
+        /// the record so a later Flow transition can reuse the state.
+        string_field_contract: Option<types::MirStringFieldBorrowContract>,
     },
     /// Consume a checker-resolved SessionChan endpoint through an explicit
     /// residual/effect receipt. Session payloads are present only when the
@@ -2068,8 +2118,14 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                     moves.extend(arguments.iter().cloned());
                     transfers.extend(arguments.iter().cloned());
                 }
-                MirInstructionKind::BuiltinCall { arguments, .. } => {
-                    moves.extend(arguments.iter().cloned());
+                MirInstructionKind::BuiltinCall {
+                    arguments,
+                    string_field_contract,
+                    ..
+                } => {
+                    if string_field_contract.is_none() {
+                        moves.extend(arguments.iter().cloned());
+                    }
                 }
                 MirInstructionKind::SessionCall {
                     endpoint,
@@ -2230,7 +2286,10 @@ pub(crate) fn validate_transfer_event_boundaries(
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum BoundaryKind<'a> {
         Call(&'a [types::MirCallEffectContract]),
-        Flow(Option<MirTransitionEffect>),
+        Flow {
+            effect: Option<MirTransitionEffect>,
+            receipt: Option<&'a types::MirFlowEffectReceipt>,
+        },
         Session(Option<&'a types::MirSessionCallContract>),
     }
 
@@ -2306,9 +2365,13 @@ pub(crate) fn validate_transfer_event_boundaries(
                 MirInstructionKind::FlowTransition {
                     transition,
                     arguments,
+                    effect_receipt,
                     ..
                 } => boundaries.push((
-                    BoundaryKind::Flow(transitions.get(transition).map(|contract| contract.effect)),
+                    BoundaryKind::Flow {
+                        effect: transitions.get(transition).map(|contract| contract.effect),
+                        receipt: effect_receipt.as_ref(),
+                    },
                     point,
                     arguments.as_slice(),
                 )),
@@ -2321,8 +2384,14 @@ pub(crate) fn validate_transfer_event_boundaries(
                     point,
                     arguments.as_slice(),
                 )),
-                MirInstructionKind::BuiltinCall { arguments, .. } => {
-                    boundaries.push((BoundaryKind::Call(&[]), point, arguments.as_slice()))
+                MirInstructionKind::BuiltinCall {
+                    arguments,
+                    string_field_contract,
+                    ..
+                } => {
+                    if string_field_contract.is_none() {
+                        boundaries.push((BoundaryKind::Call(&[]), point, arguments.as_slice()))
+                    }
                 }
                 MirInstructionKind::SessionCall {
                     endpoint, contract, ..
@@ -2437,8 +2506,8 @@ pub(crate) fn validate_transfer_event_boundaries(
                     });
                 }
             }
-            BoundaryKind::Flow(effect) => {
-                if matches!(effect, Some(MirTransitionEffect::Boundary)) {
+            BoundaryKind::Flow { effect, receipt } => {
+                if matches!(effect, Some(MirTransitionEffect::Boundary)) && receipt.is_none() {
                     errors.push(MirValidationError {
                         subject: format!("ownership[{index}]"),
                         message: format!(
@@ -2735,7 +2804,6 @@ fn instruction_consumes_owned_string(
         MirInstructionKind::VariantProjectMove { base: source, .. } => sources.push(source.clone()),
         MirInstructionKind::Call { arguments, .. }
         | MirInstructionKind::FlowTransition { arguments, .. }
-        | MirInstructionKind::BuiltinCall { arguments, .. }
         | MirInstructionKind::Construct {
             fields: arguments, ..
         }
@@ -2747,6 +2815,12 @@ fn instruction_consumes_owned_string(
             elements: arguments,
             ..
         } => sources.extend(arguments.iter().cloned()),
+        MirInstructionKind::BuiltinCall {
+            arguments,
+            string_field_contract,
+            ..
+        } if string_field_contract.is_none() => sources.extend(arguments.iter().cloned()),
+        MirInstructionKind::BuiltinCall { .. } => {}
         MirInstructionKind::SessionCall {
             endpoint, payload, ..
         } => {
@@ -3056,26 +3130,36 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             result,
             transition,
             arguments,
+            effect_receipt,
         } => format!(
-            "flow_transition {result} {}({})",
+            "flow_transition {result} {}({}){}",
             transition.0,
             arguments
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            effect_receipt
+                .as_ref()
+                .map(|receipt| format!(" [effect_receipt={receipt:?}]"))
+                .unwrap_or_default()
         ),
         MirInstructionKind::BuiltinCall {
             result,
             kind,
             arguments,
+            string_field_contract,
         } => format!(
-            "builtin_call {result} {kind:?}({})",
+            "builtin_call {result} {kind:?}({}){}",
             arguments
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            string_field_contract
+                .as_ref()
+                .map(|contract| format!(" [string_field_contract={contract:?}]"))
+                .unwrap_or_default()
         ),
         MirInstructionKind::SessionCall {
             result,

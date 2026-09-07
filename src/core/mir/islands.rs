@@ -3977,6 +3977,7 @@ impl<'a> ScalarCollectionValidator<'a> {
                 result,
                 kind,
                 arguments,
+                ..
             } => {
                 if !matches!(
                     kind,

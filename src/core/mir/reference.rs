@@ -137,6 +137,7 @@ impl MirProgram {
         .map_err(MirProgramBuildError::Lowering)?;
         let transitions = materialize_transition_contracts(program, &type_catalog, None)
             .map_err(MirProgramBuildError::Validation)?;
+        attach_flow_effect_receipts(&mut functions, &transitions);
         Self::with_type_catalog_and_instances_and_transitions(
             functions,
             type_catalog,
@@ -214,6 +215,7 @@ impl MirProgram {
         let transitions =
             materialize_transition_contracts(program, &type_catalog, Some(excluded_sources))
                 .map_err(MirProgramBuildError::Validation)?;
+        attach_flow_effect_receipts(&mut functions, &transitions);
         Self::with_type_catalog_and_instances_and_transitions(
             functions,
             type_catalog,
@@ -1423,6 +1425,7 @@ fn validate_builtin_calls(
                 result,
                 kind,
                 arguments,
+                string_field_contract,
             } = &instruction.kind
             else {
                 continue;
@@ -1438,6 +1441,59 @@ fn validate_builtin_calls(
                 });
                 continue;
             }
+            let borrowed_string_field = if let Some(receipt) = string_field_contract {
+                if *kind != super::types::MirBuiltinKind::PrintlnString {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: "String-field borrow receipt is attached to a non-String builtin"
+                            .into(),
+                    });
+                    false
+                } else {
+                    if arguments.len() != 1 {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message:
+                                "String-field borrow println requires exactly one record source"
+                                    .into(),
+                        });
+                    }
+                    let source_ok = arguments.first().and_then(|argument| {
+                        let Some(argument_value) = function.values.get(argument) else {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "String-field borrow source '{}' is absent from MIR values",
+                                    argument
+                                ),
+                            });
+                            return None;
+                        };
+                        if argument_value.ty != receipt.source_ty {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message:
+                                    "String-field borrow source disagrees with receipt TypeDesc"
+                                        .into(),
+                            });
+                            return None;
+                        }
+                        if let Err(message) = type_catalog
+                            .validate_string_field_borrow_receipt(&argument_value.ty, receipt)
+                        {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message,
+                            });
+                            return None;
+                        }
+                        Some(())
+                    });
+                    source_ok.is_some()
+                }
+            } else {
+                false
+            };
             if arguments.len() != contract.arity {
                 errors.push(super::MirValidationError {
                     subject: instruction.id.to_string(),
@@ -1486,46 +1542,47 @@ fn validate_builtin_calls(
                 continue;
             }
             let mut first_type = None;
-            for (index, argument) in arguments.iter().enumerate() {
-                let Some(argument_value) = function.values.get(argument) else {
-                    errors.push(super::MirValidationError {
-                        subject: instruction.id.to_string(),
-                        message: format!(
-                            "builtin argument {index} value '{}' is absent from MIR values",
-                            argument
-                        ),
-                    });
-                    continue;
-                };
-                if contract.requires_same_input_type {
-                    if let Some(first_type) = &first_type {
-                        if first_type != &argument_value.ty {
-                            errors.push(super::MirValidationError {
+            if !borrowed_string_field {
+                for (index, argument) in arguments.iter().enumerate() {
+                    let Some(argument_value) = function.values.get(argument) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "builtin argument {index} value '{}' is absent from MIR values",
+                                argument
+                            ),
+                        });
+                        continue;
+                    };
+                    if contract.requires_same_input_type {
+                        if let Some(first_type) = &first_type {
+                            if first_type != &argument_value.ty {
+                                errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
                                 message: format!(
                                     "builtin '{}' arguments must have the same ResolvedTypeId (argument {index} differs)",
                                     contract.name
                                 ),
                             });
+                            }
+                        } else {
+                            first_type = Some(argument_value.ty.clone());
                         }
-                    } else {
+                    } else if first_type.is_none() {
                         first_type = Some(argument_value.ty.clone());
                     }
-                } else if first_type.is_none() {
-                    first_type = Some(argument_value.ty.clone());
-                }
-                let Some(descriptor) = type_catalog.get(&argument_value.ty) else {
-                    errors.push(super::MirValidationError {
-                        subject: instruction.id.to_string(),
-                        message: format!(
-                            "builtin argument {index} type '{}' is absent from MIR TypeDesc",
-                            argument_value.ty.as_str()
-                        ),
-                    });
-                    continue;
-                };
-                if !contract.accepts_abi(descriptor.abi) {
-                    errors.push(super::MirValidationError {
+                    let Some(descriptor) = type_catalog.get(&argument_value.ty) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "builtin argument {index} type '{}' is absent from MIR TypeDesc",
+                                argument_value.ty.as_str()
+                            ),
+                        });
+                        continue;
+                    };
+                    if !contract.accepts_abi(descriptor.abi) {
+                        errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
                             "builtin '{}' does not support argument {index} ABI {:?}; canonical contract accepts {}",
@@ -1534,26 +1591,27 @@ fn validate_builtin_calls(
                             contract.accepted_abi_description()
                         ),
                     });
-                }
-                if !contract.accepts_layout(&descriptor.layout) {
-                    errors.push(super::MirValidationError {
+                    }
+                    if !contract.accepts_layout(&descriptor.layout) {
+                        errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
                             "builtin '{}' requires scalar TypeDesc layout for argument {index}, got {:?}",
                             contract.name, descriptor.layout
                         ),
                     });
-                }
-                if contract.requires_copy
-                    && descriptor.ownership != super::types::MirOwnership::Copy
-                {
-                    errors.push(super::MirValidationError {
+                    }
+                    if contract.requires_copy
+                        && descriptor.ownership != super::types::MirOwnership::Copy
+                    {
+                        errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
                         message: format!(
                             "builtin '{}' requires Copy arguments but argument {index} TypeDesc says {:?}",
                             contract.name, descriptor.ownership
                         ),
                     });
+                    }
                 }
             }
             if let (Some(result_value), Some(first_type)) = (result_value, first_type) {
@@ -2029,6 +2087,7 @@ fn validate_call_graph(
                     result,
                     transition,
                     arguments,
+                    effect_receipt,
                 } = &instruction.kind
                 {
                     validate_flow_transition_instruction(
@@ -2039,6 +2098,7 @@ fn validate_call_graph(
                         result,
                         transition,
                         arguments,
+                        effect_receipt.as_ref(),
                         &instruction.id.to_string(),
                         &mut errors,
                     );
@@ -2736,12 +2796,17 @@ fn validate_transition_contracts(
                 }
             }
             MirTransitionEffect::Boundary => {
-                errors.push(super::MirValidationError {
-                    subject,
-                    message:
-                        "transition boundary effect is outside the implemented canonical MIR island"
-                            .into(),
-                });
+                if contract.targets.len() != 1
+                    || contract.failure.is_some()
+                    || contract.is_fallback
+                    || contract.is_ffi_pinned
+                    || contract.targets.first() != Some(&contract.result)
+                {
+                    errors.push(super::MirValidationError {
+                        subject,
+                        message: "Boundary transition must be one-target, non-failing, non-fallback, non-pinned, and return that target state".into(),
+                    });
+                }
             }
         }
     }
@@ -2756,6 +2821,7 @@ fn validate_flow_transition_instruction(
     result: &MirValueId,
     transition: &NodeId,
     arguments: &[MirValueId],
+    effect_receipt: Option<&super::types::MirFlowEffectReceipt>,
     subject: &str,
     errors: &mut Vec<super::MirValidationError>,
 ) {
@@ -2770,7 +2836,11 @@ fn validate_flow_transition_instruction(
         return;
     };
     let recoverable = contract.effect.is_recoverable();
-    if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
+    if (!recoverable
+        && !matches!(
+            contract.effect,
+            MirTransitionEffect::SilentLocal | MirTransitionEffect::Boundary
+        ))
         || contract.targets.len() != 1
         || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
@@ -2782,6 +2852,28 @@ fn validate_flow_transition_instruction(
             message: "FlowTransition instruction is outside the silent-local transition island"
                 .into(),
         });
+    }
+    let argument_types = arguments
+        .iter()
+        .filter_map(|argument| function.values.get(argument).map(|value| value.ty.clone()))
+        .collect::<Vec<_>>();
+    if argument_types.len() == arguments.len() {
+        if let Err(message) = super::validate_flow_effect_receipt(
+            transition,
+            contract,
+            &argument_types,
+            &function
+                .values
+                .get(result)
+                .map(|value| value.ty.clone())
+                .unwrap_or_else(|| contract.result.clone()),
+            effect_receipt,
+        ) {
+            errors.push(super::MirValidationError {
+                subject: subject.into(),
+                message,
+            });
+        }
     }
     let Some(target) = functions.get(&contract.owner) else {
         errors.push(super::MirValidationError {
@@ -2970,6 +3062,64 @@ fn materialize_transition_contracts(
         Ok(transitions)
     } else {
         Err(errors)
+    }
+}
+
+/// Install the checker-owned effect receipt after transition contracts and
+/// executable MIR signatures have both been materialized. Keeping this pass
+/// after lowering means a receipt repeats the actual instruction-side
+/// TypeDesc shape and can be rejected if lowering ever drifts from the
+/// canonical transition contract.
+fn attach_flow_effect_receipts(
+    functions: &mut BTreeMap<NodeId, MirFunction>,
+    transitions: &BTreeMap<NodeId, MirTransitionContract>,
+) {
+    for function in functions.values_mut() {
+        for block in function.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                let MirInstructionKind::FlowTransition {
+                    result,
+                    transition,
+                    arguments,
+                    effect_receipt,
+                } = &mut instruction.kind
+                else {
+                    continue;
+                };
+                let Some(contract) = transitions.get(transition) else {
+                    continue;
+                };
+                if contract.effect != MirTransitionEffect::Boundary {
+                    continue;
+                }
+                let parameter_types = arguments
+                    .iter()
+                    .filter_map(|argument| {
+                        function.values.get(argument).map(|value| value.ty.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let result_ty = function.values.get(result).map(|value| value.ty.clone());
+                let Some(result_ty) = result_ty else {
+                    continue;
+                };
+                let source = parameter_types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| contract.source.clone());
+                let target = contract
+                    .targets
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| contract.result.clone());
+                *effect_receipt = Some(super::types::MirFlowEffectReceipt {
+                    transition: transition.clone(),
+                    source,
+                    parameters: parameter_types,
+                    result: result_ty,
+                    target,
+                });
+            }
+        }
     }
 }
 
@@ -3442,10 +3592,15 @@ fn consumed_sources(kind: &super::MirInstructionKind) -> Vec<MirValueId> {
         }
         super::MirInstructionKind::Call { arguments, .. }
         | super::MirInstructionKind::FlowTransition { arguments, .. }
-        | super::MirInstructionKind::BuiltinCall { arguments, .. }
         | super::MirInstructionKind::Construct {
             fields: arguments, ..
         } => arguments.clone(),
+        super::MirInstructionKind::BuiltinCall {
+            arguments,
+            string_field_contract,
+            ..
+        } if string_field_contract.is_none() => arguments.clone(),
+        super::MirInstructionKind::BuiltinCall { .. } => Vec::new(),
         super::MirInstructionKind::SessionCall {
             operation,
             endpoint,
@@ -5117,6 +5272,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 kind,
                 arguments,
+                string_field_contract,
             } => {
                 let contract = super::types::MirBuiltinContract::for_kind(*kind);
                 if arguments.len() != contract.arity {
@@ -5222,7 +5378,36 @@ impl<'a> MirReferenceInterpreter<'a> {
                         let argument = arguments.first().ok_or_else(|| {
                             self.error(&function.owner, "println argument is absent")
                         })?;
-                        let argument = self.read_value(function, values, argument)?;
+                        let argument = if let Some(receipt) = string_field_contract {
+                            let source_ty = function
+                                .values
+                                .get(argument)
+                                .map(|value| value.ty.clone())
+                                .ok_or_else(|| {
+                                    self.error(
+                                        &function.owner,
+                                        "String-field borrow source has no MIR type",
+                                    )
+                                })?;
+                            self.program
+                                .type_catalog()
+                                .validate_string_field_borrow_receipt(&source_ty, receipt)
+                                .map_err(|message| self.error(&function.owner, message))?;
+                            let source = self.read_value(function, values, argument)?;
+                            project_value(
+                                &function.owner,
+                                source,
+                                Some(&source_ty),
+                                Some(&receipt.projection.field_ty),
+                                &MirProjection::Field(receipt.projection.field.clone()),
+                                None,
+                                None,
+                                None,
+                                self.program.type_catalog(),
+                            )?
+                        } else {
+                            self.read_value(function, values, argument)?
+                        };
                         let MirRuntimeValue::String(value) = argument else {
                             return Err(self.error(
                                 &function.owner,
@@ -5603,8 +5788,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                 result,
                 transition,
                 arguments,
+                effect_receipt,
             } => {
-                let arguments = self.take_transfer_values(function, values, arguments)?;
                 let contract = self.program.transitions.get(transition).ok_or_else(|| {
                     self.error(
                         &function.owner,
@@ -5612,7 +5797,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                     )
                 })?;
                 let recoverable = contract.effect.is_recoverable();
-                if (!recoverable && contract.effect != MirTransitionEffect::SilentLocal)
+                if (!recoverable
+                    && !matches!(
+                        contract.effect,
+                        MirTransitionEffect::SilentLocal | MirTransitionEffect::Boundary
+                    ))
                     || contract.targets.len() != 1
                     || (!recoverable && contract.failure.is_some())
                     || contract.is_fallback
@@ -5624,6 +5813,32 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "FlowTransition is outside the silent-local transition island",
                     ));
                 }
+                let argument_types = arguments
+                    .iter()
+                    .filter_map(|argument| {
+                        function.values.get(argument).map(|value| value.ty.clone())
+                    })
+                    .collect::<Vec<_>>();
+                if argument_types.len() != arguments.len() {
+                    return Err(self.error(
+                        &function.owner,
+                        "FlowTransition argument TypeDesc is absent",
+                    ));
+                }
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .map(|value| value.ty.clone())
+                    .unwrap_or_else(|| contract.result.clone());
+                super::validate_flow_effect_receipt(
+                    transition,
+                    contract,
+                    &argument_types,
+                    &result_ty,
+                    effect_receipt.as_ref(),
+                )
+                .map_err(|message| self.error(&function.owner, message))?;
+                let arguments = self.take_transfer_values(function, values, arguments)?;
                 let callee = self.program.functions.get(&contract.owner).ok_or_else(|| {
                     self.error(
                         &function.owner,

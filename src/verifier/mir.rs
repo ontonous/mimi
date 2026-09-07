@@ -1591,6 +1591,7 @@ fn eval_instruction(
             result,
             kind,
             arguments,
+            string_field_contract,
         } => {
             let args =
                 arguments
@@ -1614,8 +1615,42 @@ fn eval_instruction(
                 }
                 (MirBuiltinKind::PrintlnBool, [SymbolicValue::Bool(_)]) => SymbolicValue::Unit,
                 (MirBuiltinKind::PrintlnInt, [SymbolicValue::Int(_)]) => SymbolicValue::Unit,
-                (MirBuiltinKind::PrintlnString, [SymbolicValue::Opaque { ty }]) => {
-                    catalog.validate_owned_string(ty)?;
+                (MirBuiltinKind::PrintlnString, [argument]) => {
+                    if let Some(receipt) = string_field_contract {
+                        let source_ty = function
+                            .values
+                            .get(&arguments[0])
+                            .ok_or_else(|| "MIR String-field borrow source is absent".to_string())?
+                            .ty
+                            .clone();
+                        catalog.validate_string_field_borrow_receipt(&source_ty, receipt)?;
+                        let SymbolicValue::Record { nominal, fields } = argument else {
+                            return Err(
+                                "MIR String-field borrow source is not a symbolic record".into()
+                            );
+                        };
+                        if nominal != &receipt.projection.nominal {
+                            return Err(
+                                "MIR String-field borrow record nominal disagrees with receipt"
+                                    .into(),
+                            );
+                        }
+                        let field = fields.get(&receipt.projection.field).ok_or_else(|| {
+                            "MIR String-field borrow selected field is absent".to_string()
+                        })?;
+                        let SymbolicValue::Opaque { ty } = field else {
+                            return Err(
+                                "MIR String-field borrow selected field is not an opaque String"
+                                    .into(),
+                            );
+                        };
+                        catalog.validate_owned_string(ty)?;
+                    } else {
+                        let SymbolicValue::Opaque { ty } = argument else {
+                            return Err("MIR builtin 'println' received a non-string value".into());
+                        };
+                        catalog.validate_owned_string(ty)?;
+                    }
                     SymbolicValue::Unit
                 }
                 (MirBuiltinKind::SessionOpen, []) => {
@@ -2714,8 +2749,16 @@ fn eval_instruction(
             result,
             transition,
             arguments,
+            effect_receipt,
         } => eval_flow_transition(
-            function, program, catalog, state, result, transition, arguments,
+            function,
+            program,
+            catalog,
+            state,
+            result,
+            transition,
+            arguments,
+            effect_receipt.as_ref(),
         )?,
         MirInstructionKind::Borrow {
             result,
@@ -2930,6 +2973,7 @@ fn eval_flow_transition(
     result: &MirValueId,
     transition: &crate::core::NodeId,
     arguments: &[MirValueId],
+    effect_receipt: Option<&crate::core::mir::types::MirFlowEffectReceipt>,
 ) -> Result<(), String> {
     let contract = program.transitions().get(transition).ok_or_else(|| {
         format!(
@@ -2938,7 +2982,12 @@ fn eval_flow_transition(
         )
     })?;
     let recoverable = contract.effect.is_recoverable();
-    if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
+    if (!recoverable
+        && !matches!(
+            contract.effect,
+            crate::core::mir::MirTransitionEffect::SilentLocal
+                | crate::core::mir::MirTransitionEffect::Boundary
+        ))
         || contract.targets.len() != 1
         || (!recoverable && contract.failure.is_some())
         || contract.is_fallback
@@ -2951,6 +3000,28 @@ fn eval_flow_transition(
             transition.0
         ));
     }
+    let argument_types = arguments
+        .iter()
+        .filter_map(|argument| function.values.get(argument).map(|value| value.ty.clone()))
+        .collect::<Vec<_>>();
+    if argument_types.len() != arguments.len() {
+        return Err(format!(
+            "MIR verifier transition '{}' argument TypeDesc is absent",
+            transition.0
+        ));
+    }
+    let result_ty = function
+        .values
+        .get(result)
+        .map(|value| value.ty.clone())
+        .unwrap_or_else(|| contract.result.clone());
+    crate::core::mir::validate_flow_effect_receipt(
+        transition,
+        contract,
+        &argument_types,
+        &result_ty,
+        effect_receipt,
+    )?;
     let target = program.functions().get(&contract.owner).ok_or_else(|| {
         format!(
             "MIR verifier transition '{}' executable body is absent",

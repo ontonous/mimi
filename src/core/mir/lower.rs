@@ -7046,6 +7046,57 @@ impl<'a> Lowerer<'a> {
         Ok(value)
     }
 
+    /// Recognize the one bounded borrowed managed-field observation admitted
+    /// by the canonical `println` contract. The call argument is represented
+    /// by a direct one-field place (`state.label`); lower it as the owning
+    /// record plus an explicit checker receipt so the builtin cannot consume
+    /// the record merely to print its String bytes.
+    fn borrowed_string_field_for_call(
+        &mut self,
+        call: &ResolvedCall,
+    ) -> Option<(
+        usize,
+        MirValueId,
+        super::types::MirStringFieldBorrowContract,
+    )> {
+        let ResolvedCallee::Builtin(builtin) = &call.callee else {
+            return None;
+        };
+        if builtin.as_str() != "println" || call.arguments.len() != 1 {
+            return None;
+        }
+        let (base_local, field) = match &call.arguments[0].value.kind {
+            ResolvedExprKind::Load(place) => {
+                let [crate::core::ir::ResolvedProjection::Field { field, .. }] =
+                    place.projections.as_slice()
+                else {
+                    return None;
+                };
+                (place.base.clone(), field.clone())
+            }
+            ResolvedExprKind::Project {
+                value,
+                projection: crate::core::ir::ResolvedValueProjection::Field(field),
+            } => {
+                let ResolvedExprKind::Load(place) = &value.kind else {
+                    return None;
+                };
+                if !place.projections.is_empty() {
+                    return None;
+                }
+                (place.base.clone(), field.clone())
+            }
+            _ => return None,
+        };
+        let base = self.local_value(&base_local).ok()?;
+        let catalog = self.type_catalog?;
+        let base_ty = self.values.get(&base).map(|value| value.ty.clone())?;
+        let contract = catalog
+            .validated_string_field_borrow_contract(&base_ty, &field)
+            .ok()?;
+        Some((0, base, contract))
+    }
+
     fn lower_root(&mut self, root: &ResolvedBlock) {
         for statement in &root.statements {
             if self.current_is_terminated() {
@@ -7642,6 +7693,7 @@ impl<'a> Lowerer<'a> {
                     ResolvedCallee::Builtin(builtin)
                         if matches!(builtin.as_str(), "session_recv" | "builtin.method.session.recv")
                 );
+                let borrowed_string_field = self.borrowed_string_field_for_call(call);
                 let mut arguments: Vec<MirValueId> = call
                     .arguments
                     .iter()
@@ -7699,6 +7751,11 @@ impl<'a> Lowerer<'a> {
                                 }
                             }
                         }
+                        if let Some((borrowed_index, base, _)) = &borrowed_string_field {
+                            if index == *borrowed_index {
+                                return base.clone();
+                            }
+                        }
                         if consuming_transition
                             || session_endpoint
                             || consuming_list_concat
@@ -7753,6 +7810,7 @@ impl<'a> Lowerer<'a> {
                             result: result.clone(),
                             transition: super::transition_owner_from_id(transition),
                             arguments,
+                            effect_receipt: None,
                         },
                     );
                 } else if session_call {
@@ -8026,6 +8084,9 @@ impl<'a> Lowerer<'a> {
                             result: result.clone(),
                             kind: contract.kind,
                             arguments,
+                            string_field_contract: borrowed_string_field
+                                .as_ref()
+                                .map(|(_, _, contract)| contract.clone()),
                         },
                     );
                 } else {

@@ -1049,6 +1049,7 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 kind,
                 arguments,
+                string_field_contract,
             } => {
                 let contract = MirBuiltinContract::for_kind(*kind);
                 if arguments.len() != contract.arity {
@@ -1119,41 +1120,61 @@ impl<'a> NativeMirValidator<'a> {
                         "builtin kind is not in native MIR contract",
                     ));
                 }
-                for (index, argument) in arguments.iter().enumerate() {
-                    let Some(desc) = function
-                        .values
-                        .get(argument)
-                        .and_then(|value| self.program.type_catalog().get(&value.ty))
-                    else {
-                        continue;
-                    };
-                    let ownership_ok = if *kind == MirBuiltinKind::PrintlnString {
-                        self.program
-                            .type_catalog()
-                            .validate_owned_string(&function.values[argument].ty)
-                            .is_ok()
-                    } else {
-                        desc.ownership == MirOwnership::Copy
-                    };
-                    if !contract.accepts_abi(desc.abi)
-                        || !contract.accepts_layout(&desc.layout)
-                        || !ownership_ok
-                        || (matches!(
-                            kind,
-                            MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
-                        ) && desc.abi
-                            != MirAbiClass::Integer {
-                                bits: 64,
-                                signed: true,
-                            })
-                    {
+                if let Some(receipt) = string_field_contract {
+                    if *kind != MirBuiltinKind::PrintlnString {
                         self.errors.push(NativeMirError::new(
+                            subject,
+                            "String-field borrow receipt is attached to a non-String builtin",
+                        ));
+                    } else if arguments.len() == 1 {
+                        let Some(source) = function.values.get(&arguments[0]) else {
+                            return;
+                        };
+                        if let Err(message) = self
+                            .program
+                            .type_catalog()
+                            .validate_string_field_borrow_receipt(&source.ty, receipt)
+                        {
+                            self.errors.push(NativeMirError::new(subject, message));
+                        }
+                    }
+                } else {
+                    for (index, argument) in arguments.iter().enumerate() {
+                        let Some(desc) = function
+                            .values
+                            .get(argument)
+                            .and_then(|value| self.program.type_catalog().get(&value.ty))
+                        else {
+                            continue;
+                        };
+                        let ownership_ok = if *kind == MirBuiltinKind::PrintlnString {
+                            self.program
+                                .type_catalog()
+                                .validate_owned_string(&function.values[argument].ty)
+                                .is_ok()
+                        } else {
+                            desc.ownership == MirOwnership::Copy
+                        };
+                        if !contract.accepts_abi(desc.abi)
+                            || !contract.accepts_layout(&desc.layout)
+                            || !ownership_ok
+                            || (matches!(
+                                kind,
+                                MirBuiltinKind::Abs | MirBuiltinKind::Min | MirBuiltinKind::Max
+                            ) && desc.abi
+                                != MirAbiClass::Integer {
+                                    bits: 64,
+                                    signed: true,
+                                })
+                        {
+                            self.errors.push(NativeMirError::new(
                             subject,
                             format!(
                                 "builtin '{}' argument {index} TypeDesc/ABI is outside native scalar contract",
                                 contract.name,
                             ),
                         ));
+                        }
                     }
                 }
                 let Some(result_desc) = function
@@ -1297,7 +1318,15 @@ impl<'a> NativeMirValidator<'a> {
                 result,
                 transition,
                 arguments,
-            } => self.validate_flow_transition(function, result, transition, arguments, subject),
+                effect_receipt,
+            } => self.validate_flow_transition(
+                function,
+                result,
+                transition,
+                arguments,
+                effect_receipt.as_ref(),
+                subject,
+            ),
             MirInstructionKind::Nop => {}
             _ => self.errors.push(NativeMirError::new(
                 subject,
@@ -2495,6 +2524,7 @@ impl<'a> NativeMirValidator<'a> {
         result: &MirValueId,
         transition: &crate::core::NodeId,
         arguments: &[MirValueId],
+        effect_receipt: Option<&crate::core::mir::types::MirFlowEffectReceipt>,
         subject: &str,
     ) {
         let Some(contract) = self.program.transitions().get(transition) else {
@@ -2508,7 +2538,12 @@ impl<'a> NativeMirValidator<'a> {
             return;
         };
         let recoverable = contract.effect.is_recoverable();
-        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
+        if (!recoverable
+            && !matches!(
+                contract.effect,
+                crate::core::mir::MirTransitionEffect::SilentLocal
+                    | crate::core::mir::MirTransitionEffect::Boundary
+            ))
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
@@ -2520,6 +2555,26 @@ impl<'a> NativeMirValidator<'a> {
                 subject,
                 "FlowTransition is outside the silent-local native contract",
             ));
+        }
+        let argument_types = arguments
+            .iter()
+            .filter_map(|argument| function.values.get(argument).map(|value| value.ty.clone()))
+            .collect::<Vec<_>>();
+        if argument_types.len() == arguments.len() {
+            let result_ty = function
+                .values
+                .get(result)
+                .map(|value| value.ty.clone())
+                .unwrap_or_else(|| contract.result.clone());
+            if let Err(message) = crate::core::mir::validate_flow_effect_receipt(
+                transition,
+                contract,
+                &argument_types,
+                &result_ty,
+                effect_receipt,
+            ) {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
         }
         let Some(target) = self.program.functions().get(&contract.owner) else {
             self.errors.push(NativeMirError::new(

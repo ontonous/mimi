@@ -443,6 +443,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         kind: MirBuiltinKind,
         arguments: &[MirValueId],
+        string_field_contract: Option<&crate::core::mir::types::MirStringFieldBorrowContract>,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         if kind == MirBuiltinKind::SessionPair {
@@ -567,14 +568,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return Ok(value);
         }
         if kind == MirBuiltinKind::PrintlnString {
-            let value = self
-                .value(
-                    arguments.first().ok_or_else(|| {
-                        NativeMirError::new(subject, "builtin argument is absent")
-                    })?,
-                    subject,
-                )?
-                .into_struct_value();
+            let argument = arguments
+                .first()
+                .ok_or_else(|| NativeMirError::new(subject, "builtin argument is absent"))?;
+            let value = if let Some(receipt) = string_field_contract {
+                let source_ty = self.value_type(argument, subject)?;
+                self.program
+                    .type_catalog()
+                    .validate_string_field_borrow_receipt(&source_ty, receipt)
+                    .map_err(|message| NativeMirError::new(subject, message))?;
+                self.generator
+                    .builder
+                    .build_extract_value(
+                        self.value(argument, subject)?.into_struct_value(),
+                        receipt.projection.field_index as u32,
+                        "mir_println_borrowed_string_field",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    .into_struct_value()
+            } else {
+                self.value(argument, subject)?.into_struct_value()
+            };
             let data = self
                 .generator
                 .builder
@@ -1132,6 +1146,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         transition: &crate::core::NodeId,
         arguments: &[MirValueId],
+        effect_receipt: Option<&crate::core::mir::types::MirFlowEffectReceipt>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
         let contract = self.program.transitions().get(transition).ok_or_else(|| {
@@ -1144,7 +1159,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
         })?;
         let recoverable = contract.effect.is_recoverable();
-        if (!recoverable && contract.effect != crate::core::mir::MirTransitionEffect::SilentLocal)
+        if (!recoverable
+            && !matches!(
+                contract.effect,
+                crate::core::mir::MirTransitionEffect::SilentLocal
+                    | crate::core::mir::MirTransitionEffect::Boundary
+            ))
             || contract.targets.len() != 1
             || (!recoverable && contract.failure.is_some())
             || contract.is_fallback
@@ -1157,6 +1177,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "FlowTransition is outside the silent-local native contract",
             ));
         }
+        let argument_types = arguments
+            .iter()
+            .map(|argument| self.value_type(argument, subject))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result_ty = self.value_type(result, subject)?;
+        crate::core::mir::validate_flow_effect_receipt(
+            transition,
+            contract,
+            &argument_types,
+            &result_ty,
+            effect_receipt,
+        )
+        .map_err(|message| NativeMirError::new(subject, message))?;
         let function = *self.functions.get(&contract.owner).ok_or_else(|| {
             NativeMirError::new(
                 subject,

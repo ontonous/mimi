@@ -52,6 +52,7 @@ func main() -> i32 {
             // The caller can inspect src to decide retry logic.
             println(e)
             println(src.item)
+            drop(src)
             0
         },
     }
