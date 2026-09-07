@@ -447,7 +447,12 @@ impl<'a> CapabilityGate<'a> {
         self.validate_acyclic_cfg(function);
         for block in function.blocks.values() {
             for instruction in &block.instructions {
-                self.validate_instruction(function, &instruction.kind, instruction.id.as_str());
+                self.validate_instruction(
+                    function,
+                    &instruction.id,
+                    &instruction.kind,
+                    instruction.id.as_str(),
+                );
             }
             self.validate_terminator(function, &block.terminator, block.id.as_str());
         }
@@ -689,6 +694,7 @@ impl<'a> CapabilityGate<'a> {
     fn validate_instruction(
         &mut self,
         function: &MirFunction,
+        instruction_id: &crate::core::mir::MirInstructionId,
         instruction: &MirInstructionKind,
         subject: &str,
     ) {
@@ -1516,6 +1522,7 @@ impl<'a> CapabilityGate<'a> {
             } => {
                 self.validate_call(
                     function,
+                    instruction_id,
                     result.as_ref(),
                     callee,
                     type_arguments,
@@ -1627,6 +1634,7 @@ impl<'a> CapabilityGate<'a> {
     fn validate_call(
         &mut self,
         function: &MirFunction,
+        instruction_id: &crate::core::mir::MirInstructionId,
         result: Option<&MirValueId>,
         callee: &ResolvedCallee,
         type_arguments: &[crate::core::ResolvedTypeId],
@@ -1634,6 +1642,34 @@ impl<'a> CapabilityGate<'a> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) {
+        if let ResolvedCallee::Extern(owner) = callee {
+            let Some(contract) = self.program.ffi_calls().get(instruction_id) else {
+                self.error(format!(
+                    "{subject} extern callee '{}' has no canonical FFI contract",
+                    owner.0
+                ));
+                return;
+            };
+            if contract.caller != function.owner || contract.callee != *owner {
+                self.error(format!(
+                    "{subject} extern FFI contract identity disagrees with MIR call"
+                ));
+            }
+            if contract.arguments != arguments {
+                self.error(format!(
+                    "{subject} extern FFI contract arguments disagree with MIR call"
+                ));
+            }
+            for argument in arguments {
+                if value_type(function, argument).is_none() {
+                    self.error(format!(
+                        "{subject} extern argument '{}' is absent from caller values",
+                        argument
+                    ));
+                }
+            }
+            return;
+        }
         let owner = match callee {
             ResolvedCallee::Function(owner) => owner.clone(),
             ResolvedCallee::ProtocolMethod { .. } => {

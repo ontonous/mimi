@@ -150,7 +150,10 @@ pub fn verify_checked(
 pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String> {
     let file = parse_memory_source(source, "ffi-call-sites")?;
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
-    verify_ffi_checked(&program)
+    verify_ffi_checked_with_source_hash(
+        &program,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
 }
 
 /// Verify extern call sites from a checked program.
@@ -160,6 +163,13 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 /// authoritative from CheckedProgram and fail closed before that adapter.
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_ffi_checked_with_source_hash(program, String::new())
+}
+
+fn verify_ffi_checked_with_source_hash(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
     // A declaration-only FFI surface has no call-site contract obligation.
     // CheckedProgram already owns declaration identity and arity, so avoid
@@ -196,6 +206,22 @@ pub fn verify_ffi_checked(
     }
     if !has_contract {
         return Ok(Vec::new());
+    }
+
+    // The scalar precondition slice is admitted only after checker-owned
+    // eligibility, canonical MIR construction, and the whole-program MIR
+    // capability gate all succeed. Any other FFI contract shape remains on
+    // the explicit compatibility boundary below; it is never silently
+    // reinterpreted by a partial MIR verifier.
+    if is_z3_available() && crate::core::mir::contains_scalar_ffi_contract_candidate(program) {
+        let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
+            .map_err(|error| format!("MIR-FFI-MATERIALIZATION-001: {error}"))?;
+        crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+            format!(
+                "MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}"
+            )
+        })?;
+        return mir::verify_ffi_program(&canonical, source_hash);
     }
 
     let mut externs = std::collections::HashMap::new();

@@ -91,6 +91,29 @@ fn canonical_mir_text(program: &MirProgram) -> String {
     for transition in program.transitions().values() {
         text.push_str(&transition.canonical_text());
     }
+    for contract in program.ffi_calls().values() {
+        text.push_str("mir.ffi ");
+        text.push_str(contract.caller.0.as_str());
+        text.push(' ');
+        text.push_str(contract.instruction.as_str());
+        text.push(' ');
+        text.push_str(contract.callee.0.as_str());
+        text.push_str(" args=");
+        for argument in &contract.arguments {
+            text.push_str(argument.as_str());
+            text.push(',');
+        }
+        text.push_str(" requires=");
+        text.push_str(
+            contract
+                .requires
+                .as_ref()
+                .map(|condition| condition.canonical_text())
+                .as_deref()
+                .unwrap_or("none"),
+        );
+        text.push('\n');
+    }
     for function in program.functions().values() {
         text.push_str(&function.canonical_text());
     }

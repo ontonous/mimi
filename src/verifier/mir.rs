@@ -94,6 +94,10 @@ struct SymbolicState {
     /// through the shape table.  Non-literal indices remain symbolic and use
     /// the ordinary bounds proof.
     known_ints: BTreeMap<MirValueId, i64>,
+    /// FFI precondition checks observed along this symbolic path. Keeping
+    /// them in the path state means branch joins never lose a call-site
+    /// obligation or accidentally merge facts from mutually exclusive arms.
+    ffi_checks: Vec<FfiCheck>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +112,14 @@ struct ReturnPath {
     constraints: Vec<Bool>,
     values: BTreeMap<MirValueId, SymbolicValue>,
     value: SymbolicValue,
+    ffi_checks: Vec<FfiCheck>,
+}
+
+#[derive(Debug, Clone)]
+struct FfiCheck {
+    instruction: crate::core::mir::MirInstructionId,
+    constraints: Vec<Bool>,
+    condition: Bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +259,156 @@ pub(crate) fn verify_program(
         });
     }
 
+    Ok(results)
+}
+
+/// Verify canonical scalar FFI preconditions. Each result is one actual MIR
+/// extern call, so a caller with two calls receives two independently bound
+/// proof artifacts and counterexamples. The contract is checked against the
+/// caller's canonical `requires` facts and the symbolic path reaching the MIR
+/// call; no surface AST or legacy FFI walker is involved.
+pub(crate) fn verify_ffi_program(
+    program: &MirProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
+    let mir_hash = canonical_mir_hash(program);
+    let mut checks_by_instruction =
+        BTreeMap::<crate::core::mir::MirInstructionId, (crate::core::NodeId, Vec<FfiCheck>)>::new();
+
+    for function in program.functions().values() {
+        if !program
+            .ffi_calls()
+            .values()
+            .any(|call| call.caller == function.owner)
+        {
+            continue;
+        }
+        let mut initial = initial_state(function, program.type_catalog(), &mut session)?;
+        for contract in &function.contracts {
+            match contract.kind {
+                MirContractKind::Requires => {
+                    let term =
+                        contract_term(&contract.condition, &initial.values, &initial.values, None)?;
+                    initial
+                        .constraints
+                        .push(expect_bool(term, "caller requires contract")?);
+                }
+                MirContractKind::Ensures | MirContractKind::Invariant => {
+                    return Err(format!(
+                        "canonical MIR FFI verifier admits caller '{}' only with requires contracts",
+                        function.owner.0
+                    ));
+                }
+            }
+        }
+        let mut returns = Vec::new();
+        let mut traps = Vec::new();
+        explore_block(
+            function,
+            program,
+            program.type_catalog(),
+            &mut initial,
+            &function.entry,
+            &mut BTreeSet::new(),
+            &mut returns,
+            &mut traps,
+        )?;
+        for trap in traps {
+            match session.check_scope(&conjunction(&trap.condition)) {
+                (SatResult::Sat, _) => {
+                    return Err(format!(
+                        "canonical MIR FFI verifier encountered reachable trap '{}' in '{}'",
+                        trap.code, function.owner.0
+                    ));
+                }
+                (SatResult::Unknown, _) => {
+                    return Err(format!(
+                        "canonical MIR FFI verifier cannot discharge trap '{}' in '{}'",
+                        trap.code, function.owner.0
+                    ));
+                }
+                (SatResult::Unsat, _) => {}
+            }
+        }
+        if returns.is_empty() {
+            return Err(format!(
+                "canonical MIR FFI verifier found no return path in '{}'",
+                function.owner.0
+            ));
+        }
+        for path in returns {
+            for check in path.ffi_checks {
+                checks_by_instruction
+                    .entry(check.instruction.clone())
+                    .or_insert_with(|| (function.owner.clone(), Vec::new()))
+                    .1
+                    .push(check);
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    for (instruction, (caller, checks)) in checks_by_instruction {
+        let contract = program
+            .ffi_calls()
+            .get(&instruction)
+            .ok_or_else(|| format!("canonical MIR FFI check '{}' has no contract", instruction))?;
+        let started = Instant::now();
+        let mut status = VerifStatus::Proven;
+        let mut message = "canonical MIR extern requires contract proven".to_string();
+        let mut constraint_count = 0;
+        for check in checks {
+            let mut terms = check.constraints;
+            terms.push(check.condition.not());
+            constraint_count += terms.len();
+            match session.check_scope(&conjunction(&terms)) {
+                (SatResult::Sat, _) => {
+                    status = VerifStatus::Disproven;
+                    message = format!(
+                        "canonical MIR extern requires contract disproven at '{}'",
+                        instruction
+                    );
+                    break;
+                }
+                (SatResult::Unknown, _) => {
+                    status = session.unknown_status();
+                    message =
+                        "canonical MIR FFI verifier could not discharge extern requires".into();
+                }
+                (SatResult::Unsat, _) => {}
+            }
+        }
+        let artifact = if status.is_definitive() {
+            Some(ProofArtifact {
+                semantics_version: ProofArtifact::SEMANTICS_VERSION,
+                integer_model: "checked_i32_i64".into(),
+                float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
+                solver_version: format!("z3 {}", z3::full_version()),
+                source_hash: source_hash.clone(),
+                resolved_ir_hash: String::new(),
+                mir_hash: mir_hash.clone(),
+                vir_hash: String::new(),
+                engine: ProofArtifact::ENGINE_MIR.to_string(),
+            })
+        } else {
+            None
+        };
+        let diagnostic = (status == VerifStatus::Disproven)
+            .then(|| crate::diagnostic::Diagnostic::error(message.clone(), contract.span));
+        let trusted_subset_domain =
+            (status == VerifStatus::Disproven).then_some(TrustedSubsetDomain::Contract);
+        results.push(VerificationResult {
+            func_name: caller.0,
+            status: status.clone(),
+            message,
+            diagnostic,
+            duration_us: started.elapsed().as_micros() as u64,
+            constraint_count,
+            artifact,
+            trusted_subset_domain,
+        });
+    }
     Ok(results)
 }
 
@@ -415,6 +577,7 @@ fn initial_state(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     for parameter in &function.parameters {
         let name = format!("mir.value.{}", parameter.as_str());
@@ -970,7 +1133,14 @@ fn explore_block(
         .get(block_id)
         .ok_or_else(|| format!("MIR verifier block '{}' is absent", block_id))?;
     for instruction in &block.instructions {
-        eval_instruction(function, program, catalog, state, &instruction.kind)?;
+        eval_instruction(
+            function,
+            program,
+            catalog,
+            state,
+            &instruction.id,
+            &instruction.kind,
+        )?;
     }
     match &block.terminator {
         MirTerminator::Goto {
@@ -1040,6 +1210,7 @@ fn explore_block(
                 constraints: state.constraints.clone(),
                 values: state.values.clone(),
                 value,
+                ffi_checks: state.ffi_checks.clone(),
             });
             traps.extend(state.traps.clone());
         }
@@ -1361,6 +1532,7 @@ fn eval_instruction(
     program: &MirProgram,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
     instruction: &MirInstructionKind,
 ) -> Result<(), String> {
     match instruction {
@@ -2694,17 +2866,31 @@ fn eval_instruction(
             arguments,
             variant_call_contract,
             ..
-        } => eval_materialized_call(
-            function,
-            program,
-            catalog,
-            state,
-            result,
-            callee,
-            type_arguments,
-            arguments,
-            variant_call_contract.as_ref(),
-        )?,
+        } => {
+            if matches!(callee, crate::core::ir::ResolvedCallee::Extern(_)) {
+                eval_ffi_call(
+                    function,
+                    program,
+                    catalog,
+                    state,
+                    instruction_id,
+                    result,
+                    arguments,
+                )?;
+            } else {
+                eval_materialized_call(
+                    function,
+                    program,
+                    catalog,
+                    state,
+                    result,
+                    callee,
+                    type_arguments,
+                    arguments,
+                    variant_call_contract.as_ref(),
+                )?;
+            }
+        }
         MirInstructionKind::VariantPredicate {
             result,
             predicate,
@@ -3064,6 +3250,7 @@ fn eval_flow_transition(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -3153,6 +3340,52 @@ fn eval_flow_transition(
         state.constraints = returned.constraints.clone();
         ensure_result_shape(function, catalog, result, &returned.value)?;
         state.values.insert(result.clone(), returned.value.clone());
+    }
+    Ok(())
+}
+
+fn eval_ffi_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+    result: &Option<MirValueId>,
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    let contract = program.ffi_calls().get(instruction_id).ok_or_else(|| {
+        format!(
+            "MIR verifier extern call '{}' has no canonical FFI contract",
+            instruction_id
+        )
+    })?;
+    if contract.arguments != arguments {
+        return Err("MIR verifier extern call arguments disagree with FFI contract".into());
+    }
+    if let Some(condition) = &contract.requires {
+        let term = contract_term(condition, &state.values, &state.values, None)?;
+        let condition = expect_bool(term, "extern requires contract")?;
+        state.ffi_checks.push(FfiCheck {
+            instruction: instruction_id.clone(),
+            constraints: state.constraints.clone(),
+            condition,
+        });
+    }
+    if let Some(result) = result {
+        let result_ty = function
+            .values
+            .get(result)
+            .ok_or_else(|| format!("MIR extern result '{}' is absent", result))?
+            .ty
+            .clone();
+        let (value, constraints) = symbolic_value_for_type(
+            catalog,
+            &result_ty,
+            &format!("mir.ffi.{}.result", instruction_id),
+        )?;
+        state.constraints.extend(constraints);
+        ensure_result_shape(function, catalog, result, &value)?;
+        state.values.insert(result.clone(), value);
     }
     Ok(())
 }
@@ -3828,6 +4061,7 @@ fn eval_direct_owned_string_call(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -4021,6 +4255,7 @@ fn eval_direct_variant_call(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     for ((argument, parameter), parameter_ty) in arguments
         .iter()
@@ -5295,6 +5530,7 @@ fn eval_materialized_owned_record_projection_call(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -5417,6 +5653,7 @@ fn eval_materialized_owned_record_projection_drop_call(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -5607,6 +5844,7 @@ fn eval_materialized_identity_call(
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();

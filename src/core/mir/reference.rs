@@ -14,8 +14,9 @@ use crate::core::{NodeId, ResolvedPlace};
 use super::types::{MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
-    MirInstanceId, MirInstruction, MirInstructionKind, MirProjection, MirSwitchArm, MirSwitchCase,
-    MirTerminator, MirTransitionContract, MirTransitionEffect, MirValueId,
+    MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirProjection,
+    MirSwitchArm, MirSwitchCase, MirTerminator, MirTransitionContract, MirTransitionEffect,
+    MirValueId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +117,7 @@ pub struct MirProgram {
     type_catalog: MirTypeCatalog,
     instances: BTreeMap<MirInstanceId, MirInstance>,
     transitions: BTreeMap<NodeId, MirTransitionContract>,
+    ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
 }
 
 impl MirProgram {
@@ -138,11 +140,14 @@ impl MirProgram {
         let transitions = materialize_transition_contracts(program, &type_catalog, None)
             .map_err(MirProgramBuildError::Validation)?;
         attach_flow_effect_receipts(&mut functions, &transitions);
-        Self::with_type_catalog_and_instances_and_transitions(
+        let ffi_calls = materialize_ffi_call_contracts(program, &functions)
+            .map_err(MirProgramBuildError::Validation)?;
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi(
             functions,
             type_catalog,
             instances,
             transitions,
+            ffi_calls,
         )
         .map_err(MirProgramBuildError::Validation)
     }
@@ -244,6 +249,7 @@ impl MirProgram {
                 type_catalog: MirTypeCatalog::default(),
                 instances: BTreeMap::new(),
                 transitions: BTreeMap::new(),
+                ffi_calls: BTreeMap::new(),
             })
         } else {
             Err(errors)
@@ -275,6 +281,22 @@ impl MirProgram {
         type_catalog: MirTypeCatalog,
         instances: BTreeMap<MirInstanceId, MirInstance>,
         transitions: BTreeMap<NodeId, MirTransitionContract>,
+    ) -> Result<Self, Vec<super::MirValidationError>> {
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi(
+            functions,
+            type_catalog,
+            instances,
+            transitions,
+            BTreeMap::new(),
+        )
+    }
+
+    fn with_type_catalog_and_instances_and_transitions_and_ffi(
+        functions: BTreeMap<NodeId, MirFunction>,
+        type_catalog: MirTypeCatalog,
+        instances: BTreeMap<MirInstanceId, MirInstance>,
+        transitions: BTreeMap<NodeId, MirTransitionContract>,
+        ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
     ) -> Result<Self, Vec<super::MirValidationError>> {
         let mut errors = Vec::new();
         errors.extend(validate_instance_table(
@@ -1339,6 +1361,7 @@ impl MirProgram {
                 &instances,
                 &type_catalog,
                 &transitions,
+                &ffi_calls,
             ));
         }
         if errors.is_empty() {
@@ -1347,6 +1370,7 @@ impl MirProgram {
                 type_catalog,
                 instances,
                 transitions,
+                ffi_calls,
             })
         } else {
             Err(errors)
@@ -1373,6 +1397,10 @@ impl MirProgram {
 
     pub fn transitions(&self) -> &BTreeMap<NodeId, MirTransitionContract> {
         &self.transitions
+    }
+
+    pub fn ffi_calls(&self) -> &BTreeMap<MirInstructionId, super::MirFfiCallContract> {
+        &self.ffi_calls
     }
 }
 
@@ -2073,6 +2101,7 @@ fn validate_call_graph(
     instances: &BTreeMap<MirInstanceId, MirInstance>,
     type_catalog: &MirTypeCatalog,
     transitions: &BTreeMap<NodeId, MirTransitionContract>,
+    ffi_calls: &BTreeMap<MirInstructionId, super::MirFfiCallContract>,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
     errors.extend(validate_transition_contracts(
@@ -2115,6 +2144,30 @@ fn validate_call_graph(
                 else {
                     continue;
                 };
+                if let super::ResolvedCallee::Extern(callee_owner) = callee {
+                    let Some(contract) = ffi_calls.get(&instruction.id) else {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call has no canonical FFI contract".into(),
+                        });
+                        continue;
+                    };
+                    if contract.caller != function.owner || contract.callee != *callee_owner {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI contract identity disagrees with MIR call"
+                                .into(),
+                        });
+                    }
+                    if contract.arguments != *arguments {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI contract arguments disagree with MIR call"
+                                .into(),
+                        });
+                    }
+                    continue;
+                }
                 let Some(target_owner) = super::canonical_protocol_call_target(callee) else {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
@@ -2506,6 +2559,167 @@ fn validate_call_graph(
         }
     }
     errors
+}
+
+/// Materialize the narrow verifier-only FFI contract slice.  This is the
+/// frontend/MIR construction boundary: source contract syntax is read once
+/// here and converted to MIR value identities.  No consumer receives the
+/// source expression or re-resolves an extern name.
+fn materialize_ffi_call_contracts(
+    program: &crate::core::CheckedProgram,
+    functions: &BTreeMap<NodeId, MirFunction>,
+) -> Result<BTreeMap<MirInstructionId, super::MirFfiCallContract>, Vec<super::MirValidationError>> {
+    let mut contracts = BTreeMap::new();
+    let mut errors = Vec::new();
+    for function in functions.values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let super::MirInstructionKind::Call {
+                    callee: super::ResolvedCallee::Extern(callee),
+                    arguments,
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let signature = program
+                    .extern_blocks()
+                    .values()
+                    .flat_map(|block| block.signatures.iter())
+                    .find(|signature| signature.node_id == *callee);
+                let Some(signature) = signature else {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "extern call '{}' has no checker-owned declaration identity",
+                            callee.0
+                        ),
+                    });
+                    continue;
+                };
+                if arguments.len() != signature.typed_params.len() {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: "extern call argument arity disagrees with canonical declaration"
+                            .into(),
+                    });
+                    continue;
+                }
+                let parameter_names = signature
+                    .typed_params
+                    .iter()
+                    .map(|(name, _, _)| name.as_str())
+                    .collect::<Vec<_>>();
+                let requires = signature.requires.as_ref().map(|expression| {
+                    lower_ffi_contract_expr(expression, &parameter_names, arguments)
+                });
+                let requires = match requires {
+                    Some(Ok(condition)) => Some(condition),
+                    Some(Err(message)) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern declaration '{}' requires is outside canonical MIR: {message}",
+                                signature.name
+                            ),
+                        });
+                        None
+                    }
+                    None => None,
+                };
+                let call_node = instruction
+                    .id
+                    .as_str()
+                    .strip_prefix("inst:call:")
+                    .map(|node| NodeId(node.to_string()));
+                let span = call_node
+                    .as_ref()
+                    .and_then(|node| program.node_meta().get(node))
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or(signature.span);
+                contracts.insert(
+                    instruction.id.clone(),
+                    super::MirFfiCallContract {
+                        caller: function.owner.clone(),
+                        instruction: instruction.id.clone(),
+                        callee: callee.clone(),
+                        arguments: arguments.clone(),
+                        requires,
+                        span,
+                    },
+                );
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(contracts)
+    } else {
+        Err(errors)
+    }
+}
+
+fn lower_ffi_contract_expr(
+    expression: &crate::ast::Expr,
+    parameter_names: &[&str],
+    arguments: &[MirValueId],
+) -> Result<super::MirContractExpr, String> {
+    use super::{MirContractBinaryOp, MirContractExpr, MirContractUnaryOp};
+    use crate::ast::{BinOp, Expr, Lit, UnOp};
+
+    match expression.unlocated() {
+        Expr::Literal(Lit::Int(value)) => Ok(MirContractExpr::Int(*value)),
+        Expr::Literal(Lit::Bool(value)) => Ok(MirContractExpr::Bool(*value)),
+        Expr::Ident(name) => {
+            let index = parameter_names
+                .iter()
+                .position(|parameter| *parameter == name)
+                .ok_or_else(|| format!("unknown extern contract parameter '{name}'"))?;
+            let argument = arguments
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("extern contract parameter '{name}' has no argument"))?;
+            Ok(MirContractExpr::Value(argument))
+        }
+        Expr::Unary(op, operand) => {
+            let op = match op {
+                UnOp::Neg => MirContractUnaryOp::Negate,
+                UnOp::Not => MirContractUnaryOp::Not,
+                _ => return Err("extern contract unary operator is outside scalar MIR".into()),
+            };
+            Ok(MirContractExpr::Unary {
+                op,
+                operand: Box::new(lower_ffi_contract_expr(
+                    operand,
+                    parameter_names,
+                    arguments,
+                )?),
+            })
+        }
+        Expr::Binary(op, left, right) => {
+            let op = match op {
+                BinOp::Add => MirContractBinaryOp::Add,
+                BinOp::Sub => MirContractBinaryOp::Subtract,
+                BinOp::Mul => MirContractBinaryOp::Multiply,
+                BinOp::Div => MirContractBinaryOp::Divide,
+                BinOp::Mod => MirContractBinaryOp::Remainder,
+                BinOp::EqCmp => MirContractBinaryOp::Equal,
+                BinOp::NeCmp => MirContractBinaryOp::NotEqual,
+                BinOp::Lt => MirContractBinaryOp::Less,
+                BinOp::Gt => MirContractBinaryOp::Greater,
+                BinOp::Le => MirContractBinaryOp::LessEqual,
+                BinOp::Ge => MirContractBinaryOp::GreaterEqual,
+                BinOp::And => MirContractBinaryOp::LogicalAnd,
+                BinOp::Or => MirContractBinaryOp::LogicalOr,
+                _ => return Err("extern contract binary operator is outside scalar MIR".into()),
+            };
+            Ok(MirContractExpr::Binary {
+                op,
+                left: Box::new(lower_ffi_contract_expr(left, parameter_names, arguments)?),
+                right: Box::new(lower_ffi_contract_expr(right, parameter_names, arguments)?),
+            })
+        }
+        _ => Err("extern contract expression is outside scalar MIR".into()),
+    }
 }
 
 /// Validate the ownership direction of each ordinary call argument against
@@ -10387,6 +10601,58 @@ mod tests {
                 error.message.contains("non-Copy") || error.message.contains("aggregate match glue")
             }),
             "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_missing_or_forged_ffi_receipt() {
+        let source = r#"
+extern "C" {
+    func read(fd: i64) -> i64 requires: fd >= 0;
+}
+func caller(fd: i64) -> i64 { read(fd) }
+func main() -> i64 { caller(0 as i64) }
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let canonical = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+
+        let missing = MirProgram::with_type_catalog_and_instances_and_transitions(
+            canonical.functions().clone(),
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            canonical.transitions().clone(),
+        )
+        .expect_err("extern call without a receipt must fail before execution");
+        assert!(
+            missing
+                .iter()
+                .any(|error| error.message.contains("no canonical FFI contract")),
+            "{missing:?}"
+        );
+
+        let mut forged_receipts = canonical.ffi_calls().clone();
+        forged_receipts
+            .values_mut()
+            .next()
+            .expect("FFI receipt")
+            .callee = NodeId("extern:forged".into());
+        let forged = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            canonical.functions().clone(),
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            canonical.transitions().clone(),
+            forged_receipts,
+        )
+        .expect_err("forged extern identity must fail before execution");
+        assert!(
+            forged.iter().any(|error| {
+                error
+                    .message
+                    .contains("FFI contract identity disagrees with MIR call")
+            }),
+            "{forged:?}"
         );
     }
 }

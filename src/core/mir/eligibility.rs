@@ -15,6 +15,135 @@ use crate::core::{
     TransitionId,
 };
 
+/// Whether an extern declaration contract belongs to the first canonical FFI
+/// verifier slice. The slice is intentionally scalar and precondition-only:
+/// its materializer can turn every leaf into a concrete MIR argument identity.
+/// Strings, `ensures`, calls, projections, variadics, and floating-point
+/// expressions remain on the explicit compatibility boundary.
+fn scalar_ffi_contract_expr(expression: &crate::ast::Expr) -> bool {
+    use crate::ast::{BinOp, Expr, Lit, UnOp};
+    match expression.unlocated() {
+        Expr::Literal(Lit::Int(_) | Lit::Bool(_)) | Expr::Ident(_) => true,
+        Expr::Unary(op, operand) => {
+            matches!(op, UnOp::Neg | UnOp::Not) && scalar_ffi_contract_expr(operand)
+        }
+        Expr::Binary(op, left, right) => {
+            matches!(
+                op,
+                BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::EqCmp
+                    | BinOp::NeCmp
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::Le
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or
+            ) && scalar_ffi_contract_expr(left)
+                && scalar_ffi_contract_expr(right)
+        }
+        _ => false,
+    }
+}
+
+fn direct_scalar_ffi_callee(body: &ResolvedBody) -> Option<NodeId> {
+    let non_contract_statements = body
+        .root
+        .statements
+        .iter()
+        .filter(|statement| !matches!(statement.kind, ResolvedStmtKind::Contract { .. }))
+        .collect::<Vec<_>>();
+    let expression = match (
+        non_contract_statements.as_slice(),
+        body.root.result.as_deref(),
+    ) {
+        ([], Some(expression)) => Some(expression),
+        (
+            [ResolvedStmt {
+                kind: ResolvedStmtKind::Expr(expression),
+                ..
+            }],
+            None,
+        ) => Some(expression),
+        (
+            [ResolvedStmt {
+                kind:
+                    ResolvedStmtKind::Return {
+                        value: Some(expression),
+                        ..
+                    },
+                ..
+            }],
+            None,
+        ) => Some(expression),
+        _ => None,
+    }?;
+    let ResolvedExprKind::Call(call) = &expression.kind else {
+        return None;
+    };
+    let ResolvedCallee::Extern(callee) = &call.callee else {
+        return None;
+    };
+    Some(callee.clone())
+}
+
+/// Exact admission predicate for the canonical scalar FFI verifier profile.
+/// This is an eligibility fact only; construction and TypeDesc/call-graph
+/// validation still have to succeed before the verifier route is selected.
+pub fn contains_scalar_ffi_contract_candidate(program: &CheckedProgram) -> bool {
+    let extern_sites = program
+        .call_sites()
+        .values()
+        .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
+        .collect::<Vec<_>>();
+    let direct_extern_callee = extern_sites.first().and_then(|site| {
+        program
+            .resolved_body(&NodeId(site.owner.clone()))
+            .and_then(direct_scalar_ffi_callee)
+    });
+    let has_requires = direct_extern_callee.as_ref().is_some_and(|callee| {
+        program.extern_blocks().values().any(|block| {
+            block.signatures.iter().any(|signature| {
+                signature.node_id == *callee
+                    && signature.requires.is_some()
+                    && signature.ensures.is_none()
+                    && !signature.variadic
+                    && signature
+                        .requires
+                        .as_ref()
+                        .is_some_and(scalar_ffi_contract_expr)
+            })
+        })
+    });
+    if extern_sites.len() != 1 || !has_requires {
+        return false;
+    }
+    if program.callables().values().any(|callable| {
+        callable
+            .contracts
+            .iter()
+            .any(|contract| contract.kind != crate::core::ir::ContractKind::Requires)
+    }) {
+        return false;
+    }
+    let result = program.extern_blocks().values().all(|block| {
+        block.signatures.iter().all(|signature| {
+            signature.ensures.is_none()
+                && (!signature.variadic
+                    || (signature.requires.is_none() && signature.ensures.is_none()))
+                && signature
+                    .requires
+                    .as_ref()
+                    .is_none_or(scalar_ffi_contract_expr)
+        })
+    });
+    result
+}
+
 /// Whether the checked program is one of the deliberately narrow recoverable
 /// Flow profiles. M3 is the single-state retry profile; F2 is the cross-state
 /// `Result<state, (source, error)>` match profile. The predicate is only

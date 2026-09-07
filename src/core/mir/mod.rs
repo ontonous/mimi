@@ -290,8 +290,8 @@ pub use copy_result_island::{
     COPY_RESULT_I32_VARIANT_ISLAND,
 };
 pub use eligibility::{
-    is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
-    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    contains_scalar_ffi_contract_candidate, is_exact_cross_state_f64_failure_receipt,
+    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
 };
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,
@@ -1008,6 +1008,23 @@ pub enum MirInstructionKind {
 pub struct MirInstruction {
     pub id: MirInstructionId,
     pub kind: MirInstructionKind,
+}
+
+/// Canonical precondition attached to one checker-resolved extern call.
+///
+/// The declaration expression is lowered to `MirContractExpr` while the
+/// checked program is materialized.  Consumers therefore receive the stable
+/// extern identity, actual MIR argument identities, and the canonical
+/// predicate; they must not reconstruct an FFI call-site from source AST or
+/// display names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirFfiCallContract {
+    pub caller: NodeId,
+    pub instruction: MirInstructionId,
+    pub callee: NodeId,
+    pub arguments: Vec<MirValueId>,
+    pub requires: Option<MirContractExpr>,
+    pub span: crate::span::Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

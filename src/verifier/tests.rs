@@ -619,13 +619,15 @@ fn verify_ffi_requires_always_satisfied() {
     require_z3!();
     let src = r#"
 extern "C" {
-    func read(fd: i64, buf: i64, size: i64) -> i64;
+    func read(fd: i64, buf: i64, size: i64) -> i64
+        requires: fd >= 0 && size > 0;
 }
 func caller(fd: i64, buf: i64, size: i64) -> i64 {
     requires: fd >= 0 && size > 0
     read(fd, buf, size)
 }
 "#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = verify_ffi_source(src).expect("src/verifier/tests.rs:397 unwrap failed");
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -634,6 +636,15 @@ func caller(fd: i64, buf: i64, size: i64) -> i64 {
         "requires fd >= 0 && size > 0 should satisfy read's preconditions: {}",
         results[0].message
     );
+    assert_eq!(results[0].func_name, "function:caller");
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("canonical FFI proof artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash.len(), 64);
+    assert_eq!(artifact.source_hash.len(), 64);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -648,6 +659,7 @@ func bad_caller(size: i64) -> i64 {
     read(-1, 0, size)
 }
 "#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = verify_ffi_source(src).expect("src/verifier/tests.rs:415 unwrap failed");
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -655,6 +667,13 @@ func bad_caller(size: i64) -> i64 {
         VerifStatus::Failed,
         "read(-1, 0, size) should fail: fd is negative"
     );
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("canonical FFI counterexample artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.mir_hash.len(), 64);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let diagnostic = results[0]
         .diagnostic
         .as_ref()
