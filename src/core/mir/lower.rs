@@ -7068,38 +7068,47 @@ impl<'a> Lowerer<'a> {
             .collect()
     }
 
-    /// Check whether a value has already crossed a consuming boundary on
-    /// every MIR path reaching the current block.  This is intentionally a
-    /// MIR-CFG query, not a scan over all blocks: a Drop in a sibling branch
-    /// must not suppress the error-edge Drop for a path that did not consume
-    /// the parameter.  A cycle or incomplete predecessor graph is treated as
-    /// "not proven", so the caller emits cleanup conservatively.
-    fn value_consumed_on_all_paths_to_current(&self, value: &MirValueId) -> bool {
+    /// Classify whether a value was consumed on all, no, or only some MIR
+    /// paths reaching the current block.  This is intentionally a MIR-CFG
+    /// query, not a scan over all blocks: a Drop in a sibling branch must not
+    /// suppress the error-edge Drop for a path that did not consume the
+    /// parameter.  Mixed paths are returned to the caller as a hard lowering
+    /// error because this narrow transition-parameter contract has no
+    /// branch-specific cleanup receipt yet.
+    fn value_consumption_on_paths_to_current(&self, value: &MirValueId) -> (bool, bool) {
         fn visit(
             lowerer: &Lowerer<'_>,
             block_id: &MirBlockId,
             value: &MirValueId,
-            memo: &mut BTreeMap<MirBlockId, bool>,
+            memo: &mut BTreeMap<MirBlockId, (bool, bool)>,
             visiting: &mut HashSet<MirBlockId>,
-        ) -> bool {
+        ) -> (bool, bool) {
             if let Some(consumed) = memo.get(block_id) {
                 return *consumed;
             }
             if !visiting.insert(block_id.clone()) {
-                return false;
+                return (true, false);
             }
             let direct = lowerer
                 .blocks
                 .get(block_id)
                 .is_some_and(|block| block_consumes_value(block, value));
             let result = if direct {
-                true
+                (true, true)
             } else {
                 let predecessors = lowerer.predecessors(block_id);
-                !predecessors.is_empty()
-                    && predecessors
+                if predecessors.is_empty() {
+                    (false, false)
+                } else {
+                    let states = predecessors
                         .iter()
-                        .all(|predecessor| visit(lowerer, predecessor, value, memo, visiting))
+                        .map(|predecessor| visit(lowerer, predecessor, value, memo, visiting))
+                        .collect::<Vec<_>>();
+                    (
+                        states.iter().any(|(any, _)| *any),
+                        states.iter().all(|(_, all)| *all),
+                    )
+                }
             };
             visiting.remove(block_id);
             memo.insert(block_id.clone(), result);
@@ -7210,7 +7219,19 @@ impl<'a> Lowerer<'a> {
     fn emit_failure_parameter_drops(&mut self, node: &NodeId) {
         let parameters = self.linear_transition_parameter_values();
         for (index, parameter) in parameters.into_iter().enumerate() {
-            if self.value_consumed_on_all_paths_to_current(&parameter) {
+            let (any_consumed, all_consumed) =
+                self.value_consumption_on_paths_to_current(&parameter);
+            if all_consumed {
+                continue;
+            }
+            if any_consumed {
+                self.error(
+                    node,
+                    format!(
+                        "recoverable Flow parameter '{}' has path-dependent consumption before `?`; branch-specific cleanup receipt is not admitted",
+                        parameter
+                    ),
+                );
                 continue;
             }
             self.emit(

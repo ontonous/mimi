@@ -1685,9 +1685,8 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_flow_parameter_cleanup_uses_checker_join_fact() {
-        let program = canonical_program(
-            r#"
+    fn recoverable_flow_parameter_cleanup_does_not_trust_sibling_branch() {
+        let source = r#"
 func validate_price(price: i32) -> Result<i32, string> {
     if price <= 0 { Err("invalid") } else { Ok(price) }
 }
@@ -1696,12 +1695,12 @@ flow Order {
     state Pending { price: i32 }
     state Paid { price: i32 }
 
-    transition pay(Pending, txn_id: string) -> Paid fails string {
-        if self.price > 0 {
-            drop(txn_id)
-        } else {
-            drop(txn_id)
-        }
+        transition pay(Pending, txn_id: string) -> Paid fails string {
+            if self.price > 0 {
+                drop(txn_id)
+            } else {
+                let untouched = self.price
+            }
         let valid_price = validate_price(self.price)?
         return Paid { price: valid_price }
     }
@@ -1714,36 +1713,22 @@ func main() -> i32 {
         Err((source, error)) => { drop(error) drop(source) 0 },
     }
 }
-"#,
-        );
-        let transition = crate::core::NodeId("transition:Order::pay::Pending".into());
-        let body = program
-            .functions()
-            .get(&transition)
-            .expect("recoverable transition MIR");
-        let parameter = body.parameters.get(1).expect("transaction parameter");
-        let explicit_drops = body
-            .blocks
-            .values()
-            .flat_map(|block| block.instructions.iter())
-            .filter(|instruction| {
-                matches!(
-                    &instruction.kind,
-                    MirInstructionKind::Drop { value } if value == parameter
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            explicit_drops.len(),
-            2,
-            "both mutually exclusive branches explicitly consume txn_id"
-        );
-        assert!(explicit_drops.iter().all(|instruction| {
-            !instruction
-                .id
-                .as_str()
-                .contains("transition_parameter_failure_drop")
-        }));
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("mixed sibling consumption must stay outside canonical MIR");
+        match error {
+            crate::core::mir::reference::MirProgramBuildError::Lowering(errors) => {
+                assert!(errors.iter().any(|error| {
+                    error
+                        .message
+                        .contains("path-dependent consumption before `?`")
+                }));
+            }
+            other => panic!("expected fail-closed lowering diagnostic, got {other:?}"),
+        }
     }
 
     #[test]
