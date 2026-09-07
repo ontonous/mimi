@@ -999,6 +999,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
+        if matches!(callee, ResolvedCallee::Extern(_)) {
+            return self.emit_ffi_call(
+                result,
+                callee,
+                type_arguments,
+                arguments,
+                variant_call_contract,
+                subject,
+            );
+        }
         let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
             return Err(NativeMirError::new(
                 subject,
@@ -1145,6 +1155,59 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "non-Copy Result call result is outside the canonical call ABI contract",
             ));
         }
+        self.emit_call_target(result, function, arguments, subject)
+    }
+
+    fn emit_ffi_call(
+        &mut self,
+        result: Option<&MirValueId>,
+        callee: &ResolvedCallee,
+        type_arguments: &[crate::core::ResolvedTypeId],
+        arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let ResolvedCallee::Extern(callee_owner) = callee else {
+            unreachable!("emit_ffi_call called for non-extern callee");
+        };
+        if !type_arguments.is_empty() {
+            return Err(NativeMirError::new(
+                subject,
+                "canonical native FFI call cannot have type arguments",
+            ));
+        }
+        if variant_call_contract.is_some() {
+            return Err(NativeMirError::new(
+                subject,
+                "canonical native FFI call cannot carry a variant ABI receipt",
+            ));
+        }
+        let instruction = crate::core::mir::MirInstructionId::new(subject.to_owned())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let receipt = self
+            .program
+            .ffi_calls()
+            .get(&instruction)
+            .ok_or_else(|| NativeMirError::new(subject, "extern call has no FFI receipt"))?;
+        if receipt.callee != *callee_owner || receipt.result.as_ref() != result {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI receipt identity disagrees with the native call",
+            ));
+        }
+        let function = self
+            .ffi_functions
+            .get(&receipt.symbol)
+            .copied()
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    format!(
+                        "FFI symbol '{}' is absent from native declarations",
+                        receipt.symbol
+                    ),
+                )
+            })?;
         self.emit_call_target(result, function, arguments, subject)
     }
 

@@ -2367,6 +2367,18 @@ impl<'a> NativeMirValidator<'a> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) {
+        if let ResolvedCallee::Extern(callee_owner) = callee {
+            self.validate_ffi_call(
+                function,
+                result,
+                callee_owner,
+                type_arguments,
+                arguments,
+                variant_call_contract,
+                subject,
+            );
+            return;
+        }
         let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
             self.errors.push(NativeMirError::new(
                 subject,
@@ -2515,6 +2527,115 @@ impl<'a> NativeMirValidator<'a> {
         }
         if let Some(result) = result {
             self.validate_value(function, result, "call result");
+        }
+    }
+
+    fn validate_ffi_call(
+        &mut self,
+        function: &MirFunction,
+        result: Option<&MirValueId>,
+        callee_owner: &crate::core::NodeId,
+        type_arguments: &[crate::core::ResolvedTypeId],
+        arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+        subject: &str,
+    ) {
+        let instruction = match crate::core::mir::MirInstructionId::new(subject.to_owned()) {
+            Ok(instruction) => instruction,
+            Err(error) => {
+                self.errors
+                    .push(NativeMirError::new(subject, error.to_string()));
+                return;
+            }
+        };
+        let Some(receipt) = self.program.ffi_calls().get(&instruction) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "extern call has no FFI receipt",
+            ));
+            return;
+        };
+        if receipt.callee != *callee_owner || receipt.result.as_ref() != result {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "FFI receipt identity disagrees with native call",
+            ));
+        }
+        if receipt.abi != "C" {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI ABI '{}' is outside the canonical native C ABI",
+                    receipt.abi
+                ),
+            ));
+        }
+        if receipt.symbol.trim().is_empty() {
+            self.errors
+                .push(NativeMirError::new(subject, "FFI symbol is empty"));
+        }
+        if !type_arguments.is_empty() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "canonical native FFI call cannot have type arguments",
+            ));
+        }
+        if variant_call_contract.is_some() {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "canonical native FFI call cannot carry a variant ABI receipt",
+            ));
+        }
+        if receipt.arguments != arguments {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "FFI receipt arguments disagree with native call",
+            ));
+        }
+        for argument in arguments {
+            self.validate_ffi_scalar_value(function, argument, subject);
+        }
+        if let Some(result) = result {
+            self.validate_ffi_scalar_value(function, result, subject);
+        }
+    }
+
+    fn validate_ffi_scalar_value(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+    ) {
+        let Some(info) = function.values.get(value) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("FFI value '{}' is absent from the MIR value catalog", value),
+            ));
+            return;
+        };
+        let Some(desc) = self.program.type_catalog().get(&info.ty) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!("FFI value '{}' has no TypeDesc", value),
+            ));
+            return;
+        };
+        if !matches!(
+            desc.abi,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } | MirAbiClass::Bool
+                | MirAbiClass::Float { bits: 64 }
+        ) || desc.layout != MirLayout::Scalar
+        {
+            self.errors.push(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI value '{}' has unsupported canonical ABI {:?}/layout {:?}",
+                    value, desc.abi, desc.layout
+                ),
+            ));
         }
     }
 

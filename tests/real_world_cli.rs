@@ -123,6 +123,50 @@ fn run_mimi_build_and_exec(src: &Path) -> Result<String, String> {
 }
 
 #[test]
+fn canonical_native_scalar_ffi_executes_checker_owned_symbol() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let source = project_root().join("tests/fixtures/mir_scalar_ffi_labs.mimi");
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_scalar_ffi_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create scalar FFI output directory");
+    let binary = dir.join("labs");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn canonical native FFI build");
+    assert!(
+        build.status.success(),
+        "canonical native FFI build failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&binary)
+        .output()
+        .expect("run canonical native FFI binary");
+    assert!(
+        run.status.success(),
+        "canonical native FFI binary failed\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn std_mimispec_removed() {
     // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
     // `mimispec` crate are removed. This test prevents regrowth of the old

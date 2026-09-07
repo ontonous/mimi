@@ -221,11 +221,14 @@ impl MirProgram {
             materialize_transition_contracts(program, &type_catalog, Some(excluded_sources))
                 .map_err(MirProgramBuildError::Validation)?;
         attach_flow_effect_receipts(&mut functions, &transitions);
-        Self::with_type_catalog_and_instances_and_transitions(
+        let ffi_calls = materialize_ffi_call_contracts(program, &functions)
+            .map_err(MirProgramBuildError::Validation)?;
+        Self::with_type_catalog_and_instances_and_transitions_and_ffi(
             functions,
             type_catalog,
             instances,
             transitions,
+            ffi_calls,
         )
         .map_err(MirProgramBuildError::Validation)
     }
