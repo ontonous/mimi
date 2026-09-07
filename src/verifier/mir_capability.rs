@@ -2002,16 +2002,27 @@ impl<'a> CapabilityGate<'a> {
                                 "{subject} SwitchMove binding parameter disagrees with target block parameter"
                             ));
                         }
-                        if let Err(message) = self
-                            .program
-                            .type_catalog()
-                            .validate_variant_payload_projection_receipt(
-                                &scrutinee_ty,
-                                variant_id,
-                                &parameter.ty,
-                                &binding.projection,
-                            )
-                        {
+                        let validation = if let Some(nested) = &binding.nested_tuple {
+                            self.program
+                                .type_catalog()
+                                .validate_variant_nested_tuple_payload_projection_receipt(
+                                    &scrutinee_ty,
+                                    variant_id,
+                                    &parameter.ty,
+                                    &binding.projection,
+                                    nested,
+                                )
+                        } else {
+                            self.program
+                                .type_catalog()
+                                .validate_variant_payload_projection_receipt(
+                                    &scrutinee_ty,
+                                    variant_id,
+                                    &parameter.ty,
+                                    &binding.projection,
+                                )
+                        };
+                        if let Err(message) = validation {
                             self.error(format!("{subject} SwitchMove rejected: {message}"));
                         }
                     }
@@ -2176,16 +2187,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_copy_nested_variant_before_default_route() {
-        let program = canonical(
-            "func main() -> i32 { let value: Option<(string, i32)> = Some((\"owned\", 41)); drop(value); 42 }",
-        );
-        let errors =
-            validate_mir_capabilities(&program).expect_err("nested Option payload must be gated");
-        assert!(errors.iter().any(|error| {
-            error.contains("non-Copy variant TypeDesc")
-                || error.contains("Option<string> variant contract")
-        }));
+    fn rejects_unsupported_non_copy_variant_before_default_route() {
+        let tokens = Lexer::new(
+            "func main() -> i32 { let value: Option<List<string>> = Some([\"owned\"]); drop(value); 42 }",
+        )
+        .tokenize()
+        .expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("unsupported Option<List<string>> must fail before capability gate");
+        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
+            panic!("unsupported Option<List<string>> reached an unexpected MIR stage");
+        };
+        assert!(errors.iter().any(|error| error.message.contains("List")));
     }
 
     #[test]

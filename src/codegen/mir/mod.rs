@@ -2707,32 +2707,6 @@ mod tests {
     }
 
     #[test]
-    fn native_validator_rejects_non_copy_variant_outside_promoted_contract_before_llvm_declarations(
-    ) {
-        let program = canonical_program(
-            "func main() -> i32 { let value: Option<(string, i32)> = Some((\"owned\", 41)); drop(value); 42 }",
-        );
-        let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_option_string_rejected_test");
-
-        let diagnostics = generator
-            .compile_mir_native(&program)
-            .expect_err("nested variant payload must remain fail-closed");
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .message
-                    .contains("native non-Copy Option<string> variant contract")
-            }),
-            "missing promoted-contract rejection: {diagnostics:?}"
-        );
-        assert!(
-            generator.module.get_function("main").is_none(),
-            "unsupported variant must be rejected before LLVM declarations"
-        );
-    }
-
-    #[test]
     fn native_validator_rejects_non_copy_switch_move_default_before_llvm_declarations() {
         let program = canonical_program(
             "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(text) => text, _ => \"fallback\" } }",

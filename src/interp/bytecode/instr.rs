@@ -869,6 +869,15 @@ pub enum Op {
         variant_tag: ConstIdx,
         shapes: ConstIdx,
     },
+    /// Consume a canonical tuple and move every element into `base..base+arity`.
+    /// The shape constant is copied from the MIR tuple receipt and is checked
+    /// before the source register is replaced.
+    DestructureTupleMove {
+        ra: Reg,
+        base: Reg,
+        arity: u16,
+        shape: ConstIdx,
+    },
     /// rd = variant_tag(ra) — extract tag as Int
     VariantTag {
         rd: Reg,
@@ -1338,7 +1347,7 @@ impl Op {
             | FaultRetEarly => false,
             Mov { rs, .. } | Move { rs, .. } | Clone { rs, .. } => *rs == reg,
             Drop { ra } | DropAggregate { ra, .. } | DropVariant { ra, .. } => *ra == reg,
-            DestructureVariantMove { ra, .. } => *ra == reg,
+            DestructureVariantMove { ra, .. } | DestructureTupleMove { ra, .. } => *ra == reg,
             AddInt { ra, rb, .. }
             | SubInt { ra, rb, .. }
             | MulInt { ra, rb, .. }
@@ -1559,6 +1568,9 @@ pub enum ConstValue {
     /// Canonical tuple projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     TupleProjection(TupleProjectionShape),
+    /// Canonical full tuple destructure receipt encoded for the bytecode
+    /// physical ABI.
+    TupleDestructure(TupleDestructureShape),
     /// Canonical List index projection receipts encoded for the bytecode
     /// physical ABI. Legacy ListGet has no receipt and remains separate.
     ListProjection(ListProjectionShape),
@@ -1664,6 +1676,14 @@ pub struct TupleProjectionShape {
     pub tuple_ty: crate::core::ResolvedTypeId,
     pub index: FieldIdx,
     pub arity: u16,
+}
+
+/// One canonical full tuple move/destructure shape. Element identities are
+/// retained for auditability; the VM additionally checks the physical arity.
+#[derive(Debug, Clone)]
+pub struct TupleDestructureShape {
+    pub tuple_ty: crate::core::ResolvedTypeId,
+    pub element_tys: Vec<crate::core::ResolvedTypeId>,
 }
 
 /// One canonical read-only List index projection in the bytecode physical

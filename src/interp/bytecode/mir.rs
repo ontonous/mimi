@@ -30,8 +30,8 @@ use crate::core::NodeId;
 use super::instr::{
     BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
     ListProjectionShape, Op, RecordMoveDropProjectionShape, RecordProjectionShape,
-    RecordResidualDropShape, Reg, TupleProjectionShape, VariantPredicateShape,
-    VariantProjectionFallbackShape, VariantShape,
+    RecordResidualDropShape, Reg, TupleDestructureShape, TupleProjectionShape,
+    VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -3841,6 +3841,67 @@ impl<'a> FunctionEmitter<'a> {
                 self.emit_drop_register(payload_base + index as u16, &field.ty);
             }
         }
+        let mut nested_bases = BTreeMap::new();
+        for (binding_index, binding) in bindings.iter().enumerate() {
+            let Some(nested) = &binding.nested_tuple else {
+                continue;
+            };
+            let Some(parameter) = block
+                .parameters
+                .get(arguments.len() + binding_index)
+                .and_then(|parameter| self.function.values.get(&parameter.value))
+            else {
+                self.error("nested tuple binding target type is absent");
+                return;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_variant_nested_tuple_payload_projection_receipt(
+                    scrutinee_ty,
+                    &variant.id,
+                    &parameter.ty,
+                    &binding.projection,
+                    nested,
+                )
+            {
+                self.error(message);
+                return;
+            }
+            let outer_index = binding.projection.field_index;
+            if nested_bases.contains_key(&outer_index) {
+                continue;
+            }
+            let Some(tuple_desc) = self.program.type_catalog().get(&nested.tuple_ty) else {
+                self.error("nested tuple binding TypeDesc is absent");
+                return;
+            };
+            let MirLayout::Tuple(elements) = &tuple_desc.layout else {
+                self.error("nested tuple binding TypeDesc has no tuple layout");
+                return;
+            };
+            if elements.len() > u16::MAX as usize {
+                self.error("nested tuple payload arity exceeds bytecode field ABI");
+                return;
+            }
+            let tuple_base = self.proto.alloc_reg();
+            for _ in 1..elements.len() {
+                self.proto.alloc_reg();
+            }
+            let shape = self
+                .proto
+                .add_const(ConstValue::TupleDestructure(TupleDestructureShape {
+                    tuple_ty: nested.tuple_ty.clone(),
+                    element_tys: elements.clone(),
+                }));
+            self.proto.emit(Op::DestructureTupleMove {
+                ra: payload_base + outer_index as u16,
+                base: tuple_base,
+                arity: elements.len() as u16,
+                shape,
+            });
+            nested_bases.insert(outer_index, tuple_base);
+        }
         for (binding_index, binding) in bindings.iter().enumerate() {
             let Some(parameter) = block
                 .parameters
@@ -3852,7 +3913,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             if binding.projection.variant != variant.id
                 || binding.projection.nominal.as_str() != expected_nominal
-                || binding.projection.field_ty != parameter.ty
+                || (binding.nested_tuple.is_none() && binding.projection.field_ty != parameter.ty)
                 || binding.projection.arity != variant.fields.len()
             {
                 self.error("switch-move payload projection receipt disagrees with TypeDesc");
@@ -3863,7 +3924,16 @@ impl<'a> FunctionEmitter<'a> {
                 self.error("switch-move binding parameter disagrees with target block parameter");
                 return;
             }
-            sources.push(payload_base + index as u16);
+            let source = if let Some(nested) = &binding.nested_tuple {
+                let tuple_base = nested_bases
+                    .get(&index)
+                    .copied()
+                    .expect("nested tuple base materialized");
+                tuple_base + nested.field_index as u16
+            } else {
+                payload_base + index as u16
+            };
+            sources.push(source);
         }
         for (source, parameter) in sources.into_iter().zip(&block.parameters) {
             let Some(destination) = self.reg(&parameter.value) else {
@@ -10346,6 +10416,31 @@ mod tests {
             crate::core::mir::reference::MirRuntimeValue::String("owned".into())
         );
         assert!(matches!(value, Value::String(value) if value.as_str() == "owned"));
+    }
+
+    #[test]
+    fn executes_nested_tuple_variant_switch_through_reference_and_bytecode() {
+        let source = include_str!("../../../tests/real_world/mir_nested_tuple_option.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let mir = MirProgram::from_checked_program(&checked)
+            .expect("nested tuple Option must lower to canonical MIR");
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&owner, &[])
+            .expect("reference nested tuple switch execution");
+        let bytecode = compile_mir_program(&mir).expect("nested tuple MIR bytecode");
+        assert!(bytecode
+            .functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .any(|op| matches!(op, Op::DestructureTupleMove { .. })));
+        let value = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("bytecode nested tuple switch execution");
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+        assert!(matches!(value, Value::Int(0)));
     }
 
     #[test]

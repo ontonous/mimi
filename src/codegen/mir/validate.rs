@@ -2108,15 +2108,22 @@ impl<'a> NativeMirValidator<'a> {
             // The native non-Copy TypeDesc gate has already proved the
             // complete admitted variant shape. Only this edge's own
             // single-binding physical shape remains to be checked here.
-            if arm.bindings.len() > 1 {
+            let nested_group = arm.bindings.len() > 1
+                && arm.bindings.iter().all(|binding| {
+                    binding.nested_tuple.is_some()
+                        && binding.projection.field == arm.bindings[0].projection.field
+                });
+            if arm.bindings.len() > 1 && !nested_group {
                 self.errors.push(NativeMirError::new(
                     subject,
-                    "native non-Copy SwitchMove supports at most one payload field and one binding",
+                    "native non-Copy SwitchMove supports one direct binding or one complete nested tuple binding group",
                 ));
             }
             let mut binding_fields = BTreeSet::new();
             for (index, binding) in arm.bindings.iter().enumerate() {
-                if !binding_fields.insert(binding.projection.field.clone()) {
+                if binding.nested_tuple.is_none()
+                    && !binding_fields.insert(binding.projection.field.clone())
+                {
                     self.errors.push(NativeMirError::new(
                         subject,
                         format!(
@@ -2138,16 +2145,27 @@ impl<'a> NativeMirValidator<'a> {
                         "switch-move binding parameter disagrees with target block parameter",
                     ));
                 }
-                if let Err(message) = self
-                    .program
-                    .type_catalog()
-                    .validate_variant_payload_projection_receipt(
-                        &scrutinee_value.ty,
-                        variant_id,
-                        &parameter.ty,
-                        &binding.projection,
-                    )
-                {
+                let validation = if let Some(nested) = &binding.nested_tuple {
+                    self.program
+                        .type_catalog()
+                        .validate_variant_nested_tuple_payload_projection_receipt(
+                            &scrutinee_value.ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                            nested,
+                        )
+                } else {
+                    self.program
+                        .type_catalog()
+                        .validate_variant_payload_projection_receipt(
+                            &scrutinee_value.ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                        )
+                };
+                if let Err(message) = validation {
                     self.errors.push(NativeMirError::new(subject, message));
                 }
             }

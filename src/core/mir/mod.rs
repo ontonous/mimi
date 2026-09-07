@@ -1018,6 +1018,10 @@ pub struct MirSwitchBinding {
     /// must use this receipt; they may not reconstruct the variant field
     /// index, arity, or field type from a runtime tag or payload vector.
     pub projection: types::MirVariantProjectionContract,
+    /// Optional second-stage tuple projection for the narrow consuming
+    /// destructure shape. The outer variant field is moved once, then every
+    /// tuple element is transferred to a distinct arm parameter.
+    pub nested_tuple: Option<types::MirTupleProjectionContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3158,12 +3162,13 @@ fn format_switch_terminator(name: &str, scrutinee: &MirValueId, arms: &[MirSwitc
                         .iter()
                         .map(|binding| {
                             format!(
-                                "{}<-{:?}[index={},arity={},ty={}]",
+                                "{}<-{:?}[index={},arity={},ty={},nested={:?}]",
                                 binding.parameter,
                                 binding.projection.field,
                                 binding.projection.field_index,
                                 binding.projection.arity,
-                                binding.projection.field_ty.as_str()
+                                binding.projection.field_ty.as_str(),
+                                binding.nested_tuple
                             )
                         })
                         .collect::<Vec<_>>()
@@ -3746,6 +3751,7 @@ impl<'a> MirValidator<'a> {
             MirTerminator::Switch { scrutinee, arms }
             | MirTerminator::SwitchMove { scrutinee, arms } => {
                 self.use_value(scrutinee);
+                let consuming_switch = matches!(terminator, MirTerminator::SwitchMove { .. });
                 let mut has_default = false;
                 for arm in arms {
                     self.edge(&arm.edge);
@@ -3768,11 +3774,27 @@ impl<'a> MirValidator<'a> {
                                 "switch binding projection index is outside its payload arity",
                             );
                         }
-                        if !binding_fields.insert(&binding.projection.field) {
+                        if binding.nested_tuple.is_some() && !consuming_switch {
+                            self.error(
+                                arm.edge.to_string(),
+                                "nested tuple switch bindings require SwitchMove",
+                            );
+                        }
+                        let duplicate_direct = binding.nested_tuple.is_none()
+                            && !binding_fields.insert(&binding.projection.field);
+                        if duplicate_direct {
                             self.error(
                                 arm.edge.to_string(),
                                 "switch binding field identity is duplicated",
                             );
+                        }
+                        if let Some(nested) = &binding.nested_tuple {
+                            if nested.tuple_ty != binding.projection.field_ty {
+                                self.error(
+                                    arm.edge.to_string(),
+                                    "nested tuple binding source type disagrees with variant payload receipt",
+                                );
+                            }
                         }
                     }
                     if matches!(arm.case, MirSwitchCase::Default) {

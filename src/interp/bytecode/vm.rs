@@ -1679,6 +1679,7 @@ impl BytecodeVM {
                         | Some(ConstValue::RecordProjection(_))
                         | Some(ConstValue::RecordMoveDropProjection(_))
                         | Some(ConstValue::TupleProjection(_))
+                        | Some(ConstValue::TupleDestructure(_))
                         | Some(ConstValue::ListProjection(_))
                         | Some(ConstValue::ListOperation(_))
                         | Some(ConstValue::VariantPredicate(_))
@@ -3444,6 +3445,60 @@ impl BytecodeVM {
                         }
                     };
                     for (index, value) in payload.into_iter().enumerate() {
+                        self.set_reg(base + index as u16, value);
+                    }
+                }
+                Op::DestructureTupleMove {
+                    ra,
+                    base,
+                    arity,
+                    shape,
+                } => {
+                    let expected = match proto.constants.get(shape as usize) {
+                        Some(ConstValue::TupleDestructure(shape)) => shape,
+                        Some(_) => {
+                            return Err(InterpError::new(format!(
+                                "tuple destructure: shape constant {} is not a TupleDestructure",
+                                shape
+                            )));
+                        }
+                        None => {
+                            return Err(InterpError::new(format!(
+                                "tuple destructure: shape constant {} is absent",
+                                shape
+                            )));
+                        }
+                    };
+                    if expected.element_tys.len() != arity as usize {
+                        return Err(InterpError::new(
+                            "tuple destructure: shape arity disagrees with opcode arity",
+                        ));
+                    }
+                    let source_len = match self.get_reg(ra) {
+                        Value::Tuple(items) => items.len(),
+                        value => {
+                            return Err(InterpError::new(format!(
+                                "tuple destructure: expected Tuple value, got {}",
+                                value
+                            )));
+                        }
+                    };
+                    if source_len != arity as usize {
+                        return Err(InterpError::new(format!(
+                            "tuple destructure: expected {} elements, got {}",
+                            arity, source_len
+                        )));
+                    }
+                    let value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::Tuple(items) = value else {
+                        return Err(InterpError::new(
+                            "tuple destructure: source changed before transfer",
+                        ));
+                    };
+                    for (index, value) in items.into_iter().enumerate() {
                         self.set_reg(base + index as u16, value);
                     }
                 }
@@ -5654,6 +5709,7 @@ impl BytecodeVM {
             ConstValue::RecordProjection(_) => Value::Unit,
             ConstValue::RecordMoveDropProjection(_) => Value::Unit,
             ConstValue::TupleProjection(_) => Value::Unit,
+            ConstValue::TupleDestructure(_) => Value::Unit,
             ConstValue::ListProjection(_) => Value::Unit,
             ConstValue::ListOperation(_) => Value::Unit,
             ConstValue::VariantPredicate(_) => Value::Unit,

@@ -266,14 +266,14 @@ pub(super) fn native_copy_variant_payload_type(
 /// complete ABI must use `native_variant_abi` below.
 ///
 /// The admitted native move-owned profiles are `Option<string>`,
-/// `Option<List<Copy scalar>>`, `Result<string, i32>` and
-/// `Result<List<Copy scalar>, i32>` and the generic projection-only
+/// `Option<List<Copy scalar>>`, bounded scalar/String/tuple products,
+/// `Result<string, i32>` and `Result<List<Copy scalar>, i32>` and the generic projection-only
 /// `Result<managed, bool>` shape. Their canonical TypeDesc/drop plans prove
 /// the active payload glue; the physical ABI is
 /// `{ i8 discriminant, managed payload }` for Option and
 /// `{ i8 discriminant, managed ok_payload, i32 err_payload }` for Result.
-/// Nested, mixed, unit-payload, and user-defined variants remain fail-closed
-/// until their own contracts are promoted.
+/// Nested List, mixed, unit-payload, and user-defined variants remain
+/// fail-closed until their own contracts are promoted.
 pub(super) fn native_non_copy_variant_payload_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,

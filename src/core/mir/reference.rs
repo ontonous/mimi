@@ -1296,14 +1296,24 @@ impl MirProgram {
                                         message: "switch binding parameter disagrees with target block parameter".into(),
                                     });
                                 }
-                                if let Err(message) = type_catalog
-                                    .validate_variant_payload_projection_receipt(
+                                let validation = if let Some(nested) = &binding.nested_tuple {
+                                    type_catalog
+                                        .validate_variant_nested_tuple_payload_projection_receipt(
+                                            &scrutinee_value.ty,
+                                            variant_id,
+                                            &parameter.ty,
+                                            &binding.projection,
+                                            nested,
+                                        )
+                                } else {
+                                    type_catalog.validate_variant_payload_projection_receipt(
                                         &scrutinee_value.ty,
                                         variant_id,
                                         &parameter.ty,
                                         &binding.projection,
                                     )
-                                {
+                                };
+                                if let Err(message) = validation {
                                     errors.push(super::MirValidationError {
                                         subject: arm.edge.to_string(),
                                         message,
@@ -6115,6 +6125,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "switch binding parameter disagrees with target block parameter",
                 ));
             }
+            if binding.nested_tuple.is_some() {
+                return Err(self.error(
+                    &function.owner,
+                    "read-only switch cannot carry a nested consuming tuple binding",
+                ));
+            }
             if binding.projection.variant != *actual_variant
                 || binding.projection.nominal.as_str() != actual_nominal.as_str()
                 || binding.projection.arity != payload.len()
@@ -6205,6 +6221,7 @@ impl<'a> MirReferenceInterpreter<'a> {
         }
         let plan = plan.clone();
         let mut bound_indices = BTreeMap::new();
+        let mut nested_indices: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
         for (binding_index, binding) in arm.bindings.iter().enumerate() {
             let target_parameter = function
                 .blocks
@@ -6228,7 +6245,6 @@ impl<'a> MirReferenceInterpreter<'a> {
             if binding.projection.variant != actual_variant
                 || binding.projection.nominal.as_str() != actual_nominal.as_str()
                 || binding.projection.arity != payload.len()
-                || binding.projection.field_ty != parameter.ty
             {
                 return Err(self.error(
                     &function.owner,
@@ -6236,11 +6252,52 @@ impl<'a> MirReferenceInterpreter<'a> {
                 ));
             }
             let index = binding.projection.field_index;
-            if bound_indices
-                .insert(binding.projection.field.clone(), index)
-                .is_some()
-            {
-                return Err(self.error(&function.owner, "switch-move binding field is repeated"));
+            if let Some(nested) = &binding.nested_tuple {
+                self.program
+                    .type_catalog()
+                    .validate_variant_nested_tuple_payload_projection_receipt(
+                        &scrutinee_ty,
+                        &actual_variant,
+                        &parameter.ty,
+                        &binding.projection,
+                        nested,
+                    )
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if bound_indices
+                    .get(&binding.projection.field)
+                    .is_some_and(|outer| *outer != index)
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "switch-move nested binding outer field index disagrees",
+                    ));
+                }
+                bound_indices.insert(binding.projection.field.clone(), index);
+                if !nested_indices
+                    .entry(index)
+                    .or_default()
+                    .insert(nested.field_index)
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "switch-move nested tuple field is repeated",
+                    ));
+                }
+            } else {
+                if binding.projection.field_ty != parameter.ty {
+                    return Err(self.error(
+                        &function.owner,
+                        "switch-move payload projection receipt disagrees with runtime value",
+                    ));
+                }
+                if bound_indices
+                    .insert(binding.projection.field.clone(), index)
+                    .is_some()
+                {
+                    return Err(
+                        self.error(&function.owner, "switch-move binding field is repeated")
+                    );
+                }
             }
         }
         let mut bound_values = BTreeMap::new();
@@ -6260,15 +6317,58 @@ impl<'a> MirReferenceInterpreter<'a> {
                 self.drop_runtime_value(function, &field.ty, child)?;
             }
         }
+        let mut nested_values = BTreeMap::new();
+        for (outer_index, indices) in nested_indices {
+            let tuple = bound_values.remove(&outer_index).ok_or_else(|| {
+                self.error(
+                    &function.owner,
+                    "switch-move nested tuple payload was not transferred",
+                )
+            })?;
+            let MirRuntimeValue::Tuple(mut fields) = tuple else {
+                return Err(self.error(
+                    &function.owner,
+                    "switch-move nested binding payload is not a tuple",
+                ));
+            };
+            if fields.len() != indices.len()
+                || indices
+                    .iter()
+                    .enumerate()
+                    .any(|(index, expected)| index != *expected)
+            {
+                return Err(self.error(
+                    &function.owner,
+                    "switch-move nested tuple payload is not fully bound",
+                ));
+            }
+            for index in 0..fields.len() {
+                nested_values.insert(
+                    (outer_index, index),
+                    std::mem::replace(&mut fields[index], MirRuntimeValue::Unit),
+                );
+            }
+        }
         for binding in &arm.bindings {
             let index = *bound_indices
                 .get(&binding.projection.field)
                 .ok_or_else(|| {
                     self.error(&function.owner, "switch-move binding index is absent")
                 })?;
-            let value = bound_values.remove(&index).ok_or_else(|| {
-                self.error(&function.owner, "switch-move binding was consumed twice")
-            })?;
+            let value = if let Some(nested) = &binding.nested_tuple {
+                nested_values
+                    .remove(&(index, nested.field_index))
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "switch-move nested binding was consumed twice",
+                        )
+                    })?
+            } else {
+                bound_values.remove(&index).ok_or_else(|| {
+                    self.error(&function.owner, "switch-move binding was consumed twice")
+                })?
+            };
             incoming.push(value);
         }
         Ok(incoming)

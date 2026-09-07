@@ -8321,6 +8321,7 @@ impl<'a> Lowerer<'a> {
                     bindings: vec![MirSwitchBinding {
                         parameter: result.clone(),
                         projection: ok_projection,
+                        nested_tuple: None,
                     }],
                     case: MirSwitchCase::Variant(ok_id),
                 },
@@ -8331,6 +8332,7 @@ impl<'a> Lowerer<'a> {
                     bindings: vec![MirSwitchBinding {
                         parameter: error_value.clone(),
                         projection: err_projection,
+                        nested_tuple: None,
                     }],
                     case: MirSwitchCase::Variant(err_id),
                 },
@@ -8746,6 +8748,7 @@ impl<'a> Lowerer<'a> {
                     bindings.push(MirSwitchBinding {
                         parameter,
                         projection,
+                        nested_tuple: None,
                     });
                 }
                 ResolvedPatternKind::Binding { .. } => {
@@ -8754,6 +8757,82 @@ impl<'a> Lowerer<'a> {
                         "variant payload reference bindings require ownership lowering",
                     );
                     return None;
+                }
+                ResolvedPatternKind::Tuple(elements)
+                    if nested_record.is_none()
+                        && fields.len() == 1
+                        && self.type_catalog.is_some_and(|catalog| {
+                            catalog.get(scrutinee_ty).is_some_and(|descriptor| {
+                                descriptor.kind == super::types::MirTypeKind::Option
+                            })
+                        }) =>
+                {
+                    let Some(type_catalog) = self.type_catalog else {
+                        self.error(
+                            node,
+                            "nested tuple binding requires a canonical TypeDesc catalog",
+                        );
+                        return None;
+                    };
+                    if elements.is_empty() {
+                        self.error(node, "nested tuple payload binding cannot be empty");
+                        return None;
+                    }
+                    let outer_projection = match type_catalog
+                        .validated_variant_payload_projection_contract(
+                            scrutinee_ty,
+                            variant,
+                            field,
+                            &payload.ty,
+                        ) {
+                        Ok(projection) => projection,
+                        Err(message) => {
+                            self.error(node, message);
+                            return None;
+                        }
+                    };
+                    for (index, element) in elements.iter().enumerate() {
+                        let ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        } = &element.kind
+                        else {
+                            self.error(
+                                node,
+                                "nested tuple payload patterns require direct bindings for every element",
+                            );
+                            return None;
+                        };
+                        let parameter = match self.local_value(local) {
+                            Ok(value) => value,
+                            Err(errors) => {
+                                self.errors.extend(errors);
+                                return None;
+                            }
+                        };
+                        let Some(parameter_ty) =
+                            self.values.get(&parameter).map(|value| value.ty.clone())
+                        else {
+                            self.error(node, "nested tuple binding target has no MIR type");
+                            return None;
+                        };
+                        let nested = match type_catalog.validated_tuple_field_projection_contract(
+                            &payload.ty,
+                            index,
+                            &parameter_ty,
+                        ) {
+                            Ok(projection) => projection,
+                            Err(message) => {
+                                self.error(node, message);
+                                return None;
+                            }
+                        };
+                        bindings.push(MirSwitchBinding {
+                            parameter,
+                            projection: outer_projection.clone(),
+                            nested_tuple: Some(nested),
+                        });
+                    }
                 }
                 ResolvedPatternKind::Constructor {
                     fields: nested_fields,
@@ -8830,6 +8909,7 @@ impl<'a> Lowerer<'a> {
                     bindings.push(MirSwitchBinding {
                         parameter: base.clone(),
                         projection: projection_contract,
+                        nested_tuple: None,
                     });
                     nested_record = Some(NestedRecordMatchSetup {
                         base,

@@ -3919,16 +3919,44 @@ impl MirTypeCatalog {
     }
 
     /// Validate one move-owned payload that a tagged variant projection may
-    /// transfer out without introducing residual ownership state. The current
-    /// managed payload island is deliberately limited to owned `String` and
-    /// `List<Copy scalar>` handles; callers receive the exact glue family so a
-    /// backend cannot infer ownership from representation.
+    /// transfer out without introducing residual ownership state. The managed
+    /// payload island admits owned `String` and `List<Copy scalar>` handles;
+    /// nested tuple payloads have a separate whole-variant contract so generic
+    /// `Option<T>.unwrap_or(T)` and direct Result calls cannot inherit tuple
+    /// admission merely because they share this helper.
     pub fn validate_move_owned_payload(&self, ty: &ResolvedTypeId) -> Result<MirGlueKind, String> {
         if self.validate_owned_string(ty).is_ok() {
             return Ok(MirGlueKind::OwnedString);
         }
         self.validate_move_owned_list_payload(ty)?;
         Ok(MirGlueKind::List)
+    }
+
+    /// Validate the bounded non-Copy tuple product used by an explicit
+    /// `Option<(...)>` consuming pattern. This is intentionally not folded
+    /// into `validate_move_owned_payload`: generic variant projection and
+    /// direct Result-call contracts remain closed until they have their own
+    /// tuple ABI and ownership receipts.
+    fn validate_move_owned_tuple_payload(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<MirGlueKind, String> {
+        self.validate_recursive_tuple_abi(ty).map_err(|message| {
+            format!(
+                "move-owned tuple payload '{}' is outside the canonical scalar/String/tuple product contract: {message}",
+                ty.as_str()
+            )
+        })?;
+        let descriptor = self
+            .get(ty)
+            .expect("tuple TypeDesc remains present after validation");
+        if descriptor.ownership == MirOwnership::Copy {
+            return Err(format!(
+                "move-owned tuple payload '{}' must be non-Copy",
+                ty.as_str()
+            ));
+        }
+        Ok(MirGlueKind::Aggregate)
     }
 
     /// Validate one move-owned payload that may cross a generic record
@@ -8606,15 +8634,10 @@ impl MirTypeCatalog {
         Ok(inner.clone())
     }
 
-    /// Validate the common Option envelope for a move-owned managed payload.
-    /// This helper is intentionally separate from the narrow Option<string>
-    /// accessor: it admits only the additional `List<Copy scalar>` payload
-    /// shape needed by the generic projection slice and returns its exact
-    /// child glue family.
-    pub fn validate_option_move_variant(
+    fn validate_option_variant_envelope(
         &self,
         ty: &ResolvedTypeId,
-    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+    ) -> Result<ResolvedTypeId, String> {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
@@ -8679,8 +8702,34 @@ impl MirTypeCatalog {
                 "Option Some payload identity/type disagrees with the canonical managed-payload contract".into(),
             );
         }
-        let payload_glue = self.validate_move_owned_payload(inner)?;
+        Ok(inner.clone())
+    }
+
+    /// Validate the common Option envelope for a move-owned managed payload.
+    /// This helper is intentionally separate from the narrow Option<string>
+    /// accessor: it admits the established managed payload families
+    /// (`String` and `List<Copy scalar>`) and returns their exact child glue
+    /// family. Explicit nested tuple matching uses
+    /// `validate_option_nested_tuple_variant` instead.
+    pub fn validate_option_move_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+        let inner = self.validate_option_variant_envelope(ty)?;
+        let payload_glue = self.validate_move_owned_payload(&inner)?;
         Ok((inner.clone(), payload_glue))
+    }
+
+    /// Validate the explicit non-Copy tuple payload variant used by the
+    /// nested `Option<(...)>` SwitchMove lowering. It is intentionally not
+    /// accepted by generic `Option<T>.unwrap_or(T)` or direct Result calls.
+    pub fn validate_option_nested_tuple_variant(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(ResolvedTypeId, MirGlueKind), String> {
+        let inner = self.validate_option_variant_envelope(ty)?;
+        let payload_glue = self.validate_move_owned_tuple_payload(&inner)?;
+        Ok((inner, payload_glue))
     }
 
     /// Validate the promoted non-Copy Result variant contract.
@@ -8879,15 +8928,24 @@ impl MirTypeCatalog {
             ));
         };
         match &descriptor.layout {
-            MirLayout::Option { .. } => self
-                .validate_option_move_variant(ty)
+            MirLayout::Option { inner, .. } => {
+                let validation = if self
+                    .get(inner)
+                    .is_some_and(|payload| matches!(payload.layout, MirLayout::Tuple(_)))
+                {
+                    self.validate_option_nested_tuple_variant(ty)
+                } else {
+                    self.validate_option_move_variant(ty)
+                };
+                validation
                 .map(|_| ())
                 .map_err(|message| {
                     format!(
                         "type '{}' is outside the canonical non-Copy Option managed-payload variant contract: {message}",
                         ty.as_str()
                     )
-                }),
+                })
+            }
             MirLayout::Result { .. } => self
                 .validate_result_move_variant(ty)
                 .map(|_| ())
@@ -9237,6 +9295,58 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Validate the one admitted nested consuming pattern:
+    /// `Variant { payload: (field0, field1, ...) }`. The outer variant field
+    /// is moved once and the nested tuple receipt proves that the arm binds
+    /// tuple elements rather than independently cloning a non-Copy payload.
+    pub fn validate_variant_nested_tuple_payload_projection_receipt(
+        &self,
+        scrutinee_ty: &ResolvedTypeId,
+        variant_id: &NodeId,
+        parameter_ty: &ResolvedTypeId,
+        projection: &MirVariantProjectionContract,
+        nested: &MirTupleProjectionContract,
+    ) -> Result<(), String> {
+        if self
+            .get(scrutinee_ty)
+            .is_none_or(|descriptor| descriptor.kind != MirTypeKind::Option)
+        {
+            return Err(
+                "nested consuming tuple payload binding is currently restricted to canonical Option variants"
+                    .into(),
+            );
+        }
+        self.validate_variant_payload_projection_receipt(
+            scrutinee_ty,
+            variant_id,
+            &nested.tuple_ty,
+            projection,
+        )?;
+        let tuple = self.get(&nested.tuple_ty).ok_or_else(|| {
+            format!(
+                "nested tuple payload type '{}' is absent from TypeDesc",
+                nested.tuple_ty.as_str()
+            )
+        })?;
+        if tuple.ownership == MirOwnership::Copy {
+            return Err(
+                "nested consuming tuple payload must be non-Copy so its elements have one move boundary"
+                    .into(),
+            );
+        }
+        self.validate_glue(&nested.tuple_ty, MirGlueOperation::MoveOut)?;
+        self.validate_glue(&nested.tuple_ty, MirGlueOperation::Drop)?;
+        let expected = self.validated_tuple_field_projection_contract(
+            &nested.tuple_ty,
+            nested.field_index,
+            parameter_ty,
+        )?;
+        if nested != &expected {
+            return Err("nested tuple projection receipt disagrees with TypeDesc".into());
+        }
+        Ok(())
+    }
+
     /// Validate a switch over a canonical variant family.  Exhaustiveness is
     /// part of the MIR contract: either every discriminant is listed exactly
     /// once or the final arm is an explicit default.
@@ -9314,6 +9424,21 @@ impl MirTypeCatalog {
                                 binding.projection.field.0
                             ));
                         }
+                        if let Some(nested) = &binding.nested_tuple {
+                            if !allow_move_owned_payload {
+                                return Err(
+                                    "read-only variant switch cannot destructure an owned nested tuple payload"
+                                        .into(),
+                                );
+                            }
+                            self.validate_variant_nested_tuple_payload_projection_receipt(
+                                scrutinee_ty,
+                                variant,
+                                &nested.field_ty,
+                                &binding.projection,
+                                nested,
+                            )?;
+                        }
                     }
                 }
                 crate::core::mir::MirSwitchCase::Default => {
@@ -9385,14 +9510,12 @@ impl MirTypeCatalog {
                 continue;
             };
             let (_, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
-            let mut bound_fields = BTreeSet::new();
+            let mut bound_fields = std::collections::BTreeMap::<
+                NodeId,
+                Option<std::collections::BTreeSet<usize>>,
+            >::new();
+            let mut nested_outer_field = None;
             for binding in &arm.bindings {
-                if !bound_fields.insert(&binding.projection.field) {
-                    return Err(format!(
-                        "switch-move binding field '{}' is repeated",
-                        binding.projection.field.0
-                    ));
-                }
                 if !variant
                     .fields
                     .iter()
@@ -9401,6 +9524,67 @@ impl MirTypeCatalog {
                     return Err(format!(
                         "switch-move binding field '{}' is absent from variant '{}'",
                         binding.projection.field.0, variant.name
+                    ));
+                }
+                if let Some(nested) = &binding.nested_tuple {
+                    if nested_outer_field.get_or_insert_with(|| binding.projection.field.clone())
+                        != &binding.projection.field
+                    {
+                        return Err(
+                            "switch-move nested tuple bindings may consume only one outer variant field"
+                                .into(),
+                        );
+                    }
+                    let entry = bound_fields
+                        .entry(binding.projection.field.clone())
+                        .or_insert_with(|| Some(std::collections::BTreeSet::new()));
+                    let Some(indices) = entry else {
+                        return Err(format!(
+                            "switch-move binding field '{}' mixes direct and nested tuple projections",
+                            binding.projection.field.0
+                        ));
+                    };
+                    if !indices.insert(nested.field_index) {
+                        return Err(format!(
+                            "switch-move nested tuple index {} is repeated for field '{}'",
+                            nested.field_index, binding.projection.field.0
+                        ));
+                    }
+                } else if bound_fields
+                    .insert(binding.projection.field.clone(), None)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "switch-move binding field '{}' is repeated",
+                        binding.projection.field.0
+                    ));
+                }
+            }
+            for (field_id, indices) in bound_fields {
+                let Some(indices) = indices else { continue };
+                let field = variant
+                    .fields
+                    .iter()
+                    .find(|field| field.id == field_id)
+                    .expect("validated variant field");
+                let tuple = self.get(&field.ty).ok_or_else(|| {
+                    format!(
+                        "nested tuple payload field '{}' type '{}' is absent from TypeDesc",
+                        field.name,
+                        field.ty.as_str()
+                    )
+                })?;
+                let MirLayout::Tuple(elements) = &tuple.layout else {
+                    return Err(format!(
+                        "nested tuple payload field '{}' has no tuple layout",
+                        field.name
+                    ));
+                };
+                let expected = (0..elements.len()).collect::<std::collections::BTreeSet<_>>();
+                if indices != expected {
+                    return Err(format!(
+                        "nested tuple payload field '{}' must bind every element exactly once",
+                        field.name
                     ));
                 }
             }
@@ -9427,14 +9611,11 @@ impl MirTypeCatalog {
                 continue;
             };
             let (_, variant) = self.validated_variant_switch_case(scrutinee_ty, variant_id)?;
-            let mut bound_fields = BTreeSet::new();
+            let mut bound_fields = std::collections::BTreeMap::<
+                NodeId,
+                Option<std::collections::BTreeSet<usize>>,
+            >::new();
             for binding in &arm.bindings {
-                self.validate_variant_payload_projection_receipt(
-                    scrutinee_ty,
-                    variant_id,
-                    &binding.projection.field_ty,
-                    &binding.projection,
-                )?;
                 let field = variant
                     .fields
                     .get(binding.projection.field_index)
@@ -9444,11 +9625,42 @@ impl MirTypeCatalog {
                             binding.projection.field.0, variant.name
                         )
                     })?;
-                if !bound_fields.insert(field.id.clone()) {
-                    return Err(format!(
-                        "switch-move binding field '{}' is repeated",
-                        field.id.0
-                    ));
+                if let Some(nested) = &binding.nested_tuple {
+                    self.validate_variant_nested_tuple_payload_projection_receipt(
+                        scrutinee_ty,
+                        variant_id,
+                        &nested.field_ty,
+                        &binding.projection,
+                        nested,
+                    )?;
+                    let entry = bound_fields
+                        .entry(field.id.clone())
+                        .or_insert_with(|| Some(std::collections::BTreeSet::new()));
+                    let Some(indices) = entry else {
+                        return Err(format!(
+                            "switch-move binding field '{}' mixes direct and nested tuple projections",
+                            field.id.0
+                        ));
+                    };
+                    if !indices.insert(nested.field_index) {
+                        return Err(format!(
+                            "switch-move nested tuple index {} is repeated for field '{}'",
+                            nested.field_index, field.id.0
+                        ));
+                    }
+                } else {
+                    self.validate_variant_payload_projection_receipt(
+                        scrutinee_ty,
+                        variant_id,
+                        &binding.projection.field_ty,
+                        &binding.projection,
+                    )?;
+                    if bound_fields.insert(field.id.clone(), None).is_some() {
+                        return Err(format!(
+                            "switch-move binding field '{}' is repeated",
+                            field.id.0
+                        ));
+                    }
                 }
                 self.validate_glue(&field.ty, MirGlueOperation::MoveOut)
                     .map_err(|message| {
@@ -9457,6 +9669,34 @@ impl MirTypeCatalog {
                             field.id.0
                         )
                     })?;
+            }
+            for (field_id, indices) in bound_fields {
+                let Some(indices) = indices else { continue };
+                let field = variant
+                    .fields
+                    .iter()
+                    .find(|field| field.id == field_id)
+                    .expect("validated variant field");
+                let tuple = self.get(&field.ty).ok_or_else(|| {
+                    format!(
+                        "nested tuple payload field '{}' type '{}' is absent from TypeDesc",
+                        field.name,
+                        field.ty.as_str()
+                    )
+                })?;
+                let MirLayout::Tuple(elements) = &tuple.layout else {
+                    return Err(format!(
+                        "nested tuple payload field '{}' has no tuple layout",
+                        field.name
+                    ));
+                };
+                let expected = (0..elements.len()).collect::<std::collections::BTreeSet<_>>();
+                if indices != expected {
+                    return Err(format!(
+                        "nested tuple payload field '{}' must bind every element exactly once",
+                        field.name
+                    ));
+                }
             }
         }
         Ok(())
@@ -10573,6 +10813,101 @@ mod tests {
         assert!(catalog
             .validate_aggregate_glue(&nested_id, MirGlueOperation::Drop)
             .is_ok());
+    }
+
+    #[test]
+    fn nested_tuple_variant_move_receipt_covers_every_element() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string type");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32 type");
+        let tuple_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![string_id.clone(), i32_id.clone()]))
+            .expect("failure tuple type");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(tuple_id.clone()))
+            .expect("Option<tuple>");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let (managed_payload, payload_glue) = catalog
+            .validate_option_nested_tuple_variant(&option_id)
+            .expect("Option tuple managed payload contract");
+        assert_eq!(managed_payload, tuple_id);
+        assert_eq!(payload_glue, MirGlueKind::Aggregate);
+        let some = crate::core::NodeId("builtin:variant:Option::Some".into());
+        let none = crate::core::NodeId("builtin:variant:Option::None".into());
+        let payload = crate::core::NodeId("builtin:variant:Option::Some/payload:0".into());
+        let outer = catalog
+            .validated_variant_payload_projection_contract(&option_id, &some, &payload, &tuple_id)
+            .expect("Some tuple payload receipt");
+        let first = catalog
+            .validated_tuple_field_projection_contract(&tuple_id, 0, &string_id)
+            .expect("tuple string receipt");
+        let second = catalog
+            .validated_tuple_field_projection_contract(&tuple_id, 1, &i32_id)
+            .expect("tuple i32 receipt");
+        catalog
+            .validate_variant_nested_tuple_payload_projection_receipt(
+                &option_id, &some, &string_id, &outer, &first,
+            )
+            .expect("first nested payload receipt");
+        catalog
+            .validate_variant_nested_tuple_payload_projection_receipt(
+                &option_id, &some, &i32_id, &outer, &second,
+            )
+            .expect("second nested payload receipt");
+
+        let make_binding = |parameter: &str, nested: super::MirTupleProjectionContract| {
+            crate::core::mir::MirSwitchBinding {
+                parameter: crate::core::mir::MirValueId::new(parameter).expect("value id"),
+                projection: outer.clone(),
+                nested_tuple: Some(nested),
+            }
+        };
+        let arms = vec![
+            crate::core::mir::MirSwitchArm {
+                edge: crate::core::mir::MirEdgeId::new("edge:none").expect("edge"),
+                target: crate::core::mir::MirBlockId::new("bb:none").expect("block"),
+                arguments: Vec::new(),
+                bindings: Vec::new(),
+                case: crate::core::mir::MirSwitchCase::Variant(none),
+            },
+            crate::core::mir::MirSwitchArm {
+                edge: crate::core::mir::MirEdgeId::new("edge:some").expect("edge"),
+                target: crate::core::mir::MirBlockId::new("bb:some").expect("block"),
+                arguments: Vec::new(),
+                bindings: vec![
+                    make_binding("value:first", first),
+                    make_binding("value:second", second),
+                ],
+                case: crate::core::mir::MirSwitchCase::Variant(some.clone()),
+            },
+        ];
+        catalog
+            .validate_variant_switch_move_contract(&option_id, &arms)
+            .expect("complete nested tuple switch receipt");
+
+        let incomplete = vec![crate::core::mir::MirSwitchArm {
+            edge: crate::core::mir::MirEdgeId::new("edge:some-only").expect("edge"),
+            target: crate::core::mir::MirBlockId::new("bb:some-only").expect("block"),
+            arguments: Vec::new(),
+            bindings: vec![make_binding(
+                "value:first",
+                catalog
+                    .validated_tuple_field_projection_contract(&tuple_id, 0, &string_id)
+                    .expect("tuple string receipt"),
+            )],
+            case: crate::core::mir::MirSwitchCase::Variant(some),
+        }];
+        let error = catalog
+            .validate_variant_switch_move_contract(&option_id, &incomplete)
+            .expect_err("nested tuple switch must bind every element");
+        assert!(
+            error.contains("exhaustive") || error.contains("every element"),
+            "{error}"
+        );
     }
 
     #[test]

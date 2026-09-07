@@ -113,6 +113,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::NewVariant { .. } => "NEW_VARIANT",
         Op::NewVariantMove { .. } => "NEW_VARIANT_MOVE",
         Op::DestructureVariantMove { .. } => "DESTRUCTURE_VARIANT_MOVE",
+        Op::DestructureTupleMove { .. } => "DESTRUCTURE_TUPLE_MOVE",
         Op::VariantTag { .. } => "VARIANT_TAG",
         Op::VariantPayload { .. } => "VARIANT_PAYLOAD",
         Op::IsVariant { .. } => "IS_VARIANT",
@@ -203,6 +204,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     format!("record_move_drop_projection {:?}", v)
                 }
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+                ConstValue::TupleDestructure(v) => format!("tuple_destructure {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
                 ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
@@ -398,6 +400,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     format!("record_move_drop_projection {:?}", v)
                 }
                 ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+                ConstValue::TupleDestructure(v) => format!("tuple_destructure {:?}", v),
                 ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
                 ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
                 ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),
@@ -933,6 +936,20 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 shapes
             )
         }
+        Op::DestructureTupleMove {
+            ra,
+            base,
+            arity,
+            shape,
+        } => format!(
+            "{:04}  {:<16} destructure_tuple_move r{} -> r{}..r{} [shape const {}]",
+            pc,
+            name,
+            ra,
+            base,
+            *base as u16 + arity.saturating_sub(1),
+            shape
+        ),
         Op::VariantTag { rd, ra } => format!("{:04}  {:<16} r{} = tag(r{})", pc, name, rd, ra),
         Op::VariantPayload { rd, ra, idx } => format!(
             "{:04}  {:<16} r{} = payload(r{}, {})",
@@ -1147,6 +1164,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
                 format!("record_move_drop_projection {:?}", v)
             }
             ConstValue::TupleProjection(v) => format!("tuple_projection {:?}", v),
+            ConstValue::TupleDestructure(v) => format!("tuple_destructure {:?}", v),
             ConstValue::ListProjection(v) => format!("list_projection {:?}", v),
             ConstValue::ListOperation(v) => format!("list_operation {:?}", v),
             ConstValue::VariantPredicate(v) => format!("variant_predicate {:?}", v),

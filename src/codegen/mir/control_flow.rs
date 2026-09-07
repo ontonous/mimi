@@ -471,6 +471,81 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 predecessor,
             ));
         }
+        if bindings
+            .iter()
+            .any(|binding| binding.nested_tuple.is_some())
+        {
+            if flat_copy {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "nested tuple payload binding requires consuming SwitchMove",
+                ));
+            }
+            let payload_slot = variant_abi.payload_slot(&variant.id).ok_or_else(|| {
+                NativeMirError::new(
+                    subject.to_string(),
+                    "nested tuple binding has no native ABI payload slot",
+                )
+            })?;
+            let payload = self
+                .generator
+                .builder
+                .build_extract_value(
+                    scrutinee.into_struct_value(),
+                    payload_slot.physical_field,
+                    "mir_nested_variant_payload_load",
+                )
+                .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+            for (index, binding) in bindings.iter().enumerate() {
+                let Some(nested) = &binding.nested_tuple else {
+                    return Err(NativeMirError::new(
+                        subject.to_string(),
+                        "nested tuple binding group mixes direct and nested projections",
+                    ));
+                };
+                let parameter = block
+                    .parameters
+                    .get(arguments.len() + index)
+                    .and_then(|parameter| self.function.values.get(&parameter.value))
+                    .ok_or_else(|| {
+                        NativeMirError::new(
+                            subject.to_string(),
+                            "nested tuple binding target type is absent",
+                        )
+                    })?;
+                self.program
+                    .type_catalog()
+                    .validate_variant_nested_tuple_payload_projection_receipt(
+                        scrutinee_ty,
+                        &variant.id,
+                        &parameter.ty,
+                        &binding.projection,
+                        nested,
+                    )
+                    .map_err(|message| NativeMirError::new(subject.to_string(), message))?;
+                if binding.parameter != parameter.id {
+                    return Err(NativeMirError::new(
+                        subject.to_string(),
+                        "nested tuple binding parameter disagrees with target block parameter",
+                    ));
+                }
+                let element = self
+                    .generator
+                    .builder
+                    .build_extract_value(
+                        payload.into_struct_value(),
+                        nested.field_index as u32,
+                        "mir_nested_tuple_payload_load",
+                    )
+                    .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+                self.pending_incoming.push((
+                    parameter.id.clone(),
+                    NativePhiSource::Value(element),
+                    predecessor,
+                ));
+            }
+            return Ok(());
+        }
         let payload = if bindings.is_empty() {
             None
         } else {

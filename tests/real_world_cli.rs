@@ -278,6 +278,60 @@ fn canonical_mir_native_build_matches_mir_run() {
 }
 
 #[test]
+fn canonical_mir_nested_tuple_variant_matches_reference_and_native() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("mir_nested_tuple_option.mimi");
+    let mir_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&fixture)
+        .arg("--mir")
+        .output()
+        .expect("failed to spawn nested tuple canonical MIR run");
+    assert_eq!(
+        mir_run.status.code(),
+        Some(0),
+        "nested tuple canonical MIR run failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir_run.stderr),
+        String::from_utf8_lossy(&mir_run.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&mir_run.stdout), "7\n");
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-native-{}-nested-tuple",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--mir")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn nested tuple canonical MIR native build");
+    assert!(
+        build.status.success(),
+        "nested tuple canonical MIR native build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native_run = Command::new(&binary)
+        .output()
+        .expect("failed to execute nested tuple canonical MIR native binary");
+    let _ = std::fs::remove_file(&binary);
+    assert_eq!(
+        native_run.status.code(),
+        Some(0),
+        "nested tuple canonical MIR native run failed:\n{}\n{}",
+        String::from_utf8_lossy(&native_run.stderr),
+        String::from_utf8_lossy(&native_run.stdout)
+    );
+    assert_eq!(String::from_utf8_lossy(&native_run.stdout), "7\n");
+}
+
+#[test]
 fn canonical_flow_state_match_uses_default_mir_route_and_native_output() {
     let fixture = project_root()
         .join("tests")
@@ -4381,13 +4435,13 @@ fn canonical_mir_native_rejects_mixed_variant_payload_without_fallback() {
 }
 
 #[test]
-fn canonical_mir_native_rejects_non_copy_variant_outside_promoted_contract_without_fallback() {
+fn canonical_mir_native_builds_nested_tuple_variant_construct_and_drop() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
         .join("mir_native_option_string_rejected.mimi");
     let binary = std::env::temp_dir().join(format!(
-        "mimi-canonical-native-option-string-rejected-{}",
+        "mimi-canonical-native-option-nested-tuple-{}",
         std::process::id()
     ));
     let build = Command::new(mimi_bin())
@@ -4398,13 +4452,13 @@ fn canonical_mir_native_rejects_non_copy_variant_outside_promoted_contract_witho
         .arg("-o")
         .arg(&binary)
         .output()
-        .expect("failed to spawn rejected canonical MIR Option<string> build");
+        .expect("failed to spawn canonical MIR nested tuple Option build");
     let _ = fs::remove_file(&binary);
-    assert!(!build.status.success());
-    let stderr = String::from_utf8_lossy(&build.stderr);
-    assert!(stderr.contains("canonical MIR native backend rejected"));
-    assert!(stderr.contains("native non-Copy Option<string> variant contract"));
-    assert!(!stderr.contains("bytecode runtime error"));
+    assert!(
+        build.status.success(),
+        "canonical MIR nested tuple Option build failed:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 }
 
 #[test]

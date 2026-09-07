@@ -1,0 +1,12 @@
+func main() -> i32 {
+  ensures: result == 0
+  let value: Option<(string, i32)> = Some(("source", 7))
+  match value {
+    Some((source, code)) => {
+      drop(source)
+      println(code)
+      0
+    },
+    None => 0
+  }
+}

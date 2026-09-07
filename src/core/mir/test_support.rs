@@ -526,6 +526,7 @@ pub(crate) fn direct_enum_switch_move_fixture() -> DirectEnumSwitchMoveFixture {
                                     bindings: vec![MirSwitchBinding {
                                         parameter: kept.clone(),
                                         projection: projection.clone(),
+                                        nested_tuple: None,
                                     }],
                                     case: MirSwitchCase::Variant(keep_desc.id.clone()),
                                 },
@@ -705,6 +706,7 @@ pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitch
                                     bindings: vec![MirSwitchBinding {
                                         parameter: number.clone(),
                                         projection: projection.clone(),
+                                        nested_tuple: None,
                                     }],
                                     case: MirSwitchCase::Variant(number_desc.id.clone()),
                                 },

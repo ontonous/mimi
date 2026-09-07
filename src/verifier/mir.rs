@@ -1150,12 +1150,22 @@ fn explore_variant_switch(
                             binding.parameter
                         )
                     })?;
-                    catalog.validate_variant_payload_projection_receipt(
-                        &scrutinee_ty,
-                        variant_id,
-                        &parameter.ty,
-                        &binding.projection,
-                    )?;
+                    if let Some(nested) = &binding.nested_tuple {
+                        catalog.validate_variant_nested_tuple_payload_projection_receipt(
+                            &scrutinee_ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                            nested,
+                        )?;
+                    } else {
+                        catalog.validate_variant_payload_projection_receipt(
+                            &scrutinee_ty,
+                            variant_id,
+                            &parameter.ty,
+                            &binding.projection,
+                        )?;
+                    }
                     let field_index = binding.projection.field_index;
                     let field = variant.fields.get(field_index).ok_or_else(|| {
                         format!(
@@ -1186,6 +1196,11 @@ fn explore_variant_switch(
                                 field.id.0
                             )
                         })?
+                    };
+                    let value = if let Some(nested) = &binding.nested_tuple {
+                        symbolic_project(value, &MirProjection::Tuple(nested.field_index))?
+                    } else {
+                        value
                     };
                     if !symbolic_matches_type(catalog, &parameter.ty, &value) {
                         return Err(format!(
@@ -8049,9 +8064,9 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_non_copy_nested_variant_switch_move() {
+    fn verifier_rejects_unsupported_non_copy_variant_before_symbolic_execution() {
         let source = r#"
-            func consume(value: Option<(string, i32)>) -> i32 {
+            func consume(value: Option<List<string>>) -> i32 {
                 ensures: result >= 0
                 match value {
                     Some(_) => 41,
@@ -8064,20 +8079,12 @@ mod tests {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR gate");
-        let results = verify_program(&program, "nested-non-copy-variant-source-hash".into())
-            .expect("verifier should return a classified result");
-        let result = results
-            .iter()
-            .find(|result| result.func_name.ends_with("consume"))
-            .expect("consume verification result");
-        assert_eq!(
-            result.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
-        );
-        assert!(result
-            .message
-            .contains("outside the canonical non-Copy Option managed-payload variant contract"));
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("unsupported Option<List<string>> must fail before verifier");
+        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
+            panic!("unsupported Option<List<string>> reached an unexpected MIR stage");
+        };
+        assert!(errors.iter().any(|error| error.message.contains("List")));
     }
 
     #[test]
