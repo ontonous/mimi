@@ -28,6 +28,7 @@ func main() -> i32 {
         },
         Err((returned, error)) => {
             println(returned.label)
+            drop(returned)
             drop(error)
             0
         },
