@@ -3198,7 +3198,7 @@ fn validate_recoverable_failure_consumption(
                             .values
                             .get(&binding.parameter)
                             .is_some_and(|value| value.ty == contract.source)
-                            && nested.element_ty == contract.source
+                            && nested.field_ty == contract.source
                     } else {
                         binding.projection.field_ty == failure_ty
                     }
