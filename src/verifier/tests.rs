@@ -1176,6 +1176,35 @@ fn public_checked_verifier_reports_recoverable_cross_state_counterexample_from_m
 }
 
 #[test]
+fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
+    require_z3!();
+    let source =
+        include_str!("../../tests/fixtures/mir_m3_flow_multifield_string_source_receipt.mimi");
+    let file = parse_memory_source(source, "mir-multifield-flow-source-receipt-public-api")
+        .expect("parse multifield Flow source receipt");
+    let program =
+        crate::core::check_program(&file).expect("typecheck multifield Flow source receipt");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::mir::reset_test_route_materialization_count();
+    let results = verify_checked(&program, source_hash).expect("public multifield MIR verify");
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "main")
+        .expect("multifield Flow source receipt proof");
+    assert_eq!(result.status, VerifStatus::Proven);
+    assert!(result.constraint_count > 0);
+    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("canonical multifield Flow source receipt MIR");
+    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+}
+
+#[test]
 fn scalar_collection_verifier_admission_does_not_overmatch_managed_siblings() {
     require_z3!();
     let source = include_str!("../../tests/fixtures/mir_test_scalar_collection_mixed.mimi");

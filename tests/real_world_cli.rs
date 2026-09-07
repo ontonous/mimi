@@ -559,6 +559,75 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
 }
 
 #[test]
+fn canonical_multifield_flow_source_receipt_uses_default_mir_route() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_m3_flow_multifield_string_source_receipt.mimi");
+
+    let mir_dump = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .output()
+        .expect("failed to spawn multifield Flow MIR inspection");
+    assert!(
+        mir_dump.status.success(),
+        "multifield Flow MIR inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir_dump.stderr),
+        String::from_utf8_lossy(&mir_dump.stdout)
+    );
+    let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
+    assert!(mir_stdout.contains("RecoverableBoundary"), "{mir_stdout}");
+    assert!(mir_stdout.contains("move_project_drop"), "{mir_stdout}");
+
+    for args in [vec!["run"], vec!["run", "--mir"]] {
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(args)
+            .arg(&fixture)
+            .output()
+            .expect("failed to spawn multifield Flow canonical run");
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "multifield Flow run failed:\n{}\n{}",
+            String::from_utf8_lossy(&run.stderr),
+            String::from_utf8_lossy(&run.stdout)
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "source\n");
+        assert!(run.stderr.is_empty());
+    }
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-canonical-multifield-flow-source-receipt-{}",
+        std::process::id()
+    ));
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("failed to spawn multifield Flow canonical build");
+    assert!(
+        build.status.success(),
+        "multifield Flow native build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("failed to execute multifield Flow native binary");
+    let _ = fs::remove_file(&binary);
+    assert_eq!(native.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "source\n");
+    assert!(native.stderr.is_empty());
+}
+
+#[test]
 fn canonical_flow_failure_verifier_reports_a_real_counterexample() {
     let fixture = project_root()
         .join("tests")

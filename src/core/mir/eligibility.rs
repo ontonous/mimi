@@ -80,7 +80,90 @@ pub fn is_flow_failure_retry_candidate(program: &CheckedProgram) -> bool {
             .resolved_body(&transition.node_id)
             .is_some_and(|body| block_contains_try(&body.root));
 
-    local_retry || is_exact_cross_state_result_match(program, transition, flow)
+    local_retry
+        || is_exact_cross_state_result_match(program, transition, flow)
+        || is_exact_multifield_cross_state_record_receipt(program, transition, flow)
+}
+
+/// The bounded F1 record-residual shape: a failing cross-state transition
+/// moves one owned String field from a two-field source state into a one-field
+/// target state, while the other source field is released by the canonical
+/// `MoveProjectDrop` receipt on the failure path.  The MIR lowerer and all
+/// consumers already support this receipt; admission was intentionally kept
+/// behind the single-field retry/F2 profiles until this composition boundary
+/// had a fixed real-world fixture.
+fn is_exact_multifield_cross_state_record_receipt(
+    program: &CheckedProgram,
+    transition: &crate::core::resolved::ResolvedTransition,
+    flow: &crate::core::resolved::ResolvedFlow,
+) -> bool {
+    if transition.silent_transition
+        || transition.targets.len() != 1
+        || transition.targets[0] == transition.id.source
+        || transition.params.len() != 1
+        || transition
+            .fails
+            .as_ref()
+            .is_none_or(|ty| !is_concrete_string_type(ty))
+        || transition.is_fallback
+        || transition.is_ffi_pinned
+        || flow.persistent_fields.len() != 0
+        || flow
+            .states
+            .keys()
+            .filter(|name| name.as_str() != "Fault")
+            .count()
+            != 2
+        || program
+            .transitions()
+            .values()
+            .filter(|item| !item.is_fallback && program.resolved_body(&item.node_id).is_some())
+            .count()
+            != 1
+        || !is_concrete_i32_type(&transition.params[0].1)
+    {
+        return false;
+    }
+    let Some(source_state) = flow.states.get(&transition.id.source.name) else {
+        return false;
+    };
+    let Some(target_id) = transition.targets.first() else {
+        return false;
+    };
+    let Some(target_state) = flow.states.get(&target_id.name) else {
+        return false;
+    };
+    let [(target_field, target_ty)] = target_state.payload.as_slice() else {
+        return false;
+    };
+    if source_state.payload.len() != 2
+        || !is_concrete_string_type(target_ty)
+        || target_field.is_empty()
+        || !source_state
+            .payload
+            .iter()
+            .all(|(_, ty)| is_concrete_string_type(ty))
+        || source_state
+            .payload
+            .iter()
+            .filter(|(name, ty)| name == target_field && is_concrete_string_type(ty))
+            .count()
+            != 1
+    {
+        return false;
+    }
+    let Some(signature) = program.resolved_signature(&transition.node_id) else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&signature.result),
+        Some(ResolvedType::Result { .. })
+    ) {
+        return false;
+    }
+    program
+        .resolved_body(&transition.node_id)
+        .is_some_and(|body| block_contains_try(&body.root))
 }
 
 /// F2 is intentionally a source-shaped matcher, not a broad "Flow with a
@@ -1195,6 +1278,14 @@ fn is_concrete_i32_type(ty: &Type) -> bool {
     }
 }
 
+fn is_concrete_string_type(ty: &Type) -> bool {
+    match ty {
+        Type::Located { ty, .. } => is_concrete_string_type(ty),
+        Type::Name(name, arguments) => name == "string" && arguments.is_empty(),
+        _ => false,
+    }
+}
+
 /// The local recoverable retry island carries the state through the failure
 /// envelope and back into the same transition.  Keep the admission explicit:
 /// the payload may be a Copy `i32` or one owned `string`, whose aggregate
@@ -1255,6 +1346,27 @@ mod tests {
         let source = include_str!("../../../tests/fixtures/mir_m3_flow_retry_string_state.mimi");
         let program = checked(source);
         assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn multifield_cross_state_string_receipt_is_a_narrow_candidate() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_m3_flow_multifield_string_source_receipt.mimi"
+        );
+        let program = checked(source);
+        assert!(is_flow_failure_retry_candidate(&program));
+    }
+
+    #[test]
+    fn multifield_cross_state_string_receipt_rejects_non_string_residual() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_m3_flow_multifield_string_source_receipt.mimi"
+        );
+        let mutated = source
+            .replace("note: string", "note: i32")
+            .replace("note: \"discarded\"", "note: 7");
+        let program = checked(&mutated);
+        assert!(!is_flow_failure_retry_candidate(&program));
     }
 
     #[test]

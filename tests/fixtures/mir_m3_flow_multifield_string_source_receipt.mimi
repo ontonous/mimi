@@ -19,6 +19,7 @@ flow Account {
 }
 
 func main() -> i32 {
+    ensures: result == 0
     let source = Active { label: "source", note: "discarded" }
     let rejected = Account::close(source, 0)
     match rejected {
