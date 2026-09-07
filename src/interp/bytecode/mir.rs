@@ -9286,16 +9286,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_copy_record_move_projection_with_non_copy_sibling() {
-        let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+    fn rejects_managed_generic_list_projection_before_bytecode_emission() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi"
+        );
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("partial move must fail before bytecode emission");
+            .expect_err("managed generic List projection must fail before bytecode emission");
         let text = format!("{error:?}");
         assert!(
-            text.contains("non-Copy") || text.contains("move projection"),
+            text.contains("outside scalar contract"),
             "unexpected fail-closed error: {text}"
         );
     }

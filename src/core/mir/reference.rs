@@ -3344,10 +3344,28 @@ fn recoverable_failure_path_has_live_source(
                     aliases.clear();
                     source_live = false;
                 }
+                MirInstructionKind::MoveProject {
+                    base,
+                    projection: MirProjection::Field(_),
+                    ..
+                }
+                | MirInstructionKind::MoveProjectDrop {
+                    base,
+                    projection: MirProjection::Field(_),
+                    ..
+                } if aliases.contains(base) => {
+                    // A direct field move consumes the complete Flow source
+                    // aggregate.  The TypeDesc MoveProject contract admits
+                    // only Copy siblings; MoveProjectDrop carries the
+                    // explicit residual drop schedule for managed siblings.
+                    aliases.clear();
+                    source_live = false;
+                }
                 MirInstructionKind::MoveProject { base, .. } if aliases.contains(base) => {
-                    // A projection of error (or any other non-source field)
-                    // consumes the aggregate in the generic ledger, but it
-                    // does not satisfy the Flow source receipt.
+                    // A tuple/error projection is not the returned Flow source
+                    // receipt.  It may consume the error payload, but the
+                    // source residual remains live until tuple index 0 or an
+                    // explicit drop/transfer consumes it.
                     aliases.remove(base);
                 }
                 MirInstructionKind::Drop { value } if aliases.contains(value) => {

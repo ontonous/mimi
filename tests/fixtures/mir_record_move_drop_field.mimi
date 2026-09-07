@@ -1,0 +1,11 @@
+// R6-06 probe: a multi-field owned record consumes one field and releases the
+// remaining owned sibling through the same MoveProjectDrop contract used by
+// Flow state payloads.
+type Ticket { title: string, note: string }
+
+func main() -> i32 {
+    let ticket = Ticket { title: "done", note: "discarded" }
+    let title = ticket.title
+    drop(title)
+    0
+}

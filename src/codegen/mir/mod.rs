@@ -856,6 +856,7 @@ mod tests {
     use super::CodeGenerator;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout};
+    use crate::core::mir::MirInstructionKind;
     use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
     use crate::interp::Value;
     use crate::lexer::Lexer;
@@ -7207,6 +7208,110 @@ mod tests {
         assert!(ir.contains("mir_record_move_drop_residual"));
         assert!(ir.contains("mir_record_move_drop_project"));
         assert!(generator.module.get_function("project").is_some());
+    }
+
+    #[test]
+    fn ordinary_record_field_move_drop_shares_one_mir_across_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_record_move_drop_field.mimi"
+        ));
+        let main = program
+            .functions()
+            .get(&crate::core::NodeId("function:main".into()))
+            .expect("main MIR");
+        let move_drop = main
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::MoveProjectDrop {
+                    contract: Some(contract),
+                    ..
+                } => Some(contract),
+                _ => None,
+            })
+            .expect("ordinary record field must use MoveProjectDrop");
+        assert_eq!(move_drop.projection.name, "title");
+        assert_eq!(move_drop.residual.len(), 1);
+        assert_eq!(move_drop.residual[0].name, "note");
+        assert_eq!(move_drop.residual[0].glue, MirGlueKind::OwnedString);
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference ordinary MoveProjectDrop execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "");
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("ordinary MoveProjectDrop MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode ordinary MoveProjectDrop execution");
+        assert!(matches!(bytecode, Value::Int(0)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for ordinary MoveProjectDrop");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_ordinary_record_move_drop_test");
+        generator
+            .compile_mir_native(&program)
+            .expect("native ordinary MoveProjectDrop lowering");
+        generator
+            .module
+            .verify()
+            .expect("native ordinary MoveProjectDrop module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native ordinary MoveProjectDrop execution");
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
+    }
+
+    #[test]
+    fn multifield_flow_source_receipt_shares_one_mir_across_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_m3_flow_multifield_string_source_receipt.mimi"
+        ));
+        let owner = crate::core::NodeId("function:main".into());
+        let main = program.functions().get(&owner).expect("main MIR");
+        assert!(main.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::MoveProjectDrop { .. })
+            })
+        }));
+
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference multifield Flow source receipt execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "source\n");
+
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("multifield Flow source receipt MIR bytecode"),
+        )
+        .run_value()
+        .expect("bytecode multifield Flow source receipt execution");
+        assert!(matches!(bytecode, Value::Int(0)));
+
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability for multifield Flow source receipt");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_multifield_flow_source_receipt");
+        generator
+            .compile_mir_native(&program)
+            .expect("native multifield Flow source receipt lowering");
+        generator
+            .module
+            .verify()
+            .expect("native multifield Flow source receipt module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native multifield Flow source receipt execution");
+        assert_eq!(native.stdout, "source\n");
+        assert_eq!(native.stderr, "");
+        assert_eq!(native.exit_code, Some(0));
     }
 
     #[test]

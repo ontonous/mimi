@@ -6326,16 +6326,16 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_non_copy_record_move_projection_with_non_copy_sibling() {
+    fn verifier_rejects_managed_generic_list_projection_before_exploration() {
         let source =
-            include_str!("../../tests/fixtures/mir_native_record_move_project_rejected.mimi");
+            include_str!("../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi");
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("non-Copy sibling must fail before verifier exploration");
+            .expect_err("managed generic List projection must fail before verifier exploration");
         let text = format!("{error:?}");
-        assert!(text.contains("explicit move projection contract"), "{text}");
+        assert!(text.contains("outside scalar contract"), "{text}");
     }
 
     #[test]

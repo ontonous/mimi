@@ -45,12 +45,14 @@ func main() -> i32 {
             println(o2.tracking)
             let o3 = Order::deliver(o2)
             println(o3.item)
+            0
         },
         Err((src, e)) => {
             // Rejected path: source state returned, error message available.
             // The caller can inspect src to decide retry logic.
             println(e)
             println(src.item)
+            0
         },
     }
 
@@ -58,10 +60,15 @@ func main() -> i32 {
     let bad = Pending { item: "free", price: 0 }
     let bad_result = Order::pay(bad, "TXN-99")
     match bad_result {
-        Ok(o) => println(o.price),
+        Ok(o) => {
+            println(o.price)
+            0
+        },
         Err((src, e)) => {
             println(e)
             println(src.price)
+            drop(src)
+            0
         },
     }
 

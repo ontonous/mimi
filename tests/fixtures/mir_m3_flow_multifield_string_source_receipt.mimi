@@ -1,0 +1,35 @@
+// R6-06 regression: a recoverable transition moves one owned field from a
+// multi-field Flow source and drops the owned sibling through its receipt.
+func validate_amount(amount: i32) -> Result<i32, string> {
+    if amount <= 0 {
+        Err("invalid amount")
+    } else {
+        Ok(amount)
+    }
+}
+
+flow Account {
+    state Active { label: string, note: string }
+    state Closed { label: string }
+
+    transition close(Active, amount: i32) -> Closed fails string {
+        let checked = validate_amount(amount)?
+        return Closed { label: self.label }
+    }
+}
+
+func main() -> i32 {
+    let source = Active { label: "source", note: "discarded" }
+    let rejected = Account::close(source, 0)
+    match rejected {
+        Ok(success) => {
+            drop(success)
+            1000
+        },
+        Err((returned, error)) => {
+            println(returned.label)
+            drop(error)
+            0
+        },
+    }
+}

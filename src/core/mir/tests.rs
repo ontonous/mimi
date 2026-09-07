@@ -6177,18 +6177,19 @@ fn direct_owned_string_calls_remain_canonical_and_reference_transfers_arguments(
 }
 
 #[test]
-fn non_copy_record_projection_with_non_copy_sibling_fails_closed() {
-    let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+fn managed_generic_list_projection_fails_closed_before_consumers() {
+    let source =
+        include_str!("../../../tests/fixtures/mir_native_generic_list_projection_rejected.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
     let checked = crate::core::check_program(&file).expect("check");
     let error = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
-        .expect_err("record with a non-Copy sibling must not invent a residual");
+        .expect_err("managed generic List projection must fail before consumers");
     let text = format!("{error:?}");
     assert!(
-        text.contains("non-Copy") || text.contains("move projection"),
+        text.contains("outside scalar contract"),
         "unexpected fail-closed error: {text}"
     );
 }

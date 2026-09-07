@@ -7328,6 +7328,19 @@ impl<'a> Lowerer<'a> {
                                 projection,
                             },
                         );
+                    } else if let Some((projection, contract)) =
+                        self.move_projection_drop_for_place(&local, &expression.ty, place)
+                    {
+                        self.emit(
+                            &expression.node_id,
+                            "move_project_drop",
+                            MirInstructionKind::MoveProjectDrop {
+                                result: result.clone(),
+                                base: local,
+                                projection,
+                                contract: Some(contract),
+                            },
+                        );
                     } else if let Some(projection) =
                         self.copy_projection_for_place(&local, &expression.ty, place)
                     {
@@ -7471,6 +7484,19 @@ impl<'a> Lowerer<'a> {
                             result: result.clone(),
                             base,
                             projection,
+                        },
+                    );
+                } else if let Some(contract) =
+                    self.move_projection_drop_contract(&base, &result, &projection)
+                {
+                    self.emit(
+                        &expression.node_id,
+                        "move_project_drop",
+                        MirInstructionKind::MoveProjectDrop {
+                            result: result.clone(),
+                            base,
+                            projection,
+                            contract: Some(contract),
                         },
                     );
                 } else {
@@ -9383,6 +9409,53 @@ impl<'a> Lowerer<'a> {
         type_catalog
             .validate_move_projection(&base_value.ty, &result_value.ty, projection)
             .is_ok()
+    }
+
+    fn move_projection_drop_contract(
+        &self,
+        base: &MirValueId,
+        result: &MirValueId,
+        projection: &super::MirProjection,
+    ) -> Option<super::types::MirRecordMoveProjectionDropContract> {
+        let catalog = self.type_catalog?;
+        let base_ty = self.values.get(base)?.ty.clone();
+        let result_ty = self.values.get(result)?.ty.clone();
+        let super::MirProjection::Field(field) = projection else {
+            return None;
+        };
+        catalog
+            .validated_record_move_projection_drop_contract(&base_ty, field, &result_ty)
+            .ok()
+    }
+
+    fn move_projection_drop_for_place(
+        &self,
+        base: &MirValueId,
+        result_ty: &crate::core::ResolvedTypeId,
+        place: &crate::core::ResolvedPlace,
+    ) -> Option<(
+        super::MirProjection,
+        super::types::MirRecordMoveProjectionDropContract,
+    )> {
+        let [projection] = place.projections.as_slice() else {
+            return None;
+        };
+        let projection = match projection {
+            crate::core::ir::ResolvedProjection::Field { field, .. } => {
+                super::MirProjection::Field(field.clone())
+            }
+            _ => return None,
+        };
+        let catalog = self.type_catalog?;
+        let base_ty = self.values.get(base)?.ty.clone();
+        let field = match &projection {
+            super::MirProjection::Field(field) => field,
+            _ => return None,
+        };
+        let contract = catalog
+            .validated_record_move_projection_drop_contract(&base_ty, field, result_ty)
+            .ok()?;
+        (contract.result_ty == *result_ty).then_some((projection, contract))
     }
 
     fn list_index_projection_contract(

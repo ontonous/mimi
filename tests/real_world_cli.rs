@@ -1325,13 +1325,13 @@ fn canonical_mir_native_record_move_project_matches_mir_run() {
 }
 
 #[test]
-fn canonical_mir_record_move_project_rejects_non_copy_sibling_without_fallback() {
+fn canonical_mir_generic_list_projection_rejects_without_legacy_fallback() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
-        .join("mir_native_record_move_project_rejected.mimi");
+        .join("mir_native_generic_list_projection_rejected.mimi");
     let binary = std::env::temp_dir().join(format!(
-        "mimi-canonical-native-record-move-project-rejected-{}",
+        "mimi-canonical-native-generic-list-projection-rejected-{}",
         std::process::id()
     ));
     let build = Command::new(mimi_bin())
@@ -1342,12 +1342,12 @@ fn canonical_mir_record_move_project_rejects_non_copy_sibling_without_fallback()
         .arg("-o")
         .arg(&binary)
         .output()
-        .expect("failed to spawn rejected canonical MIR record MoveProject build");
+        .expect("failed to spawn rejected canonical MIR generic List build");
     let _ = fs::remove_file(&binary);
     assert!(!build.status.success());
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(stderr.contains("canonical MIR build error"));
-    assert!(stderr.contains("non-Copy") && stderr.contains("explicit move projection contract"));
+    assert!(stderr.contains("generic MIR instance argument is outside scalar contract"));
     assert!(!stderr.contains("bytecode runtime error"));
 }
 
