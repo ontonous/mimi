@@ -161,6 +161,43 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {
+    // A declaration-only FFI surface has no call-site contract obligation.
+    // CheckedProgram already owns declaration identity and arity, so avoid
+    // reconstructing ExternFunc AST adapters and invoking the legacy FFI
+    // walker for this no-obligation profile. This is an explicit empty
+    // result, not a proof verdict.
+    let has_contract = program.extern_blocks().values().any(|block| {
+        block
+            .signatures
+            .iter()
+            .any(|signature| signature.requires.is_some() || signature.ensures.is_some())
+    }) || program
+        .callables()
+        .values()
+        .any(|callable| !callable.contracts.is_empty());
+    for site in program.call_sites().values() {
+        if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
+        }
+        let signature = program.extern_func_signature(&site.callee).ok_or_else(|| {
+            format!(
+                "TOOL-RESOLUTION-001: missing resolved extern signature for call '{}'",
+                site.callee
+            )
+        })?;
+        if site.argc != signature.params.len() {
+            return Err(format!(
+                "TOOL-RESOLUTION-001: extern call '{}' expects {} arguments, got {}",
+                site.callee,
+                signature.params.len(),
+                site.argc
+            ));
+        }
+    }
+    if !has_contract {
+        return Ok(Vec::new());
+    }
+
     let mut externs = std::collections::HashMap::new();
     for block in program.extern_blocks().values() {
         for signature in &block.signatures {
@@ -199,25 +236,6 @@ pub fn verify_ffi_checked(
                     signature.name
                 ));
             }
-        }
-    }
-    for site in program.call_sites().values() {
-        if site.kind != crate::core::ResolvedCallKind::Extern {
-            continue;
-        }
-        let signature = program.extern_func_signature(&site.callee).ok_or_else(|| {
-            format!(
-                "TOOL-RESOLUTION-001: missing resolved extern signature for call '{}'",
-                site.callee
-            )
-        })?;
-        if site.argc != signature.params.len() {
-            return Err(format!(
-                "TOOL-RESOLUTION-001: extern call '{}' expects {} arguments, got {}",
-                site.callee,
-                signature.params.len(),
-                site.argc
-            ));
         }
     }
     if is_z3_available() {

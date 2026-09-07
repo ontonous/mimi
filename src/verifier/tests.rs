@@ -598,15 +598,19 @@ fn verify_ffi_no_requires() {
 extern "C" {
     func get_value() -> i64;
 }
-func caller() -> i64 {
-    get_value()
-}
+    func caller() -> i64 {
+        get_value()
+    }
 "#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = verify_ffi_source(src).expect("src/verifier/tests.rs:380 unwrap failed");
     assert!(
-        results.iter().all(|r| r.status == VerifStatus::Verified),
-        "no-requires extern should be Verified: {:?}",
-        results
+        results.is_empty(),
+        "no-contract extern has no obligations: {results:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "declaration-only FFI must not enter the retained AST verifier"
     );
 }
 
