@@ -1296,6 +1296,68 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_receipt_digest_pins_argument_order_result_and_contract_phase() {
+    const SOURCE: &str = r#"
+extern "C" {
+    func digest_pair(left: i64, right: i64) -> i64
+        ensures: result / right == left / right and result % right == left % right;
+}
+func main() -> i64 {
+    let first = digest_pair(-7 as i64, -3 as i64);
+    let second = digest_pair(7 as i64, -3 as i64);
+    0
+}
+"#;
+    const SWAPPED_ARGS: &str = r#"
+extern "C" {
+    func digest_pair(left: i64, right: i64) -> i64
+        ensures: result / right == left / right and result % right == left % right;
+}
+func main() -> i64 {
+    let first = digest_pair(-3 as i64, -7 as i64);
+    let second = digest_pair(-3 as i64, 7 as i64);
+    0
+}
+"#;
+    const REQUIRES_PHASE: &str = r#"
+extern "C" {
+    func digest_pair(left: i64, right: i64) -> i64
+        requires: right != 0;
+}
+func main() -> i64 {
+    let first = digest_pair(-7 as i64, -3 as i64);
+    let second = digest_pair(7 as i64, -3 as i64);
+    0
+}
+"#;
+
+    let materialize = |source: &str| {
+        let checked =
+            crate::core::check_program(&super::parse(source)).expect("digest fixture check");
+        MirProgram::from_checked_program(&checked).expect("digest fixture materialization")
+    };
+    let first = materialize(SOURCE);
+    let second = materialize(SOURCE);
+    assert_eq!(first.canonical_digest(), second.canonical_digest());
+    assert_eq!(first.ffi_calls().len(), 2);
+    let receipts = first.ffi_calls().values().collect::<Vec<_>>();
+    let first_result = receipts[0].result.clone().expect("first digest result");
+    let second_result = receipts[1].result.clone().expect("second digest result");
+    assert_ne!(first_result, second_result);
+    assert!(receipts.iter().all(|receipt| receipt.arguments.len() == 2));
+    assert_ne!(
+        first.canonical_digest(),
+        materialize(SWAPPED_ARGS).canonical_digest(),
+        "argument order must affect the canonical digest"
+    );
+    assert_ne!(
+        first.canonical_digest(),
+        materialize(REQUIRES_PHASE).canonical_digest(),
+        "precondition/postcondition phase must affect the canonical digest"
+    );
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
