@@ -1178,6 +1178,124 @@ func main() -> i64 {{
 }
 
 #[test]
+fn scalar_ffi_ensures_multi_argument_negative_divisor_keeps_result_identity() {
+    struct PairOracle(Cell<u32>);
+    impl MirReferenceFfiResolver for PairOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_pair" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(left), MirRuntimeValue::Int(_right)] = args else {
+                return Err("pair oracle expects two i64 arguments".into());
+            };
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Int(*left))
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_pair(int64_t left, int64_t right) { (void)right; return left; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_pair(left: i64, right: i64) -> i64
+        ensures: result / right == left / right and result % right == left % right;
+}
+func main() -> i64 {
+    let first = mir_ffi_pair(-7 as i64, -3 as i64);
+    let second = mir_ffi_pair(7 as i64, -3 as i64);
+    println(first);
+    println(second);
+    0
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("multi-argument remainder FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("multi-argument remainder FFI materialization");
+    assert_eq!(mir.ffi_calls().len(), 2, "two calls must keep two receipts");
+    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    assert!(receipts.iter().all(|receipt| receipt.arguments.len() == 2));
+    let first_result = receipts[0].result.clone().expect("first result identity");
+    let second_result = receipts[1].result.clone().expect("second result identity");
+    assert_ne!(first_result, second_result, "call results must not alias");
+    assert!(receipts.iter().all(|receipt| receipt.ensures.is_some()));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let mir_results = crate::verifier::verify_mir(&mir, "multi-argument-remainder".into())
+        .expect("multi-argument remainder MIR verifier");
+    assert_eq!(mir_results.len(), 2);
+    assert!(mir_results.iter().all(|result| {
+        result.status == crate::verifier::VerifStatus::Disproven
+            && result.message.contains("extern ensures contract")
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    for results in [
+        crate::verifier::verify_checked(&checked, "multi-argument-remainder".into()),
+        crate::verifier::verify_checked_dual(&checked, "multi-argument-remainder-dual".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public multi-argument remainder verifier");
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|result| { result.status == crate::verifier::VerifStatus::Disproven }));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = PairOracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("multi-argument remainder reference");
+    assert_eq!(oracle.0.get(), 2);
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "-7\n7\n");
+
+    let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("multi-argument remainder VM"));
+    assert!(vm.program().ast.is_none());
+    assert!(matches!(
+        vm.run_value().expect("multi-argument remainder VM run"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "-7\n7\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_ffi_remainder");
+    generator
+        .compile_mir_native(&mir)
+        .expect("multi-argument remainder native compile");
+    generator
+        .module
+        .verify()
+        .expect("multi-argument remainder native verify");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("multi-argument remainder native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "-7\n7\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
