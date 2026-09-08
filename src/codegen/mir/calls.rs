@@ -1219,8 +1219,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             result,
             function,
             arguments,
-            &receipt.parameter_types,
-            &receipt.result_type,
+            &receipt.parameter_conversions,
+            receipt.result_conversion.as_ref(),
             subject,
         )?;
         if let Some(condition) = receipt
@@ -1338,39 +1338,35 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: Option<&MirValueId>,
         function: FunctionValue<'ctx>,
         arguments: &[MirValueId],
-        declaration_parameters: &[crate::core::ResolvedTypeId],
-        declaration_result: &crate::core::ResolvedTypeId,
+        parameter_conversions: &[crate::core::mir::MirFfiAbiConversion],
+        result_conversion: Option<&crate::core::mir::MirFfiAbiConversion>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        if arguments.len() != declaration_parameters.len() {
+        if arguments.len() != parameter_conversions.len() {
             return Err(NativeMirError::new(
                 subject,
-                "FFI declaration parameter TypeDesc count disagrees with native call",
+                "FFI parameter ABI conversion receipt count disagrees with native call",
             ));
         }
         let mut values = Vec::with_capacity(arguments.len());
-        for (index, (argument, declaration_type)) in
-            arguments.iter().zip(declaration_parameters).enumerate()
+        for (index, (argument, conversion)) in
+            arguments.iter().zip(parameter_conversions).enumerate()
         {
             let value = self.value(argument, subject)?;
             let actual_type = self.value_desc(argument, subject)?;
-            let declared_type = self
-                .program
-                .type_catalog()
-                .get(declaration_type)
-                .ok_or_else(|| {
-                    NativeMirError::new(
-                        subject,
-                        format!(
-                            "FFI declaration parameter {index} TypeDesc '{}' is absent",
-                            declaration_type.as_str()
-                        ),
-                    )
-                })?;
+            if actual_type.abi != conversion.from {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!(
+                        "FFI parameter {index} ABI conversion receipt starts at {:?}, MIR value is {:?}",
+                        conversion.from, actual_type.abi
+                    ),
+                ));
+            }
             let value = self.coerce_ffi_value(
                 value,
                 actual_type.abi,
-                declared_type.abi,
+                conversion.to,
                 subject,
                 &format!("ffi_arg_{index}"),
             )?;
@@ -1386,30 +1382,30 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         };
         let actual_type = self.value_desc(result, subject)?;
         if actual_type.abi == MirAbiClass::Unit {
+            if result_conversion.is_some_and(|conversion| conversion.from != MirAbiClass::Unit) {
+                return Err(NativeMirError::new(
+                    subject,
+                    "unit MIR result has a non-unit FFI conversion receipt",
+                ));
+            }
             return Ok(());
         }
-        let declared_type = self
-            .program
-            .type_catalog()
-            .get(declaration_result)
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    format!(
-                        "FFI declaration result TypeDesc '{}' is absent",
-                        declaration_result.as_str()
-                    ),
-                )
-            })?;
+        let conversion = result_conversion.ok_or_else(|| {
+            NativeMirError::new(subject, "non-unit FFI result has no conversion receipt")
+        })?;
+        if conversion.to != actual_type.abi {
+            return Err(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI result ABI conversion receipt ends at {:?}, MIR result is {:?}",
+                    conversion.to, actual_type.abi
+                ),
+            ));
+        }
         let value = call_try_basic_value(&call)
             .ok_or_else(|| NativeMirError::new(subject, "non-unit FFI call returned void"))?;
-        let value = self.coerce_ffi_value(
-            value,
-            declared_type.abi,
-            actual_type.abi,
-            subject,
-            "ffi_result",
-        )?;
+        let value =
+            self.coerce_ffi_value(value, conversion.from, conversion.to, subject, "ffi_result")?;
         self.values.insert(result.clone(), value);
         Ok(())
     }
@@ -1495,6 +1491,27 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .map(BasicValueEnum::from)
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
             }
+            (
+                MirAbiClass::Float { bits: 64 },
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true,
+                },
+                value,
+            ) => self
+                .generator
+                .builder
+                .build_float_to_signed_int(
+                    value.into_float_value(),
+                    match to {
+                        MirAbiClass::Integer { bits: 32, .. } => self.generator.context.i32_type(),
+                        MirAbiClass::Integer { bits: 64, .. } => self.generator.context.i64_type(),
+                        _ => unreachable!("matched integer result ABI above"),
+                    },
+                    name,
+                )
+                .map(BasicValueEnum::from)
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
             _ => Err(NativeMirError::new(
                 subject,
                 format!("FFI ABI conversion from {from:?} to {to:?} is unsupported"),

@@ -1665,6 +1665,11 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} extern declaration parameter TypeDesc count disagrees with MIR arguments"
                 ));
             }
+            if contract.parameter_conversions.len() != arguments.len() {
+                self.error(format!(
+                    "{subject} extern parameter ABI conversion receipt count disagrees with MIR arguments"
+                ));
+            }
             for (index, (argument, declared_type)) in
                 arguments.iter().zip(&contract.parameter_types).enumerate()
             {
@@ -1684,6 +1689,16 @@ impl<'a> CapabilityGate<'a> {
                         "{subject} extern argument {index} TypeDesc disagrees with declaration TypeDesc"
                     ));
                 }
+                let expected = crate::core::mir::MirFfiAbiConversion::for_argument(
+                    self.program.type_catalog(),
+                    &actual_type,
+                    declared_type,
+                );
+                if expected.as_ref() != contract.parameter_conversions.get(index) {
+                    self.error(format!(
+                        "{subject} extern argument {index} ABI conversion receipt disagrees with declaration"
+                    ));
+                }
             }
             if let Some(result) = result {
                 if let Some(actual_type) = value_type(function, result) {
@@ -1696,6 +1711,16 @@ impl<'a> CapabilityGate<'a> {
                             "{subject} extern result TypeDesc disagrees with declaration TypeDesc"
                         ));
                     }
+                    let expected = crate::core::mir::MirFfiAbiConversion::for_result(
+                        self.program.type_catalog(),
+                        &actual_type,
+                        &contract.result_type,
+                    );
+                    if contract.result_conversion.as_ref() != expected.as_ref() {
+                        self.error(format!(
+                            "{subject} extern result ABI conversion receipt disagrees with declaration"
+                        ));
+                    }
                 } else {
                     self.error(format!(
                         "{subject} extern result '{}' is absent from caller values",
@@ -1703,6 +1728,11 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
             } else {
+                if contract.result_conversion.is_some() {
+                    self.error(format!(
+                        "{subject} extern result ABI conversion receipt is present for a unit call"
+                    ));
+                }
                 self.error(format!(
                     "{subject} extern call has no canonical result value identity"
                 ));

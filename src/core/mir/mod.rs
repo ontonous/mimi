@@ -1040,11 +1040,20 @@ pub struct MirFfiCallContract {
     /// accept a forged MIR call whose physical signature merely agrees with
     /// itself while disagreeing with the extern declaration.
     pub parameter_types: Vec<ResolvedTypeId>,
+    /// ABI conversion receipt for each call-site argument. The `from` class is
+    /// the MIR value ABI and the `to` class is the declaration ABI; consumers
+    /// must apply this receipt instead of maintaining an adapter-local pair
+    /// table.
+    pub parameter_conversions: Vec<MirFfiAbiConversion>,
     pub result: Option<MirValueId>,
     /// Checker-canonical declaration result TypeDesc identity. A unit-return
     /// declaration carries the canonical unit TypeDesc even when the backend
     /// ABI lowers it as a void result.
     pub result_type: ResolvedTypeId,
+    /// ABI conversion receipt for the returned value, from declaration ABI to
+    /// the MIR result ABI. Calls without a MIR result identity carry `None`;
+    /// a stable Unit result carries an explicit Unit→Unit conversion.
+    pub result_conversion: Option<MirFfiAbiConversion>,
     pub requires: Option<MirContractExpr>,
     /// Canonical postcondition attached to the foreign call.  The declaration
     /// `result` leaf is lowered to this call's MIR result value identity so
@@ -1052,6 +1061,120 @@ pub struct MirFfiCallContract {
     /// backend-local result placeholder.
     pub ensures: Option<MirContractExpr>,
     pub span: crate::span::Span,
+}
+
+/// One physical scalar ABI conversion at a canonical FFI boundary.
+///
+/// The checker-owned MIR receipt records the source and target ABI classes so
+/// bytecode, native, reference, and verifier consumers all use the same
+/// conversion vocabulary. Layout/ownership admission remains part of the
+/// resolver below; an arbitrary pair of ABI classes is never accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MirFfiAbiConversion {
+    pub from: types::MirAbiClass,
+    pub to: types::MirAbiClass,
+}
+
+impl MirFfiAbiConversion {
+    fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
+        desc.layout == types::MirLayout::Scalar
+            && desc.ownership == types::MirOwnership::Copy
+            && matches!(
+                desc.abi,
+                types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                } | types::MirAbiClass::Bool
+                    | types::MirAbiClass::Float { bits: 64 }
+            )
+    }
+
+    /// Resolve the checker-approved argument conversion (MIR value to C
+    /// declaration). This is the only admitted parameter direction.
+    pub(crate) fn for_argument(
+        catalog: &types::MirTypeCatalog,
+        actual: &ResolvedTypeId,
+        declared: &ResolvedTypeId,
+    ) -> Option<Self> {
+        let actual_desc = catalog.get(actual)?;
+        let declared_desc = catalog.get(declared)?;
+        if actual == declared {
+            return Some(Self {
+                from: actual_desc.abi,
+                to: declared_desc.abi,
+            });
+        }
+        if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
+            return None;
+        }
+        let accepted = matches!(
+            (actual_desc.abi, declared_desc.abi),
+            (
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                },
+                types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                }
+            ) | (
+                types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                },
+                types::MirAbiClass::Float { bits: 64 }
+            )
+        );
+        accepted.then_some(Self {
+            from: actual_desc.abi,
+            to: declared_desc.abi,
+        })
+    }
+
+    /// Resolve the checker-approved result conversion (C declaration to MIR
+    /// result). It is the inverse physical direction of the admitted
+    /// argument widening where needed by the result slot.
+    pub(crate) fn for_result(
+        catalog: &types::MirTypeCatalog,
+        actual: &ResolvedTypeId,
+        declared: &ResolvedTypeId,
+    ) -> Option<Self> {
+        let actual_desc = catalog.get(actual)?;
+        let declared_desc = catalog.get(declared)?;
+        if actual == declared {
+            return Some(Self {
+                from: declared_desc.abi,
+                to: actual_desc.abi,
+            });
+        }
+        if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
+            return None;
+        }
+        let accepted = matches!(
+            (actual_desc.abi, declared_desc.abi),
+            (
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                },
+                types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                }
+            ) | (
+                types::MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                },
+                types::MirAbiClass::Float { bits: 64 }
+            )
+        );
+        accepted.then_some(Self {
+            from: declared_desc.abi,
+            to: actual_desc.abi,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

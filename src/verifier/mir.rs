@@ -3400,6 +3400,12 @@ fn eval_ffi_call(
                 .into(),
         );
     }
+    if contract.parameter_conversions.len() != arguments.len() {
+        return Err(
+            "MIR verifier extern parameter ABI conversion receipt count disagrees with MIR arguments"
+                .into(),
+        );
+    }
     for (index, (argument, declared_type)) in
         arguments.iter().zip(&contract.parameter_types).enumerate()
     {
@@ -3412,6 +3418,16 @@ fn eval_ffi_call(
         if !crate::core::mir::reference::ffi_type_compatible(catalog, &actual_type, declared_type) {
             return Err(format!(
                 "MIR verifier extern argument {index} TypeDesc disagrees with declaration TypeDesc"
+            ));
+        }
+        let expected = crate::core::mir::MirFfiAbiConversion::for_argument(
+            catalog,
+            &actual_type,
+            declared_type,
+        );
+        if expected.as_ref() != contract.parameter_conversions.get(index) {
+            return Err(format!(
+                "MIR verifier extern argument {index} ABI conversion receipt disagrees with declaration"
             ));
         }
     }
@@ -3441,6 +3457,17 @@ fn eval_ffi_call(
                 "MIR verifier extern result TypeDesc disagrees with declaration TypeDesc".into(),
             );
         }
+        let expected = crate::core::mir::MirFfiAbiConversion::for_result(
+            catalog,
+            &result_ty,
+            &contract.result_type,
+        );
+        if contract.result_conversion.as_ref() != expected.as_ref() {
+            return Err(
+                "MIR verifier extern result ABI conversion receipt disagrees with declaration"
+                    .into(),
+            );
+        }
         let (value, constraints) = symbolic_value_for_type(
             catalog,
             &result_ty,
@@ -3449,6 +3476,10 @@ fn eval_ffi_call(
         state.constraints.extend(constraints);
         ensure_result_shape(function, catalog, result, &value)?;
         state.values.insert(result.clone(), value);
+    } else if contract.result_conversion.is_some() {
+        return Err(
+            "MIR verifier extern result ABI conversion receipt is present for a unit call".into(),
+        );
     }
     if let Some(condition) = &contract.ensures {
         let (term, defined) = ffi_contract_term(condition, &state.values, "postcondition")?;

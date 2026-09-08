@@ -164,7 +164,7 @@ impl MirProgram {
         let transitions = materialize_transition_contracts(program, &type_catalog, None)
             .map_err(MirProgramBuildError::Validation)?;
         attach_flow_effect_receipts(&mut functions, &transitions);
-        let ffi_calls = materialize_ffi_call_contracts(program, &functions)
+        let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
         Self::with_type_catalog_and_instances_and_transitions_and_ffi(
             functions,
@@ -245,7 +245,7 @@ impl MirProgram {
             materialize_transition_contracts(program, &type_catalog, Some(excluded_sources))
                 .map_err(MirProgramBuildError::Validation)?;
         attach_flow_effect_receipts(&mut functions, &transitions);
-        let ffi_calls = materialize_ffi_call_contracts(program, &functions)
+        let ffi_calls = materialize_ffi_call_contracts(program, &type_catalog, &functions)
             .map_err(MirProgramBuildError::Validation)?;
         Self::with_type_catalog_and_instances_and_transitions_and_ffi(
             functions,
@@ -2125,38 +2125,34 @@ pub(crate) fn ffi_type_compatible(
     declared: &crate::core::ResolvedTypeId,
 ) -> bool {
     if actual == declared {
+        // Preserve the historical identity admission here; each scalar
+        // consumer still performs its own layout/ABI gate, which is how
+        // non-scalar FFI remains representable for explicit fail-closed
+        // diagnostics rather than being rejected during MIR construction.
         return true;
     }
-    let Some(actual) = type_catalog.get(actual) else {
-        return false;
-    };
-    let Some(declared) = type_catalog.get(declared) else {
-        return false;
-    };
-    matches!(
-        (actual.abi, declared.abi),
-        (
-            super::types::MirAbiClass::Integer {
-                bits: 32,
-                signed: true
-            },
-            super::types::MirAbiClass::Integer {
-                bits: 64,
-                signed: true
-            }
-        ) | (
-            super::types::MirAbiClass::Integer {
-                bits: 32,
-                signed: true
-            },
-            super::types::MirAbiClass::Float { bits: 64 }
-        ) | (
-            super::types::MirAbiClass::Integer {
-                bits: 64,
-                signed: true
-            },
-            super::types::MirAbiClass::Float { bits: 64 }
-        )
+    super::MirFfiAbiConversion::for_argument(type_catalog, actual, declared).is_some_and(
+        |conversion| {
+            matches!(
+                (conversion.from, conversion.to),
+                (
+                    super::types::MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true
+                    },
+                    super::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true
+                    }
+                ) | (
+                    super::types::MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true
+                    },
+                    super::types::MirAbiClass::Float { bits: 64 }
+                )
+            )
+        },
     )
 }
 
@@ -2298,6 +2294,12 @@ fn validate_call_graph(
                             message: "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments".into(),
                         });
                     }
+                    if contract.parameter_conversions.len() != contract.arguments.len() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI parameter ABI conversion receipt count disagrees with MIR arguments".into(),
+                        });
+                    }
                     for (index, (argument, declared_type)) in contract
                         .arguments
                         .iter()
@@ -2313,6 +2315,23 @@ fn validate_call_graph(
                                         "extern call FFI declaration parameter {index} TypeDesc disagrees with MIR argument"
                                     ),
                                 });
+                            }
+                            if let Some(receipt_conversion) =
+                                contract.parameter_conversions.get(index)
+                            {
+                                let expected = super::MirFfiAbiConversion::for_argument(
+                                    type_catalog,
+                                    &argument_value.ty,
+                                    declared_type,
+                                );
+                                if expected.as_ref() != Some(receipt_conversion) {
+                                    errors.push(super::MirValidationError {
+                                        subject: instruction.id.to_string(),
+                                        message: format!(
+                                            "extern call FFI parameter {index} ABI conversion receipt disagrees with MIR value"
+                                        ),
+                                    });
+                                }
                             }
                         }
                     }
@@ -2348,11 +2367,30 @@ fn validate_call_graph(
                                 message: "extern call FFI declaration result TypeDesc disagrees with MIR result".into(),
                             });
                         }
+                        if let Some(value) = function.values.get(result_value) {
+                            let expected = super::MirFfiAbiConversion::for_result(
+                                type_catalog,
+                                &value.ty,
+                                &contract.result_type,
+                            );
+                            if contract.result_conversion.as_ref() != expected.as_ref() {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: "extern call FFI result ABI conversion receipt disagrees with MIR result".into(),
+                                });
+                            }
+                        }
                     }
                     if result.is_none() {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message: "extern call has no canonical result value identity".into(),
+                        });
+                    }
+                    if result.is_none() != contract.result_conversion.is_none() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI result ABI conversion receipt presence disagrees with MIR result".into(),
                         });
                     }
                     let argument_types = arguments
@@ -3098,6 +3136,7 @@ fn canonical_ffi_type_id(
 /// source expression or re-resolves an extern name.
 fn materialize_ffi_call_contracts(
     program: &crate::core::CheckedProgram,
+    type_catalog: &MirTypeCatalog,
     functions: &BTreeMap<NodeId, MirFunction>,
 ) -> Result<BTreeMap<MirInstructionId, super::MirFfiCallContract>, Vec<super::MirValidationError>> {
     let mut contracts = BTreeMap::new();
@@ -3224,6 +3263,71 @@ fn materialize_ffi_call_contracts(
                     super::MirInstructionKind::Call { result, .. } => result.clone(),
                     _ => unreachable!("FFI receipt materializes only Call instructions"),
                 };
+                let parameter_conversions = arguments
+                    .iter()
+                    .zip(&parameter_types)
+                    .map(|(argument, declared_type)| {
+                        let actual_type = functions
+                            .get(&function.owner)
+                            .and_then(|owner| owner.values.get(argument))
+                            .map(|value| &value.ty);
+                        actual_type
+                            .and_then(|actual_type| {
+                                super::MirFfiAbiConversion::for_argument(
+                                    type_catalog,
+                                    actual_type,
+                                    declared_type,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "extern declaration '{}' parameter ABI conversion is outside canonical scalar MIR",
+                                    signature.name
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                let parameter_conversions = match parameter_conversions {
+                    Ok(conversions) => conversions,
+                    Err(message) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                        continue;
+                    }
+                };
+                let result_conversion = result.as_ref().map(|result_value| {
+                    let actual_type = functions
+                        .get(&function.owner)
+                        .and_then(|owner| owner.values.get(result_value))
+                        .map(|value| &value.ty);
+                    actual_type
+                        .and_then(|actual_type| {
+                            super::MirFfiAbiConversion::for_result(
+                                type_catalog,
+                                actual_type,
+                                &result_type,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "extern declaration '{}' result ABI conversion is outside canonical scalar MIR",
+                                signature.name
+                            )
+                        })
+                });
+                let result_conversion = match result_conversion {
+                    Some(Ok(conversion)) => Some(conversion),
+                    Some(Err(message)) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                        continue;
+                    }
+                    None => None,
+                };
                 let requires = signature.requires.as_ref().map(|expression| {
                     lower_ffi_contract_expr(expression, &parameter_names, arguments, None)
                 });
@@ -3283,8 +3387,10 @@ fn materialize_ffi_call_contracts(
                         abi: declaration.abi.clone(),
                         arguments: arguments.clone(),
                         parameter_types,
+                        parameter_conversions,
                         result,
                         result_type,
+                        result_conversion,
                         requires,
                         ensures,
                         span,
@@ -4963,6 +5069,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments",
             ));
         }
+        if receipt.parameter_conversions.len() != arguments.len() {
+            return Err(self.error(
+                &function.owner,
+                "extern call FFI parameter ABI conversion receipt count disagrees with MIR arguments",
+            ));
+        }
         for (role, value) in arguments.iter().map(|value| ("argument", value)) {
             let Some(info) = function.values.get(value) else {
                 return Err(self.error(
@@ -4999,8 +5111,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 ));
             }
         }
-        for (index, (value, declared_type)) in
-            arguments.iter().zip(&receipt.parameter_types).enumerate()
+        for (index, ((value, declared_type), conversion)) in arguments
+            .iter()
+            .zip(&receipt.parameter_types)
+            .zip(&receipt.parameter_conversions)
+            .enumerate()
         {
             let actual_type = function
                 .values
@@ -5017,6 +5132,21 @@ impl<'a> MirReferenceInterpreter<'a> {
                     &function.owner,
                     format!(
                         "extern call argument {index} TypeDesc disagrees with declaration TypeDesc"
+                    ),
+                ));
+            }
+            if super::MirFfiAbiConversion::for_argument(
+                self.program.type_catalog(),
+                &actual_type,
+                declared_type,
+            )
+            .as_ref()
+                != Some(conversion)
+            {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call argument {index} ABI conversion receipt disagrees with declaration"
                     ),
                 ));
             }
@@ -5070,6 +5200,24 @@ impl<'a> MirReferenceInterpreter<'a> {
                     "extern call result TypeDesc disagrees with declaration TypeDesc",
                 ));
             }
+            if receipt.result_conversion.as_ref()
+                != super::MirFfiAbiConversion::for_result(
+                    self.program.type_catalog(),
+                    &info.ty,
+                    &receipt.result_type,
+                )
+                .as_ref()
+            {
+                return Err(self.error(
+                    &function.owner,
+                    "extern call result ABI conversion receipt disagrees with declaration",
+                ));
+            }
+        } else if receipt.result_conversion.is_some() {
+            return Err(self.error(
+                &function.owner,
+                "extern call FFI result ABI conversion receipt is present for a unit call",
+            ));
         }
         super::contracts::validate_ffi_ensures(function, self.program.type_catalog(), receipt)
             .map_err(|message| self.error(&function.owner, message))?;

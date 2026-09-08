@@ -386,6 +386,13 @@ func main() -> i64 {
             .map(|value| value.canonical_text()),
         Some("true".to_owned())
     );
+    assert!(matches!(
+        store_receipt.result_conversion,
+        Some(crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Unit,
+            to: crate::core::mir::types::MirAbiClass::Unit,
+        })
+    ));
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-unit-ensures".into())

@@ -1870,7 +1870,14 @@ pub struct CanonicalFfiDescriptor {
     pub symbol: String,
     pub abi: String,
     pub arguments: Vec<CanonicalFfiScalarType>,
+    /// Checker-owned conversion receipt for each argument, from the MIR value
+    /// ABI to the declaration ABI.
+    pub parameter_conversions: Vec<crate::core::mir::MirFfiAbiConversion>,
     pub result: CanonicalFfiScalarType,
+    /// Checker-owned conversion receipt from declaration ABI to the MIR result
+    /// ABI. Calls without a MIR result identity carry `None`; unit-return calls
+    /// with a stable Unit result carry an explicit Unit→Unit conversion.
+    pub result_conversion: Option<crate::core::mir::MirFfiAbiConversion>,
     /// MIR identities bind predicate leaves to this call's evaluated arguments.
     pub argument_ids: Vec<crate::core::mir::MirValueId>,
     /// Canonical predicate only: no AST expression or source-name environment.

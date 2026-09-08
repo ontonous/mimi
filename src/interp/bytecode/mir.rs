@@ -185,7 +185,9 @@ fn materialize_canonical_ffi(
             || receipt.callee != *callee
             || receipt.arguments != *arguments
             || receipt.parameter_types.len() != arguments.len()
+            || receipt.parameter_conversions.len() != arguments.len()
             || receipt.result.as_ref() != result.as_ref()
+            || receipt.result_conversion.is_none() != result.is_none()
             || receipt.symbol.trim().is_empty()
             || receipt.abi != "C"
             || !type_arguments.is_empty()
@@ -222,6 +224,64 @@ fn materialize_canonical_ffi(
                     continue;
                 }
             };
+        for (index, ((argument, declared_type), conversion)) in arguments
+            .iter()
+            .zip(&receipt.parameter_types)
+            .zip(&receipt.parameter_conversions)
+            .enumerate()
+        {
+            let Some(actual_type) = function.values.get(argument).map(|value| &value.ty) else {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message: format!(
+                        "canonical FFI argument {index} '{}' has no MIR TypeDesc",
+                        argument
+                    ),
+                });
+                continue;
+            };
+            if crate::core::mir::MirFfiAbiConversion::for_argument(
+                program.type_catalog(),
+                actual_type,
+                declared_type,
+            )
+            .as_ref()
+                != Some(conversion)
+            {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message: format!(
+                        "canonical FFI argument {index} ABI conversion receipt disagrees with MIR value"
+                    ),
+                });
+            }
+        }
+        if let Some(result_value) = result {
+            let Some(actual_type) = function.values.get(result_value).map(|value| &value.ty) else {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message: format!(
+                        "canonical FFI result '{}' has no MIR TypeDesc",
+                        result_value
+                    ),
+                });
+                continue;
+            };
+            let expected = crate::core::mir::MirFfiAbiConversion::for_result(
+                program.type_catalog(),
+                actual_type,
+                &receipt.result_type,
+            );
+            if receipt.result_conversion.as_ref() != expected.as_ref() {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message:
+                        "canonical FFI result ABI conversion receipt disagrees with MIR result"
+                            .into(),
+                });
+                continue;
+            }
+        }
         let index = match u16::try_from(descriptors.len()) {
             Ok(index) => index,
             Err(_) => {
@@ -240,7 +300,9 @@ fn materialize_canonical_ffi(
             symbol: receipt.symbol.clone(),
             abi: receipt.abi.clone(),
             arguments: argument_types,
+            parameter_conversions: receipt.parameter_conversions.clone(),
             result: result_type,
+            result_conversion: receipt.result_conversion,
             argument_ids: receipt.arguments.clone(),
             requires: receipt.requires.clone(),
             result_id: receipt.result.clone(),
@@ -11456,6 +11518,32 @@ mod tests {
             CanonicalFfiScalarType::I64,
             "bytecode result ABI must follow the checker declaration TypeDesc"
         );
+        assert!(matches!(
+            bytecode.canonical_ffi[0].parameter_conversions.as_slice(),
+            [crate::core::mir::MirFfiAbiConversion {
+                from: crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true
+                },
+                to: crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                }
+            }]
+        ));
+        assert!(matches!(
+            bytecode.canonical_ffi[0].result_conversion,
+            Some(crate::core::mir::MirFfiAbiConversion {
+                from: crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                },
+                to: crate::core::mir::types::MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true
+                }
+            })
+        ));
         let mut vm = BytecodeVM::new(bytecode);
         let value = vm
             .run_value()

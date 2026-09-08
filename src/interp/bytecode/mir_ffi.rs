@@ -152,6 +152,32 @@ impl CanonicalMirFfiRuntime {
                 args.len()
             ));
         }
+        if descriptor.parameter_conversions.len() != descriptor.arguments.len() {
+            return Err("canonical FFI parameter conversion receipt arity mismatch".into());
+        }
+        for (index, (scalar, conversion)) in descriptor
+            .arguments
+            .iter()
+            .zip(&descriptor.parameter_conversions)
+            .enumerate()
+        {
+            if scalar_abi_class(scalar) != conversion.to {
+                return Err(format!(
+                    "canonical FFI argument {index} conversion target {:?} disagrees with declaration ABI {:?}",
+                    conversion.to,
+                    scalar_abi_class(scalar)
+                ));
+            }
+        }
+        let result_conversion = descriptor
+            .result_conversion
+            .as_ref()
+            .ok_or_else(|| "canonical FFI result has no conversion receipt".to_owned())?;
+        if scalar_abi_class(&descriptor.result) != result_conversion.from {
+            return Err(
+                "canonical FFI result conversion source disagrees with declaration ABI".into(),
+            );
+        }
         // libffi rejects void argument types while preparing the CIF. Reject
         // them here, before library loading or CIF construction can occur.
         if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
@@ -281,7 +307,56 @@ impl CanonicalMirFfiRuntime {
         // As for native C FFI, the foreign declaration must accurately state
         // the symbol's ABI; that external contract is the program's obligation.
         let result = unsafe { call_typed(&cif, code_ptr, &ffi_args, &descriptor.result) }?;
-        Ok(result)
+        apply_result_conversion(result, descriptor.result_conversion.as_ref())
+    }
+}
+
+fn apply_result_conversion(
+    value: Value,
+    conversion: Option<&crate::core::mir::MirFfiAbiConversion>,
+) -> Result<Value, String> {
+    let Some(conversion) = conversion else {
+        return Ok(value);
+    };
+    if conversion.from == conversion.to {
+        return Ok(value);
+    }
+    use crate::core::mir::types::MirAbiClass;
+    match (conversion.from, conversion.to, value) {
+        (
+            MirAbiClass::Integer {
+                bits: from,
+                signed: true,
+            },
+            MirAbiClass::Integer {
+                bits: to,
+                signed: true,
+            },
+            Value::Int(value),
+        ) if from == 64 && to == 32 => Ok(Value::Int((value as i32) as i64)),
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            Value::Int(value),
+        ) => Ok(Value::Int(value)),
+        (
+            MirAbiClass::Float { bits: 64 },
+            MirAbiClass::Integer { bits, signed: true },
+            Value::Float(value),
+        ) => Ok(Value::Int(if bits == 32 {
+            (value as i32) as i64
+        } else {
+            value as i64
+        })),
+        (from, to, value) => Err(format!(
+            "canonical MIR FFI result conversion from {from:?} to {to:?} received {value:?}"
+        )),
     }
 }
 
@@ -293,6 +368,23 @@ fn ffi_type(scalar: &CanonicalFfiScalarType) -> Result<FfiType, String> {
         CanonicalFfiScalarType::F64 => FfiType::f64(),
         CanonicalFfiScalarType::Unit => FfiType::void(),
     })
+}
+
+fn scalar_abi_class(scalar: &CanonicalFfiScalarType) -> crate::core::mir::types::MirAbiClass {
+    use crate::core::mir::types::MirAbiClass;
+    match scalar {
+        CanonicalFfiScalarType::I32 => MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        CanonicalFfiScalarType::I64 => MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+        CanonicalFfiScalarType::Bool => MirAbiClass::Bool,
+        CanonicalFfiScalarType::F64 => MirAbiClass::Float { bits: 64 },
+        CanonicalFfiScalarType::Unit => MirAbiClass::Unit,
+    }
 }
 
 // SAFETY: the caller must supply a live C function pointer, matching CIF,
@@ -319,7 +411,39 @@ unsafe fn call_typed(
 mod tests {
     use super::*;
 
+    #[test]
+    fn scalar_ffi_result_receipt_applies_declared_float_to_mir_integer() {
+        let conversion = crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Float { bits: 64 },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        };
+        assert_eq!(
+            apply_result_conversion(Value::Float(41.75), Some(&conversion)).unwrap(),
+            Value::Int(41)
+        );
+        assert_eq!(
+            apply_result_conversion(Value::Float(2_147_483_646.75), Some(&conversion)).unwrap(),
+            Value::Int(2_147_483_646)
+        );
+    }
+
     fn descriptor(symbol: &str, argument: CanonicalFfiScalarType) -> CanonicalFfiDescriptor {
+        let abi = match &argument {
+            CanonicalFfiScalarType::I32 => crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            CanonicalFfiScalarType::I64 => crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            CanonicalFfiScalarType::Bool => crate::core::mir::types::MirAbiClass::Bool,
+            CanonicalFfiScalarType::F64 => crate::core::mir::types::MirAbiClass::Float { bits: 64 },
+            CanonicalFfiScalarType::Unit => crate::core::mir::types::MirAbiClass::Unit,
+        };
         CanonicalFfiDescriptor {
             caller: "function:main".into(),
             instruction: "ffi-test-call".into(),
@@ -327,7 +451,12 @@ mod tests {
             symbol: symbol.into(),
             abi: "C".into(),
             arguments: vec![argument.clone()],
+            parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
+                from: abi,
+                to: abi,
+            }],
             result: argument,
+            result_conversion: Some(crate::core::mir::MirFfiAbiConversion { from: abi, to: abi }),
             argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
             requires: None,
             result_id: None,
