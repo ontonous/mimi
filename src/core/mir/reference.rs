@@ -2144,6 +2144,7 @@ fn validate_call_graph(
             Option<crate::core::ResolvedTypeId>,
         ),
     > = BTreeMap::new();
+    let mut seen_ffi_contracts = BTreeSet::new();
     errors.extend(validate_transition_contracts(
         functions,
         type_catalog,
@@ -2192,6 +2193,7 @@ fn validate_call_graph(
                         });
                         continue;
                     };
+                    seen_ffi_contracts.insert(instruction.id.clone());
                     if contract.caller != function.owner
                         || contract.instruction != instruction.id
                         || contract.callee != *callee_owner
@@ -2688,6 +2690,14 @@ fn validate_call_graph(
                     allow_managed_clone,
                 ));
             }
+        }
+    }
+    for instruction in ffi_calls.keys() {
+        if !seen_ffi_contracts.contains(instruction) {
+            errors.push(super::MirValidationError {
+                subject: instruction.to_string(),
+                message: "canonical FFI contract is orphaned from a MIR extern call".into(),
+            });
         }
     }
     errors
@@ -11397,6 +11407,41 @@ func main() -> i64 { foreign(1 as i64); 0 }
                 error
                     .message
                     .contains("FFI contract symbol contains a control character")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_orphaned_ffi_receipts() {
+        let source =
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }";
+        let (_, program) = canonical_program_with_main(source);
+        let receipt = program
+            .ffi_calls()
+            .values()
+            .next()
+            .cloned()
+            .expect("FFI receipt");
+        let orphan_instruction =
+            crate::core::mir::MirInstructionId::new("inst:call:orphan").expect("instruction id");
+        let mut orphan = receipt;
+        orphan.instruction = orphan_instruction.clone();
+        let mut receipts = program.ffi_calls().clone();
+        receipts.insert(orphan_instruction, orphan);
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("orphaned FFI receipts must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("canonical FFI contract is orphaned from a MIR extern call")
             }),
             "{errors:?}"
         );
