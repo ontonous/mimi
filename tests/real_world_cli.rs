@@ -740,6 +740,137 @@ fn canonical_scalar_ffi_cli_multi_argument_remainder_zero_domain_matches() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_mixed_width_checked_arithmetic_matches_default_and_mir() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_mixed_width_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create mixed-width CLI fixture directory");
+    let c_path = dir.join("mixed.c");
+    let library = dir.join("mixed.so");
+    fs::write(
+        &c_path,
+        "#include <stdint.h>\nint32_t mixed_max(int32_t left, int64_t right) { (void)left; (void)right; return INT32_MAX; }\nint32_t mixed_zero(int32_t left, int64_t right) { (void)left; (void)right; return INT32_MAX; }\n",
+    )
+    .expect("write mixed-width C fixture");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile mixed-width C fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+
+    let source = dir.join("mixed.mimi");
+    fs::write(
+        &source,
+        r#"extern "C" {
+    func mixed_max(left: i32, right: i64) -> i32
+        ensures: result + 1 > result;
+    func mixed_zero(left: i32, right: i64) -> i32
+        ensures: right == 0 or result + 1 > result;
+}
+func main() -> i32 {
+    let max_value = mixed_max(0, 1 as i64);
+    let zero_value = mixed_zero(0, 0 as i64);
+    println(max_value);
+    println(zero_value);
+    0
+}
+"#,
+    )
+    .expect("write mixed-width CLI source");
+
+    for explicit_mir in [false, true] {
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap_or_else(|error| panic!("mixed-width run {:?}: {error}", explicit_mir));
+        let run_stdout = String::from_utf8_lossy(&run.stdout);
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            run.status.success(),
+            "mixed-width run {:?}: stdout={run_stdout} stderr={run_stderr}",
+            explicit_mir
+        );
+        assert_eq!(run_stdout, "2147483647\n2147483647\n");
+        assert!(
+            run_stderr.is_empty(),
+            "mixed-width run {:?}: {run_stderr}",
+            explicit_mir
+        );
+        assert!(!run_stderr.contains("canonical route disposition: legacy"));
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("mixed-width verify {:?}: {error}", explicit_mir));
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            verify.status.success(),
+            "mixed-width verify {:?}: stdout={verify_stdout} stderr={verify_stderr}",
+            explicit_mir
+        );
+        assert!(verify_stdout.contains("2/2 verified"), "{verify_stdout}");
+        assert!(
+            verify_stdout.contains("canonical MIR extern ensures contract proven"),
+            "{verify_stdout}"
+        );
+        assert!(!verify_stdout.contains("canonical route disposition: legacy"));
+        assert!(!verify_stderr.contains("canonical route disposition: legacy"));
+
+        let mut build = Command::new(mimi_bin());
+        build
+            .current_dir(project_root())
+            .arg("build")
+            .arg("--verify-ffi")
+            .arg("--emit-ir");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("mixed-width build {:?}: {error}", explicit_mir));
+        let build_stdout = String::from_utf8_lossy(&build.stdout);
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build.status.success(),
+            "mixed-width build {:?}: stdout={build_stdout} stderr={build_stderr}",
+            explicit_mir
+        );
+        assert!(build_stdout.contains("define i32 @main"), "{build_stdout}");
+        assert!(!build_stdout.contains("canonical route disposition: legacy"));
+        assert!(!build_stderr.contains("canonical route disposition: legacy"));
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn std_mimispec_removed() {
     // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
     // `mimispec` crate are removed. This test prevents regrowth of the old
