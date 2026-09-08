@@ -2208,6 +2208,13 @@ fn validate_call_graph(
                             message: "extern call FFI contract has an empty C symbol".into(),
                         });
                     }
+                    if contract.symbol.chars().any(char::is_control) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI contract symbol contains a control character"
+                                .into(),
+                        });
+                    }
                     if contract.abi != "C" {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
@@ -2242,6 +2249,12 @@ fn validate_call_graph(
                             subject: instruction.id.to_string(),
                             message: "extern call FFI contract result disagrees with MIR call"
                                 .into(),
+                        });
+                    }
+                    if result.is_none() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call has no canonical result value identity".into(),
                         });
                     }
                     let argument_types = arguments
@@ -11302,6 +11315,88 @@ func main() -> i64 { foreign(1 as i64) }
                 error
                     .message
                     .contains("canonical scalar FFI call cannot carry a variant ABI receipt")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_ffi_result_and_symbol_identity_gaps() {
+        let source = r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(1 as i64); 0 }
+"#;
+        let (_, program) = canonical_program_with_main(source);
+        let owner = NodeId("function:main".into());
+        let instruction_id = program
+            .ffi_calls()
+            .keys()
+            .next()
+            .cloned()
+            .expect("FFI receipt");
+        let mut functions = program.functions().clone();
+        let function = functions.get_mut(&owner).expect("main MIR");
+        let instruction = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| instruction.id == instruction_id)
+            .expect("extern call");
+        let old_result = match &instruction.kind {
+            MirInstructionKind::Call { result, .. } => result.clone(),
+            _ => unreachable!(),
+        };
+        let MirInstructionKind::Call { result, .. } = &mut instruction.kind else {
+            unreachable!();
+        };
+        *result = None;
+        if let Some(old_result) = old_result {
+            function.values.remove(&old_result);
+            function
+                .ownership
+                .events
+                .retain(|event| event.value.as_ref() != Some(&old_result));
+        }
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .result = None;
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("extern calls must retain a canonical result identity");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("extern call has no canonical result value identity")
+            }),
+            "{errors:?}"
+        );
+
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let mut receipts = program.ffi_calls().clone();
+        receipts.values_mut().next().expect("FFI receipt").symbol = "foreign\0symbol".into();
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("C symbol control characters must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("FFI contract symbol contains a control character")
             }),
             "{errors:?}"
         );
