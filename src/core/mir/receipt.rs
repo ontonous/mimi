@@ -134,11 +134,13 @@ impl CanonicalMirRouteReceipt {
                 ));
             }
         }
-        if self
-            .root_owners
-            .iter()
-            .any(|owner| owner.0.is_empty() || owner.0.chars().any(char::is_control))
-        {
+        if self.root_owners.iter().any(|owner| {
+            owner.0.is_empty()
+                || owner
+                    .0
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '=' | ','))
+        }) {
             return Err("route receipt root owner is empty or not manifest-safe".into());
         }
         if self
@@ -336,6 +338,14 @@ mod tests {
 
         let mut receipt = valid_receipt();
         receipt.root_owners.reverse();
+        assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners[0] = NodeId("function:owner=drift".into());
+        assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners[0] = NodeId("function:owner,drift".into());
         assert!(receipt.validate().is_err());
     }
 }
