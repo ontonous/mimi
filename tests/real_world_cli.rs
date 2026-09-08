@@ -182,53 +182,194 @@ fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
     fs::create_dir_all(&dir).unwrap();
     let source = dir.join("requires.mimi");
     let binary = dir.join("requires");
-    for (argument, helper) in [(42, false), (-1, false), (-1, true)] {
-        let wrapper = if helper {
-            "func assume_positive(x: i64) -> i64 { requires: x > 0\n labs(x) }"
-        } else {
-            ""
-        };
-        let call = if helper { "assume_positive" } else { "labs" };
-        fs::write(&source, format!(
+    for explicit_mir in [true, false] {
+        let mir_flag: &[&str] = if explicit_mir { &["--mir"] } else { &[] };
+        for (argument, helper) in [(42, false), (-1, false), (-1, true)] {
+            let wrapper = if helper {
+                "func assume_positive(x: i64) -> i64 { requires: x > 0\n labs(x) }"
+            } else {
+                ""
+            };
+            let call = if helper { "assume_positive" } else { "labs" };
+            fs::write(&source, format!(
             "extern \"C\" {{ func labs(x: i64) -> i64 requires: x > 0; }}\n{wrapper}\nfunc main() -> i64 {{ println({call}({argument} as i64)); 0 }}"
         )).unwrap();
-        let run = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .args(["run", "--mir"])
-            .arg(&source)
-            .env_remove("MIMI_FFI_LIB")
-            .output()
-            .unwrap();
-        let expected_stdout = if argument > 0 { "42\n" } else { "" };
-        assert_eq!(
-            run.status.success(),
-            argument > 0,
-            "{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        assert_eq!(run.stdout, expected_stdout.as_bytes());
-        if argument < 0 {
-            assert!(String::from_utf8_lossy(&run.stderr).contains("[E0808]"));
-            let skipped = Command::new(mimi_bin())
+            let verification = Command::new(mimi_bin())
                 .current_dir(project_root())
-                .args(["run", "--mir", "--skip-verify-ffi"])
+                .arg("verify")
+                .args(mir_flag)
+                .arg(&source)
+                .env("MIMI_VERBOSE", "1")
+                .output()
+                .unwrap();
+            // A helper's requires is a conditional proof assumption. Runtime
+            // checking must still reject the invalid actual input below.
+            assert_eq!(
+                verification.status.success(),
+                argument > 0 || helper,
+                "{}",
+                String::from_utf8_lossy(&verification.stderr)
+            );
+            let verified_stdout = String::from_utf8_lossy(&verification.stdout);
+            assert!(
+                verified_stdout.contains("canonical MIR extern requires contract")
+                    || String::from_utf8_lossy(&verification.stderr)
+                        .contains("canonical MIR extern requires contract"),
+                "{verified_stdout}"
+            );
+            assert!(!String::from_utf8_lossy(&verification.stderr)
+                .contains("canonical route disposition: legacy"));
+            let static_build = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .args(["build", "--verify-ffi", "--emit-ir"])
+                .args(mir_flag)
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert_eq!(
+                static_build.status.success(),
+                argument > 0 || helper,
+                "{}",
+                String::from_utf8_lossy(&static_build.stderr)
+            );
+            let run = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("run")
+                .args(mir_flag)
+                .env("MIMI_VERBOSE", "1")
                 .arg(&source)
                 .env_remove("MIMI_FFI_LIB")
                 .output()
                 .unwrap();
-            assert!(
-                skipped.status.success(),
+            assert!(!String::from_utf8_lossy(&run.stderr)
+                .contains("canonical route disposition: legacy"));
+            let expected_stdout = if argument > 0 { "42\n" } else { "" };
+            assert_eq!(
+                run.status.success(),
+                argument > 0,
                 "{}",
-                String::from_utf8_lossy(&skipped.stderr)
+                String::from_utf8_lossy(&run.stderr)
             );
-            assert_eq!(skipped.stdout, b"1\n");
+            assert_eq!(run.stdout, expected_stdout.as_bytes());
+            if argument < 0 {
+                assert!(String::from_utf8_lossy(&run.stderr).contains("[E0808]"));
+                let skipped = Command::new(mimi_bin())
+                    .current_dir(project_root())
+                    .arg("run")
+                    .args(mir_flag)
+                    .arg("--skip-verify-ffi")
+                    .arg(&source)
+                    .env_remove("MIMI_FFI_LIB")
+                    .output()
+                    .unwrap();
+                assert!(
+                    skipped.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&skipped.stderr)
+                );
+                assert_eq!(skipped.stdout, b"1\n");
+            }
+            let build = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg("build")
+                .args(mir_flag)
+                .env("MIMI_VERBOSE", "1")
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                build.status.success(),
+                "{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&build.stderr)
+                .contains("canonical route disposition: legacy"));
+            let native = Command::new(&binary).output().unwrap();
+            assert_eq!(
+                native.status.success(),
+                argument > 0,
+                "{}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(native.stdout, expected_stdout.as_bytes());
+            if argument < 0 {
+                assert!(String::from_utf8_lossy(&native.stderr).contains("[E0808]"));
+            }
         }
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_cli_abi_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let library = dir.join("ffi.so");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC"])
+        .arg(project_root().join("tests/fixtures/mir_scalar_ffi_abi.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+    for contracts in [true, false] {
+        let mut source = include_str!("fixtures/mir_scalar_ffi_abi.mimi").to_owned();
+        if !contracts {
+            for requires in [
+                " requires: x != 0",
+                " requires: x || not x",
+                " requires: x > 0",
+            ] {
+                source = source.replace(requires, "");
+            }
+        }
+        let path = dir.join("abi.mimi");
+        fs::write(&path, source).unwrap();
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&path)
+            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_FFI_LIB", &library)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            run.stdout,
+            b"-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n"
+        );
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(!run_stderr.contains("canonical route disposition: legacy"));
+        assert!(!run_stderr.contains("FFI contract verification is disabled"));
+        // The CLI does not accept an extra native library link argument.
+        // Exercise its production emitter here; direct native linking against
+        // this same C fixture is checked in canonical_scalar_ffi.rs.
         let build = Command::new(mimi_bin())
             .current_dir(project_root())
-            .args(["build", "--mir"])
-            .arg(&source)
-            .arg("-o")
-            .arg(&binary)
+            .args(["build", "--emit-ir"])
+            .arg(&path)
+            .env("MIMI_VERBOSE", "1")
             .output()
             .unwrap();
         assert!(
@@ -236,19 +377,44 @@ fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let native = Command::new(&binary).output().unwrap();
-        assert_eq!(
-            native.status.success(),
-            argument > 0,
-            "{}",
-            String::from_utf8_lossy(&native.stderr)
-        );
-        assert_eq!(native.stdout, expected_stdout.as_bytes());
-        if argument < 0 {
-            assert!(String::from_utf8_lossy(&native.stderr).contains("[E0808]"));
+        let ir = String::from_utf8_lossy(&build.stdout);
+        for symbol in [
+            "mir_ffi_i32",
+            "mir_ffi_i64",
+            "mir_ffi_bool",
+            "mir_ffi_f64",
+            "mir_ffi_store",
+        ] {
+            assert!(ir.contains(symbol), "missing emitted ABI {symbol}");
         }
+        assert!(
+            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy")
+        );
+        let verify = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&path)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            verify.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        let output = String::from_utf8_lossy(&verify.stdout);
+        if contracts {
+            assert!(
+                output.contains("canonical MIR extern requires contract proven"),
+                "{output}"
+            );
+        } else {
+            assert!(output.contains("No contracts to verify"), "{output}");
+        }
+        assert!(!String::from_utf8_lossy(&verify.stderr)
+            .contains("canonical route disposition: legacy"));
     }
-    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(dir).ok();
 }
 
 #[test]

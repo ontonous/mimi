@@ -13,43 +13,8 @@ use crate::core::mir::MirFfiCallContract;
 use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
 use crate::interp::Value;
 
-const C_SOURCE: &str = r#"
-#include <stdint.h>
-#include <stdbool.h>
-int32_t mir_ffi_i32(int32_t x) { return x; }
-int64_t mir_ffi_i64(int64_t x) { return x; }
-bool mir_ffi_bool(bool x) { return !x; }
-double mir_ffi_f64(double x) { return x; }
-int64_t mir_ffi_f64_code(double x) { return x == 42.5 ? 1 : 0; }
-static int64_t sequence = 0;
-void mir_ffi_store(int32_t x) { sequence = sequence * 10 + x; }
-int64_t mir_ffi_read(void) { return sequence; }
-"#;
-
-const SOURCE: &str = r#"
-extern "C" {
-    func mir_ffi_i32(x: i32) -> i32 requires: x != 0;
-    func mir_ffi_i64(x: i64) -> i64;
-    func mir_ffi_bool(x: bool) -> bool requires: x || not x;
-    func mir_ffi_f64(x: f64) -> f64;
-    func mir_ffi_f64_code(x: f64) -> i64;
-    func mir_ffi_store(x: i32) requires: x > 0;
-    func mir_ffi_read() -> i64;
-}
-func main() -> i64 {
-    println(mir_ffi_i32(-2147483647))
-    println(mir_ffi_i32(2147483647))
-    println(mir_ffi_i64(4294967296 as i64))
-    println(mir_ffi_bool(false))
-    println(mir_ffi_bool(true))
-    let f = mir_ffi_f64(42.5)
-    println(mir_ffi_f64_code(f))
-    mir_ffi_store(4)
-    mir_ffi_store(2)
-    println(mir_ffi_read())
-    0
-}
-"#;
+const C_SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.c");
+const SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.mimi");
 
 struct Oracle(Cell<i64>);
 
@@ -146,6 +111,31 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
         .expect("parse C ABI fixture");
     let checked = crate::core::check_program(&file).expect("check C ABI fixture");
     let mir = MirProgram::from_checked_program(&checked).expect("materialize C ABI MIR");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+        "all scalar ABIs must share production admission"
+    );
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("shared scalar FFI materialization");
+    assert!(crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route));
+    assert_eq!(route.program.canonical_digest(), mir.canonical_digest());
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-abi".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-abi".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public scalar FFI contract consumer");
+        assert!(
+            results.iter().all(|result| matches!(
+                result.status,
+                crate::verifier::VerifStatus::Verified
+                    | crate::verifier::VerifStatus::NoObligations
+            )),
+            "{results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let digest = mir.canonical_digest();
     let expected = "-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n";
     let oracle = Oracle(Cell::new(0));
@@ -186,6 +176,22 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     };
     let native = super::link_and_observe_module(&generator, &config, counter)
         .expect("native execution against the same C library source");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, expected);
+    assert_eq!(native.stderr, "");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = inkwell::context::Context::create();
+    let mut direct = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_direct");
+    direct
+        .compile_checked(&checked)
+        .expect("direct native uses scalar FFI MIR");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let native = super::link_and_observe_module(
+        &direct,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("direct checked native ABI execution");
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, expected);
     assert_eq!(native.stderr, "");
@@ -331,5 +337,112 @@ int64_t mir_ffi_mark(int64_t x) {{
             assert_eq!(native.stderr, "");
         }
         assert_eq!(mir.canonical_digest(), digest);
+    }
+}
+
+#[test]
+fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
+    use crate::verifier::VerifStatus;
+    for (source, expected) in [
+        (
+            r#"extern "C" { func transport(x: f64) -> f64; }
+            func helper(x: f64) -> f64 { transport(x) }
+            func main() -> i64 { let y = helper(42.5); transport(y); 0 }"#,
+            VerifStatus::NoObligations,
+        ),
+        (
+            r#"extern "C" { func foreign(x: i64) -> i64 requires: x > 0; }
+            func helper(x: i64) -> i64 {
+                if x > (0 as i64) { let y = x; foreign(y) } else { foreign(1 as i64) }
+            }
+            func main() -> i64 { let x = helper(-1 as i64); println(x); 0 }"#,
+            VerifStatus::Verified,
+        ),
+        (
+            r#"extern "C" { func foreign(x: i64) -> i64 requires: x > 0; }
+            func helper(x: i64) -> i64 { let y = foreign(x); foreign(y) }
+            func main() -> i64 { let x = helper(42 as i64); println(x); 0 }"#,
+            VerifStatus::Failed,
+        ),
+    ] {
+        let checked =
+            crate::core::check_program(&super::parse_prod(source)).expect("check CLI scope");
+        assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("shared prelude exclusion");
+        assert_eq!(
+            route.program.functions().len(),
+            2,
+            "only user helper and main"
+        );
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        for results in [
+            crate::verifier::verify_checked(&checked, "ffi-route".into()),
+            crate::verifier::verify_checked_dual(&checked, "ffi-route".into()),
+        ] {
+            let results = results.expect("checked MIR verifier");
+            if expected == VerifStatus::NoObligations {
+                assert!(
+                    results.is_empty(),
+                    "contract-free transport has no proof obligations"
+                );
+            } else {
+                assert!(
+                    results.iter().any(|result| result.status == expected),
+                    "{results:?}"
+                );
+            }
+            assert!(results.iter().all(|result| result
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.engine
+                    == crate::verifier::ProofArtifact::ENGINE_MIR
+                    && artifact.mir_hash == route.program.canonical_digest())));
+        }
+        let ffi = crate::verifier::verify_ffi_checked(&checked).expect("FFI-only MIR verifier");
+        if expected == VerifStatus::NoObligations {
+            assert!(
+                ffi.is_empty(),
+                "opaque f64 transport claims no numerical proof"
+            );
+        } else {
+            assert!(
+                ffi.iter().any(|result| result.status == expected),
+                "{ffi:?}"
+            );
+        }
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_route_prelude");
+        generator
+            .compile_checked(&checked)
+            .expect("direct native scalar FFI route");
+        generator.module.verify().expect("valid native module");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
+    for source in [
+        r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
+            func main() -> f64 { foreign(42.5) }"#,
+        r#"extern "C" { func foreign(x: i64) -> i64; }
+            func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
+    ] {
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .expect("check unsupported graph");
+        assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        for result in [
+            crate::verifier::verify_checked(&checked, String::new()),
+            crate::verifier::verify_checked_dual(&checked, String::new()),
+            crate::verifier::verify_ffi_checked(&checked),
+        ] {
+            assert!(result.is_err(), "unsupported graph must fail closed");
+        }
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_ffi_route");
+        assert!(generator.compile_checked(&checked).is_err());
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }

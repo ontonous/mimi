@@ -208,7 +208,7 @@ extern "C" {
         requires: p > 0;
 }
 func caller(x: i64) -> i64 {
-    if danger(x) > 0 {
+    if danger(x) > (0 as i64) {
         return x;
     }
     x
@@ -217,13 +217,13 @@ func caller(x: i64) -> i64 {
     let results = crate::verifier::verify_ffi_source(src)
         .expect("fixture must type-check (wave1-review §2-B fix)");
     assert!(
-        results.iter().any(|r| r.func_name.contains("calls danger")),
+        results.iter().any(|r| r.func_name == "function:caller"),
         "extern call inside an if-condition must be discovered: {:?}",
         results
     );
     // No caller-side guard → precondition may be violated (fail closed).
     assert!(
-        results.iter().any(|r| r.func_name.contains("calls danger")
+        results.iter().any(|r| r.func_name == "function:caller"
             && r.status == crate::verifier::VerifStatus::Failed),
         "unguarded danger(x) in condition should be Disproven: {:?}",
         results
@@ -247,7 +247,7 @@ extern "C" {
         requires: s >= 0;
 }
 func poller(s: i64) -> i64 {
-    while step(s) > 0 {
+    while step(s) > (0 as i64) {
         return s;
     }
     s
@@ -256,12 +256,12 @@ func poller(s: i64) -> i64 {
     let results = crate::verifier::verify_ffi_source(src)
         .expect("fixture must type-check (wave1-review §2-B fix)");
     assert!(
-        results.iter().any(|r| r.func_name.contains("calls step")),
+        results.iter().any(|r| r.func_name == "function:poller"),
         "extern call inside a while-condition must be discovered: {:?}",
         results
     );
     assert!(
-        results.iter().any(|r| r.func_name.contains("calls step")
+        results.iter().any(|r| r.func_name == "function:poller"
             && r.status == crate::verifier::VerifStatus::Failed),
         "unguarded step(s) in while-condition should be Disproven: {:?}",
         results
@@ -286,7 +286,17 @@ func cleaner(h: i64) -> i64 {
     h
 }
 "#;
-    let results = crate::verifier::verify_ffi_source(src).expect("verify_ffi_source");
+    // The migrated scalar profile must reject an unmaterialized defer,
+    // rather than silently dropping the call or returning to the AST walker.
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let error = crate::verifier::verify_ffi_source(src).expect_err("defer is outside MIR coverage");
+    assert!(error.contains("MIR-MATERIALIZATION-001"), "{error}");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    // Extern postconditions still own a compatibility boundary. Keep the
+    // original exhaustive-walker regression on that surviving owner too.
+    let compatibility = src.replace("requires: h >= 0;", "requires: h >= 0 ensures: true;");
+    let results =
+        crate::verifier::verify_ffi_source(&compatibility).expect("compatibility FFI verifier");
     assert!(
         results
             .iter()

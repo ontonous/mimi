@@ -158,9 +158,9 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 
 /// Verify extern call sites from a checked program.
 ///
-/// Contract expressions still use the explicit legacy body adapter until
-/// typed Verification IR lands, but declaration identity and arity are
-/// authoritative from CheckedProgram and fail closed before that adapter.
+/// Called scalar C ABIs consume the shared canonical MIR route and call-site
+/// receipts. Unmigrated declaration semantics retain the explicit compatibility
+/// adapter; declaration identity and arity are checked before either route.
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {
@@ -204,24 +204,20 @@ fn verify_ffi_checked_with_source_hash(
             ));
         }
     }
-    if !has_contract {
-        return Ok(Vec::new());
-    }
-
-    // The scalar precondition slice is admitted only after checker-owned
-    // eligibility, canonical MIR construction, and the whole-program MIR
-    // capability gate all succeed. Any other FFI contract shape remains on
-    // the explicit compatibility boundary below; it is never silently
-    // reinterpreted by a partial MIR verifier.
-    if is_z3_available() && crate::core::mir::contains_scalar_ffi_contract_candidate(program) {
-        let canonical = crate::core::mir::reference::MirProgram::from_checked_program(program)
-            .map_err(|error| format!("MIR-FFI-MATERIALIZATION-001: {error}"))?;
+    if let Some(canonical) = materialize_closed_mir_island(
+        program,
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
+    )? {
         crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
             format!(
                 "MIR-FFI-CAPABILITY-001: canonical verifier rejected scalar FFI MIR: {errors:?}"
             )
         })?;
         return mir::verify_ffi_program(&canonical, source_hash);
+    }
+
+    if !has_contract {
+        return Ok(Vec::new());
     }
 
     let mut externs = std::collections::HashMap::new();
@@ -426,7 +422,8 @@ fn verify_closed_mir_program(
     program: &crate::core::CheckedProgram,
     source_hash: String,
 ) -> Result<Option<Vec<VerificationResult>>, String> {
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 17] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 18] = [
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
         crate::core::mir::CanonicalMirRouteProfile::S8FlowTransition,
@@ -468,6 +465,7 @@ fn verify_closed_mir_profile(
         return Ok(None);
     };
     match profile {
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi => {}
         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection => {
             crate::core::mir::validate_scalar_collection_island(&canonical).map_err(|errors| {
                 format!(

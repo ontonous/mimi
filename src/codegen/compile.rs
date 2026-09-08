@@ -591,6 +591,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 message,
             }) => {
                 let (code, detail) = match (profile, stage) {
+                    (crate::core::mir::CanonicalMirRouteProfile::ScalarFfi, stage) => (
+                        "MIR-FFI-COVERAGE-001",
+                        format!("scalar FFI canonical MIR {stage:?} failed: {message}"),
+                    ),
                     (
                         crate::core::mir::CanonicalMirRouteProfile::ScalarCollection,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
@@ -1000,6 +1004,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let canonical = &route.program;
+        let scalar_ffi_candidate =
+            route.admission.scalar_ffi && route.materialized_scalar_ffi_candidate;
         let scalar_collection_candidate = route.materialized_collection_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
@@ -1011,7 +1017,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let copy_option_i64_candidate = route.materialized_copy_option_i64_candidate;
         let copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
         let copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
-        if !scalar_collection_candidate
+        if !scalar_ffi_candidate
+            && !scalar_collection_candidate
             && !flat_copy_record_candidate
             && !flow_transition_candidate
             && !flow_failure_retry_candidate
@@ -1031,7 +1038,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // validator then rejects the unsupported combination.  This keeps the
         // candidate precedence identical to canonical_dispatch and prevents
         // a flat record from accidentally widening the collection envelope.
-        let island = if flow_failure_retry_candidate {
+        let island = if scalar_ffi_candidate {
+            "scalar FFI island"
+        } else if flow_failure_retry_candidate {
             "recoverable Flow failure island"
         } else if scalar_collection_candidate {
             "scalar collection island"

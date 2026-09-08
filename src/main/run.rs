@@ -199,10 +199,10 @@ fn run_once(
         // ("Enable runtime contract verification"). The VM's internal default
         // (true) is overridden so the flag actually controls behavior.
         vm.verify_contracts = verify_contracts;
-        // §13-#67: --verify-ffi (default true) was silently ignored — the VM
-        // hardcodes ffi_runtime.verify_ffi = false until the bytecode engine
-        // implements contract-expression eval. Fail loud when the user
-        // expects FFI contract checking on a program that declares externs.
+        // Legacy-compatible programs may still contain FFI declarations that
+        // are outside the canonical scalar-C profile. Keep the warning only
+        // on this old consumer path; admitted scalar FFI programs return
+        // above after the AST-free MIR VM has installed the receipt check.
         if verify_ffi
             && merged_file
                 .items

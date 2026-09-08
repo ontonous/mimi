@@ -516,7 +516,7 @@ enum WireAction {
     },
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let args = Args::parse();
     let result = match args.cmd {
         Command::Check {
@@ -548,7 +548,9 @@ fn main() {
                 profile,
                 &extra_args,
             ) {
-                Ok(code) => std::process::exit(code),
+                // Return through Rust's normal shutdown so solver/thread-local
+                // state created by canonical preflight is released as well.
+                Ok(code) => return std::process::ExitCode::from(code as u8),
                 Err(e) => Err(e),
             }
         }
@@ -675,8 +677,9 @@ fn main() {
     };
     if let Err(e) = result {
         eprintln!("{}", format_simple_error(&e));
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }
 
 /// Resolve the target path, either from argument or by finding mimi.toml

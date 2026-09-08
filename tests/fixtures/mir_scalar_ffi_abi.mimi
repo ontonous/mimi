@@ -1,0 +1,22 @@
+extern "C" {
+    func mir_ffi_i32(x: i32) -> i32 requires: x != 0;
+    func mir_ffi_i64(x: i64) -> i64;
+    func mir_ffi_bool(x: bool) -> bool requires: x || not x;
+    func mir_ffi_f64(x: f64) -> f64;
+    func mir_ffi_f64_code(x: f64) -> i64;
+    func mir_ffi_store(x: i32) requires: x > 0;
+    func mir_ffi_read() -> i64;
+}
+func main() -> i64 {
+    println(mir_ffi_i32(-2147483647))
+    println(mir_ffi_i32(2147483647))
+    println(mir_ffi_i64(4294967296 as i64))
+    println(mir_ffi_bool(false))
+    println(mir_ffi_bool(true))
+    let f = mir_ffi_f64(42.5)
+    println(mir_ffi_f64_code(f))
+    mir_ffi_store(4)
+    mir_ffi_store(2)
+    println(mir_ffi_read())
+    0
+}

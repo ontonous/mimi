@@ -4,8 +4,6 @@
 //! They intentionally inspect only checker-owned facts; a backend must not
 //! rediscover a migrated shape from the retained surface AST.
 
-use std::collections::BTreeSet;
-
 use crate::ast::Type;
 use crate::core::ir::{
     ResolvedBinaryOp, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral,
@@ -17,169 +15,66 @@ use crate::core::{
     TransitionId,
 };
 
-/// Whether an extern declaration contract belongs to the first canonical FFI
-/// verifier slice. The slice is intentionally scalar and precondition-only:
-/// its materializer can turn every leaf into a concrete MIR argument identity.
-/// Strings, `ensures`, calls, projections, variadics, and floating-point
-/// expressions remain on the explicit compatibility boundary.
-fn scalar_ffi_contract_expr(expression: &crate::ast::Expr) -> bool {
-    use crate::ast::{BinOp, Expr, Lit, UnOp};
-    match expression.unlocated() {
-        Expr::Literal(Lit::Int(_) | Lit::Bool(_)) | Expr::Ident(_) => true,
-        Expr::Unary(op, operand) => {
-            matches!(op, UnOp::Neg | UnOp::Not) && scalar_ffi_contract_expr(operand)
+/// A called scalar C ABI crosses the shared canonical route boundary. Body
+/// syntax is deliberately irrelevant: let bindings, branches, nested calls,
+/// and ordinary helpers all have to materialize as one complete MIR graph.
+/// Non-scalar ABI and declaration semantics not yet migrated remain explicit
+/// compatibility inputs. A recognized scalar graph failing construction or a
+/// consumer gate must never return to those compatibility consumers.
+pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
+    let mut found = false;
+    for site in program.call_sites().values() {
+        if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
         }
-        Expr::Binary(op, left, right) => {
-            matches!(
-                op,
-                BinOp::Add
-                    | BinOp::Sub
-                    | BinOp::Mul
-                    | BinOp::Div
-                    | BinOp::Mod
-                    | BinOp::EqCmp
-                    | BinOp::NeCmp
-                    | BinOp::Lt
-                    | BinOp::Gt
-                    | BinOp::Le
-                    | BinOp::Ge
-                    | BinOp::And
-                    | BinOp::Or
-            ) && scalar_ffi_contract_expr(left)
-                && scalar_ffi_contract_expr(right)
+        let Some(declaration) = program.extern_func_signature(&site.callee) else {
+            return false;
+        };
+        let Some(block) = program.extern_blocks().values().find(|block| {
+            block
+                .signatures
+                .iter()
+                .any(|item| item.node_id == declaration.node_id)
+        }) else {
+            return false;
+        };
+        if block.abi != "C"
+            || block.returns_errno
+            || declaration.returns_errno
+            || declaration.variadic
+            || declaration.ensures.is_some()
+            || declaration
+                .typed_params
+                .iter()
+                .any(|(_, _, mode)| mode.is_some())
+        {
+            return false;
         }
-        _ => false,
-    }
-}
-
-fn direct_scalar_ffi_callees(body: &ResolvedBody) -> Option<Vec<NodeId>> {
-    let non_contract_statements = body
-        .root
-        .statements
-        .iter()
-        .filter(|statement| !matches!(statement.kind, ResolvedStmtKind::Contract { .. }))
-        .collect::<Vec<_>>();
-    let expression = match (
-        non_contract_statements.as_slice(),
-        body.root.result.as_deref(),
-    ) {
-        ([], Some(expression)) => Some(expression),
-        (
-            [ResolvedStmt {
-                kind: ResolvedStmtKind::Expr(expression),
-                ..
-            }],
-            None,
-        ) => Some(expression),
-        (
-            [ResolvedStmt {
-                kind:
-                    ResolvedStmtKind::Return {
-                        value: Some(expression),
-                        ..
-                    },
-                ..
-            }],
-            None,
-        ) => Some(expression),
-        _ => None,
-    }?;
-    fn collect(expression: &ResolvedExpr, callees: &mut Vec<NodeId>) -> bool {
-        match &expression.kind {
-            ResolvedExprKind::Call(call) => {
-                let ResolvedCallee::Extern(callee) = &call.callee else {
-                    return false;
-                };
-                callees.push(callee.clone());
-                // A nested call in an extern argument would not be represented
-                // by this direct expression shape; the global call-site count
-                // check below rejects that mismatch before admission.
-                true
-            }
-            ResolvedExprKind::Binary { left, right, .. } => {
-                collect(left, callees) && collect(right, callees)
-            }
-            ResolvedExprKind::Unary { operand, .. } => collect(operand, callees),
-            ResolvedExprKind::Literal(_) | ResolvedExprKind::Load(_) => true,
-            _ => false,
+        // Extern declarations live in their own checker-owned signature
+        // directory, not the ordinary callable ResolvedSignature table.
+        // Inspect typed ABI declarations here; concrete MIR argument/result
+        // TypeDesc agreement is still checked before every consumer.
+        let scalar = |ty: &Type, result: bool| {
+            matches!(ty.unlocated(), Type::Name(name, arguments)
+                if arguments.is_empty() && (matches!(name.as_str(), "i32" | "i64" | "bool" | "f64")
+                    || (result && name == "unit")))
+                || (result
+                    && matches!(ty.unlocated(), Type::Tuple(elements) if elements.is_empty()))
+        };
+        if !declaration
+            .ret_type
+            .as_ref()
+            .is_none_or(|ty| scalar(ty, true))
+            || !declaration
+                .typed_params
+                .iter()
+                .all(|(_, ty, _)| scalar(ty, false))
+        {
+            return false;
         }
+        found = true;
     }
-
-    let mut callees = Vec::new();
-    collect(expression, &mut callees)
-        .then_some(callees)
-        .filter(|callees| !callees.is_empty())
-}
-
-/// Exact admission predicate for the canonical scalar FFI verifier profile.
-/// This is an eligibility fact only; construction and TypeDesc/call-graph
-/// validation still have to succeed before the verifier route is selected.
-pub fn contains_scalar_ffi_contract_candidate(program: &CheckedProgram) -> bool {
-    let extern_sites = program
-        .call_sites()
-        .values()
-        .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
-        .collect::<Vec<_>>();
-    if extern_sites.is_empty() {
-        return false;
-    }
-    let owners = extern_sites
-        .iter()
-        .map(|site| site.owner.clone())
-        .collect::<BTreeSet<_>>();
-    let direct_callees = owners
-        .iter()
-        .map(|owner| {
-            program
-                .resolved_body(&NodeId(owner.clone()))
-                .and_then(direct_scalar_ffi_callees)
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(direct_callees) = direct_callees else {
-        return false;
-    };
-    let direct_callee_count = direct_callees.iter().map(Vec::len).sum::<usize>();
-    if direct_callee_count != extern_sites.len() {
-        return false;
-    }
-    let all_callees = direct_callees.into_iter().flatten().collect::<Vec<_>>();
-    let has_requires = all_callees.iter().all(|callee| {
-        program.extern_blocks().values().any(|block| {
-            block.signatures.iter().any(|signature| {
-                signature.node_id == *callee
-                    && signature.requires.is_some()
-                    && signature.ensures.is_none()
-                    && !signature.variadic
-                    && signature
-                        .requires
-                        .as_ref()
-                        .is_some_and(scalar_ffi_contract_expr)
-            })
-        })
-    });
-    if !has_requires {
-        return false;
-    }
-    if program.callables().values().any(|callable| {
-        callable
-            .contracts
-            .iter()
-            .any(|contract| contract.kind != crate::core::ir::ContractKind::Requires)
-    }) {
-        return false;
-    }
-    let result = program.extern_blocks().values().all(|block| {
-        block.signatures.iter().all(|signature| {
-            signature.ensures.is_none()
-                && (!signature.variadic
-                    || (signature.requires.is_none() && signature.ensures.is_none()))
-                && signature
-                    .requires
-                    .as_ref()
-                    .is_none_or(scalar_ffi_contract_expr)
-        })
-    });
-    result
+    found
 }
 
 /// Whether the checked program is one of the deliberately narrow recoverable

@@ -64,6 +64,7 @@ pub(crate) fn test_route_materialization_count() -> usize {
 /// lacked its canonical operation receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalMirRouteProfile {
+    ScalarFfi,
     ScalarCollection,
     FlatCopyRecord,
     S8FlowTransition,
@@ -86,6 +87,7 @@ pub enum CanonicalMirRouteProfile {
 impl CanonicalMirRouteProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ScalarFfi => "scalar-ffi-v1",
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
             Self::FlatCopyRecord => "flat-copy-record-v1",
             Self::S8FlowTransition => "s8-silent-local-flow-v1",
@@ -119,6 +121,7 @@ impl CanonicalMirRouteProfile {
     /// `is_exact -> construct -> contains_*` tables.
     pub const fn is_admitted(self, admission: CanonicalMirRouteAdmission) -> bool {
         match self {
+            Self::ScalarFfi => admission.scalar_ffi,
             Self::ScalarCollection => admission.collection_complete(),
             Self::FlatCopyRecord => admission.record_complete(),
             Self::S8FlowTransition => admission.flow_complete(),
@@ -147,6 +150,7 @@ impl CanonicalMirRouteProfile {
     /// materialization receipt.
     pub const fn is_materialized(self, route: &CanonicalMirRouteMaterialization) -> bool {
         match self {
+            Self::ScalarFfi => route.materialized_scalar_ffi_candidate,
             Self::ScalarCollection => route.materialized_collection_candidate,
             Self::FlatCopyRecord => route.materialized_record_candidate,
             Self::S8FlowTransition => route.materialized_flow_candidate,
@@ -238,6 +242,7 @@ impl std::fmt::Display for CanonicalMirRouteMaterializationError {
 /// Checker-owned route admission captured alongside one canonical graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMirRouteAdmission {
+    pub scalar_ffi: bool,
     pub collection: ScalarCollectionAdmission,
     pub record: FlatCopyRecordAdmission,
     pub flow: S8FlowAdmission,
@@ -259,7 +264,8 @@ pub struct CanonicalMirRouteAdmission {
 
 impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
-        !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
+        self.scalar_ffi
+            || !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
             || !matches!(self.record, FlatCopyRecordAdmission::OutsideProfile)
             || !matches!(self.flow, S8FlowAdmission::OutsideProfile)
             || self.flow_failure_retry
@@ -429,6 +435,7 @@ impl CanonicalMirRouteAdmission {
 pub struct CanonicalMirRouteMaterialization {
     pub program: MirProgram,
     pub admission: CanonicalMirRouteAdmission,
+    pub materialized_scalar_ffi_candidate: bool,
     pub materialized_collection_candidate: bool,
     pub materialized_record_candidate: bool,
     pub materialized_flow_candidate: bool,
@@ -453,6 +460,7 @@ pub fn classify_canonical_mir_route_admission(
     program: &CheckedProgram,
 ) -> CanonicalMirRouteAdmission {
     CanonicalMirRouteAdmission {
+        scalar_ffi: super::is_scalar_ffi_candidate(program),
         collection: classify_scalar_collection_admission(program),
         record: classify_flat_copy_record_admission(program),
         flow: classify_s8_flow_admission(program),
@@ -505,6 +513,21 @@ pub fn materialize_canonical_mir_route(
     #[cfg(test)]
     TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
+    // All public scalar-FFI consumers use the same known prelude exclusion.
+    // Imported/user code stays in the graph; calls into excluded prelude code
+    // remain missing-target errors, never compatibility retries.
+    let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
+    if admission.scalar_ffi {
+        selected_exclusions.extend(
+            program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id),
+        );
+    }
+    let excluded_sources = (!selected_exclusions.is_empty()).then_some(&selected_exclusions);
     let canonical = match excluded_sources {
         Some(excluded_sources) => {
             MirProgram::from_checked_program_excluding_sources(program, excluded_sources)
@@ -522,6 +545,14 @@ pub fn materialize_canonical_mir_route(
         }
     };
 
+    let materialized_scalar_ffi_candidate = !canonical.ffi_calls().is_empty();
+    if admission.scalar_ffi && !materialized_scalar_ffi_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarFfi,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "scalar FFI admission did not materialize a canonical FFI receipt".into(),
+        });
+    }
     let materialized_collection_operation_candidate =
         contains_scalar_collection_operation_candidate(&canonical);
     let materialized_collection_candidate = materialized_collection_operation_candidate
@@ -557,6 +588,66 @@ pub fn materialize_canonical_mir_route(
         super::contains_copy_option_f64_variant_candidate(&canonical);
     let materialized_copy_result_i32_candidate =
         contains_copy_result_i32_variant_candidate(&canonical);
+    if admission.scalar_ffi {
+        // Recognizing FFI must not widen an existing aggregate/collection
+        // island. Keep these intersection gates in the shared materializer,
+        // so CLI, direct native and public verifiers reject the same graph.
+        type IslandGate = fn(&MirProgram) -> Result<(), Vec<String>>;
+        let gates: &[(bool, IslandGate)] = &[
+            (
+                materialized_collection_candidate,
+                super::validate_scalar_collection_island,
+            ),
+            (
+                materialized_option_string_candidate,
+                super::validate_option_string_variant_island,
+            ),
+            (
+                materialized_option_nested_tuple_candidate,
+                super::validate_option_nested_tuple_variant_island,
+            ),
+            (
+                materialized_managed_result_call_candidate,
+                super::validate_managed_result_call_island,
+            ),
+            (
+                materialized_copy_option_i32_candidate,
+                super::validate_copy_option_i32_variant_island,
+            ),
+            (
+                materialized_copy_option_i64_candidate,
+                super::validate_copy_option_i64_variant_island,
+            ),
+            (
+                materialized_copy_option_f64_candidate,
+                super::validate_copy_option_f64_variant_island,
+            ),
+            (
+                materialized_copy_result_i32_candidate,
+                super::validate_copy_result_i32_variant_island,
+            ),
+            (materialized_copy_option_bool_candidate, |canonical| {
+                super::validate_copy_option_variant_island(
+                    canonical,
+                    crate::core::PrimitiveType::Bool,
+                    super::COPY_OPTION_BOOL_VARIANT_ISLAND,
+                )
+            }),
+        ];
+        for (candidate, gate) in gates {
+            if *candidate {
+                gate(&canonical).map_err(|errors| {
+                    CanonicalMirRouteMaterializationError::Complete {
+                        profile: CanonicalMirRouteProfile::ScalarFfi,
+                        stage: CanonicalMirRouteFailureStage::Coverage,
+                        message: format!(
+                            "scalar FFI composition exceeds an existing island: {errors:?}"
+                        ),
+                    }
+                })?;
+            }
+        }
+    }
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarCollection,
@@ -717,6 +808,7 @@ pub fn materialize_canonical_mir_route(
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
         admission,
+        materialized_scalar_ffi_candidate,
         materialized_collection_candidate,
         materialized_record_candidate,
         materialized_flow_candidate,
@@ -742,7 +834,13 @@ fn match_complete_or_compatibility(
     stage: CanonicalMirRouteFailureStage,
     message: String,
 ) -> CanonicalMirRouteMaterializationError {
-    if admission.flow_failure_retry {
+    if admission.scalar_ffi {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarFfi,
+            stage,
+            message,
+        }
+    } else if admission.flow_failure_retry {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::FlowFailureRetry,
             stage,
@@ -925,6 +1023,7 @@ mod tests {
     #[test]
     fn compatibility_materialization_error_preserves_candidate_admission() {
         let admission = CanonicalMirRouteAdmission {
+            scalar_ffi: false,
             collection: ScalarCollectionAdmission::MixedCoverage,
             record: FlatCopyRecordAdmission::OutsideProfile,
             flow: S8FlowAdmission::OutsideProfile,

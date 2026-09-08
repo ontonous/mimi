@@ -139,6 +139,12 @@ pub(crate) fn select_default_route(
     // The shared envelope also owns the materialization receipts, preventing
     // this selector from growing a second Set/record lowering walk.
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    if admission.scalar_ffi {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) => select_scalar_ffi_route(route.program),
+            Err(error) => DefaultMirRoute::Rejected(error.to_string()),
+        };
+    }
     let collection_admission = admission.collection;
     let option_string_admission = admission.option_string;
     let option_nested_tuple_admission = admission.option_nested_tuple;
@@ -1305,6 +1311,35 @@ pub(crate) fn select_default_route(
     DefaultMirRoute::Canonical(route.program)
 }
 
+/// Consumer preflight for the shared scalar FFI receipt. An error at any
+/// stage is a hard rejection; this adapter has no compatibility return arm.
+fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "scalar FFI MIR verifier capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::interp::bytecode::compile_mir_program(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "scalar FFI MIR bytecode capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("scalar FFI MIR native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir(&program, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false) =>
+        {
+            DefaultMirRoute::Canonical(program)
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "scalar FFI MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("scalar FFI MIR verifier pass: {error}")),
+    }
+}
+
 fn reject_migrated_candidates(
     flow_candidate: bool,
     collection_candidate: bool,
@@ -1517,6 +1552,43 @@ mod tests {
             .expect("parse");
         let checked = mimi::core::check_program(&file).expect("check");
         (checked, file)
+    }
+
+    #[test]
+    fn scalar_ffi_default_route_covers_bindings_branches_and_helpers() {
+        for body in [
+            "foreign(42 as i64)",
+            "let x = foreign(42 as i64); foreign(x)",
+            "if true { foreign(42 as i64) } else { foreign(9 as i64) }",
+            "let x = helper(42 as i64); println(x); foreign(x)",
+        ] {
+            let source = format!(
+                r#"extern "C" {{ func foreign(x: i64) -> i64; }}
+                func helper(x: i64) -> i64 {{ foreign(x) }}
+                func main() -> i64 {{ {body} }}"#
+            );
+            let (checked, file) = checked(&source);
+            let route = select_default_route(&checked, &file);
+            assert!(
+                matches!(route, DefaultMirRoute::Canonical(_)),
+                "{body}: {route:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_default_route_rejects_uncovered_graph_without_fallback() {
+        for source in [
+            r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
+                func main() -> f64 { foreign(42.5) }"#,
+            r#"extern "C" { func foreign(x: i64) -> i64; }
+                func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
+        ] {
+            let (checked, file) = checked(source);
+            assert!(mimi::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+            let route = select_default_route(&checked, &file);
+            assert!(matches!(route, DefaultMirRoute::Rejected(_)), "{route:?}");
+        }
     }
 
     #[test]
