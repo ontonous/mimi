@@ -914,7 +914,7 @@ fn ffi_checked_does_not_open_legacy_for_uncalled_extern_contract() {
 }
 
 #[test]
-fn ffi_checked_keeps_uncontracted_called_extern_result_when_other_contract_is_uncalled() {
+fn ffi_checked_ignores_uncontracted_called_extern_when_other_contract_is_uncalled() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -930,9 +930,35 @@ fn ffi_checked_keeps_uncontracted_called_extern_result_when_other_contract_is_un
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
-        .expect("called uncontracted extern should retain its result");
-    assert_eq!(results.len(), 1, "called uncontracted extern: {results:?}");
-    assert!(results[0].func_name.contains("plain"));
+        .expect("called uncontracted extern has no FFI obligation");
+    assert!(
+        results.is_empty(),
+        "called uncontracted extern: {results:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_compatibility_keeps_only_called_contract_externs() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let source = r#"
+        extern "C" {
+            func guarded(value: string) -> i64 requires: value != "";
+            func plain(value: string) -> i64;
+        }
+        func main() -> i64 { guarded("ok") + plain("ok") }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("mixed called contract/uncontracted string FFI fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("called string contract should use compatibility verifier");
+    assert_eq!(results.len(), 1, "called contract results: {results:?}");
+    assert!(results[0].func_name.contains("guarded"));
+    assert!(!results[0].func_name.contains("plain"));
     assert_eq!(
         crate::core::CheckedProgram::test_legacy_body_access(),
         vec![crate::core::LegacyBodyConsumer::FfiVerifierCompatibility]

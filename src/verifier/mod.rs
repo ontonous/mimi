@@ -160,7 +160,9 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 ///
 /// Called scalar C ABIs consume the shared canonical MIR route and call-site
 /// receipts. Unmigrated declaration semantics retain the explicit compatibility
-/// adapter; declaration identity and arity are checked before either route.
+/// adapter only for called declarations with `requires`/`ensures`; declarations
+/// and calls with no FFI obligations return an empty result. Declaration
+/// identity and arity are checked before either route.
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {
@@ -262,14 +264,40 @@ fn verify_ffi_checked_with_source_hash(
             }
         }
     }
+
+    // The compatibility FFI walker owns declaration contracts, not calls
+    // whose extern declaration has no requires/ensures. Keep its input
+    // directory contract-only so an unsupported ABI with no obligation can
+    // still return the same empty result as the canonical scalar profile.
+    let called_contract_names = program
+        .call_sites()
+        .values()
+        .filter(|site| site.kind == crate::core::ResolvedCallKind::Extern)
+        .filter_map(|site| program.extern_func_signature(&site.callee))
+        .filter(|signature| signature.requires.is_some() || signature.ensures.is_some())
+        .map(|signature| signature.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+
+    if called_contract_names.is_empty() {
+        // No called declaration contributes an FFI verification obligation.
+        // In particular, an uncalled contract or a called uncontracted
+        // string/aggregate extern must not make this API touch the retained
+        // surface body merely to manufacture a "Verified" status.
+        return Ok(Vec::new());
+    }
+
     if is_z3_available() {
         // C4 Z3 path (permanent): FFI call-site verification encodes extern
         // contract expressions from surface AST. The explicitly tagged legacy
         // body boundary is required because
         // the Z3 encoding is defined over AST Expr nodes.
+        let contract_externs = externs
+            .into_iter()
+            .filter(|(name, _)| called_contract_names.contains(name))
+            .collect::<std::collections::HashMap<_, _>>();
         flow::flow_verify_ffi_call_sites_with_externs_or_mock(
             program.legacy_body_file(crate::core::LegacyBodyConsumer::FfiVerifierCompatibility),
-            &externs,
+            &contract_externs,
         )
     } else {
         // C4 mock path: from CheckedProgram's extern signatures, no retained
@@ -277,7 +305,9 @@ fn verify_ffi_checked_with_source_hash(
         let mut results: Vec<VerificationResult> = Vec::new();
         for block in program.extern_blocks().values() {
             for signature in &block.signatures {
-                if signature.requires.is_some() || signature.ensures.is_some() {
+                if (signature.requires.is_some() || signature.ensures.is_some())
+                    && called_contract_names.contains(&signature.name)
+                {
                     results.push(VerificationResult {
                         func_name: format!("extern {}", signature.name),
                         status: VerifStatus::InfrastructureError,
