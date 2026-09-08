@@ -76,5 +76,21 @@ fi
 printf 'production_compile_func_legacy_call_sites=%s\n' "$legacy_call_count"
 printf 'owner_count=%s\n' "$owner_count"
 
+# R6-15 removed the former direct-expression-only scalar FFI admission helper.
+# Keep its names in this audit so a future compatibility refactor cannot
+# silently reintroduce a second FFI route policy.
+scalar_ffi_legacy_refs="$(rg -n \
+    --glob '*.rs' \
+    --glob '!**/tests.rs' \
+    --glob '!src/tests/**' \
+    'contains_scalar_ffi_contract_candidate|direct_scalar_ffi_callees|scalar_ffi_contract_expr' \
+    "$SRC_DIR" || true)"
+scalar_ffi_legacy_count=0
+if [ -n "$scalar_ffi_legacy_refs" ]; then
+    scalar_ffi_legacy_count="$(printf '%s\n' "$scalar_ffi_legacy_refs" | wc -l)"
+    printf '%s\n' "$scalar_ffi_legacy_refs"
+fi
+printf 'scalar_ffi_direct_expression_legacy_refs=%s\n' "$scalar_ffi_legacy_count"
+
 printf 'dynamic_probe_command=%s\n' \
     'cargo test --features llvm18-host-dynamic legacy_body_access -- --test-threads=1'
