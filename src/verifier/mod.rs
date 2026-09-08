@@ -104,9 +104,9 @@ pub fn verify_source_with(
 /// `source_hash` is the BLAKE3 hash of the source text (for ProofArtifact
 /// tamper detection). Pass an empty string if source text is unavailable.
 ///
-/// Closed scalar collection, flat Copy-record, S8 Flow, recoverable Flow, and
-/// exact non-Copy `Option<string>` programs are verified from one canonical
-/// MIR graph. Other programs remain on the explicit compatibility
+/// Closed scalar FFI, scalar collection, flat Copy-record, S8 Flow, recoverable
+/// Flow, and exact non-Copy `Option<string>` programs are verified from one
+/// canonical MIR graph. Other programs remain on the explicit compatibility
 /// boundary: when Z3 is available, they delegate to the Flow verifier state
 /// machine (which still uses `legacy_body_file()` for AST-based function body
 /// encoding); when Z3 is unavailable, they use CheckedProgram-based mock
