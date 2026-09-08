@@ -484,6 +484,133 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_bool_ensures_binds_bool_result_across_three_consumers() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_bool(x: bool) -> bool ensures: result == not x;
+}
+func main() -> i64 {
+    println(mir_ffi_bool(false))
+    println(mir_ffi_bool(true))
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex bool-result FFI ensures fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse bool-result FFI ensures fixture");
+    let checked = crate::core::check_program(&file).expect("check bool-result FFI ensures fixture");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize bool-result FFI");
+    let receipts = mir
+        .ffi_calls()
+        .values()
+        .filter(|receipt| receipt.symbol == "mir_ffi_bool")
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2, "one receipt per bool FFI call-site");
+    assert!(receipts.iter().all(|receipt| receipt.result.is_some()));
+    assert!(receipts.iter().all(|receipt| receipt.ensures.is_some()));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-bool-ensures".into())
+        .expect("MIR bool-result FFI ensures verifier");
+    assert_eq!(
+        results.len(),
+        2,
+        "one postcondition obligation per bool call"
+    );
+    assert!(results
+        .iter()
+        .all(|result| result.status == crate::verifier::VerifStatus::Disproven));
+    assert!(results
+        .iter()
+        .all(|result| result.message.contains("extern ensures contract disproven")));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-bool-ensures".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-bool-ensures".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public bool-result FFI ensures verifier");
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|result| result.status == crate::verifier::VerifStatus::Disproven));
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            })
+        }));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference bool-result FFI ensures execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "true\nfalse\n");
+
+    let bytecode = compile_mir_program(&mir).expect("bool-result FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(
+        bytecode
+            .canonical_ffi
+            .iter()
+            .filter(|descriptor| descriptor.symbol == "mir_ffi_bool")
+            .count(),
+        2
+    );
+    assert!(bytecode
+        .canonical_ffi
+        .iter()
+        .filter(|descriptor| descriptor.symbol == "mir_ffi_bool")
+        .all(|descriptor| {
+            descriptor.result == crate::interp::bytecode::CanonicalFfiScalarType::Bool
+                && descriptor.result_id.is_some()
+                && descriptor.ensures.is_some()
+        }));
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("bytecode bool-result FFI ensures"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "true\nfalse\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_bool_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native bool-result FFI ensures");
+    generator
+        .module
+        .verify()
+        .expect("valid native bool-result FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native bool-result FFI ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "true\nfalse\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
