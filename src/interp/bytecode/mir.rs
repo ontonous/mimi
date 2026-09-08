@@ -188,7 +188,7 @@ fn materialize_canonical_ffi(
             || receipt.parameter_conversions.len() != arguments.len()
             || receipt.result.as_ref() != result.as_ref()
             || receipt.result_conversion.is_none() != result.is_none()
-            || receipt.symbol.trim().is_empty()
+            || !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&receipt.symbol)
             || receipt.abi != "C"
             || !type_arguments.is_empty()
             || variant_call_contract.is_some()

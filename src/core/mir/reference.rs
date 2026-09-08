@@ -2246,17 +2246,17 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
-                    if contract.symbol.trim().is_empty() {
+                    if !super::canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
+                        let message = if contract.symbol.trim().is_empty() {
+                            "extern call FFI contract has an empty C symbol"
+                        } else if contract.symbol.chars().any(char::is_control) {
+                            "extern call FFI contract symbol contains a control character"
+                        } else {
+                            "extern call FFI contract symbol contains whitespace or a manifest delimiter"
+                        };
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
-                            message: "extern call FFI contract has an empty C symbol".into(),
-                        });
-                    }
-                    if contract.symbol.chars().any(char::is_control) {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI contract symbol contains a control character"
-                                .into(),
+                            message: message.into(),
                         });
                     }
                     if contract.abi != "C" {
@@ -12021,6 +12021,30 @@ func main() -> i64 { foreign(1 as i64); 0 }
             }),
             "{errors:?}"
         );
+
+        for symbol in ["foreign symbol", "foreign=symbol", "foreign,symbol"] {
+            let (_, program) = canonical_program_with_main(
+                "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+            );
+            let mut receipts = program.ffi_calls().clone();
+            receipts.values_mut().next().expect("FFI receipt").symbol = symbol.into();
+            let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+                program.functions().clone(),
+                program.type_catalog().clone(),
+                program.instances().clone(),
+                program.transitions().clone(),
+                receipts,
+            )
+            .expect_err("manifest-ambiguous C symbols must fail before consumers");
+            assert!(
+                errors.iter().any(|error| {
+                    error
+                        .message
+                        .contains("FFI contract symbol contains whitespace or a manifest delimiter")
+                }),
+                "{symbol}: {errors:?}"
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,18 @@ use crate::core::ir::{
 };
 use crate::core::{NodeId, ResolvedPlace};
 
+/// Return whether an extern symbol is safe to carry through the canonical
+/// MIR/receipt text and the line-oriented CLI manifest.  The frontend only
+/// produces identifier-shaped symbols, but this predicate also protects the
+/// public MIR constructors and every backend from a forged receipt whose
+/// spelling would be ambiguous or unsafe at a consumer boundary.
+pub(crate) fn canonical_ffi_symbol_is_manifest_safe(symbol: &str) -> bool {
+    !symbol.trim().is_empty()
+        && !symbol.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || matches!(character, '=' | ',')
+        })
+}
+
 /// Resolve a checker-owned callable identity to the executable MIR function
 /// owner used by all consumers. Protocol/trait method calls retain their
 /// `ProtocolMethod` identity in the MIR node (so dispatch kind is not erased),

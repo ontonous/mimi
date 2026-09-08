@@ -144,6 +144,11 @@ impl CanonicalMirFfiRuntime {
         if descriptor.symbol.trim().is_empty() || descriptor.symbol.contains('\0') {
             return Err("canonical MIR FFI symbol is empty or contains NUL".into());
         }
+        if !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&descriptor.symbol) {
+            return Err(
+                "canonical MIR FFI symbol contains whitespace or a manifest delimiter".into(),
+            );
+        }
         if descriptor.arguments.len() != args.len() {
             return Err(format!(
                 "canonical MIR FFI symbol '{}' expects {} arguments, got {}",
@@ -490,6 +495,18 @@ mod tests {
             ),
             ("", "C", vec![Value::Int(1)], "symbol is empty"),
             ("labs\0other", "C", vec![Value::Int(1)], "contains NUL"),
+            (
+                "labs other",
+                "C",
+                vec![Value::Int(1)],
+                "contains whitespace or a manifest delimiter",
+            ),
+            (
+                "labs=other",
+                "C",
+                vec![Value::Int(1)],
+                "contains whitespace or a manifest delimiter",
+            ),
             ("labs", "C", vec![], "expects 1 arguments, got 0"),
         ] {
             let mut runtime = CanonicalMirFfiRuntime::new();
