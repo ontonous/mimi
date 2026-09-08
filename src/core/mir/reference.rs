@@ -2253,6 +2253,25 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
+                    for (index, argument) in contract.arguments.iter().enumerate() {
+                        if !function.values.contains_key(argument) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "extern call FFI contract argument {index} value identity is absent"
+                                ),
+                            });
+                        }
+                    }
+                    if let Some(result_value) = contract.result.as_ref() {
+                        if !function.values.contains_key(result_value) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "extern call FFI contract result value identity is absent"
+                                    .into(),
+                            });
+                        }
+                    }
                     if result.is_none() {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
@@ -11442,6 +11461,36 @@ func main() -> i64 { foreign(1 as i64); 0 }
                 error
                     .message
                     .contains("canonical FFI contract is orphaned from a MIR extern call")
+            }),
+            "{errors:?}"
+        );
+
+        let (_, program) = canonical_program_with_main(source);
+        let forged_argument = super::MirValueId::new("value:forged-argument").expect("value id");
+        let instruction_id = program
+            .ffi_calls()
+            .keys()
+            .next()
+            .cloned()
+            .expect("FFI instruction");
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .arguments = vec![forged_argument];
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("FFI value identities must be declared by the caller MIR function");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("FFI contract argument 0 value identity is absent")
             }),
             "{errors:?}"
         );
