@@ -425,10 +425,17 @@ pub enum Op {
         argc: u16,
     },
     /// Call extern (FFI) function: rd = extern(idx)(args[0..argc]).
-    /// The index refers to BytecodeProgram::extern_names; the name is
-    /// resolved against the shared `FfiRuntime` table at runtime
-    /// (0.33 Phase D: FFI forwarding).
+    /// The index refers to `BytecodeProgram::extern_names` and the
+    /// compatibility AST-backed runtime.
     CallExtern {
+        rd: Reg,
+        extern_idx: u16,
+        args_base: Reg,
+        argc: u16,
+    },
+    /// Call a checker-owned scalar FFI descriptor. A missing descriptor is
+    /// an error; this instruction never consults compatibility extern names.
+    CallCanonicalExtern {
         rd: Reg,
         extern_idx: u16,
         args_base: Reg,
@@ -1207,6 +1214,7 @@ impl Op {
             | CallMove { rd, .. }
             | CallBuiltin { rd, .. }
             | CallExtern { rd, .. }
+            | CallCanonicalExtern { rd, .. }
             | CallIndirect { rd, .. }
             | DynMethodCall { rd, .. }
             | FlowTransition { rd, .. }
@@ -1308,6 +1316,7 @@ impl Op {
             | Op::CallMove { rd, .. }
             | Op::CallBuiltin { rd, .. }
             | Op::CallExtern { rd, .. }
+            | Op::CallCanonicalExtern { rd, .. }
             | Op::CallIndirect { rd, .. }
             | Op::DynMethodCall { rd, .. }
             | Op::FlowTransition { rd, .. }
@@ -1448,6 +1457,9 @@ impl Op {
                 args_base, argc, ..
             }
             | CallExtern {
+                args_base, argc, ..
+            }
+            | CallCanonicalExtern {
                 args_base, argc, ..
             }
             | DynMethodCall {
@@ -1802,6 +1814,11 @@ pub struct BytecodeProgram {
     /// Extern (FFI) function names, indexed by Op::CallExtern::extern_idx
     /// (0.33 Phase D FFI forwarding).
     pub extern_names: Vec<String>,
+    /// Checker-owned scalar FFI descriptors materialized from Canonical MIR.
+    /// Canonical bytecode execution uses this table directly and never needs
+    /// an AST or legacy `ExternFunc` declaration.  Compatibility bytecode
+    /// leaves the table empty and uses `extern_names` instead.
+    pub canonical_ffi: Vec<CanonicalFfiDescriptor>,
     /// Actor definitions (for spawn at runtime).
     pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
     /// Flow definitions (for transition dispatch).
@@ -1827,6 +1844,33 @@ pub struct BytecodeProgram {
     /// Record field types: type_name → [(field_name, field_type_str)].
     /// Used by from_json_typed for recursive field coercion.
     pub record_fields: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+/// The deliberately narrow scalar ABI admitted by the Canonical MIR FFI
+/// bytecode consumer.  This is a physical execution view of a MIR TypeDesc,
+/// not a type-name lookup; the adapter constructs it only after validating the
+/// checker-owned layout and ABI contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalFfiScalarType {
+    I32,
+    I64,
+    Bool,
+    F64,
+    Unit,
+}
+
+/// One checker-owned scalar FFI call descriptor for AST-free bytecode.
+/// Descriptors are per MIR call receipt, so an Op index cannot silently reuse
+/// a symbol with a different argument or result ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalFfiDescriptor {
+    pub caller: String,
+    pub instruction: String,
+    pub callee: String,
+    pub symbol: String,
+    pub abi: String,
+    pub arguments: Vec<CanonicalFfiScalarType>,
+    pub result: CanonicalFfiScalarType,
 }
 
 impl BytecodeProgram {

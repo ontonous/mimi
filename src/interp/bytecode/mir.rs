@@ -28,10 +28,10 @@ use crate::core::mir::{
 use crate::core::NodeId;
 
 use super::instr::{
-    BytecodeProgram, ConstIdx, ConstValue, FuncIdx, FunctionProto, ListOperationShape,
-    ListProjectionShape, Op, RecordMoveDropProjectionShape, RecordProjectionShape,
-    RecordResidualDropShape, Reg, TupleDestructureShape, TupleProjectionShape,
-    VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
+    BytecodeProgram, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstIdx, ConstValue, FuncIdx,
+    FunctionProto, ListOperationShape, ListProjectionShape, Op, RecordMoveDropProjectionShape,
+    RecordProjectionShape, RecordResidualDropShape, Reg, TupleDestructureShape,
+    TupleProjectionShape, VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -74,10 +74,12 @@ pub fn compile_mir_program(
         indices.insert((*owner).clone(), index as FuncIdx);
     }
 
+    let (ffi_indices, canonical_ffi) = materialize_canonical_ffi(program)?;
+
     let mut functions = Vec::with_capacity(ordered.len());
     let mut errors = Vec::new();
     for (_, function) in &ordered {
-        match compile_function(function, program, &indices) {
+        match compile_function(function, program, &indices, &ffi_indices) {
             Ok(proto) => functions.push(proto),
             Err(mut function_errors) => errors.append(&mut function_errors),
         }
@@ -108,6 +110,7 @@ pub fn compile_mir_program(
         entry,
         builtin_names,
         extern_names: Vec::new(),
+        canonical_ffi,
         actor_defs: std::collections::HashMap::new(),
         flow_defs: std::collections::HashMap::new(),
         flow_transition_funcs: std::collections::HashMap::new(),
@@ -122,10 +125,216 @@ pub fn compile_mir_program(
     }))
 }
 
+fn materialize_canonical_ffi(
+    program: &MirProgram,
+) -> Result<
+    (
+        BTreeMap<crate::core::mir::MirInstructionId, u16>,
+        Vec<CanonicalFfiDescriptor>,
+    ),
+    Vec<MirBytecodeError>,
+> {
+    let mut indices = BTreeMap::new();
+    let mut descriptors = Vec::with_capacity(program.ffi_calls().len());
+    let mut errors = Vec::new();
+    for (instruction, receipt) in program.ffi_calls() {
+        let Some(function) = program.functions().get(&receipt.caller) else {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!(
+                    "canonical FFI receipt '{}' names an absent caller",
+                    instruction
+                ),
+            });
+            continue;
+        };
+        let Some(call) = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find(|candidate| candidate.id == *instruction)
+        else {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!(
+                    "canonical FFI call '{}' is absent from its caller",
+                    instruction
+                ),
+            });
+            continue;
+        };
+        let MirInstructionKind::Call {
+            callee: ResolvedCallee::Extern(callee),
+            result,
+            arguments,
+            type_arguments,
+            variant_call_contract,
+            ..
+        } = &call.kind
+        else {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!(
+                    "canonical FFI receipt '{}' does not name an extern call",
+                    instruction
+                ),
+            });
+            continue;
+        };
+        if receipt.instruction != *instruction
+            || receipt.callee != *callee
+            || receipt.arguments != *arguments
+            || receipt.result.as_ref() != result.as_ref()
+            || receipt.symbol.trim().is_empty()
+            || receipt.abi != "C"
+            || !type_arguments.is_empty()
+            || variant_call_contract.is_some()
+        {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!(
+                    "canonical FFI receipt '{}' failed identity/ABI validation",
+                    instruction
+                ),
+            });
+            continue;
+        }
+        let argument_types = match scalar_ffi_arguments(program, function, arguments, instruction) {
+            Ok(arguments) => arguments,
+            Err(message) => {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message,
+                });
+                continue;
+            }
+        };
+        let result_type = match result {
+            Some(value) => {
+                let Some(info) = function.values.get(value) else {
+                    errors.push(MirBytecodeError {
+                        function: receipt.caller.clone(),
+                        message: format!(
+                            "canonical FFI result '{}' is absent from MIR values",
+                            instruction
+                        ),
+                    });
+                    continue;
+                };
+                match scalar_ffi_type(program, &info.ty, instruction, "result") {
+                    Ok(result) => result,
+                    Err(message) => {
+                        errors.push(MirBytecodeError {
+                            function: receipt.caller.clone(),
+                            message,
+                        });
+                        continue;
+                    }
+                }
+            }
+            None => CanonicalFfiScalarType::Unit,
+        };
+        let index = match u16::try_from(descriptors.len()) {
+            Ok(index) => index,
+            Err(_) => {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message: "canonical FFI descriptor table exceeds bytecode index ABI".into(),
+                });
+                continue;
+            }
+        };
+        indices.insert(instruction.clone(), index);
+        descriptors.push(CanonicalFfiDescriptor {
+            caller: receipt.caller.0.clone(),
+            instruction: receipt.instruction.as_str().to_owned(),
+            callee: receipt.callee.0.clone(),
+            symbol: receipt.symbol.clone(),
+            abi: receipt.abi.clone(),
+            arguments: argument_types,
+            result: result_type,
+        });
+    }
+    if errors.is_empty() {
+        Ok((indices, descriptors))
+    } else {
+        Err(errors)
+    }
+}
+
+fn scalar_ffi_arguments(
+    program: &MirProgram,
+    function: &MirFunction,
+    arguments: &[MirValueId],
+    instruction: &crate::core::mir::MirInstructionId,
+) -> Result<Vec<CanonicalFfiScalarType>, String> {
+    arguments
+        .iter()
+        .map(|argument| {
+            let info = function.values.get(argument).ok_or_else(|| {
+                format!(
+                    "canonical FFI '{}' argument '{}' is absent from MIR values",
+                    instruction, argument
+                )
+            })?;
+            scalar_ffi_type(program, &info.ty, instruction, "argument")
+        })
+        .collect()
+}
+
+fn scalar_ffi_type(
+    program: &MirProgram,
+    ty: &crate::core::ResolvedTypeId,
+    instruction: &crate::core::mir::MirInstructionId,
+    role: &str,
+) -> Result<CanonicalFfiScalarType, String> {
+    let descriptor = program.type_catalog().get(ty).ok_or_else(|| {
+        format!(
+            "canonical FFI '{}' {} TypeDesc '{}' is absent",
+            instruction,
+            role,
+            ty.as_str()
+        )
+    })?;
+    if role == "result"
+        && descriptor.layout == MirLayout::Unit
+        && descriptor.abi == MirAbiClass::Unit
+        && descriptor.ownership == MirOwnership::Copy
+    {
+        return Ok(CanonicalFfiScalarType::Unit);
+    }
+    if descriptor.layout != MirLayout::Scalar || descriptor.ownership != MirOwnership::Copy {
+        return Err(format!(
+            "canonical FFI '{}' {} TypeDesc '{}' has non-scalar layout {:?}",
+            instruction,
+            role,
+            ty.as_str(),
+            descriptor.layout
+        ));
+    }
+    match descriptor.abi {
+        MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        } => Ok(CanonicalFfiScalarType::I32),
+        MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        } => Ok(CanonicalFfiScalarType::I64),
+        MirAbiClass::Bool => Ok(CanonicalFfiScalarType::Bool),
+        MirAbiClass::Float { bits: 64 } => Ok(CanonicalFfiScalarType::F64),
+        abi => Err(format!(
+            "canonical FFI '{}' {} ABI {:?} is outside the scalar bytecode island",
+            instruction, role, abi
+        )),
+    }
+}
+
 struct FunctionEmitter<'a> {
     function: &'a MirFunction,
     program: &'a MirProgram,
     indices: &'a BTreeMap<NodeId, FuncIdx>,
+    ffi_indices: &'a BTreeMap<crate::core::mir::MirInstructionId, u16>,
     proto: FunctionProto,
     registers: BTreeMap<MirValueId, Reg>,
     block_starts: BTreeMap<crate::core::mir::MirBlockId, usize>,
@@ -137,6 +346,7 @@ fn compile_function(
     function: &MirFunction,
     program: &MirProgram,
     indices: &BTreeMap<NodeId, FuncIdx>,
+    ffi_indices: &BTreeMap<crate::core::mir::MirInstructionId, u16>,
 ) -> Result<FunctionProto, Vec<MirBytecodeError>> {
     if function.parameters.len() > u16::MAX as usize {
         return Err(vec![MirBytecodeError {
@@ -148,6 +358,7 @@ fn compile_function(
         function,
         program,
         indices,
+        ffi_indices,
         proto: FunctionProto::new(function.owner.0.clone(), function.parameters.len() as u16),
         registers: BTreeMap::new(),
         block_starts: BTreeMap::new(),
@@ -413,13 +624,17 @@ impl<'a> FunctionEmitter<'a> {
             self.block_starts
                 .insert(block.id.clone(), self.proto.code.len());
             for instruction in &block.instructions {
-                self.emit_instruction(&instruction.kind);
+                self.emit_instruction(&instruction.id, &instruction.kind);
             }
             self.emit_terminator(&block.terminator);
         }
     }
 
-    fn emit_instruction(&mut self, instruction: &MirInstructionKind) {
+    fn emit_instruction(
+        &mut self,
+        instruction_id: &crate::core::mir::MirInstructionId,
+        instruction: &MirInstructionKind,
+    ) {
         match instruction {
             MirInstructionKind::Const { result, literal } => {
                 if let Err(message) = self.supported_type_for_value(result) {
@@ -721,6 +936,7 @@ impl<'a> FunctionEmitter<'a> {
                 variant_call_contract,
                 ..
             } => self.emit_call(
+                instruction_id,
                 result.as_ref(),
                 callee,
                 type_arguments,
@@ -1610,12 +1826,23 @@ impl<'a> FunctionEmitter<'a> {
 
     fn emit_call(
         &mut self,
+        instruction: &crate::core::mir::MirInstructionId,
         result: Option<&MirValueId>,
         callee: &ResolvedCallee,
         type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
     ) {
+        if let ResolvedCallee::Extern(_) = callee {
+            self.emit_extern_call(
+                instruction,
+                result,
+                type_arguments,
+                arguments,
+                variant_call_contract,
+            );
+            return;
+        }
         let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
             self.error(format!("callee {callee:?} is not a canonical function"));
             return;
@@ -1756,6 +1983,100 @@ impl<'a> FunctionEmitter<'a> {
             return;
         }
         self.emit_call_target(result, func, arguments);
+    }
+
+    fn emit_extern_call(
+        &mut self,
+        instruction: &crate::core::mir::MirInstructionId,
+        result: Option<&MirValueId>,
+        type_arguments: &[crate::core::ResolvedTypeId],
+        arguments: &[MirValueId],
+        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+    ) {
+        let Some(&extern_idx) = self.ffi_indices.get(instruction) else {
+            self.error(format!(
+                "extern call '{}' has no canonical bytecode FFI descriptor",
+                instruction
+            ));
+            return;
+        };
+        let Some(receipt) = self.program.ffi_calls().get(instruction) else {
+            self.error(format!(
+                "extern call '{}' has no canonical FFI receipt",
+                instruction
+            ));
+            return;
+        };
+        if !type_arguments.is_empty() || variant_call_contract.is_some() {
+            self.error(format!(
+                "extern call '{}' has unsupported generic or variant ABI metadata",
+                instruction
+            ));
+            return;
+        }
+        if receipt.arguments != arguments || receipt.result.as_ref() != result {
+            self.error(format!(
+                "extern call '{}' receipt disagrees with its MIR call",
+                instruction
+            ));
+            return;
+        }
+        for argument in arguments {
+            if let Err(message) = self.supported_type_for_value(argument) {
+                self.error(format!(
+                    "canonical extern argument '{}' is unsupported: {message}",
+                    argument
+                ));
+                return;
+            }
+        }
+        if let Some(result) = result {
+            if let Err(message) = self.supported_type_for_value(result) {
+                self.error(format!(
+                    "canonical extern result '{}' is unsupported: {message}",
+                    result
+                ));
+                return;
+            }
+        }
+        let rd = result
+            .and_then(|value| self.reg(value))
+            .unwrap_or_else(|| self.proto.alloc_reg());
+        let args_base = self.proto.alloc_reg();
+        for (index, argument) in arguments.iter().enumerate() {
+            let destination = if index == 0 {
+                args_base
+            } else {
+                self.proto.alloc_reg()
+            };
+            let Some(source) = self.reg(argument) else {
+                return;
+            };
+            let Some(desc) = self.type_of(argument) else {
+                self.error(format!(
+                    "canonical extern argument '{}' has no TypeDesc",
+                    argument
+                ));
+                return;
+            };
+            if desc.ownership != MirOwnership::Copy {
+                self.error(format!(
+                    "canonical extern argument '{}' is not Copy",
+                    argument
+                ));
+                return;
+            }
+            self.proto.emit(Op::Mov {
+                rd: destination,
+                rs: source,
+            });
+        }
+        self.proto.emit(Op::CallCanonicalExtern {
+            rd,
+            extern_idx,
+            args_base,
+            argc: arguments.len() as u16,
+        });
     }
 
     fn emit_flow_transition(
@@ -6760,7 +7081,7 @@ mod tests {
 
         for reorder_residuals in [false, true] {
             let forged = forged_owned_record_update_function(&mir, reorder_residuals);
-            let errors = super::compile_function(&forged, &mir, &indices)
+            let errors = super::compile_function(&forged, &mir, &indices, &BTreeMap::new())
                 .expect_err("forged update receipt must fail before bytecode emission");
             assert!(
                 errors.iter().any(|error| {
@@ -11122,5 +11443,93 @@ mod tests {
             .expect("bytecode generic Record<f64> projection");
         assert_eq!(reference, MirRuntimeValue::Int(42));
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_uses_ast_free_bytecode_receipt() {
+        let _guard = crate::tests::FfiEnvLock::lock();
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex scalar FFI fixture");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse scalar FFI fixture");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI fixture");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        assert_eq!(mir.ffi_calls().len(), 1);
+        let bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        assert!(bytecode.ast.is_none());
+        assert_eq!(bytecode.canonical_ffi.len(), 1);
+        assert_eq!(bytecode.canonical_ffi[0].symbol, "labs");
+        assert_eq!(bytecode.canonical_ffi[0].abi, "C");
+        let mut vm = BytecodeVM::new(bytecode);
+        let value = vm
+            .run_value()
+            .expect("AST-free canonical scalar FFI bytecode execution");
+        assert!(matches!(value, Value::Int(0)));
+        assert_eq!(vm.stdout(), "42\n");
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_string_layout_before_execution() {
+        let source = r#"
+extern "C" {
+    func strlen(s: string) -> i64;
+}
+func main() -> i64 {
+    strlen("mimi")
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex string FFI");
+        let file = Parser::new(tokens).parse_file().expect("parse string FFI");
+        let checked = crate::core::check_program(&file).expect("check string FFI");
+        let mir = MirProgram::from_checked_program(&checked).expect("MIR string FFI");
+        let errors = compile_mir_program(&mir).expect_err("string FFI must remain fail-closed");
+        assert!(errors.iter().any(|error| {
+            error.message.contains("non-scalar layout")
+                || error.message.contains("outside the scalar bytecode island")
+        }));
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_bytecode_rejects_forged_runtime_abi() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex scalar FFI fixture");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse scalar FFI fixture");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI fixture");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let mut bytecode = compile_mir_program(&mir).expect("canonical scalar FFI bytecode");
+        std::sync::Arc::make_mut(&mut bytecode).canonical_ffi[0].abi = "Rust".into();
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("forged ABI must be rejected before symbol execution");
+        assert!(error.to_string().contains("outside the C scalar island"));
+    }
+
+    #[test]
+    fn canonical_scalar_ffi_missing_descriptor_never_uses_compatibility_runtime() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let mir = MirProgram::from_checked_program(&checked).unwrap();
+        let mut bytecode = compile_mir_program(&mir).unwrap();
+        let forged = std::sync::Arc::make_mut(&mut bytecode);
+        forged.canonical_ffi.clear();
+        forged.extern_names.push("legacy_tripwire".into());
+        let error = BytecodeVM::new(bytecode)
+            .run_value()
+            .expect_err("canonical FFI must reject its missing descriptor");
+        assert!(
+            error.to_string().contains("canonical FFI descriptor index"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("legacy_tripwire"));
     }
 }

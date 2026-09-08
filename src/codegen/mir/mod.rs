@@ -449,6 +449,16 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     .context
                     .void_type()
                     .fn_type(&parameter_types, false),
+                Some(ref ty)
+                    if self.program.type_catalog().get(ty).is_some_and(|desc| {
+                        desc.abi == MirAbiClass::Unit && desc.layout == MirLayout::Unit
+                    }) =>
+                {
+                    self.generator
+                        .context
+                        .void_type()
+                        .fn_type(&parameter_types, false)
+                }
                 Some(ty) => native_ffi_scalar_type(
                     self.generator.context,
                     self.program.type_catalog(),
@@ -8219,5 +8229,83 @@ func main() -> i64 {
             generator.module.get_function("main").is_none(),
             "unsupported FFI must fail before native function declarations"
         );
+    }
+
+    #[test]
+    fn scalar_ffi_single_and_multiple_calls_share_one_mir_across_three_consumers() {
+        use crate::core::mir::reference::MirReferenceFfiResolver;
+        use std::cell::RefCell;
+
+        struct LabsOracle(RefCell<Vec<i64>>);
+        impl MirReferenceFfiResolver for LabsOracle {
+            fn call(
+                &self,
+                receipt: &crate::core::mir::MirFfiCallContract,
+                arguments: &[MirRuntimeValue],
+            ) -> Result<MirRuntimeValue, String> {
+                if receipt.symbol != "labs" || receipt.abi != "C" {
+                    return Err("unexpected foreign symbol or ABI".into());
+                }
+                let [MirRuntimeValue::Int(n)] = arguments else {
+                    return Err("labs requires exactly one i64 argument".into());
+                };
+                self.0.borrow_mut().push(*n);
+                n.checked_abs()
+                    .map(MirRuntimeValue::Int)
+                    .ok_or_else(|| "labs oracle excludes LONG_MIN".into())
+            }
+        }
+
+        // Serialize against the compatibility FFI tests' library overrides.
+        let _guard = crate::tests::FfiEnvLock::lock();
+        for inputs in [vec![42_i64], vec![-17, -25], vec![0, -42, 42]] {
+            let calls = inputs
+                .iter()
+                .map(|n| format!("println(labs({n} as i64))"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let source = format!(
+                "extern \"C\" {{ func labs(n: i64) -> i64; }}\nfunc main() -> i64 {{ {calls}\n 0 }}"
+            );
+            let expected = inputs
+                .iter()
+                .map(|n| format!("{}\n", n.abs()))
+                .collect::<String>();
+            let program = canonical_program(&source);
+            let digest = program.canonical_digest();
+            assert_eq!(program.ffi_calls().len(), inputs.len());
+
+            let oracle = LabsOracle(RefCell::new(Vec::new()));
+            let reference = MirReferenceInterpreter::new(&program)
+                .with_ffi_resolver(&oracle)
+                .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference FFI with explicit oracle");
+            assert_eq!(*oracle.0.borrow(), inputs);
+            assert_eq!(reference.value, MirRuntimeValue::Int(0));
+            assert_eq!(reference.output, expected);
+
+            let bytecode = compile_mir_program(&program).expect("AST-free FFI bytecode");
+            assert!(bytecode.ast.is_none());
+            assert!(bytecode.extern_names.is_empty());
+            let mut vm = BytecodeVM::new(bytecode);
+            assert!(matches!(
+                vm.run_value().expect("libc FFI VM execution"),
+                Value::Int(0)
+            ));
+            assert_eq!(vm.stdout(), expected);
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_ffi_three_consumers");
+            generator
+                .compile_mir_native(&program)
+                .expect("FFI native lowering");
+            generator.module.verify().expect("valid FFI LLVM module");
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("real native FFI execution");
+            assert_eq!(native.exit_code, Some(0));
+            assert_eq!(native.stdout, expected);
+            assert_eq!(native.stderr, "");
+            assert_eq!(program.canonical_digest(), digest);
+        }
     }
 }

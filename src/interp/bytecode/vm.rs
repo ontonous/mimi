@@ -136,6 +136,8 @@ pub struct BytecodeVM {
     /// Shared FFI execution context (0.33 Phase D FFI forwarding): extern
     /// function tables, loaded shared libraries, contract verification.
     ffi_runtime: FfiRuntime,
+    /// AST-free runtime for canonical MIR scalar FFI descriptors.
+    canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime,
     /// Quote assembly stack (0.33 Phase F): nodes pushed by Quote* ops.
     quote_stack: Vec<crate::interp::value::QuotedAst>,
     /// Variable captures collected by QuoteCapture, consumed by ast_eval.
@@ -194,6 +196,7 @@ impl BytecodeVM {
             // engine implements contract-expression eval (see
             // FfiClosureRunner::eval_contract_expr).
             ffi_runtime,
+            canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime::new(),
             quote_stack: Vec::new(),
             quote_captures: std::collections::HashMap::new(),
             verify_contracts: true,
@@ -1619,11 +1622,29 @@ impl BytecodeVM {
                     extern_idx,
                     args_base,
                     argc,
+                }
+                | Op::CallCanonicalExtern {
+                    rd,
+                    extern_idx,
+                    args_base,
+                    argc,
                 } => {
                     let args: Vec<Value> = (0..argc)
                         .map(|i| self.get_reg(args_base + i).clone())
                         .collect();
-                    let result = self.call_extern_idx(extern_idx, args);
+                    let result = if matches!(op, Op::CallCanonicalExtern { .. }) {
+                        match self.program.canonical_ffi.get(extern_idx as usize) {
+                            Some(descriptor) => self
+                                .canonical_ffi_runtime
+                                .call(descriptor, &args)
+                                .map_err(InterpError::new),
+                            None => Err(InterpError::new(format!(
+                                "canonical FFI descriptor index {extern_idx} out of range"
+                            ))),
+                        }
+                    } else {
+                        self.call_extern_idx(extern_idx, args)
+                    };
                     match result {
                         Ok(v) => self.set_reg(rd, v),
                         Err(e) => {

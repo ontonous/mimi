@@ -2593,10 +2593,10 @@ impl<'a> NativeMirValidator<'a> {
             ));
         }
         for argument in arguments {
-            self.validate_ffi_scalar_value(function, argument, subject);
+            self.validate_ffi_scalar_value(function, argument, subject, false);
         }
         if let Some(result) = result {
-            self.validate_ffi_scalar_value(function, result, subject);
+            self.validate_ffi_scalar_value(function, result, subject, true);
         }
     }
 
@@ -2605,6 +2605,7 @@ impl<'a> NativeMirValidator<'a> {
         function: &MirFunction,
         value: &MirValueId,
         subject: &str,
+        allow_unit_result: bool,
     ) {
         let Some(info) = function.values.get(value) else {
             self.errors.push(NativeMirError::new(
@@ -2620,6 +2621,13 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
+        if allow_unit_result
+            && desc.abi == MirAbiClass::Unit
+            && desc.layout == MirLayout::Unit
+            && desc.ownership == MirOwnership::Copy
+        {
+            return;
+        }
         if !matches!(
             desc.abi,
             MirAbiClass::Integer {
@@ -2628,6 +2636,7 @@ impl<'a> NativeMirValidator<'a> {
             } | MirAbiClass::Bool
                 | MirAbiClass::Float { bits: 64 }
         ) || desc.layout != MirLayout::Scalar
+            || desc.ownership != MirOwnership::Copy
         {
             self.errors.push(NativeMirError::new(
                 subject,

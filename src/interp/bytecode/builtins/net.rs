@@ -995,6 +995,7 @@ mod tests {
             &mut crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::new(
                 crate::interp::bytecode::instr::BytecodeProgram {
                     extern_names: Vec::new(),
+                    canonical_ffi: Vec::new(),
                     functions: Vec::new(),
                     entry: 0,
                     builtin_names: vec![],

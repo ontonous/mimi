@@ -605,6 +605,7 @@ mod tests {
         // builtin_str_repeat ignores its `_vm` param; a minimal VM suffices.
         let prog = crate::interp::bytecode::instr::BytecodeProgram {
             extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
             functions: Vec::new(),
             entry: 0,
             builtin_names: vec![],

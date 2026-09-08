@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral, ResolvedType, ResolvedUnaryOp};
 use crate::core::{NodeId, ResolvedPlace};
 
-use super::types::{MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
+use super::types::{MirAbiClass, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
     MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind, MirProjection,
@@ -62,6 +62,21 @@ impl std::error::Error for MirExecutionError {}
 pub struct MirExecutionObservation {
     pub value: MirRuntimeValue,
     pub output: String,
+}
+
+/// Host binding for the narrow Canonical MIR scalar FFI island.
+///
+/// The reference executor cannot infer the meaning of an arbitrary foreign
+/// symbol.  A caller therefore supplies an explicit host binding keyed by the
+/// checker-owned `MirFfiCallContract`.  This keeps the oracle AST-free and
+/// makes the external effect visible in differential tests instead of
+/// pretending that a symbol name has a built-in semantic meaning.
+pub trait MirReferenceFfiResolver {
+    fn call(
+        &self,
+        receipt: &super::MirFfiCallContract,
+        arguments: &[MirRuntimeValue],
+    ) -> Result<MirRuntimeValue, String>;
 }
 
 /// Deterministic input queue for the canonical `session_recv` oracle.  The
@@ -4245,6 +4260,7 @@ pub struct MirReferenceInterpreter<'a> {
     /// rather than silently discarding the sent payload.
     session_peers: RefCell<BTreeMap<i64, i64>>,
     next_session_handle: RefCell<i64>,
+    ffi_resolver: Option<&'a dyn MirReferenceFfiResolver>,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -4256,7 +4272,16 @@ impl<'a> MirReferenceInterpreter<'a> {
             session_queues: RefCell::new(BTreeMap::new()),
             session_peers: RefCell::new(BTreeMap::new()),
             next_session_handle: RefCell::new(1),
+            ffi_resolver: None,
         }
+    }
+
+    /// Attach an explicit host binding for the canonical scalar FFI island.
+    /// The binding is used only for checker-owned MIR receipts; it never sees
+    /// source AST declarations.
+    pub fn with_ffi_resolver(mut self, resolver: &'a dyn MirReferenceFfiResolver) -> Self {
+        self.ffi_resolver = Some(resolver);
+        self
     }
 
     pub fn with_step_limit(mut self, max_steps: usize) -> Self {
@@ -4298,6 +4323,157 @@ impl<'a> MirReferenceInterpreter<'a> {
                             && contract.projection.ownership == MirOwnership::Copy
                 )
         })
+    }
+
+    fn validate_scalar_ffi_call(
+        &self,
+        function: &MirFunction,
+        instruction: &MirInstruction,
+        callee: &NodeId,
+        result: Option<&MirValueId>,
+        arguments: &[MirValueId],
+    ) -> Result<&super::MirFfiCallContract, MirExecutionError> {
+        let receipt = self
+            .program
+            .ffi_calls()
+            .get(&instruction.id)
+            .ok_or_else(|| {
+                self.error(&function.owner, "extern call has no canonical FFI receipt")
+            })?;
+        if receipt.caller != function.owner
+            || receipt.instruction != instruction.id
+            || receipt.callee != *callee
+            || receipt.arguments != arguments
+            || receipt.result.as_ref() != result
+            || receipt.symbol.trim().is_empty()
+            || receipt.abi != "C"
+        {
+            return Err(self.error(
+                &function.owner,
+                "extern call FFI receipt disagrees with the MIR call",
+            ));
+        }
+        for (role, value) in arguments.iter().map(|value| ("argument", value)) {
+            let Some(info) = function.values.get(value) else {
+                return Err(self.error(
+                    &function.owner,
+                    format!("extern call {role} '{value}' is absent from MIR values"),
+                ));
+            };
+            let Some(descriptor) = self.program.type_catalog().get(&info.ty) else {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call {role} TypeDesc '{}' is absent",
+                        info.ty.as_str()
+                    ),
+                ));
+            };
+            if descriptor.layout != MirLayout::Scalar
+                || descriptor.ownership != MirOwnership::Copy
+                || !matches!(
+                    descriptor.abi,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true
+                    } | MirAbiClass::Bool
+                        | MirAbiClass::Float { bits: 64 }
+                )
+            {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call {role} TypeDesc '{}' is outside the scalar reference FFI island",
+                        info.ty.as_str()
+                    ),
+                ));
+            }
+        }
+        if let Some(value) = result {
+            let Some(info) = function.values.get(value) else {
+                return Err(self.error(
+                    &function.owner,
+                    format!("extern call result '{value}' is absent from MIR values"),
+                ));
+            };
+            let Some(descriptor) = self.program.type_catalog().get(&info.ty) else {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call result TypeDesc '{}' is absent",
+                        info.ty.as_str()
+                    ),
+                ));
+            };
+            if descriptor.layout == MirLayout::Unit
+                && descriptor.abi == MirAbiClass::Unit
+                && descriptor.ownership == MirOwnership::Copy
+            {
+                return Ok(receipt);
+            }
+            if descriptor.layout != MirLayout::Scalar
+                || descriptor.ownership != MirOwnership::Copy
+                || !matches!(
+                    descriptor.abi,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true
+                    } | MirAbiClass::Bool
+                        | MirAbiClass::Float { bits: 64 }
+                )
+            {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call result TypeDesc '{}' is outside the scalar reference FFI island",
+                        info.ty.as_str()
+                    ),
+                ));
+            }
+        }
+        Ok(receipt)
+    }
+
+    fn validate_ffi_runtime_value(
+        &self,
+        function: &MirFunction,
+        expected: Option<&MirValueId>,
+        actual: &MirRuntimeValue,
+        role: &str,
+    ) -> Result<(), MirExecutionError> {
+        let abi = expected
+            .and_then(|value| function.values.get(value))
+            .and_then(|info| self.program.type_catalog().get(&info.ty))
+            .map(|desc| &desc.abi);
+        let valid = match (abi, actual) {
+            (
+                Some(MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                }),
+                MirRuntimeValue::Int(n),
+            ) => i32::try_from(*n).is_ok(),
+            (
+                Some(MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                }),
+                MirRuntimeValue::Int(_),
+            )
+            | (Some(MirAbiClass::Bool), MirRuntimeValue::Bool(_))
+            | (Some(MirAbiClass::Float { bits: 64 }), MirRuntimeValue::FloatBits(_)) => true,
+            (Some(MirAbiClass::Unit), MirRuntimeValue::Unit) => true,
+            (None, MirRuntimeValue::Unit) => expected.is_none(),
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(self.error(
+                &function.owner,
+                format!("FFI {role} does not match the canonical scalar ABI {abi:?}: {actual:?}"),
+            ))
+        }
     }
 
     pub fn execute(
@@ -5928,6 +6104,43 @@ impl<'a> MirReferenceInterpreter<'a> {
                 variant_call_contract,
                 ..
             } => {
+                if let super::ResolvedCallee::Extern(callee_owner) = callee {
+                    if !type_arguments.is_empty() || variant_call_contract.is_some() {
+                        return Err(self.error(
+                            &function.owner,
+                            "extern call has unsupported generic or variant ABI metadata",
+                        ));
+                    }
+                    let receipt = self.validate_scalar_ffi_call(
+                        function,
+                        instruction,
+                        callee_owner,
+                        result.as_ref(),
+                        arguments,
+                    )?;
+                    let resolver = self.ffi_resolver.ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            format!(
+                                "extern call '{}' has no reference FFI host binding",
+                                receipt.symbol
+                            ),
+                        )
+                    })?;
+                    let runtime_arguments =
+                        self.take_transfer_values(function, values, arguments)?;
+                    for (value, actual) in arguments.iter().zip(&runtime_arguments) {
+                        self.validate_ffi_runtime_value(function, Some(value), actual, "argument")?;
+                    }
+                    let output = resolver
+                        .call(receipt, &runtime_arguments)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                    self.validate_ffi_runtime_value(function, result.as_ref(), &output, "result")?;
+                    if let Some(result) = result {
+                        values.insert(result.clone(), output);
+                    }
+                    return Ok(());
+                }
                 let Some(owner) = super::canonical_protocol_call_target(callee) else {
                     return Err(self.error(
                         &function.owner,
@@ -7928,7 +8141,10 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue};
+    use super::{
+        MirProgram, MirProgramBuildError, MirReferenceFfiResolver, MirReferenceInterpreter,
+        MirRuntimeValue,
+    };
     use crate::core::mir::lower::{lower_body, lower_program};
     use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
     use crate::core::mir::{
@@ -10744,5 +10960,93 @@ func main() -> i64 { caller(0 as i64) }
                 .any(|error| error.message.contains("FFI contract result disagrees")),
             "{result:?}"
         );
+    }
+
+    struct LabsReferenceResolver;
+
+    impl MirReferenceFfiResolver for LabsReferenceResolver {
+        fn call(
+            &self,
+            receipt: &crate::core::mir::MirFfiCallContract,
+            arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "labs" || receipt.abi != "C" {
+                return Err("unexpected scalar reference FFI receipt".into());
+            }
+            let [MirRuntimeValue::Int(value)] = arguments else {
+                return Err("labs reference binding expected one integer".into());
+            };
+            Ok(MirRuntimeValue::Int(value.abs()))
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_reference_consumes_checker_owned_receipt_with_explicit_host_binding() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex scalar FFI fixture");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse scalar FFI fixture");
+        let checked = crate::core::check_program(&file).expect("check scalar FFI fixture");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical scalar FFI MIR");
+        let owner = NodeId("function:main".into());
+        let resolver = LabsReferenceResolver;
+        let observation = MirReferenceInterpreter::new(&program)
+            .with_ffi_resolver(&resolver)
+            .execute_with_output(&owner, &[])
+            .expect("reference scalar FFI execution");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "42\n");
+    }
+
+    struct FixedFfiResolver(MirRuntimeValue);
+
+    impl MirReferenceFfiResolver for FixedFfiResolver {
+        fn call(
+            &self,
+            _: &crate::core::mir::MirFfiCallContract,
+            _: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_reference_rejects_missing_host_binding_and_invalid_result() {
+        let source = include_str!("../../../tests/fixtures/mir_scalar_ffi_labs.mimi");
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program = MirProgram::from_checked_program(&checked).unwrap();
+        let owner = NodeId("function:main".into());
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("foreign calls require an explicit oracle");
+        assert!(error.to_string().contains("no reference FFI host binding"));
+        let resolver = FixedFfiResolver(MirRuntimeValue::Bool(true));
+        let error = MirReferenceInterpreter::new(&program)
+            .with_ffi_resolver(&resolver)
+            .execute(&owner, &[])
+            .expect_err("a bool cannot be injected into an i64 MIR value");
+        assert!(error.to_string().contains("FFI result does not match"));
+    }
+
+    #[test]
+    fn scalar_ffi_reference_rejects_out_of_range_i32_result() {
+        let source = "extern \"C\" { func foreign_i32(n: i32) -> i32; } func main() -> i32 { foreign_i32(42) }";
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program = MirProgram::from_checked_program(&checked).unwrap();
+        let resolver = FixedFfiResolver(MirRuntimeValue::Int(i64::MAX));
+        let error = MirReferenceInterpreter::new(&program)
+            .with_ffi_resolver(&resolver)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("the i64 reference slot must respect the i32 FFI ABI");
+        assert!(error.to_string().contains("FFI result does not match"));
     }
 }

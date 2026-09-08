@@ -149,6 +149,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SharedSet { .. } => "SHARED_SET",
         Op::WeakNew { .. } => "WEAK_NEW",
         Op::CallExtern { .. } => "CALL_EXTERN",
+        Op::CallCanonicalExtern { .. } => "CALL_CANONICAL_EXTERN",
         Op::QuotePushLit { .. } => "QUOTE_PUSH_LIT",
         Op::QuotePushIdent { .. } => "QUOTE_PUSH_IDENT",
         Op::QuoteInterpPush { .. } => "QUOTE_INTERP_PUSH",
@@ -347,6 +348,12 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             )
         }
         Op::CallExtern {
+            rd,
+            extern_idx,
+            args_base,
+            argc,
+        }
+        | Op::CallCanonicalExtern {
             rd,
             extern_idx,
             args_base,
