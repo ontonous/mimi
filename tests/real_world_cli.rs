@@ -12,6 +12,7 @@
 // fail the test, so the suite can be used as a CI gate while still
 // documenting real-world limitations.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,6 +71,49 @@ fn normalize_run_output(s: &str) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+fn parse_route_receipt_manifest(stdout: &[u8]) -> BTreeMap<String, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("mimi-mir-route-manifest-v1"),
+        "unexpected route receipt manifest header"
+    );
+    lines
+        .map(|line| {
+            line.split_once('=')
+                .unwrap_or_else(|| panic!("malformed route receipt manifest line: {line}"))
+        })
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect()
+}
+
+fn checked_route_receipt(path: &Path) -> mimi::core::mir::CanonicalMirRouteReceipt {
+    let source = fs::read_to_string(path).expect("read checked route fixture");
+    let tokens = mimi::lexer::Lexer::new(&source)
+        .tokenize()
+        .expect("route matrix fixture must tokenize");
+    let file = mimi::loader::parser_for_path(tokens, path)
+        .expect("route matrix fixture parser setup")
+        .parse_file()
+        .expect("route matrix fixture must parse");
+    let mut file = if !file.imports.is_empty() {
+        let base_dir = path.parent().expect("route fixture parent").to_path_buf();
+        let mut loader = mimi::loader::ModuleLoader::new(base_dir);
+        loader
+            .load_main_with_file(path, file)
+            .expect("route matrix imports must load");
+        loader.merge_all().expect("route matrix imports must merge")
+    } else {
+        file
+    };
+    mimi::loader::merge_prelude_into(&mut file);
+    let checked = mimi::core::check_program(&file).expect("route matrix fixture must typecheck");
+    let route = mimi::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("route matrix fixture must materialize canonical MIR");
+    route.program.route_receipt("cli-mir-v1")
 }
 
 fn run_mimi_run_out(src: &Path) -> Result<String, String> {
@@ -1070,6 +1114,104 @@ fn canonical_mir_cli_receipt_manifest_is_deterministic_and_exposes_ffi_digest() 
     assert_eq!(ffi_digest.len(), 64);
     assert!(stdout.contains("mir_digest="));
     assert!(stdout.contains("root_owners=function:main"));
+}
+
+#[test]
+fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_routes() {
+    let fixtures = ["mir_scalar_ffi_labs.mimi", "mir_scalar_ffi_abi.mimi"];
+    let mut manifests = Vec::new();
+    for fixture_name in fixtures {
+        let fixture = project_root()
+            .join("tests")
+            .join("fixtures")
+            .join(fixture_name);
+        let checked = checked_route_receipt(&fixture);
+        let manifest_output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&fixture)
+            .arg("--receipt")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn receipt manifest for {fixture_name}: {error}"));
+        assert!(
+            manifest_output.status.success(),
+            "receipt manifest failed for {fixture_name}: {}",
+            String::from_utf8_lossy(&manifest_output.stderr)
+        );
+        let manifest = parse_route_receipt_manifest(&manifest_output.stdout);
+        let expected = [
+            ("schema", checked.schema.to_owned()),
+            ("profile", checked.profile.clone()),
+            ("mir_digest", checked.mir_digest.clone()),
+            ("type_desc_digest", checked.type_desc_digest.clone()),
+            ("abi_digest", checked.abi_digest.clone()),
+            ("ffi_digest", checked.ffi_digest.clone()),
+            ("ownership_digest", checked.ownership_digest.clone()),
+            (
+                "flow_transition_digest",
+                checked.flow_transition_digest.clone(),
+            ),
+            (
+                "root_owners",
+                checked
+                    .root_owners
+                    .iter()
+                    .map(|owner| owner.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ];
+        let expected_len = expected.len();
+        for (key, value) in &expected {
+            assert_eq!(
+                manifest.get(*key).map(String::as_str),
+                Some(value.as_str()),
+                "{fixture_name}: {key}"
+            );
+        }
+        assert_eq!(
+            manifest.len(),
+            expected_len,
+            "{fixture_name}: manifest schema drift"
+        );
+
+        let default_ir = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["build", "--emit-ir"])
+            .arg(&fixture)
+            .output()
+            .unwrap_or_else(|error| panic!("default build for {fixture_name}: {error}"));
+        let explicit_ir = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["build", "--mir", "--emit-ir"])
+            .arg(&fixture)
+            .output()
+            .unwrap_or_else(|error| panic!("explicit MIR build for {fixture_name}: {error}"));
+        assert!(
+            default_ir.status.success(),
+            "default build failed for {fixture_name}: {}",
+            String::from_utf8_lossy(&default_ir.stderr)
+        );
+        assert!(
+            explicit_ir.status.success(),
+            "explicit MIR build failed for {fixture_name}: {}",
+            String::from_utf8_lossy(&explicit_ir.stderr)
+        );
+        assert_eq!(
+            default_ir.stdout, explicit_ir.stdout,
+            "{fixture_name}: default and --mir route IR drift"
+        );
+        assert!(!String::from_utf8_lossy(&default_ir.stderr)
+            .contains("canonical route disposition: legacy"));
+        assert!(!String::from_utf8_lossy(&explicit_ir.stderr)
+            .contains("canonical route disposition: legacy"));
+        manifests.push(manifest);
+    }
+    assert_ne!(
+        manifests[0].get("ffi_digest"),
+        manifests[1].get("ffi_digest"),
+        "different declaration/call graphs must never collapse to one FFI digest"
+    );
 }
 
 #[test]
