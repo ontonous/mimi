@@ -418,6 +418,104 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
 }
 
 #[test]
+fn canonical_scalar_ffi_default_and_explicit_mir_preserve_remainder_status() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_remainder_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create remainder CLI fixture directory");
+    let library = dir.join("ffi.so");
+    let compile_c = Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2"])
+        .arg(project_root().join("tests/fixtures/mir_scalar_ffi_abi.c"))
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .expect("compile scalar remainder FFI fixture");
+    assert!(
+        compile_c.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile_c.stderr)
+    );
+
+    for (label, contract, argument, expected_success, expected_stdout, expected_code) in [
+        (
+            "negative-sign",
+            "result / 3 == -2 and result % 3 == -1",
+            "-7 as i64",
+            true,
+            "-7\n",
+            None,
+        ),
+        (
+            "remainder-by-zero",
+            "result % x == 0",
+            "0 as i64",
+            false,
+            "",
+            Some("E0801"),
+        ),
+    ] {
+        let source = dir.join(format!("{label}.mimi"));
+        fs::write(
+            &source,
+            format!(
+                "extern \"C\" {{ func mir_ffi_i64(x: i64) -> i64 ensures: {contract}; }}\nfunc main() -> i64 {{ println(mir_ffi_i64({argument})); 0 }}\n"
+            ),
+        )
+        .expect("write remainder CLI source");
+        for explicit_mir in [false, true] {
+            let mut command = Command::new(mimi_bin());
+            command.current_dir(project_root()).arg("run");
+            if explicit_mir {
+                command.arg("--mir");
+            }
+            let output = command
+                .arg(&source)
+                .env("MIMI_FFI_LIB", &library)
+                .output()
+                .unwrap_or_else(|error| panic!("{label} {:?}: {error}", explicit_mir));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                expected_success,
+                "{label} {:?}: stdout={stdout} stderr={stderr}",
+                explicit_mir
+            );
+            assert_eq!(stdout, expected_stdout, "{label} {:?}", explicit_mir);
+            if let Some(code) = expected_code {
+                assert!(
+                    stderr.contains(code),
+                    "{label} {:?}: {stderr}",
+                    explicit_mir
+                );
+                assert!(
+                    stderr.contains("postcondition"),
+                    "{label} {:?}: {stderr}",
+                    explicit_mir
+                );
+            } else {
+                assert!(stderr.is_empty(), "{label} {:?}: {stderr}", explicit_mir);
+            }
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "{label} {:?}: {stderr}",
+                explicit_mir
+            );
+        }
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn std_mimispec_removed() {
     // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
     // `mimispec` crate are removed. This test prevents regrowth of the old
