@@ -259,6 +259,10 @@ pub(crate) fn verify_program(
         });
     }
 
+    // Extern preconditions are call-site obligations even when the enclosing
+    // function has no ensures clause. Keep them in the public MIR result set
+    // instead of letting the function-contract fast path erase them.
+    results.extend(verify_ffi_program(program, source_hash)?);
     Ok(results)
 }
 
@@ -271,6 +275,13 @@ pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
+    if !program
+        .ffi_calls()
+        .values()
+        .any(|call| call.requires.is_some())
+    {
+        return Ok(Vec::new());
+    }
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
     let mut checks_by_instruction =
@@ -280,7 +291,7 @@ pub(crate) fn verify_ffi_program(
         if !program
             .ffi_calls()
             .values()
-            .any(|call| call.caller == function.owner)
+            .any(|call| call.caller == function.owner && call.requires.is_some())
         {
             continue;
         }
@@ -294,9 +305,12 @@ pub(crate) fn verify_ffi_program(
                         .constraints
                         .push(expect_bool(term, "caller requires contract")?);
                 }
-                MirContractKind::Ensures | MirContractKind::Invariant => {
+                // Postconditions are checked by verify_function; they may
+                // never be assumed while proving a pre-call obligation.
+                MirContractKind::Ensures => {}
+                MirContractKind::Invariant => {
                     return Err(format!(
-                        "canonical MIR FFI verifier admits caller '{}' only with requires contracts",
+                        "canonical MIR FFI verifier cannot model caller '{}' invariant semantics",
                         function.owner.0
                     ));
                 }

@@ -685,6 +685,73 @@ func bad_caller(size: i64) -> i64 {
 }
 
 #[test]
+fn scalar_ffi_public_mir_verifier_reports_preconditions_without_function_ensures() {
+    require_z3!();
+    for (value, expected) in [(42, VerifStatus::Proven), (-1, VerifStatus::Disproven)] {
+        let source = format!(
+            "extern \"C\" {{ func foreign(x: i64) -> i64 requires: x > 0; }} func main() -> i64 {{ foreign({value} as i64) }}"
+        );
+        let file =
+            crate::parser::Parser::new(crate::lexer::Lexer::new(&source).tokenize().unwrap())
+                .parse_file()
+                .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program =
+            crate::core::mir::reference::MirProgram::from_checked_program(&checked).unwrap();
+        let digest = program.canonical_digest();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let bytecode = crate::interp::bytecode::compile_mir_program(&program).unwrap();
+        assert!(bytecode.ast.is_none());
+        assert!(bytecode.extern_names.is_empty());
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_contract");
+        generator.compile_mir_native(&program).unwrap();
+        generator.module.verify().unwrap();
+        let results = verify_mir(&program, "same-mir-ffi-fixture".into()).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "extern requires is an obligation even without function ensures"
+        );
+        assert_eq!(results[0].status, expected, "{results:?}");
+        let artifact = results[0].artifact.as_ref().unwrap();
+        assert_eq!(artifact.mir_hash, digest);
+        assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn scalar_ffi_mir_proofs_preserve_path_facts_and_fresh_external_results() {
+    require_z3!();
+    for (body, proven, disproven) in [
+        ("let x = unknown(); if x > (0 as i64) { positive(x) } else { positive(1 as i64) }", 2, 0),
+        ("let x = unknown(); if x > (0 as i64) { positive(x) } else { positive(x) }", 1, 1),
+        ("let first = unknown(); let second = unknown(); if first == second { positive(1 as i64) } else { positive(-1 as i64) }", 1, 1),
+        ("ensures: true\npositive(-1 as i64)", 1, 1),
+        ("unknown()", 0, 0),
+    ] {
+        let source = format!(
+            "extern \"C\" {{ func unknown() -> i64; func positive(x: i64) -> i64 requires: x > 0; }} func main() -> i64 {{ {body} }}"
+        );
+        let file = crate::parser::Parser::new(crate::lexer::Lexer::new(&source).tokenize().unwrap())
+            .parse_file().unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked).unwrap();
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_mir(&program, "ffi-paths".into()).unwrap();
+        assert_eq!(results.iter().filter(|r| r.status == VerifStatus::Proven).count(), proven,
+            "{body}: {results:?}");
+        assert_eq!(results.iter().filter(|r| r.status == VerifStatus::Disproven).count(), disproven,
+            "{body}: {results:?}");
+        assert_eq!(results.len(), proven + disproven, "{body}: {results:?}");
+        assert!(results.iter().all(|result| result.artifact.as_ref().is_some_and(|artifact|
+            artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == program.canonical_digest())));
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
 fn verify_ffi_string_empty_violation() {
     require_z3!();
     let src = r#"

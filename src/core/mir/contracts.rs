@@ -349,8 +349,44 @@ fn expr_kind(
     }
 }
 
-/// Validate contract predicates after lowering and before any consumer sees
-/// the program.  This is deliberately independent of Z3 and backend ABI.
+/// Validate an extern precondition before any consumer sees the program.
+/// Its value leaves must refer to this call's evaluated scalar arguments;
+/// ordinary function-contract result/old/aggregate forms are not FFI facts.
+pub(crate) fn validate_ffi_requires(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    receipt: &super::MirFfiCallContract,
+) -> Result<(), String> {
+    fn validate_leaves(
+        expression: &MirContractExpr,
+        arguments: &[MirValueId],
+    ) -> Result<(), String> {
+        match expression {
+            MirContractExpr::Value(value) if !arguments.contains(value) => {
+                Err(format!("extern requires value '{value}' is not a call argument"))
+            }
+            MirContractExpr::Value(_) | MirContractExpr::Int(_) | MirContractExpr::Bool(_) => Ok(()),
+            MirContractExpr::Unary { operand, .. } => validate_leaves(operand, arguments),
+            MirContractExpr::Binary { left, right, .. } => {
+                validate_leaves(left, arguments)?;
+                validate_leaves(right, arguments)
+            }
+            MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
+                Err("extern requires must use pre-call scalar arguments, without result/old/projection".into())
+            }
+        }
+    }
+    let Some(condition) = &receipt.requires else {
+        return Ok(());
+    };
+    validate_leaves(condition, &receipt.arguments)?;
+    if expr_kind(condition, function, catalog)? != ContractValueKind::Bool {
+        return Err("extern requires condition must be boolean".into());
+    }
+    Ok(())
+}
+
+/// Validate function predicates independently of Z3 and backend ABI.
 pub(crate) fn validate_contracts(
     function: &MirFunction,
     catalog: &MirTypeCatalog,

@@ -2209,6 +2209,14 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
+                    if let Err(message) =
+                        super::contracts::validate_ffi_requires(function, type_catalog, contract)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
                     continue;
                 }
                 let Some(target_owner) = super::canonical_protocol_call_target(callee) else {
@@ -2604,7 +2612,7 @@ fn validate_call_graph(
     errors
 }
 
-/// Materialize the narrow verifier-only FFI contract slice.  This is the
+/// Materialize the scalar FFI declaration and precondition contract. This is the
 /// frontend/MIR construction boundary: source contract syntax is read once
 /// here and converted to MIR value identities.  No consumer receives the
 /// source expression or re-resolves an extern name.
@@ -2655,6 +2663,31 @@ fn materialize_ffi_call_contracts(
                     });
                     continue;
                 };
+                let unsupported = if signature.ensures.is_some() {
+                    Some("ensures")
+                } else if signature.variadic {
+                    Some("variadic ABI")
+                } else if signature.returns_errno || declaration.returns_errno {
+                    Some("errno conversion")
+                } else if signature
+                    .typed_params
+                    .iter()
+                    .any(|(_, _, mode)| mode.is_some())
+                {
+                    Some("parameter mode")
+                } else {
+                    None
+                };
+                if let Some(feature) = unsupported {
+                    errors.push(super::MirValidationError {
+                        subject: instruction.id.to_string(),
+                        message: format!(
+                            "extern declaration '{}' has unsupported {feature} semantics in canonical scalar FFI",
+                            signature.name
+                        ),
+                    });
+                    continue;
+                }
                 if arguments.len() != signature.typed_params.len() {
                     errors.push(super::MirValidationError {
                         subject: instruction.id.to_string(),
@@ -10960,6 +10993,66 @@ func main() -> i64 { caller(0 as i64) }
                 .any(|error| error.message.contains("FFI contract result disagrees")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn scalar_ffi_gate_rejects_malformed_requires_before_consumers() {
+        use crate::core::mir::{MirContractBinaryOp as Op, MirContractExpr as Expr};
+        let source = r#"
+extern "C" { func foreign(fd: i64) -> i64 requires: fd >= 0; }
+func caller(fd: i64, unrelated: i64) -> i64 { foreign(fd) }
+func main() -> i64 { caller(0 as i64, 7 as i64) }
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let canonical = MirProgram::from_checked_program(&checked).unwrap();
+        let receipt = canonical.ffi_calls().values().next().unwrap();
+        let unrelated = canonical.functions()[&receipt.caller].parameters[1].clone();
+        let nonnegative = |left| Expr::Binary {
+            op: Op::GreaterEqual,
+            left: Box::new(left),
+            right: Box::new(Expr::Int(0)),
+        };
+        for (condition, expected) in [
+            (Expr::Int(1), "must be boolean"),
+            (
+                nonnegative(Expr::Value(
+                    super::MirValueId::new("value:missing").unwrap(),
+                )),
+                "call argument",
+            ),
+            (nonnegative(Expr::Value(unrelated)), "call argument"),
+            (nonnegative(Expr::Result), "pre-call scalar"),
+            (
+                nonnegative(Expr::Project {
+                    base: Box::new(Expr::Value(receipt.arguments[0].clone())),
+                    projection: crate::core::mir::MirProjection::Tuple(0),
+                }),
+                "pre-call scalar",
+            ),
+            (
+                nonnegative(Expr::Old(receipt.arguments[0].clone())),
+                "pre-call scalar",
+            ),
+            (nonnegative(Expr::Bool(true)), "integer operands"),
+        ] {
+            let mut receipts = canonical.ffi_calls().clone();
+            receipts.values_mut().next().unwrap().requires = Some(condition.clone());
+            let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+                canonical.functions().clone(),
+                canonical.type_catalog().clone(),
+                canonical.instances().clone(),
+                canonical.transitions().clone(),
+                receipts,
+            )
+            .expect_err("malformed extern requires must fail before consumer dispatch");
+            assert!(
+                errors.iter().any(|error| error.message.contains(expected)),
+                "{condition:?}: {errors:?}"
+            );
+        }
     }
 
     struct LabsReferenceResolver;

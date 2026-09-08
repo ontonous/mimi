@@ -86,6 +86,7 @@ impl MirReferenceFfiResolver for Oracle {
 struct LibraryFixture {
     dir: PathBuf,
     previous: Option<std::ffi::OsString>,
+    previous_trace: Option<std::ffi::OsString>,
 }
 
 impl Drop for LibraryFixture {
@@ -94,25 +95,27 @@ impl Drop for LibraryFixture {
             Some(value) => std::env::set_var("MIMI_FFI_LIB", value),
             None => std::env::remove_var("MIMI_FFI_LIB"),
         }
+        match &self.previous_trace {
+            Some(value) => std::env::set_var("MIMI_CANONICAL_FFI_TRACE", value),
+            None => std::env::remove_var("MIMI_CANONICAL_FFI_TRACE"),
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-#[test]
-fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
-    let _guard = super::FfiEnvLock::lock();
-    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+fn library_fixture(counter: u64, c_source: &str) -> LibraryFixture {
     let fixture = LibraryFixture {
         dir: std::env::temp_dir().join(format!(
             "mimi-canonical-ffi-{}-{counter}",
             std::process::id()
         )),
         previous: std::env::var_os("MIMI_FFI_LIB"),
+        previous_trace: std::env::var_os("MIMI_CANONICAL_FFI_TRACE"),
     };
     std::fs::create_dir_all(&fixture.dir).expect("create C FFI fixture directory");
     let c_path = fixture.dir.join("ffi.c");
     let library = fixture.dir.join("ffi.so");
-    std::fs::write(&c_path, C_SOURCE).expect("write C ABI fixture");
+    std::fs::write(&c_path, c_source).expect("write C ABI fixture");
     let cc = Command::new("cc")
         .args(["-shared", "-fPIC", "-O2"])
         .arg(&c_path)
@@ -125,6 +128,15 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
         "{}",
         String::from_utf8_lossy(&cc.stderr)
     );
+    fixture
+}
+
+#[test]
+fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
 
     let tokens = crate::lexer::Lexer::new(SOURCE)
         .tokenize()
@@ -178,4 +190,128 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     assert_eq!(native.stdout, expected);
     assert_eq!(native.stderr, "");
     assert_eq!(mir.canonical_digest(), digest);
+}
+
+#[test]
+fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
+    for (declaration, expected) in [
+        ("func foreign(x: i64) -> i64 ensures: false;", "ensures"),
+        ("func foreign(x: i64 ...) -> i64;", "variadic"),
+        ("#[errno] func foreign(x: i64) -> i64;", "errno"),
+        ("func foreign(&x: i64) -> i64;", "parameter mode"),
+    ] {
+        let source =
+            format!("extern \"C\" {{ {declaration} }} func main() -> i64 {{ foreign(42 as i64) }}");
+        let tokens = crate::lexer::Lexer::new(&source)
+            .tokenize()
+            .expect("lex declaration");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse declaration");
+        let checked = crate::core::check_program(&file).expect("check declaration");
+        let error = match MirProgram::from_checked_program(&checked) {
+            Err(error) => format!("{error:?}"),
+            Ok(_) => panic!("unrepresented declaration admitted: {declaration}"),
+        };
+        assert!(error.contains(expected), "{declaration}: {error}");
+    }
+}
+
+#[test]
+fn scalar_ffi_traps_preserve_external_effect_prefix_across_three_consumers() {
+    use std::cell::RefCell;
+    struct TraceOracle(RefCell<Vec<i64>>);
+    impl MirReferenceFfiResolver for TraceOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("trace oracle expects one integer".into());
+            };
+            match receipt.symbol.as_str() {
+                "mir_ffi_mark" => self.0.borrow_mut().push(*value),
+                "mir_ffi_i64" => {}
+                _ => return Err("unknown trace oracle symbol".into()),
+            }
+            Ok(MirRuntimeValue::Int(*value))
+        }
+    }
+    let c_source = format!(
+        r#"{C_SOURCE}
+#include <stdio.h>
+#include <stdlib.h>
+int64_t mir_ffi_mark(int64_t x) {{
+    const char *path = getenv("MIMI_CANONICAL_FFI_TRACE");
+    if (!path) abort();
+    FILE *f = fopen(path, "a");
+    if (!f) abort();
+    fprintf(f, "%lld\n", (long long)x);
+    fclose(f);
+    return x;
+}}
+"#
+    );
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, &c_source);
+    let trace_path = fixture.dir.join("trace.txt");
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    std::env::set_var("MIMI_CANONICAL_FFI_TRACE", &trace_path);
+
+    for (body, expected_trace, error, return_value) in [
+        ("mir_ffi_mark(4 as i64); let top = mir_ffi_i64(9223372036854775807 as i64); let value = top + (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n", Some(("E0802", "addition overflow")), 0),
+        ("let top = mir_ffi_i64(9223372036854775807 as i64); mir_ffi_mark(top + (1 as i64))",
+            "", Some(("E0802", "addition overflow")), 0),
+        ("mir_ffi_mark(4 as i64); let low = mir_ffi_i64(-9223372036854775807 as i64) - (1 as i64); let value = low - (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n", Some(("E0802", "subtraction overflow")), 0),
+        ("mir_ffi_mark(4 as i64); let value = mir_ffi_i64(20 as i64) + (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n9\n", None, 21),
+    ] {
+        let source = format!(
+            "extern \"C\" {{ func mir_ffi_mark(x: i64) -> i64; func mir_ffi_i64(x: i64) -> i64; }} func main() -> i64 {{ {body} }}"
+        );
+        let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex trap fixture");
+        let file = crate::parser::Parser::new(tokens).parse_file().expect("parse trap fixture");
+        let checked = crate::core::check_program(&file).expect("check trap fixture");
+        let mir = MirProgram::from_checked_program(&checked).expect("trap fixture MIR");
+        let digest = mir.canonical_digest();
+        let oracle = TraceOracle(RefCell::new(Vec::new()));
+        let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle)
+            .execute(&crate::core::NodeId("function:main".into()), &[]);
+        let reference_trace = oracle.0.borrow().iter().map(|x| format!("{x}\n")).collect::<String>();
+        assert_eq!(reference_trace, expected_trace, "{body}");
+
+        std::fs::write(&trace_path, "").expect("clear VM effect trace");
+        let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("trap fixture bytecode"));
+        let vm_result = vm.run_value();
+        assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), expected_trace, "{body}");
+        assert_eq!(vm.stdout(), "");
+
+        std::fs::write(&trace_path, "").expect("clear native effect trace");
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_trap_prefix");
+        generator.compile_mir_native(&mir).expect("trap fixture native");
+        generator.module.verify().expect("valid trap fixture LLVM");
+        let config = super::E2EConfig { extra_c_src: Some(c_source.clone()), ..Default::default() };
+        let native = super::link_and_observe_module(&generator, &config,
+            super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            .expect("native trap fixture execution");
+        assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), expected_trace, "{body}");
+        assert_eq!(native.stdout, "");
+        if let Some((code, fragment)) = error {
+            assert!(reference.expect_err("reference trap").message.contains(fragment), "{body}");
+            assert_eq!(vm_result.expect_err("VM trap").code(), code, "{body}");
+            assert_ne!(native.exit_code, Some(0), "{body}");
+            assert!(native.stderr.contains(code), "{body}: {}", native.stderr);
+        } else {
+            assert_eq!(reference.unwrap(), MirRuntimeValue::Int(return_value));
+            assert!(matches!(vm_result.unwrap(), Value::Int(n) if n == return_value));
+            assert_eq!(native.exit_code, Some(return_value as i32));
+            assert_eq!(native.stderr, "");
+        }
+        assert_eq!(mir.canonical_digest(), digest);
+    }
 }
