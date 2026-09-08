@@ -34,6 +34,11 @@ pub struct CanonicalMirRouteReceipt {
     pub mir_digest: String,
     pub type_desc_digest: String,
     pub abi_digest: String,
+    /// Digest of the checker-owned FFI receipt table, independent of the
+    /// enclosing function/ownership graph.  Matrix and CLI evidence can
+    /// compare the FFI boundary directly without parsing the whole MIR
+    /// identity text.
+    pub ffi_digest: String,
     pub ownership_digest: String,
     pub flow_transition_digest: String,
     pub root_owners: Vec<NodeId>,
@@ -55,6 +60,7 @@ impl MirProgram {
     pub fn route_receipt(&self, profile: impl Into<String>) -> CanonicalMirRouteReceipt {
         let type_desc_text = self.type_catalog().canonical_text();
         let abi_text = self.type_catalog().abi_canonical_text();
+        let ffi_text = canonical_ffi_text(self);
         let ownership_text = canonical_ownership_text(self);
         CanonicalMirRouteReceipt {
             schema: MIR_ROUTE_RECEIPT_SCHEMA,
@@ -62,6 +68,7 @@ impl MirProgram {
             mir_digest: self.canonical_digest(),
             type_desc_digest: digest(type_desc_text),
             abi_digest: digest(abi_text),
+            ffi_digest: digest(ffi_text),
             ownership_digest: digest(ownership_text),
             flow_transition_digest: digest(canonical_transition_text(self)),
             root_owners: canonical_root_owners(self),
@@ -94,6 +101,15 @@ fn canonical_mir_text(program: &MirProgram) -> String {
     for transition in program.transitions().values() {
         text.push_str(&transition.canonical_text());
     }
+    text.push_str(&canonical_ffi_text(program));
+    for function in program.functions().values() {
+        text.push_str(&function.canonical_text());
+    }
+    text
+}
+
+fn canonical_ffi_text(program: &MirProgram) -> String {
+    let mut text = String::new();
     for contract in program.ffi_calls().values() {
         text.push_str("mir.ffi ");
         text.push_str(contract.caller.0.as_str());
@@ -166,9 +182,6 @@ fn canonical_mir_text(program: &MirProgram) -> String {
                 .unwrap_or("none"),
         );
         text.push('\n');
-    }
-    for function in program.functions().values() {
-        text.push_str(&function.canonical_text());
     }
     text
 }

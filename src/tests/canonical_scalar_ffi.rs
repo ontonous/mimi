@@ -1722,6 +1722,14 @@ func main() -> i64 { conversion_identity(1 as i32); 0 }
 "#;
     let i64_program = materialize(I64_DECLARATION);
     let f64_program = materialize(F64_DECLARATION);
+    let i64_route = i64_program.route_receipt("scalar-ffi-v1");
+    let f64_route = f64_program.route_receipt("scalar-ffi-v1");
+    assert_eq!(i64_route.ffi_digest.len(), 64);
+    assert_eq!(f64_route.ffi_digest.len(), 64);
+    assert_ne!(
+        i64_route.ffi_digest, f64_route.ffi_digest,
+        "route receipt must expose an independently comparable FFI digest"
+    );
     assert_ne!(
         i64_program.canonical_digest(),
         f64_program.canonical_digest(),
