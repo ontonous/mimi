@@ -193,6 +193,9 @@ enum Command {
         /// Include imported modules; the merged prelude remains excluded from MIR
         #[arg(long)]
         all: bool,
+        /// Emit a deterministic route receipt manifest instead of MIR text
+        #[arg(long)]
+        receipt: bool,
     },
     /// Disassemble a .mimi file to bytecode (debugging)
     Disasm {
@@ -595,7 +598,12 @@ fn main() -> std::process::ExitCode {
             files,
             fail_on_warnings,
         } => lint_cmd::lint_files(&files, fail_on_warnings),
-        Command::Mir { path, strict, all } => mir_cmd::mir(path.as_deref(), strict, all),
+        Command::Mir {
+            path,
+            strict,
+            all,
+            receipt,
+        } => mir_cmd::mir(path.as_deref(), strict, all, receipt),
         Command::Disasm { file } => disasm_cmd::disasm_file(&file),
         Command::Verify {
             path,

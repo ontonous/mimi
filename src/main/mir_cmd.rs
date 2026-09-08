@@ -5,11 +5,17 @@
 //! emitter when MIR lowering is incomplete.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::{is_production, resolve_path};
 
-pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), String> {
+pub(crate) fn mir(
+    path: Option<&Path>,
+    strict: bool,
+    all: bool,
+    receipt: bool,
+) -> Result<(), String> {
     let path = resolve_path(path)?;
     if !is_production(&path) {
         return Err(format!(
@@ -84,12 +90,16 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
     )
     .map_err(|error| format!("MIR inspection input rejected: {error}"))?;
 
-    print!("{}", program.type_catalog().canonical_text());
-    for transition in program.transitions().values() {
-        print!("{}", transition.canonical_text());
-    }
-    for function in program.functions().values() {
-        print!("{}", function.canonical_text());
+    if receipt {
+        print!("{}", route_receipt_manifest(&program));
+    } else {
+        print!("{}", program.type_catalog().canonical_text());
+        for transition in program.transitions().values() {
+            print!("{}", transition.canonical_text());
+        }
+        for function in program.functions().values() {
+            print!("{}", function.canonical_text());
+        }
     }
     eprintln!(
         "✓ {} lowered {} callable(s) to canonical MIR",
@@ -97,4 +107,36 @@ pub(crate) fn mir(path: Option<&Path>, strict: bool, all: bool) -> Result<(), St
         program.functions().len()
     );
     Ok(())
+}
+
+/// Render the route receipt as a stable, line-oriented evidence manifest.
+///
+/// The manifest deliberately contains only checker/MIR-owned identities. It
+/// is suitable for matrix snapshots and remains independent of backend output
+/// or source paths.
+fn route_receipt_manifest(program: &mimi::core::mir::reference::MirProgram) -> String {
+    let receipt = program.route_receipt("cli-mir-v1");
+    let mut text = String::from("mimi-mir-route-manifest-v1\n");
+    writeln!(text, "schema={}", receipt.schema).expect("String write");
+    writeln!(text, "profile={}", receipt.profile).expect("String write");
+    writeln!(text, "mir_digest={}", receipt.mir_digest).expect("String write");
+    writeln!(text, "type_desc_digest={}", receipt.type_desc_digest).expect("String write");
+    writeln!(text, "abi_digest={}", receipt.abi_digest).expect("String write");
+    writeln!(text, "ffi_digest={}", receipt.ffi_digest).expect("String write");
+    writeln!(text, "ownership_digest={}", receipt.ownership_digest).expect("String write");
+    writeln!(
+        text,
+        "flow_transition_digest={}",
+        receipt.flow_transition_digest
+    )
+    .expect("String write");
+    text.push_str("root_owners=");
+    for (index, owner) in receipt.root_owners.iter().enumerate() {
+        if index != 0 {
+            text.push(',');
+        }
+        text.push_str(owner.0.as_str());
+    }
+    text.push('\n');
+    text
 }

@@ -1032,6 +1032,47 @@ fn canonical_mir_cli_smoke() {
 }
 
 #[test]
+fn canonical_mir_cli_receipt_manifest_is_deterministic_and_exposes_ffi_digest() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_scalar_ffi_labs.mimi");
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&fixture)
+            .arg("--receipt")
+            .output()
+            .expect("failed to spawn mimi mir --receipt")
+    };
+    let first = run();
+    let second = run();
+    assert!(
+        first.status.success(),
+        "mimi mir --receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert!(second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "receipt manifest must be deterministic"
+    );
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(stdout.contains("mimi-mir-route-manifest-v1\n"));
+    assert!(stdout.contains("schema=mimi-mir-route-receipt-v1\n"));
+    assert!(stdout.contains("profile=cli-mir-v1\n"));
+    let ffi_digest = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("ffi_digest="))
+        .expect("receipt manifest must include ffi_digest");
+    assert_eq!(ffi_digest.len(), 64);
+    assert!(stdout.contains("mir_digest="));
+    assert!(stdout.contains("root_owners=function:main"));
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
