@@ -36,7 +36,7 @@ use super::{
     contains_option_nested_tuple_variant_candidate, contains_option_string_variant_candidate,
     contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
     contains_scalar_collection_operation_candidate, is_exact_s8_flow_transition,
-    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, scalar_ffi_boundary_reason,
     CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
     GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
     GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
@@ -513,6 +513,14 @@ pub fn materialize_canonical_mir_route(
     #[cfg(test)]
     TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
+    if !admission.scalar_ffi {
+        if let Some(reason) = scalar_ffi_boundary_reason(program) {
+            return Err(CanonicalMirRouteMaterializationError::Compatibility {
+                admission,
+                message: format!("scalar FFI declaration boundary: {reason}"),
+            });
+        }
+    }
     // All public scalar-FFI consumers use the same known prelude exclusion.
     // Imported/user code stays in the graph; calls into excluded prelude code
     // remain missing-target errors, never compatibility retries.

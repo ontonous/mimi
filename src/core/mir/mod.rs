@@ -296,6 +296,7 @@ pub use copy_result_island::{
 pub use eligibility::{
     is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
     is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, is_scalar_ffi_candidate,
+    scalar_ffi_boundary_reason,
 };
 pub use islands::{
     classify_flat_copy_record_admission, classify_generic_option_projection_admission,

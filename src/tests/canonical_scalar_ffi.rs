@@ -2021,7 +2021,7 @@ fn scalar_ffi_non_c_abi_stays_outside_canonical_route() {
     // unsupported ABI must be the reported boundary, rather than an unrelated
     // compatibility helper blocking MIR construction first.
     let checked =
-        crate::core::check_program(&super::parse(source)).expect("non-C ABI scalar fixture");
+        crate::core::check_program(&super::parse_prod(source)).expect("non-C ABI scalar fixture");
     let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
     assert!(
         !admission.scalar_ffi,
@@ -2050,6 +2050,69 @@ fn scalar_ffi_non_c_abi_stays_outside_canonical_route() {
         "non-C ABI without contracts: {results:?}"
     );
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
+    for (source, expected) in [
+        (
+            r#"
+                extern "Rust" { func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "ABI 'Rust' is outside the canonical C ABI",
+        ),
+        (
+            r#"
+                #[errno]
+                extern "C" { func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "block-level errno conversion",
+        ),
+        (
+            r#"
+                extern "C" { #[errno] func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "errno conversion",
+        ),
+        (
+            r#"
+                extern "C" { func foreign(value: i64 ...) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "variadic ABI",
+        ),
+        (
+            r#"
+                extern "C" { func foreign(&value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "parameter mode",
+        ),
+    ] {
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .expect("declaration-boundary fixture");
+        assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect_err("unsupported declaration semantics must remain compatibility");
+        match error {
+            crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+                message,
+                ..
+            } => {
+                assert!(message.contains(expected), "{expected}: {message}");
+                assert!(
+                    !message.contains("prelude"),
+                    "declaration boundary was obscured by compatibility materialization: {message}"
+                );
+            }
+            other => panic!("unsupported declaration must remain compatibility: {other:?}"),
+        }
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
 }
 
 #[test]

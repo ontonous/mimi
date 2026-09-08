@@ -77,6 +77,72 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
     found
 }
 
+/// Return a checker-owned reason for a called extern declaration that cannot
+/// enter the scalar C ABI island.  This is intentionally limited to
+/// declaration-level semantics: route selection can report these boundaries
+/// before compatibility-source materialization (for example the merged
+/// prelude) produces an unrelated error.  Type/layout failures remain
+/// construction-time diagnostics because they require the MIR TypeDesc.
+pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
+    for site in program.call_sites().values() {
+        if site.kind != crate::core::ResolvedCallKind::Extern {
+            continue;
+        }
+        let Some(declaration) = program.extern_func_signature(&site.callee) else {
+            return Some(format!(
+                "extern call '{}' has no checker-owned declaration identity",
+                site.callee
+            ));
+        };
+        let Some(block) = program.extern_blocks().values().find(|block| {
+            block
+                .signatures
+                .iter()
+                .any(|item| item.node_id == declaration.node_id)
+        }) else {
+            return Some(format!(
+                "extern declaration '{}' has no checker-owned ABI block",
+                declaration.name
+            ));
+        };
+        if block.abi != "C" {
+            return Some(format!(
+                "extern declaration '{}' ABI '{}' is outside the canonical C ABI",
+                declaration.name, block.abi
+            ));
+        }
+        if block.returns_errno {
+            return Some(format!(
+                "extern declaration '{}' enables block-level errno conversion outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+        if declaration.returns_errno {
+            return Some(format!(
+                "extern declaration '{}' enables errno conversion outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+        if declaration.variadic {
+            return Some(format!(
+                "extern declaration '{}' uses variadic ABI outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+        if declaration
+            .typed_params
+            .iter()
+            .any(|(_, _, mode)| mode.is_some())
+        {
+            return Some(format!(
+                "extern declaration '{}' uses parameter mode outside canonical scalar FFI",
+                declaration.name
+            ));
+        }
+    }
+    None
+}
+
 /// Whether the checked program is one of the deliberately narrow recoverable
 /// Flow profiles. M3 is the single-state retry profile; F2 is the cross-state
 /// `Result<state, (source, error)>` match profile. The predicate is only
