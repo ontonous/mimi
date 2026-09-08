@@ -32,6 +32,21 @@ for owner in \
     if [ -n "$matches" ]; then
         printf '%s\n' "$matches"
     fi
+    case "$owner" in
+        CodegenLegacyRemainder)
+            condition='delete after every legacy body class is lowered to MIR and compile_func_legacy has zero production callers'
+            ;;
+        FlowVerifierCompatibility)
+            condition='delete after the Flow verifier consumes canonical MIR contracts for every non-closed Flow shape'
+            ;;
+        FfiVerifierCompatibility)
+            condition='delete after string/aggregate/variadic/errno/mode/ensures FFI declarations have complete MIR receipts and proofs'
+            ;;
+        DualVerifierCompatibility)
+            condition='delete after the secondary Flow/VIR engine is retired or is MIR-native for every compatibility profile'
+            ;;
+    esac
+    printf 'owner_deletion_condition=%s\n' "$condition"
 done
 
 body_refs="$(rg -n \
