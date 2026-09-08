@@ -347,5 +347,9 @@ mod tests {
         let mut receipt = valid_receipt();
         receipt.root_owners[0] = NodeId("function:owner,drift".into());
         assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners[1] = receipt.root_owners[0].clone();
+        assert!(receipt.validate().is_err());
     }
 }
