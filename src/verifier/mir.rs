@@ -282,6 +282,16 @@ pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
+    if let Some(contract) = program
+        .ffi_calls()
+        .values()
+        .find(|contract| !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&contract.symbol))
+    {
+        return Err(format!(
+            "canonical MIR verifier FFI symbol '{}' is not manifest-safe",
+            contract.symbol
+        ));
+    }
     if !program
         .ffi_calls()
         .values()

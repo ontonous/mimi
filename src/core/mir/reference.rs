@@ -1429,6 +1429,14 @@ impl MirProgram {
     pub fn ffi_calls(&self) -> &BTreeMap<MirInstructionId, super::MirFfiCallContract> {
         &self.ffi_calls
     }
+
+    #[cfg(test)]
+    pub(crate) fn replace_ffi_calls_for_test_only(
+        &mut self,
+        ffi_calls: BTreeMap<MirInstructionId, super::MirFfiCallContract>,
+    ) {
+        self.ffi_calls = ffi_calls;
+    }
 }
 
 /// Validate every `Convert` against the closed TypeDesc conversion contract
@@ -5053,7 +5061,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             || receipt.callee != *callee
             || receipt.arguments != arguments
             || receipt.result.as_ref() != result
-            || receipt.symbol.trim().is_empty()
+            || !super::canonical_ffi_symbol_is_manifest_safe(&receipt.symbol)
             || receipt.abi != "C"
         {
             return Err(self.error(
@@ -12045,6 +12053,46 @@ func main() -> i64 { foreign(1 as i64); 0 }
                 "{symbol}: {errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn forged_ffi_symbol_is_rejected_by_every_direct_consumer() {
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let mut receipts = program.ffi_calls().clone();
+        receipts.values_mut().next().expect("FFI receipt").symbol = "foreign symbol".into();
+        let mut forged = program;
+        forged.replace_ffi_calls_for_test_only(receipts);
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("reference must reject a forged manifest-unsafe symbol");
+        assert!(reference_error
+            .to_string()
+            .contains("FFI receipt disagrees with the MIR call"));
+
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+            .expect_err("bytecode must reject a forged manifest-unsafe symbol");
+        assert!(bytecode_error
+            .iter()
+            .any(|error| error.message.contains("identity/ABI validation")));
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native validator must reject a forged manifest-unsafe symbol");
+        assert!(native_error
+            .iter()
+            .any(|error| error.message.contains("FFI symbol contains whitespace")));
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("verifier capability gate must reject a forged symbol");
+        assert!(capability_error
+            .iter()
+            .any(|error| error.contains("FFI symbol is not manifest-safe")));
+
+        let verifier_error = crate::verifier::verify_mir(&forged, "forged-symbol".into())
+            .expect_err("direct verifier must reject a forged symbol even without obligations");
+        assert!(verifier_error.contains("FFI symbol 'foreign symbol' is not manifest-safe"));
     }
 
     #[test]

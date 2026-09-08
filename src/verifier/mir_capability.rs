@@ -1655,6 +1655,9 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} extern FFI contract identity disagrees with MIR call"
                 ));
             }
+            if !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
+                self.error(format!("{subject} extern FFI symbol is not manifest-safe"));
+            }
             if contract.arguments != arguments {
                 self.error(format!(
                     "{subject} extern FFI contract arguments disagree with MIR call"
