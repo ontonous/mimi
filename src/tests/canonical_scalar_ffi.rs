@@ -1411,6 +1411,120 @@ func main() -> i32 {
 }
 
 #[test]
+fn scalar_ffi_mixed_width_min_value_and_zero_short_circuit_stay_defined() {
+    struct MixedBoundaryOracle;
+    impl MirReferenceFfiResolver for MixedBoundaryOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_mixed_min" && receipt.symbol != "mir_ffi_mixed_zero" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(left), MirRuntimeValue::Int(_right)] = args else {
+                return Err("mixed boundary oracle expects i32/i64 arguments".into());
+            };
+            Ok(MirRuntimeValue::Int(*left))
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int32_t mir_ffi_mixed_min(int32_t left, int64_t right) { (void)right; return left; }
+int32_t mir_ffi_mixed_zero(int32_t left, int64_t right) { (void)right; return left; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_mixed_min(left: i32, right: i64) -> i32
+        ensures: result == left and right != 0;
+    func mir_ffi_mixed_zero(left: i32, right: i64) -> i32
+        ensures: result == left and (right == 0 or right / right == 1);
+}
+func main() -> i32 {
+    let min_value = mir_ffi_mixed_min((-2147483648) as i32, 1 as i64);
+    let zero_value = mir_ffi_mixed_zero((-2147483648) as i32, 0 as i64);
+    println(min_value);
+    println(zero_value);
+    0
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed-width boundary FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("mixed-width boundary FFI materialization");
+    let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts.iter().all(|receipt| receipt.arguments.len() == 2));
+    assert!(receipts.iter().all(|receipt| receipt.result.is_some()));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let mir_results = crate::verifier::verify_mir(&mir, "mixed-boundary".into())
+        .expect("mixed-width boundary MIR verifier");
+    assert_eq!(mir_results.len(), 2);
+    assert!(mir_results
+        .iter()
+        .all(|result| result.status == crate::verifier::VerifStatus::Disproven));
+    for results in [
+        crate::verifier::verify_checked(&checked, "mixed-boundary".into()),
+        crate::verifier::verify_checked_dual(&checked, "mixed-boundary-dual".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("mixed-width boundary public verifier");
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|result| result.status == crate::verifier::VerifStatus::Disproven));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&MixedBoundaryOracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("mixed-width boundary reference execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "-2147483648\n-2147483648\n");
+
+    let bytecode = compile_mir_program(&mir).expect("mixed-width boundary bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("mixed-width boundary VM"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "-2147483648\n-2147483648\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "mixed_width_boundary_ffi");
+    generator
+        .compile_mir_native(&mir)
+        .expect("mixed-width boundary native compile");
+    generator
+        .module
+        .verify()
+        .expect("mixed-width boundary native verify");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("mixed-width boundary native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "-2147483648\n-2147483648\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_receipt_digest_pins_argument_order_result_and_contract_phase() {
     const SOURCE: &str = r#"
 extern "C" {

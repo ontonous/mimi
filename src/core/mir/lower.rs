@@ -7619,11 +7619,11 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Unary { op, operand } => {
-                let operand = self.lower_expr(operand);
                 if matches!(
                     op,
                     ResolvedUnaryOp::BorrowShared | ResolvedUnaryOp::BorrowMutable
                 ) {
+                    let operand = self.lower_expr(operand);
                     self.emit(
                         &expression.node_id,
                         "borrow",
@@ -7634,15 +7634,43 @@ impl<'a> Lowerer<'a> {
                         },
                     );
                 } else {
-                    self.emit(
-                        &expression.node_id,
-                        "unary",
-                        MirInstructionKind::Unary {
-                            result: result.clone(),
-                            op: *op,
-                            operand,
-                        },
-                    );
+                    let folded_neg_literal =
+                        if *op == ResolvedUnaryOp::Negate && expression.ty != operand.ty {
+                            match &operand.kind {
+                                ResolvedExprKind::Literal(
+                                    crate::core::ir::ResolvedLiteral::Int(value),
+                                ) => value.checked_neg(),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                    if let Some(value) = folded_neg_literal {
+                        // `-2147483648` is parsed as Neg(i64 literal) while
+                        // contextual inference assigns the enclosing expression
+                        // the signed i32 type.  Materialize the folded value at
+                        // the result identity so canonical consumers do not see
+                        // an invalid i64 -> i32 unary TypeDesc edge.
+                        self.emit(
+                            &expression.node_id,
+                            "const.fold_neg_literal",
+                            MirInstructionKind::Const {
+                                result: result.clone(),
+                                literal: crate::core::ir::ResolvedLiteral::Int(value),
+                            },
+                        );
+                    } else {
+                        let operand = self.lower_expr(operand);
+                        self.emit(
+                            &expression.node_id,
+                            "unary",
+                            MirInstructionKind::Unary {
+                                result: result.clone(),
+                                op: *op,
+                                operand,
+                            },
+                        );
+                    }
                 }
             }
             ResolvedExprKind::Binary { op, left, right } => {
