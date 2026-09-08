@@ -2131,6 +2131,19 @@ fn validate_call_graph(
     ffi_calls: &BTreeMap<MirInstructionId, super::MirFfiCallContract>,
 ) -> Vec<super::MirValidationError> {
     let mut errors = Vec::new();
+    // A C symbol denotes one ABI.  Native emission already has to merge
+    // declarations by symbol; enforce the same invariant at the shared MIR
+    // gate so reference/bytecode cannot observe a forged or divergent
+    // signature before native declaration building gets a chance to reject
+    // it.  The key uses checker-resolved TypeDesc identities, preserving
+    // transparent aliases exactly as the native adapter does.
+    let mut ffi_symbol_shapes: BTreeMap<
+        String,
+        (
+            Vec<crate::core::ResolvedTypeId>,
+            Option<crate::core::ResolvedTypeId>,
+        ),
+    > = BTreeMap::new();
     errors.extend(validate_transition_contracts(
         functions,
         type_catalog,
@@ -2204,6 +2217,19 @@ fn validate_call_graph(
                             ),
                         });
                     }
+                    if !type_arguments.is_empty() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "canonical scalar FFI call cannot have type arguments".into(),
+                        });
+                    }
+                    if variant_call_contract.is_some() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "canonical scalar FFI call cannot carry a variant ABI receipt"
+                                .into(),
+                        });
+                    }
                     if contract.arguments != *arguments {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
@@ -2217,6 +2243,31 @@ fn validate_call_graph(
                             message: "extern call FFI contract result disagrees with MIR call"
                                 .into(),
                         });
+                    }
+                    let argument_types = arguments
+                        .iter()
+                        .filter_map(|argument| {
+                            function.values.get(argument).map(|value| value.ty.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let shape = (
+                        argument_types,
+                        result.as_ref().and_then(|value| {
+                            function.values.get(value).map(|info| info.ty.clone())
+                        }),
+                    );
+                    if let Some(previous) = ffi_symbol_shapes.get(&contract.symbol) {
+                        if previous != &shape {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: format!(
+                                    "FFI symbol '{}' is used with incompatible MIR signatures",
+                                    contract.symbol
+                                ),
+                            });
+                        }
+                    } else if !contract.symbol.trim().is_empty() {
+                        ffi_symbol_shapes.insert(contract.symbol.clone(), shape);
                     }
                     if let Err(message) =
                         super::contracts::validate_ffi_requires(function, type_catalog, contract)
@@ -11122,6 +11173,184 @@ func main() -> i64 { caller(0 as i64) }
                 .iter()
                 .any(|error| error.message.contains("FFI contract result disagrees")),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_ffi_call_metadata_outside_scalar_abi() {
+        let source = r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(1 as i64) }
+"#;
+        let (_, program) = canonical_program_with_main(source);
+        let owner = NodeId("function:main".into());
+        let mut functions = program.functions().clone();
+        let function = functions.get_mut(&owner).expect("main MIR");
+        let instruction = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: ResolvedCallee::Extern(_),
+                        ..
+                    }
+                )
+            })
+            .expect("extern call");
+        let argument_type = match &instruction.kind {
+            MirInstructionKind::Call { arguments, .. } => function
+                .values
+                .get(arguments.first().expect("extern argument"))
+                .expect("extern argument TypeDesc")
+                .ty
+                .clone(),
+            _ => unreachable!(),
+        };
+        let MirInstructionKind::Call { type_arguments, .. } = &mut instruction.kind else {
+            unreachable!();
+        };
+        type_arguments.push(argument_type);
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            program.ffi_calls().clone(),
+        )
+        .expect_err("extern generic metadata must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("canonical scalar FFI call cannot have type arguments")
+            }),
+            "{errors:?}"
+        );
+
+        let mut functions = program.functions().clone();
+        let function = functions.get_mut(&owner).expect("main MIR");
+        let instruction = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: ResolvedCallee::Extern(_),
+                        ..
+                    }
+                )
+            })
+            .expect("extern call");
+        let (callee, argument_type, result_type) = match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: ResolvedCallee::Extern(callee),
+                arguments,
+                result: Some(result),
+                ..
+            } => (
+                callee.clone(),
+                function
+                    .values
+                    .get(arguments.first().expect("extern argument"))
+                    .expect("argument TypeDesc")
+                    .ty
+                    .clone(),
+                function
+                    .values
+                    .get(result)
+                    .expect("result TypeDesc")
+                    .ty
+                    .clone(),
+            ),
+            _ => unreachable!(),
+        };
+        let MirInstructionKind::Call {
+            variant_call_contract,
+            ..
+        } = &mut instruction.kind
+        else {
+            unreachable!();
+        };
+        *variant_call_contract = Some(crate::core::mir::types::MirVariantCallAbiContract {
+            callee,
+            type_arguments: Vec::new(),
+            parameter_types: vec![argument_type.clone()],
+            result_ty: result_type.clone(),
+            mode: crate::core::mir::types::MirVariantCallAbiMode::FlatCopy,
+            return_mode: crate::core::mir::types::MirVariantCallReturnMode::FlatCopyMerge,
+            payload_ty: argument_type.clone(),
+            payload_types: vec![argument_type],
+            nominal: crate::core::ir::NominalTypeId::new("builtin:type:Option")
+                .expect("Option nominal"),
+            variants: Vec::new(),
+        });
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            functions,
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            program.ffi_calls().clone(),
+        )
+        .expect_err("extern variant metadata must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("canonical scalar FFI call cannot carry a variant ABI receipt")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_incompatible_ffi_symbol_signatures() {
+        let source = r#"
+extern "C" {
+    func wide(value: i64) -> i64;
+    func narrow(value: i32) -> i32;
+}
+func main() -> i64 { wide(1 as i64); narrow(2 as i32); 0 }
+"#;
+        let (_, program) = canonical_program_with_main(source);
+        assert_eq!(program.ffi_calls().len(), 2);
+        let first_symbol = program
+            .ffi_calls()
+            .values()
+            .next()
+            .expect("first FFI receipt")
+            .symbol
+            .clone();
+        let second_instruction = program
+            .ffi_calls()
+            .keys()
+            .nth(1)
+            .cloned()
+            .expect("second FFI receipt");
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&second_instruction)
+            .expect("second receipt")
+            .symbol = first_symbol;
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("one C symbol cannot carry two MIR signatures");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("FFI symbol 'wide' is used with incompatible MIR signatures")
+            }),
+            "{errors:?}"
         );
     }
 
