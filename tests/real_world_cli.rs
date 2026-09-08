@@ -1438,6 +1438,42 @@ fn canonical_mir_cli_all_rejects_unsupported_shapes_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_rejects_without_partial_manifest() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_list_string_index_rejected.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("failed to spawn rejected canonical MIR receipt");
+    assert!(
+        !output.status.success(),
+        "unsupported receipt snapshot must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed receipt must not emit a partial manifest: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MIR inspection input rejected") && stderr.contains("Copy scalar"),
+        "unexpected receipt rejection diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy")
+            && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+        "failed receipt must not fall back or claim a manifest:\n{stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_run_cli_smoke() {
     let fixture = project_root()
         .join("tests")
