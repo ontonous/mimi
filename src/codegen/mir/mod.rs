@@ -338,16 +338,17 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     /// Declare checker-owned scalar FFI symbols from the MIR call receipts.
     ///
     /// The legacy emitter obtains these declarations from `ExternFunc` AST
-    /// nodes.  Canonical native emission instead derives the complete LLVM
-    /// signature from the call's MIR value TypeDesc and takes the symbol/ABI
-    /// spelling from `MirFfiCallContract`.  This keeps the external boundary
-    /// AST-free while retaining the current fail-closed scalar-only island.
+    /// nodes. Canonical native emission instead derives the complete LLVM
+    /// signature from the declaration TypeDesc identities carried by
+    /// `MirFfiCallContract`; symbol/ABI spelling also comes from that receipt.
+    /// This keeps the external boundary AST-free while retaining the current
+    /// fail-closed scalar-only island.
     fn declare_ffi_functions(&mut self) -> Result<(), NativeMirError> {
         let mut declarations: BTreeMap<
             String,
             (
                 Vec<crate::core::ResolvedTypeId>,
-                Option<crate::core::ResolvedTypeId>,
+                crate::core::ResolvedTypeId,
             ),
         > = BTreeMap::new();
         for function in self.program.functions().values() {
@@ -372,36 +373,6 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                                     "extern call has no canonical FFI receipt",
                                 )
                             })?;
-                    let argument_types = arguments
-                        .iter()
-                        .map(|argument| {
-                            function
-                                .values
-                                .get(argument)
-                                .map(|value| value.ty.clone())
-                                .ok_or_else(|| {
-                                    NativeMirError::new(
-                                        instruction.id.as_str(),
-                                        format!("FFI argument '{}' has no MIR type", argument),
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let result_type = result
-                        .as_ref()
-                        .map(|value| {
-                            function
-                                .values
-                                .get(value)
-                                .map(|info| info.ty.clone())
-                                .ok_or_else(|| {
-                                    NativeMirError::new(
-                                        instruction.id.as_str(),
-                                        format!("FFI result '{}' has no MIR type", value),
-                                    )
-                                })
-                        })
-                        .transpose()?;
                     if receipt.abi != "C" {
                         return Err(NativeMirError::new(
                             instruction.id.as_str(),
@@ -411,28 +382,40 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                             ),
                         ));
                     }
+                    if receipt.parameter_types.len() != arguments.len()
+                        || receipt.result.as_ref() != result.as_ref()
+                    {
+                        return Err(NativeMirError::new(
+                            instruction.id.as_str(),
+                            "FFI receipt declaration identities disagree with the native call",
+                        ));
+                    }
                     if let Some((existing_arguments, existing_result)) =
                         declarations.get(&receipt.symbol)
                     {
-                        if existing_arguments != &argument_types || existing_result != &result_type
+                        if existing_arguments != &receipt.parameter_types
+                            || existing_result != &receipt.result_type
                         {
                             return Err(NativeMirError::new(
                                 instruction.id.as_str(),
                                 format!(
-                                    "FFI symbol '{}' is used with incompatible MIR signatures",
+                                    "FFI symbol '{}' is used with incompatible declaration TypeDescs",
                                     receipt.symbol
                                 ),
                             ));
                         }
                     } else {
-                        declarations.insert(receipt.symbol.clone(), (argument_types, result_type));
+                        declarations.insert(
+                            receipt.symbol.clone(),
+                            (receipt.parameter_types.clone(), receipt.result_type.clone()),
+                        );
                     }
                 }
             }
         }
 
-        for (symbol, (argument_types, result_type)) in declarations {
-            let parameter_types = argument_types
+        for (symbol, (parameter_type_ids, result_type)) in declarations {
+            let parameter_types = parameter_type_ids
                 .iter()
                 .map(|ty| {
                     native_ffi_scalar_type(
@@ -444,29 +427,24 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     .map(BasicMetadataTypeEnum::from)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let function_type = match result_type {
-                None => self
-                    .generator
+            let function_type = if self
+                .program
+                .type_catalog()
+                .get(&result_type)
+                .is_some_and(|desc| desc.abi == MirAbiClass::Unit && desc.layout == MirLayout::Unit)
+            {
+                self.generator
                     .context
                     .void_type()
-                    .fn_type(&parameter_types, false),
-                Some(ref ty)
-                    if self.program.type_catalog().get(ty).is_some_and(|desc| {
-                        desc.abi == MirAbiClass::Unit && desc.layout == MirLayout::Unit
-                    }) =>
-                {
-                    self.generator
-                        .context
-                        .void_type()
-                        .fn_type(&parameter_types, false)
-                }
-                Some(ty) => native_ffi_scalar_type(
+                    .fn_type(&parameter_types, false)
+            } else {
+                native_ffi_scalar_type(
                     self.generator.context,
                     self.program.type_catalog(),
-                    &ty,
+                    &result_type,
                     &symbol,
                 )?
-                .fn_type(&parameter_types, false),
+                .fn_type(&parameter_types, false)
             };
             if self.generator.module.get_function(&symbol).is_some() {
                 return Err(NativeMirError::new(

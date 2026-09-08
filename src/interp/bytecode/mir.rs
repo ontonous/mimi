@@ -184,6 +184,7 @@ fn materialize_canonical_ffi(
         if receipt.instruction != *instruction
             || receipt.callee != *callee
             || receipt.arguments != *arguments
+            || receipt.parameter_types.len() != arguments.len()
             || receipt.result.as_ref() != result.as_ref()
             || receipt.symbol.trim().is_empty()
             || receipt.abi != "C"
@@ -199,41 +200,28 @@ fn materialize_canonical_ffi(
             });
             continue;
         }
-        let argument_types = match scalar_ffi_arguments(program, function, arguments, instruction) {
-            Ok(arguments) => arguments,
-            Err(message) => {
-                errors.push(MirBytecodeError {
-                    function: receipt.caller.clone(),
-                    message,
-                });
-                continue;
-            }
-        };
-        let result_type = match result {
-            Some(value) => {
-                let Some(info) = function.values.get(value) else {
+        let argument_types =
+            match scalar_ffi_arguments(program, &receipt.parameter_types, instruction) {
+                Ok(arguments) => arguments,
+                Err(message) => {
                     errors.push(MirBytecodeError {
                         function: receipt.caller.clone(),
-                        message: format!(
-                            "canonical FFI result '{}' is absent from MIR values",
-                            instruction
-                        ),
+                        message,
                     });
                     continue;
-                };
-                match scalar_ffi_type(program, &info.ty, instruction, "result") {
-                    Ok(result) => result,
-                    Err(message) => {
-                        errors.push(MirBytecodeError {
-                            function: receipt.caller.clone(),
-                            message,
-                        });
-                        continue;
-                    }
                 }
-            }
-            None => CanonicalFfiScalarType::Unit,
-        };
+            };
+        let result_type =
+            match scalar_ffi_type(program, &receipt.result_type, instruction, "result") {
+                Ok(result) => result,
+                Err(message) => {
+                    errors.push(MirBytecodeError {
+                        function: receipt.caller.clone(),
+                        message,
+                    });
+                    continue;
+                }
+            };
         let index = match u16::try_from(descriptors.len()) {
             Ok(index) => index,
             Err(_) => {
@@ -268,21 +256,12 @@ fn materialize_canonical_ffi(
 
 fn scalar_ffi_arguments(
     program: &MirProgram,
-    function: &MirFunction,
-    arguments: &[MirValueId],
+    parameter_types: &[crate::core::ResolvedTypeId],
     instruction: &crate::core::mir::MirInstructionId,
 ) -> Result<Vec<CanonicalFfiScalarType>, String> {
-    arguments
+    parameter_types
         .iter()
-        .map(|argument| {
-            let info = function.values.get(argument).ok_or_else(|| {
-                format!(
-                    "canonical FFI '{}' argument '{}' is absent from MIR values",
-                    instruction, argument
-                )
-            })?;
-            scalar_ffi_type(program, &info.ty, instruction, "argument")
-        })
+        .map(|ty| scalar_ffi_type(program, ty, instruction, "declaration parameter"))
         .collect()
 }
 
@@ -303,7 +282,6 @@ fn scalar_ffi_type(
     if role == "result"
         && descriptor.layout == MirLayout::Unit
         && descriptor.abi == MirAbiClass::Unit
-        && descriptor.ownership == MirOwnership::Copy
     {
         return Ok(CanonicalFfiScalarType::Unit);
     }
@@ -4745,6 +4723,7 @@ mod tests {
     use crate::core::mir::types::{MirGlueKind, MirLayout};
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
+    use crate::interp::bytecode::instr::CanonicalFfiScalarType;
     use crate::interp::bytecode::BytecodeVM;
     use crate::interp::bytecode::{ConstValue, Op};
     use crate::interp::value::Value;
@@ -11467,6 +11446,16 @@ mod tests {
         assert_eq!(bytecode.canonical_ffi.len(), 1);
         assert_eq!(bytecode.canonical_ffi[0].symbol, "labs");
         assert_eq!(bytecode.canonical_ffi[0].abi, "C");
+        assert_eq!(
+            bytecode.canonical_ffi[0].arguments,
+            vec![CanonicalFfiScalarType::I64],
+            "bytecode ABI must follow the checker declaration TypeDesc"
+        );
+        assert_eq!(
+            bytecode.canonical_ffi[0].result,
+            CanonicalFfiScalarType::I64,
+            "bytecode result ABI must follow the checker declaration TypeDesc"
+        );
         let mut vm = BytecodeVM::new(bytecode);
         let value = vm
             .run_value()

@@ -2119,7 +2119,7 @@ fn validate_owned_string_identity_instance_function(
 /// ABI fact, while the call-side literal may retain its default `i32`/`i64`
 /// identity until a later backend conversion. No other representation change
 /// is admitted at this boundary.
-fn ffi_type_compatible(
+pub(crate) fn ffi_type_compatible(
     type_catalog: &MirTypeCatalog,
     actual: &crate::core::ResolvedTypeId,
     declared: &crate::core::ResolvedTypeId,
@@ -4957,6 +4957,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "extern call FFI receipt disagrees with the MIR call",
             ));
         }
+        if receipt.parameter_types.len() != arguments.len() {
+            return Err(self.error(
+                &function.owner,
+                "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments",
+            ));
+        }
         for (role, value) in arguments.iter().map(|value| ("argument", value)) {
             let Some(info) = function.values.get(value) else {
                 return Err(self.error(
@@ -4989,6 +4995,28 @@ impl<'a> MirReferenceInterpreter<'a> {
                     format!(
                         "extern call {role} TypeDesc '{}' is outside the scalar reference FFI island",
                         info.ty.as_str()
+                    ),
+                ));
+            }
+        }
+        for (index, (value, declared_type)) in
+            arguments.iter().zip(&receipt.parameter_types).enumerate()
+        {
+            let actual_type = function
+                .values
+                .get(value)
+                .map(|info| info.ty.clone())
+                .ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!("extern call argument {index} is absent from MIR values"),
+                    )
+                })?;
+            if !ffi_type_compatible(self.program.type_catalog(), &actual_type, declared_type) {
+                return Err(self.error(
+                    &function.owner,
+                    format!(
+                        "extern call argument {index} TypeDesc disagrees with declaration TypeDesc"
                     ),
                 ));
             }
@@ -5034,6 +5062,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "extern call result TypeDesc '{}' is outside the scalar reference FFI island",
                         info.ty.as_str()
                     ),
+                ));
+            }
+            if !ffi_type_compatible(self.program.type_catalog(), &info.ty, &receipt.result_type) {
+                return Err(self.error(
+                    &function.owner,
+                    "extern call result TypeDesc disagrees with declaration TypeDesc",
                 ));
             }
         }

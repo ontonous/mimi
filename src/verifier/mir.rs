@@ -3394,6 +3394,27 @@ fn eval_ffi_call(
     if contract.arguments != arguments {
         return Err("MIR verifier extern call arguments disagree with FFI contract".into());
     }
+    if contract.parameter_types.len() != arguments.len() {
+        return Err(
+            "MIR verifier extern declaration parameter TypeDesc count disagrees with MIR arguments"
+                .into(),
+        );
+    }
+    for (index, (argument, declared_type)) in
+        arguments.iter().zip(&contract.parameter_types).enumerate()
+    {
+        let actual_type = function
+            .values
+            .get(argument)
+            .ok_or_else(|| format!("MIR verifier extern argument {index} is absent"))?
+            .ty
+            .clone();
+        if !crate::core::mir::reference::ffi_type_compatible(catalog, &actual_type, declared_type) {
+            return Err(format!(
+                "MIR verifier extern argument {index} TypeDesc disagrees with declaration TypeDesc"
+            ));
+        }
+    }
     if let Some(condition) = &contract.requires {
         let (term, defined) = ffi_contract_term(condition, &state.values, "precondition")?;
         let condition = Bool::and(&[&defined, &expect_bool(term, "extern requires contract")?]);
@@ -3411,6 +3432,15 @@ fn eval_ffi_call(
             .ok_or_else(|| format!("MIR extern result '{}' is absent", result))?
             .ty
             .clone();
+        if !crate::core::mir::reference::ffi_type_compatible(
+            catalog,
+            &result_ty,
+            &contract.result_type,
+        ) {
+            return Err(
+                "MIR verifier extern result TypeDesc disagrees with declaration TypeDesc".into(),
+            );
+        }
         let (value, constraints) = symbolic_value_for_type(
             catalog,
             &result_ty,

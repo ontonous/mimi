@@ -1215,7 +1215,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         {
             self.emit_ffi_requires(condition, subject)?;
         }
-        self.emit_call_target(result, function, arguments, subject)?;
+        self.emit_ffi_call_target(
+            result,
+            function,
+            arguments,
+            &receipt.parameter_types,
+            &receipt.result_type,
+            subject,
+        )?;
         if let Some(condition) = receipt
             .ensures
             .as_ref()
@@ -1324,5 +1331,174 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
         }
         Ok(())
+    }
+
+    fn emit_ffi_call_target(
+        &mut self,
+        result: Option<&MirValueId>,
+        function: FunctionValue<'ctx>,
+        arguments: &[MirValueId],
+        declaration_parameters: &[crate::core::ResolvedTypeId],
+        declaration_result: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        if arguments.len() != declaration_parameters.len() {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI declaration parameter TypeDesc count disagrees with native call",
+            ));
+        }
+        let mut values = Vec::with_capacity(arguments.len());
+        for (index, (argument, declaration_type)) in
+            arguments.iter().zip(declaration_parameters).enumerate()
+        {
+            let value = self.value(argument, subject)?;
+            let actual_type = self.value_desc(argument, subject)?;
+            let declared_type = self
+                .program
+                .type_catalog()
+                .get(declaration_type)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        format!(
+                            "FFI declaration parameter {index} TypeDesc '{}' is absent",
+                            declaration_type.as_str()
+                        ),
+                    )
+                })?;
+            let value = self.coerce_ffi_value(
+                value,
+                actual_type.abi,
+                declared_type.abi,
+                subject,
+                &format!("ffi_arg_{index}"),
+            )?;
+            values.push(value.into());
+        }
+        let call = self
+            .generator
+            .builder
+            .build_call(function, &values, "mir_ffi_call")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let Some(result) = result else {
+            return Ok(());
+        };
+        let actual_type = self.value_desc(result, subject)?;
+        if actual_type.abi == MirAbiClass::Unit {
+            return Ok(());
+        }
+        let declared_type = self
+            .program
+            .type_catalog()
+            .get(declaration_result)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    format!(
+                        "FFI declaration result TypeDesc '{}' is absent",
+                        declaration_result.as_str()
+                    ),
+                )
+            })?;
+        let value = call_try_basic_value(&call)
+            .ok_or_else(|| NativeMirError::new(subject, "non-unit FFI call returned void"))?;
+        let value = self.coerce_ffi_value(
+            value,
+            declared_type.abi,
+            actual_type.abi,
+            subject,
+            "ffi_result",
+        )?;
+        self.values.insert(result.clone(), value);
+        Ok(())
+    }
+
+    fn coerce_ffi_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        from: MirAbiClass,
+        to: MirAbiClass,
+        subject: &str,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        if from == to {
+            return Ok(value);
+        }
+        match (from, to, value) {
+            (
+                MirAbiClass::Integer {
+                    bits: from_bits,
+                    signed: true,
+                },
+                MirAbiClass::Integer {
+                    bits: to_bits,
+                    signed: true,
+                },
+                value,
+            ) if from_bits < to_bits => self
+                .generator
+                .builder
+                .build_int_s_extend(
+                    value.into_int_value(),
+                    match to_bits {
+                        32 => self.generator.context.i32_type(),
+                        64 => self.generator.context.i64_type(),
+                        _ => {
+                            return Err(NativeMirError::new(
+                                subject,
+                                format!("FFI integer width {to_bits} is unsupported"),
+                            ))
+                        }
+                    },
+                    name,
+                )
+                .map(BasicValueEnum::from)
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            (
+                MirAbiClass::Integer {
+                    bits: from_bits,
+                    signed: true,
+                },
+                MirAbiClass::Integer {
+                    bits: to_bits,
+                    signed: true,
+                },
+                value,
+            ) if from_bits > to_bits => self
+                .generator
+                .builder
+                .build_int_truncate(
+                    value.into_int_value(),
+                    match to_bits {
+                        32 => self.generator.context.i32_type(),
+                        64 => self.generator.context.i64_type(),
+                        _ => {
+                            return Err(NativeMirError::new(
+                                subject,
+                                format!("FFI integer width {to_bits} is unsupported"),
+                            ))
+                        }
+                    },
+                    name,
+                )
+                .map(BasicValueEnum::from)
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            (MirAbiClass::Integer { signed: true, .. }, MirAbiClass::Float { bits: 64 }, value) => {
+                self.generator
+                    .builder
+                    .build_signed_int_to_float(
+                        value.into_int_value(),
+                        self.generator.context.f64_type(),
+                        name,
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
+            _ => Err(NativeMirError::new(
+                subject,
+                format!("FFI ABI conversion from {from:?} to {to:?} is unsupported"),
+            )),
+        }
     }
 }

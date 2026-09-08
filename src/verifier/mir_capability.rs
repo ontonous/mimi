@@ -1660,13 +1660,52 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} extern FFI contract arguments disagree with MIR call"
                 ));
             }
-            for argument in arguments {
-                if value_type(function, argument).is_none() {
+            if contract.parameter_types.len() != arguments.len() {
+                self.error(format!(
+                    "{subject} extern declaration parameter TypeDesc count disagrees with MIR arguments"
+                ));
+            }
+            for (index, (argument, declared_type)) in
+                arguments.iter().zip(&contract.parameter_types).enumerate()
+            {
+                let Some(actual_type) = value_type(function, argument) else {
                     self.error(format!(
-                        "{subject} extern argument '{}' is absent from caller values",
-                        argument
+                        "{subject} extern argument {index} '{}' is absent from caller values",
+                        argument,
+                    ));
+                    continue;
+                };
+                if !crate::core::mir::reference::ffi_type_compatible(
+                    self.program.type_catalog(),
+                    &actual_type,
+                    declared_type,
+                ) {
+                    self.error(format!(
+                        "{subject} extern argument {index} TypeDesc disagrees with declaration TypeDesc"
                     ));
                 }
+            }
+            if let Some(result) = result {
+                if let Some(actual_type) = value_type(function, result) {
+                    if !crate::core::mir::reference::ffi_type_compatible(
+                        self.program.type_catalog(),
+                        &actual_type,
+                        &contract.result_type,
+                    ) {
+                        self.error(format!(
+                            "{subject} extern result TypeDesc disagrees with declaration TypeDesc"
+                        ));
+                    }
+                } else {
+                    self.error(format!(
+                        "{subject} extern result '{}' is absent from caller values",
+                        result
+                    ));
+                }
+            } else {
+                self.error(format!(
+                    "{subject} extern call has no canonical result value identity"
+                ));
             }
             return;
         }
