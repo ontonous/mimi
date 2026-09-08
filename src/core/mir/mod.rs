@@ -341,8 +341,8 @@ pub use option_nested_tuple_island::{
     NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND,
 };
 pub use receipt::{
-    CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_SCHEMA,
-    MIR_ROUTE_VALIDATOR_CONTRACT_ID,
+    CanonicalMirRouteReceipt, MIR_IDENTITY_SCHEMA, MIR_ROUTE_RECEIPT_MANIFEST_FIELDS,
+    MIR_ROUTE_RECEIPT_MANIFEST_HEADER, MIR_ROUTE_RECEIPT_SCHEMA, MIR_ROUTE_VALIDATOR_CONTRACT_ID,
 };
 pub use route::{
     classify_canonical_mir_route_admission, materialize_canonical_mir_route,

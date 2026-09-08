@@ -111,7 +111,14 @@ fn checked_route_receipt(path: &Path) -> mimi::core::mir::CanonicalMirRouteRecei
     };
     mimi::loader::merge_prelude_into(&mut file);
     let checked = mimi::core::check_program(&file).expect("route matrix fixture must typecheck");
-    let route = mimi::core::mir::materialize_canonical_mir_route(&checked, None)
+    let excluded_sources = file
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let route = mimi::core::mir::materialize_canonical_mir_route(&checked, Some(&excluded_sources))
         .expect("route matrix fixture must materialize canonical MIR");
     route.program.route_receipt("cli-mir-v1")
 }
@@ -1212,6 +1219,95 @@ fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_route
         manifests[1].get("ffi_digest"),
         "different declaration/call graphs must never collapse to one FFI digest"
     );
+}
+
+#[test]
+fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_deterministic() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-import-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create import graph fixture directory");
+    let helper = dir.join("helper.mimi");
+    fs::write(&helper, "pub func imported_value() -> i32 { 41 }\n").expect("write imported helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use helper;\nfunc main() -> i32 { imported_value() }\n",
+    )
+    .expect("write import graph entry");
+
+    let run = |include_imports: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--receipt");
+        if include_imports {
+            command.arg("--all");
+        }
+        command.output().expect("spawn import graph MIR receipt")
+    };
+
+    let source_only = run(false);
+    assert!(!source_only.status.success());
+    let source_only_stderr = String::from_utf8_lossy(&source_only.stderr);
+    assert!(
+        source_only_stderr.contains("MIR inspection input rejected"),
+        "source-only import graph rejection lost its diagnostic: {source_only_stderr}"
+    );
+    assert!(!source_only_stderr.contains("canonical route disposition: legacy"));
+
+    let checked = checked_route_receipt(&main);
+    let first = run(true);
+    let second = run(true);
+    assert!(
+        first.status.success(),
+        "import graph receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "import graph receipt must be deterministic"
+    );
+    let manifest = parse_route_receipt_manifest(&first.stdout);
+    assert_eq!(
+        manifest.get("schema").map(String::as_str),
+        Some(checked.schema)
+    );
+    assert_eq!(
+        manifest.get("profile").map(String::as_str),
+        Some("cli-mir-v1")
+    );
+    assert_eq!(manifest.get("mir_digest"), Some(&checked.mir_digest));
+    assert_eq!(
+        manifest.get("type_desc_digest"),
+        Some(&checked.type_desc_digest)
+    );
+    assert_eq!(manifest.get("abi_digest"), Some(&checked.abi_digest));
+    assert_eq!(manifest.get("ffi_digest"), Some(&checked.ffi_digest));
+    assert_eq!(
+        manifest.get("ownership_digest"),
+        Some(&checked.ownership_digest)
+    );
+    assert_eq!(
+        manifest.get("flow_transition_digest"),
+        Some(&checked.flow_transition_digest)
+    );
+    let root_owners = manifest.get("root_owners").expect("root owners field");
+    assert!(root_owners.contains("function:main"));
+    assert!(root_owners.contains("function:imported_value"));
+    assert_eq!(
+        manifest.len(),
+        mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+    );
+    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

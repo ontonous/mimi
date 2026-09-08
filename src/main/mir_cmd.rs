@@ -91,7 +91,8 @@ pub(crate) fn mir(
     .map_err(|error| format!("MIR inspection input rejected: {error}"))?;
 
     if receipt {
-        print!("{}", route_receipt_manifest(&program));
+        let manifest = route_receipt_manifest(&program)?;
+        print!("{manifest}");
     } else {
         print!("{}", program.type_catalog().canonical_text());
         for transition in program.transitions().values() {
@@ -114,9 +115,15 @@ pub(crate) fn mir(
 /// The manifest deliberately contains only checker/MIR-owned identities. It
 /// is suitable for matrix snapshots and remains independent of backend output
 /// or source paths.
-fn route_receipt_manifest(program: &mimi::core::mir::reference::MirProgram) -> String {
+fn route_receipt_manifest(
+    program: &mimi::core::mir::reference::MirProgram,
+) -> Result<String, String> {
     let receipt = program.route_receipt("cli-mir-v1");
-    let mut text = String::from("mimi-mir-route-manifest-v1\n");
+    receipt
+        .validate()
+        .map_err(|error| format!("invalid MIR route receipt: {error}"))?;
+    let mut text = String::from(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER);
+    text.push('\n');
     writeln!(text, "schema={}", receipt.schema).expect("String write");
     writeln!(text, "profile={}", receipt.profile).expect("String write");
     writeln!(text, "mir_digest={}", receipt.mir_digest).expect("String write");
@@ -138,5 +145,5 @@ fn route_receipt_manifest(program: &mimi::core::mir::reference::MirProgram) -> S
         text.push_str(owner.0.as_str());
     }
     text.push('\n');
-    text
+    Ok(text)
 }

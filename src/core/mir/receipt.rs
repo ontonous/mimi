@@ -15,6 +15,24 @@ use crate::core::NodeId;
 /// Schema version for the cross-consumer route receipt.
 pub const MIR_ROUTE_RECEIPT_SCHEMA: &str = "mimi-mir-route-receipt-v1";
 
+/// Stable header for the line-oriented CLI evidence manifest.
+pub const MIR_ROUTE_RECEIPT_MANIFEST_HEADER: &str = "mimi-mir-route-manifest-v1";
+
+/// Ordered field names emitted by the CLI evidence manifest. Keeping the
+/// field set beside the receipt lets consumers detect schema drift without
+/// reverse-engineering the renderer.
+pub const MIR_ROUTE_RECEIPT_MANIFEST_FIELDS: [&str; 9] = [
+    "schema",
+    "profile",
+    "mir_digest",
+    "type_desc_digest",
+    "abi_digest",
+    "ffi_digest",
+    "ownership_digest",
+    "flow_transition_digest",
+    "root_owners",
+];
+
 /// Schema prefix for the semantic MIR identity digest.
 pub const MIR_IDENTITY_SCHEMA: &str = "mimi-canonical-mir-identity-v1";
 
@@ -73,6 +91,64 @@ impl MirProgram {
             flow_transition_digest: digest(canonical_transition_text(self)),
             root_owners: canonical_root_owners(self),
         }
+    }
+}
+
+impl CanonicalMirRouteReceipt {
+    /// Validate the invariants required before a receipt is rendered as an
+    /// evidence manifest. This remains a pure receipt check: it does not
+    /// inspect source AST, infer types, or consult a backend.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != MIR_ROUTE_RECEIPT_SCHEMA {
+            return Err(format!(
+                "unexpected route receipt schema '{}', expected '{}'",
+                self.schema, MIR_ROUTE_RECEIPT_SCHEMA
+            ));
+        }
+        if self.profile.trim().is_empty()
+            || self
+                .profile
+                .chars()
+                .any(|character| character.is_control() || character == '=')
+        {
+            return Err("route receipt profile is empty or not manifest-safe".into());
+        }
+        for (name, value) in [
+            ("mir_digest", self.mir_digest.as_str()),
+            ("type_desc_digest", self.type_desc_digest.as_str()),
+            ("abi_digest", self.abi_digest.as_str()),
+            ("ffi_digest", self.ffi_digest.as_str()),
+            ("ownership_digest", self.ownership_digest.as_str()),
+            (
+                "flow_transition_digest",
+                self.flow_transition_digest.as_str(),
+            ),
+        ] {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "route receipt {name} must be a 64-character lowercase hex digest"
+                ));
+            }
+        }
+        if self
+            .root_owners
+            .iter()
+            .any(|owner| owner.0.is_empty() || owner.0.chars().any(char::is_control))
+        {
+            return Err("route receipt root owner is empty or not manifest-safe".into());
+        }
+        if self
+            .root_owners
+            .windows(2)
+            .any(|owners| owners[0] >= owners[1])
+        {
+            return Err("route receipt root owners must be strictly sorted".into());
+        }
+        Ok(())
     }
 }
 
@@ -217,4 +293,49 @@ fn canonical_root_owners(program: &MirProgram) -> Vec<NodeId> {
 
 fn digest(text: String) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_receipt() -> CanonicalMirRouteReceipt {
+        let digest = "a".repeat(64);
+        CanonicalMirRouteReceipt {
+            schema: MIR_ROUTE_RECEIPT_SCHEMA,
+            profile: "test-v1".into(),
+            mir_digest: digest.clone(),
+            type_desc_digest: digest.clone(),
+            abi_digest: digest.clone(),
+            ffi_digest: digest.clone(),
+            ownership_digest: digest.clone(),
+            flow_transition_digest: digest,
+            root_owners: vec![NodeId("function:main".into()), NodeId("function:z".into())],
+        }
+    }
+
+    #[test]
+    fn route_receipt_validation_accepts_canonical_shape() {
+        assert!(valid_receipt().validate().is_ok());
+        assert_eq!(MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len(), 9);
+    }
+
+    #[test]
+    fn route_receipt_validation_rejects_schema_digest_profile_and_owner_drift() {
+        let mut receipt = valid_receipt();
+        receipt.schema = "future-schema";
+        assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.mir_digest = "A".repeat(64);
+        assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.profile = "bad=profile".into();
+        assert!(receipt.validate().is_err());
+
+        let mut receipt = valid_receipt();
+        receipt.root_owners.reverse();
+        assert!(receipt.validate().is_err());
+    }
 }
