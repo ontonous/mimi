@@ -51,30 +51,39 @@ for owner in \
     case "$owner" in
         CodegenLegacyRemainder)
             dependency_class='legacy-codegen-remainder'
+            deletion_blocker='all legacy body classes and compile_func_legacy production callers must be removed'
             condition='delete after every legacy body class is lowered to MIR and compile_func_legacy has zero production callers'
             ;;
         FlowVerifierCompatibility)
             dependency_class='flow-body-compatibility'
+            deletion_blocker='non-closed Flow shapes still require the AST/Z3 compatibility encoder'
             condition='delete after the Flow verifier consumes canonical MIR contracts for every non-closed Flow shape'
             ;;
         FfiVerifierCompatibility)
             dependency_class='ffi-declaration-compatibility'
+            deletion_blocker='unmigrated FFI declaration semantics still require the compatibility encoder'
             condition='delete after string/aggregate/variadic/errno/mode/ensures FFI declarations have complete MIR receipts and proofs'
             ;;
         DualVerifierCompatibility)
             dependency_class='secondary-flow-vir-compatibility'
+            deletion_blocker='the secondary Flow/VIR engine is not MIR-native for every compatibility profile'
             condition='delete after the secondary Flow/VIR engine is retired or is MIR-native for every compatibility profile'
             ;;
     esac
     if [ "$count" -eq 0 ]; then
-        deletion_ready=1
         owner_status='unreachable'
+        accessor_blocker='owner accessor is unreachable'
     else
-        deletion_ready=0
         owner_status='retained'
+        accessor_blocker='owner accessor remains reachable'
     fi
-    printf 'owner=%s status=%s dependency_class=%s owner_deletion_ready=%s\n' \
-        "$owner" "$owner_status" "$dependency_class" "$deletion_ready"
+    # Accessor reachability is only one deletion prerequisite. Keep the
+    # readiness gate conservative until a migration explicitly proves the
+    # owner-specific condition above; a zero accessor count alone must never
+    # be reported as permission to delete the owner.
+    deletion_ready=0
+    printf 'owner=%s status=%s dependency_class=%s owner_deletion_ready=%s owner_deletion_blocker=%s; %s\n' \
+        "$owner" "$owner_status" "$dependency_class" "$deletion_ready" "$accessor_blocker" "$deletion_blocker"
     printf 'owner_deletion_condition=%s\n' "$condition"
 done
 
