@@ -344,6 +344,118 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_ensures_runs_after_void_call_across_three_consumers() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_store(x: i32) ensures: true;
+    func mir_ffi_read() -> i64;
+}
+func main() -> i64 {
+    mir_ffi_store(4)
+    println(mir_ffi_read())
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex unit-return FFI ensures fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse unit-return FFI ensures fixture");
+    let checked = crate::core::check_program(&file).expect("check unit-return FFI ensures fixture");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize unit-return FFI");
+    let store_receipt = mir
+        .ffi_calls()
+        .values()
+        .find(|receipt| receipt.symbol == "mir_ffi_store")
+        .expect("unit-return FFI receipt");
+    assert!(
+        store_receipt.result.is_some(),
+        "MIR retains a stable unit result identity for every call expression"
+    );
+    assert_eq!(
+        store_receipt
+            .ensures
+            .as_ref()
+            .map(|value| value.canonical_text()),
+        Some("true".to_owned())
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-unit-ensures".into())
+        .expect("MIR unit-return FFI ensures verifier");
+    assert_eq!(
+        results.len(),
+        1,
+        "unit FFI has one postcondition obligation"
+    );
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+    assert!(results[0]
+        .message
+        .contains("extern ensures contract proven"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference unit-return FFI ensures execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "4\n");
+    assert_eq!(oracle.0.get(), 4);
+
+    let bytecode = compile_mir_program(&mir).expect("unit-return FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let store_descriptor = bytecode
+        .canonical_ffi
+        .iter()
+        .find(|descriptor| descriptor.symbol == "mir_ffi_store")
+        .expect("unit-return FFI bytecode descriptor");
+    assert_eq!(
+        store_descriptor.result,
+        crate::interp::bytecode::CanonicalFfiScalarType::Unit
+    );
+    assert!(store_descriptor.result_id.is_some());
+    assert!(store_descriptor.ensures.is_some());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("bytecode unit-return FFI ensures"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "4\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_unit_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native unit-return FFI ensures");
+    generator
+        .module
+        .verify()
+        .expect("valid native unit-return FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native unit-return FFI ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "4\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
