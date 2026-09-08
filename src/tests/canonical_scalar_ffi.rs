@@ -839,6 +839,192 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_ensures_checked_arithmetic_overflow_parity() {
+    struct CountingOracle(Cell<u32>);
+    impl MirReferenceFfiResolver for CountingOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_i64" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("arithmetic oracle expects one i64".into());
+            };
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Int(*value))
+        }
+    }
+
+    let _guard = super::FfiEnvLock::lock();
+    for (label, contract, argument, expected_status, expected_message, expected_code, output) in [
+        (
+            "add-overflow",
+            "result + 1 > result",
+            "9223372036854775807 as i64",
+            crate::verifier::VerifStatus::Disproven,
+            "overflow in FFI postcondition",
+            Some("E0802"),
+            "",
+        ),
+        (
+            "subtract-overflow",
+            "result - 1 < result",
+            "(-9223372036854775807 as i64) - (1 as i64)",
+            crate::verifier::VerifStatus::Disproven,
+            "overflow in FFI postcondition",
+            Some("E0802"),
+            "",
+        ),
+        (
+            "multiply-overflow",
+            "result * 2 > result",
+            "9223372036854775807 as i64",
+            crate::verifier::VerifStatus::Disproven,
+            "overflow in FFI postcondition",
+            Some("E0802"),
+            "",
+        ),
+        (
+            "divide-overflow",
+            "result / -1 == 9223372036854775807",
+            "(-9223372036854775807 as i64) - (1 as i64)",
+            crate::verifier::VerifStatus::Disproven,
+            "overflow in FFI postcondition",
+            Some("E0802"),
+            "",
+        ),
+        (
+            "short-circuit-overflow",
+            "x == 0 or result + 1 > result",
+            "0 as i64",
+            crate::verifier::VerifStatus::Proven,
+            "",
+            None,
+            "0\n",
+        ),
+    ] {
+        let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fixture = library_fixture(counter, C_SOURCE);
+        let library = fixture.dir.join("ffi.so");
+        std::env::set_var("MIMI_FFI_LIB", &library);
+        let source = format!(
+            r#"
+extern "C" {{
+    func mir_ffi_i64(x: i64) -> i64 ensures: {contract};
+}}
+func main() -> i64 {{
+    println(mir_ffi_i64({argument}));
+    0
+}}
+"#
+        );
+        let tokens = crate::lexer::Lexer::new(&source)
+            .tokenize()
+            .unwrap_or_else(|error| panic!("{label}: lex failed: {error}"));
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .unwrap_or_else(|error| panic!("{label}: parse failed: {error}"));
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|error| panic!("{label}: check failed: {error:?}"));
+        let mir = MirProgram::from_checked_program(&checked)
+            .unwrap_or_else(|error| panic!("{label}: materialization failed: {error:?}"));
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = crate::verifier::verify_mir(&mir, label.into())
+            .unwrap_or_else(|error| panic!("{label}: verifier failed: {error}"));
+        assert_eq!(results.len(), 1, "{label}: one postcondition result");
+        assert_eq!(results[0].status, expected_status, "{label}: {results:?}");
+        assert!(
+            results[0].message.contains("extern ensures contract"),
+            "{label}: {results:?}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for results in [
+            crate::verifier::verify_checked(&checked, label.into()),
+            crate::verifier::verify_checked_dual(&checked, label.into()),
+            crate::verifier::verify_ffi_checked(&checked),
+        ] {
+            let results =
+                results.unwrap_or_else(|error| panic!("{label}: public verifier: {error}"));
+            assert_eq!(results.len(), 1, "{label}: public verifier result");
+            assert_eq!(results[0].status, expected_status, "{label}: {results:?}");
+        }
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+        let oracle = CountingOracle(Cell::new(0));
+        let reference = MirReferenceInterpreter::new(&mir)
+            .with_ffi_resolver(&oracle)
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[]);
+        assert_eq!(oracle.0.get(), 1, "{label}: foreign call must happen once");
+        if expected_code.is_some() {
+            let error = reference.unwrap_err();
+            assert!(error.message.contains(expected_message), "{label}: {error}");
+        } else {
+            let value = reference.unwrap_or_else(|error| panic!("{label}: reference: {error}"));
+            assert_eq!(value.value, MirRuntimeValue::Int(0));
+            assert_eq!(value.output, output);
+        }
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&mir)
+                .unwrap_or_else(|error| panic!("{label}: bytecode: {error:?}")),
+        );
+        let vm_result = vm.run_value();
+        if let Some(code) = expected_code {
+            let error = vm_result.unwrap_err();
+            assert_eq!(error.code(), code, "{label}: {error}");
+            assert!(
+                error.to_string().contains(expected_message),
+                "{label}: {error}"
+            );
+            assert_eq!(vm.stdout(), "", "{label}: trap must precede println");
+        } else {
+            assert!(
+                matches!(vm_result, Ok(Value::Int(0))),
+                "{label}: {vm_result:?}"
+            );
+            assert_eq!(vm.stdout(), output);
+        }
+
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_arithmetic");
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("{label}: native compile: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("{label}: native verify: {error}"));
+        let config = super::E2EConfig {
+            extra_c_src: Some(C_SOURCE.into()),
+            ..Default::default()
+        };
+        let native = super::link_and_observe_module(
+            &generator,
+            &config,
+            super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+        .unwrap_or_else(|error| panic!("{label}: native execution: {error}"));
+        if let Some(code) = expected_code {
+            assert_ne!(native.exit_code, Some(0), "{label}: native must trap");
+            assert!(native.stderr.contains(code), "{label}: {}", native.stderr);
+            assert_eq!(
+                native.stdout, "",
+                "{label}: native trap must precede println"
+            );
+        } else {
+            assert_eq!(native.exit_code, Some(0), "{label}: {}", native.stderr);
+            assert_eq!(native.stdout, output);
+            assert_eq!(native.stderr, "");
+        }
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
