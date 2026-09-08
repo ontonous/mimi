@@ -117,7 +117,13 @@ fn canonical_mir_text(program: &MirProgram) -> String {
         }
         text.push_str(" parameter_conversions=");
         for conversion in &contract.parameter_conversions {
-            write!(text, "{:?}->{:?};", conversion.from, conversion.to).expect("String write");
+            write!(
+                text,
+                "{}->{};",
+                conversion.from.canonical_text(),
+                conversion.to.canonical_text()
+            )
+            .expect("String write");
         }
         text.push_str(" result=");
         text.push_str(
@@ -131,7 +137,13 @@ fn canonical_mir_text(program: &MirProgram) -> String {
         text.push_str(contract.result_type.as_str());
         text.push_str(" result_conversion=");
         if let Some(conversion) = contract.result_conversion {
-            write!(text, "{:?}->{:?}", conversion.from, conversion.to).expect("String write");
+            write!(
+                text,
+                "{}->{}",
+                conversion.from.canonical_text(),
+                conversion.to.canonical_text()
+            )
+            .expect("String write");
         } else {
             text.push_str("none");
         }

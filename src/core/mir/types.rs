@@ -121,6 +121,28 @@ pub enum MirAbiClass {
     FunctionPointer,
 }
 
+impl MirAbiClass {
+    /// Stable, backend-independent spelling used by canonical receipts and
+    /// identity digests. This must not depend on Rust's `Debug` formatting.
+    pub fn canonical_text(self) -> String {
+        match self {
+            Self::Unit => "unit".into(),
+            Self::Integer { bits, signed } => {
+                format!("{}{bits}", if signed { "i" } else { "u" })
+            }
+            Self::Float { bits } => format!("f{bits}"),
+            Self::Bool => "bool".into(),
+            Self::Char => "char".into(),
+            Self::StringHandle => "string_handle".into(),
+            Self::SetHandle => "set_handle".into(),
+            Self::OpaqueHandle => "opaque_handle".into(),
+            Self::Pointer => "pointer".into(),
+            Self::Aggregate => "aggregate".into(),
+            Self::FunctionPointer => "function_pointer".into(),
+        }
+    }
+}
+
 /// Semantic builtin operations that have a first-class canonical MIR node.
 /// The enum is intentionally closed: a surface builtin remains a legacy
 /// `Call` until its ABI, effect, trap, and ownership contract is materialized.
@@ -11811,6 +11833,32 @@ mod tests {
             .expect("catalog")
             .canonical_text();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn abi_class_canonical_text_is_explicit_and_debug_independent() {
+        assert_eq!(MirAbiClass::Unit.canonical_text(), "unit");
+        assert_eq!(
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            }
+            .canonical_text(),
+            "i32"
+        );
+        assert_eq!(
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: false
+            }
+            .canonical_text(),
+            "u64"
+        );
+        assert_eq!(MirAbiClass::Float { bits: 64 }.canonical_text(), "f64");
+        assert_eq!(
+            MirAbiClass::FunctionPointer.canonical_text(),
+            "function_pointer"
+        );
     }
 
     #[test]
