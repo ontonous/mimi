@@ -761,3 +761,90 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
         );
     }
 }
+
+#[test]
+fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
+    const CASES: &[(&str, &str, usize)] = &[
+        (
+            "self-recursion",
+            r#"extern "C" { func foreign(x: i64) -> i64 requires: x >= 0; }
+            func recurse(x: i64) -> i64 {
+                if x > (0 as i64) {
+                    recurse(x - (1 as i64))
+                } else {
+                    foreign(0 as i64)
+                }
+            }
+            func main() -> i64 { recurse(1 as i64) }"#,
+            1,
+        ),
+        (
+            "mutual-recursion",
+            r#"extern "C" { func foreign(x: i64) -> i64 requires: x >= 0; }
+            func alpha(x: i64) -> i64 {
+                if x > (0 as i64) {
+                    beta(x - (1 as i64))
+                } else {
+                    foreign(0 as i64)
+                }
+            }
+            func beta(x: i64) -> i64 {
+                if x > (0 as i64) {
+                    alpha(x - (1 as i64))
+                } else {
+                    foreign(0 as i64)
+                }
+            }
+            func main() -> i64 { alpha(1 as i64) }"#,
+            2,
+        ),
+    ];
+
+    for (label, source, expected_ffi_calls) in CASES {
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .unwrap_or_else(|error| panic!("{label} check: {error:?}"));
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(
+            admission.scalar_ffi,
+            "{label} must cross scalar FFI admission"
+        );
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .unwrap_or_else(|error| panic!("{label} materialization: {error}"));
+        assert!(
+            crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+            "{label} must carry a canonical FFI receipt"
+        );
+        assert_eq!(
+            route.program.ffi_calls().len(),
+            *expected_ffi_calls,
+            "{label}"
+        );
+
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let error = crate::verifier::verify_checked(&checked, format!("{label}-single"))
+            .expect_err("recursive scalar helper must fail the canonical verifier");
+        assert!(error.contains("recursive"), "{label}: {error}");
+        let error = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
+            .expect_err("recursive scalar helper must fail the dual verifier");
+        assert!(error.contains("recursive"), "{label}: {error}");
+        let error = crate::verifier::verify_ffi_checked(&checked)
+            .expect_err("recursive scalar helper must fail the FFI verifier");
+        assert!(error.contains("recursive"), "{label}: {error}");
+
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "recursive_ffi");
+        let diagnostics = generator
+            .compile_checked(&checked)
+            .expect_err("direct native route must reject recursive MIR");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("recursive")),
+            "{label}: {diagnostics:?}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{label} touched a compatibility owner"
+        );
+    }
+}
