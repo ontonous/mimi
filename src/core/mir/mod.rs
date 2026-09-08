@@ -1243,6 +1243,103 @@ impl MirFfiAbiConversion {
     }
 }
 
+/// Validate the checker-owned identity and ABI receipt for one direct extern
+/// call.  This is deliberately independent of any backend representation so
+/// native, verifier, and capability consumers cannot accept a forged
+/// conversion or declaration shape that the reference/bytecode adapters
+/// would reject.  Symbol spelling is checked separately by each consumer so
+/// its manifest-facing diagnostic remains stable.
+pub(crate) fn validate_ffi_call_contract_receipt(
+    type_catalog: &types::MirTypeCatalog,
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    callee: &NodeId,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+    contract: &MirFfiCallContract,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if contract.caller != function.owner
+        || contract.instruction != *instruction
+        || contract.callee != *callee
+        || contract.result.as_ref() != result
+    {
+        errors.push("extern call FFI contract identity disagrees with MIR call".into());
+    }
+    if contract.abi != "C" {
+        errors.push(format!(
+            "extern call FFI contract ABI '{}' is outside the canonical C ABI",
+            contract.abi
+        ));
+    }
+    if contract.arguments != arguments {
+        errors.push("extern call FFI contract arguments disagree with MIR call".into());
+    }
+    if contract.parameter_types.len() != arguments.len() {
+        errors.push(
+            "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments"
+                .into(),
+        );
+    }
+    if contract.parameter_conversions.len() != arguments.len() {
+        errors.push(
+            "extern call FFI parameter ABI conversion receipt count disagrees with MIR arguments"
+                .into(),
+        );
+    }
+    for (index, (argument, declared_type)) in
+        arguments.iter().zip(&contract.parameter_types).enumerate()
+    {
+        let Some(argument_value) = function.values.get(argument) else {
+            errors.push(format!(
+                "extern call FFI argument {index} '{}' is absent from MIR values",
+                argument
+            ));
+            continue;
+        };
+        if !reference::ffi_type_compatible(type_catalog, &argument_value.ty, declared_type) {
+            errors.push(format!(
+                "extern call FFI declaration parameter {index} TypeDesc disagrees with MIR argument"
+            ));
+        }
+        if let Some(receipt_conversion) = contract.parameter_conversions.get(index) {
+            let expected =
+                MirFfiAbiConversion::for_argument(type_catalog, &argument_value.ty, declared_type);
+            if expected.as_ref() != Some(receipt_conversion) {
+                errors.push(format!(
+                    "extern call FFI parameter {index} ABI conversion receipt disagrees with MIR value"
+                ));
+            }
+        }
+    }
+    if let Some(result_value) = result {
+        let Some(value) = function.values.get(result_value) else {
+            errors.push(format!(
+                "extern call FFI result '{}' is absent from MIR values",
+                result_value
+            ));
+            return errors;
+        };
+        if !reference::ffi_type_compatible(type_catalog, &value.ty, &contract.result_type) {
+            errors.push(
+                "extern call FFI declaration result TypeDesc disagrees with MIR result".into(),
+            );
+        }
+        let expected =
+            MirFfiAbiConversion::for_result(type_catalog, &value.ty, &contract.result_type);
+        if contract.result_conversion.as_ref() != expected.as_ref() {
+            errors.push(
+                "extern call FFI result ABI conversion receipt disagrees with MIR result".into(),
+            );
+        }
+    } else if contract.result_conversion.is_some() {
+        errors.push(
+            "extern call FFI result ABI conversion receipt is present for a unit call".into(),
+        );
+    }
+    errors
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirTerminator {
     Goto {

@@ -2555,6 +2555,17 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
+        for message in crate::core::mir::validate_ffi_call_contract_receipt(
+            self.program.type_catalog(),
+            function,
+            &instruction,
+            callee_owner,
+            result,
+            arguments,
+            receipt,
+        ) {
+            self.errors.push(NativeMirError::new(subject, message));
+        }
         if receipt.callee != *callee_owner || receipt.result.as_ref() != result {
             self.errors.push(NativeMirError::new(
                 subject,

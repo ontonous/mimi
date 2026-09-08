@@ -292,6 +292,44 @@ pub(crate) fn verify_ffi_program(
             contract.symbol
         ));
     }
+    for function in program.functions().values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let crate::core::mir::MirInstructionKind::Call {
+                    result,
+                    callee: crate::core::ir::ResolvedCallee::Extern(callee),
+                    arguments,
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let contract = program.ffi_calls().get(&instruction.id).ok_or_else(|| {
+                    format!(
+                        "MIR verifier extern call '{}' has no canonical FFI contract",
+                        instruction.id
+                    )
+                })?;
+                if let Some(message) = crate::core::mir::validate_ffi_call_contract_receipt(
+                    program.type_catalog(),
+                    function,
+                    &instruction.id,
+                    callee,
+                    result.as_ref(),
+                    arguments,
+                    contract,
+                )
+                .into_iter()
+                .next()
+                {
+                    return Err(format!(
+                        "MIR verifier extern call '{}' {message}",
+                        instruction.id
+                    ));
+                }
+            }
+        }
+    }
     if !program
         .ffi_calls()
         .values()

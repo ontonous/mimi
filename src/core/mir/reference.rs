@@ -12096,6 +12096,46 @@ func main() -> i64 { foreign(1 as i64); 0 }
     }
 
     #[test]
+    fn forged_ffi_abi_is_rejected_by_every_direct_consumer() {
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let mut receipts = program.ffi_calls().clone();
+        receipts.values_mut().next().expect("FFI receipt").abi = "Rust".into();
+        let mut forged = program;
+        forged.replace_ffi_calls_for_test_only(receipts);
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("reference must reject a forged non-C ABI");
+        assert!(reference_error
+            .to_string()
+            .contains("FFI receipt disagrees with the MIR call"));
+
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+            .expect_err("bytecode must reject a forged non-C ABI");
+        assert!(bytecode_error
+            .iter()
+            .any(|error| error.message.contains("identity/ABI validation")));
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native validator must reject a forged non-C ABI");
+        assert!(native_error
+            .iter()
+            .any(|error| error.message.contains("FFI ABI 'Rust'")));
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("verifier capability gate must reject a forged non-C ABI");
+        assert!(capability_error
+            .iter()
+            .any(|error| error.contains("outside the canonical C ABI")));
+
+        let verifier_error = crate::verifier::verify_mir(&forged, "forged-abi".into())
+            .expect_err("direct verifier must reject a forged non-C ABI without obligations");
+        assert!(verifier_error.contains("ABI 'Rust' is outside the canonical C ABI"));
+    }
+
+    #[test]
     fn canonical_program_gate_rejects_orphaned_ffi_receipts() {
         let source =
             "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }";

@@ -1650,6 +1650,17 @@ impl<'a> CapabilityGate<'a> {
                 ));
                 return;
             };
+            for message in crate::core::mir::validate_ffi_call_contract_receipt(
+                self.program.type_catalog(),
+                function,
+                instruction_id,
+                owner,
+                result,
+                arguments,
+                contract,
+            ) {
+                self.error(format!("{subject} {message}"));
+            }
             if contract.caller != function.owner || contract.callee != *owner {
                 self.error(format!(
                     "{subject} extern FFI contract identity disagrees with MIR call"
