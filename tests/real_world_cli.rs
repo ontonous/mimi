@@ -403,77 +403,85 @@ fn canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contrac
         }
         let path = dir.join("abi.mimi");
         fs::write(&path, source).unwrap();
-        let run = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .arg("run")
-            .arg(&path)
-            .env("MIMI_VERBOSE", "1")
-            .env("MIMI_FFI_LIB", &library)
-            .output()
-            .unwrap();
-        assert!(
-            run.status.success(),
-            "{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        assert_eq!(
-            run.stdout,
-            b"-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n"
-        );
-        let run_stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(!run_stderr.contains("canonical route disposition: legacy"));
-        assert!(!run_stderr.contains("FFI contract verification is disabled"));
-        // The CLI does not accept an extra native library link argument.
-        // Exercise its production emitter here; direct native linking against
-        // this same C fixture is checked in canonical_scalar_ffi.rs.
-        let build = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .args(["build", "--emit-ir"])
-            .arg(&path)
-            .env("MIMI_VERBOSE", "1")
-            .output()
-            .unwrap();
-        assert!(
-            build.status.success(),
-            "{}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        let ir = String::from_utf8_lossy(&build.stdout);
-        for symbol in [
-            "mir_ffi_i32",
-            "mir_ffi_i64",
-            "mir_ffi_bool",
-            "mir_ffi_f64",
-            "mir_ffi_store",
-        ] {
-            assert!(ir.contains(symbol), "missing emitted ABI {symbol}");
-        }
-        assert!(
-            !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy")
-        );
-        let verify = Command::new(mimi_bin())
-            .current_dir(project_root())
-            .arg("verify")
-            .arg(&path)
-            .env("MIMI_VERBOSE", "1")
-            .output()
-            .unwrap();
-        assert!(
-            verify.status.success(),
-            "{}",
-            String::from_utf8_lossy(&verify.stderr)
-        );
-        let output = String::from_utf8_lossy(&verify.stdout);
-        if contracts {
+        for explicit_mir in [false, true] {
+            let mut run = Command::new(mimi_bin());
+            run.current_dir(project_root()).arg("run");
+            if explicit_mir {
+                run.arg("--mir");
+            }
+            let run = run
+                .arg(&path)
+                .env("MIMI_VERBOSE", "1")
+                .env("MIMI_FFI_LIB", &library)
+                .output()
+                .unwrap();
             assert!(
-                output.contains("canonical MIR extern requires contract proven"),
-                "{output}"
+                run.status.success(),
+                "contracts={contracts} explicit_mir={explicit_mir}: {}",
+                String::from_utf8_lossy(&run.stderr)
             );
-        } else {
-            assert!(output.contains("No contracts to verify"), "{output}");
+            assert_eq!(
+                run.stdout, b"-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n42\n",
+                "contracts={contracts} explicit_mir={explicit_mir}"
+            );
+            let run_stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(!run_stderr.contains("canonical route disposition: legacy"));
+            assert!(!run_stderr.contains("FFI contract verification is disabled"));
+
+            // The CLI does not accept an extra native library link argument.
+            // Exercise its production emitter here; direct native linking against
+            // this same C fixture is checked in canonical_scalar_ffi.rs.
+            let mut build = Command::new(mimi_bin());
+            build.current_dir(project_root()).arg("build");
+            if explicit_mir {
+                build.arg("--mir");
+            }
+            let build = build
+                .arg("--emit-ir")
+                .arg(&path)
+                .env("MIMI_VERBOSE", "1")
+                .output()
+                .unwrap();
+            assert!(
+                build.status.success(),
+                "contracts={contracts} explicit_mir={explicit_mir}: {}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let ir = String::from_utf8_lossy(&build.stdout);
+            for symbol in [
+                "mir_ffi_i32",
+                "mir_ffi_i64",
+                "mir_ffi_bool",
+                "mir_ffi_f64",
+                "mir_ffi_store",
+            ] {
+                assert!(ir.contains(symbol), "missing emitted ABI {symbol}");
+            }
+            assert!(!String::from_utf8_lossy(&build.stderr)
+                .contains("canonical route disposition: legacy"));
+            let mut verify = Command::new(mimi_bin());
+            verify.current_dir(project_root()).arg("verify");
+            if explicit_mir {
+                verify.arg("--mir");
+            }
+            let verify = verify.arg(&path).env("MIMI_VERBOSE", "1").output().unwrap();
+            assert!(
+                verify.status.success(),
+                "contracts={contracts} explicit_mir={explicit_mir}: {}",
+                String::from_utf8_lossy(&verify.stderr)
+            );
+            let output = String::from_utf8_lossy(&verify.stdout);
+            if contracts {
+                assert!(
+                    output.contains("canonical MIR extern requires contract proven"),
+                    "{output}"
+                );
+            } else {
+                assert!(output.contains("No contracts to verify"), "{output}");
+            }
+            assert!(!String::from_utf8_lossy(&verify.stderr)
+                .contains("canonical route disposition: legacy"));
         }
-        assert!(!String::from_utf8_lossy(&verify.stderr)
-            .contains("canonical route disposition: legacy"));
     }
     fs::remove_dir_all(dir).ok();
 }
