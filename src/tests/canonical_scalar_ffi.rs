@@ -1714,6 +1714,121 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
+    struct SharedWidthOracle;
+    impl MirReferenceFfiResolver for SharedWidthOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_shared_width" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("shared-width oracle expects one integer".into());
+            };
+            Ok(MirRuntimeValue::Int(*value))
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_shared_width(int64_t value) { return value; }
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func mir_ffi_shared_width(value: i64) -> i64;
+}
+func main() -> i64 {
+    let narrow = mir_ffi_shared_width(7 as i32);
+    let wide = mir_ffi_shared_width(8 as i64);
+    println(narrow);
+    println(wide);
+    0
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed call-site width FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("one declaration may serve mixed-width call sites");
+    let receipts = mir
+        .ffi_calls()
+        .values()
+        .filter(|receipt| receipt.symbol == "mir_ffi_shared_width")
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert!(matches!(
+        receipts[0].parameter_conversions.as_slice(),
+        [crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            }
+        }]
+    ));
+    assert!(matches!(
+        receipts[1].parameter_conversions.as_slice(),
+        [crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            }
+        }]
+    ));
+
+    let owner = crate::core::NodeId("function:main".into());
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&SharedWidthOracle)
+        .execute_with_output(&owner, &[])
+        .expect("mixed call-site width reference execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "7\n8\n");
+
+    let bytecode = compile_mir_program(&mir).expect("mixed call-site width bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("mixed call-site width VM"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "7\n8\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "shared_width_ffi");
+    generator
+        .compile_mir_native(&mir)
+        .expect("mixed call-site width native compile");
+    generator
+        .module
+        .verify()
+        .expect("mixed call-site width native verify");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(&generator, &config, counter)
+        .expect("mixed call-site width native execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "7\n8\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {

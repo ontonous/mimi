@@ -2393,24 +2393,22 @@ fn validate_call_graph(
                             message: "extern call FFI result ABI conversion receipt presence disagrees with MIR result".into(),
                         });
                     }
-                    let argument_types = arguments
-                        .iter()
-                        .filter_map(|argument| {
-                            function.values.get(argument).map(|value| value.ty.clone())
-                        })
-                        .collect::<Vec<_>>();
+                    // A C symbol has one declaration ABI. Call-site MIR
+                    // values may legitimately vary within the checker-owned
+                    // numeric conversion receipt (for example i32→i64), so
+                    // merge declarations by the canonical declaration
+                    // TypeDescs rather than by the physical value identities
+                    // at each call site.
                     let shape = (
-                        argument_types,
-                        result.as_ref().and_then(|value| {
-                            function.values.get(value).map(|info| info.ty.clone())
-                        }),
+                        contract.parameter_types.clone(),
+                        Some(contract.result_type.clone()),
                     );
                     if let Some(previous) = ffi_symbol_shapes.get(&contract.symbol) {
                         if previous != &shape {
                             errors.push(super::MirValidationError {
                                 subject: instruction.id.to_string(),
                                 message: format!(
-                                    "FFI symbol '{}' is used with incompatible MIR signatures",
+                                    "FFI symbol '{}' is used with incompatible declaration TypeDescs",
                                     contract.symbol
                                 ),
                             });
@@ -12234,12 +12232,12 @@ func main() -> i64 { wide(1 as i64); narrow(2 as i32); 0 }
             program.transitions().clone(),
             receipts,
         )
-        .expect_err("one C symbol cannot carry two MIR signatures");
+        .expect_err("one C symbol cannot carry two declaration signatures");
         assert!(
             errors.iter().any(|error| {
                 error
                     .message
-                    .contains("FFI symbol 'wide' is used with incompatible MIR signatures")
+                    .contains("FFI symbol 'wide' is used with incompatible declaration TypeDescs")
             }),
             "{errors:?}"
         );
