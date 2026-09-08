@@ -1351,6 +1351,64 @@ fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_snapshot_includes_imported_instances() {
+    let fixture = project_root()
+        .join("tests")
+        .join("real_world")
+        .join("std_set.mimi");
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&fixture)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("failed to spawn imported canonical MIR receipt")
+    };
+
+    let first = run();
+    let second = run();
+    assert!(
+        first.status.success(),
+        "mimi mir --all --receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&first.stderr),
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert_eq!(
+        first.stdout, second.stdout,
+        "imported-instance receipt manifest must be deterministic"
+    );
+    let manifest = parse_route_receipt_manifest(&first.stdout);
+    assert_eq!(
+        manifest.get("schema").map(String::as_str),
+        Some(mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA)
+    );
+    assert_eq!(
+        manifest.get("profile").map(String::as_str),
+        Some("cli-mir-v1")
+    );
+    let root_owners = manifest.get("root_owners").expect("root owners field");
+    assert!(
+        root_owners.contains("function:mir:instance:function:set_insert"),
+        "--all receipt omitted materialized Set instance: {root_owners}"
+    );
+    assert_eq!(
+        manifest.len(),
+        mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+    );
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        stderr.contains("lowered 7 callable(s) to canonical MIR"),
+        "--all receipt lost imported callable diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "--all receipt must not report a legacy disposition: {stderr}"
+    );
+}
+
+#[test]
 fn canonical_mir_cli_all_rejects_unsupported_shapes_without_fallback() {
     let fixture = project_root()
         .join("tests")
