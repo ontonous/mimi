@@ -50,18 +50,31 @@ for owner in \
     fi
     case "$owner" in
         CodegenLegacyRemainder)
+            dependency_class='legacy-codegen-remainder'
             condition='delete after every legacy body class is lowered to MIR and compile_func_legacy has zero production callers'
             ;;
         FlowVerifierCompatibility)
+            dependency_class='flow-body-compatibility'
             condition='delete after the Flow verifier consumes canonical MIR contracts for every non-closed Flow shape'
             ;;
         FfiVerifierCompatibility)
+            dependency_class='ffi-declaration-compatibility'
             condition='delete after string/aggregate/variadic/errno/mode/ensures FFI declarations have complete MIR receipts and proofs'
             ;;
         DualVerifierCompatibility)
+            dependency_class='secondary-flow-vir-compatibility'
             condition='delete after the secondary Flow/VIR engine is retired or is MIR-native for every compatibility profile'
             ;;
     esac
+    if [ "$count" -eq 0 ]; then
+        deletion_ready=1
+        owner_status='unreachable'
+    else
+        deletion_ready=0
+        owner_status='retained'
+    fi
+    printf 'owner=%s status=%s dependency_class=%s owner_deletion_ready=%s\n' \
+        "$owner" "$owner_status" "$dependency_class" "$deletion_ready"
     printf 'owner_deletion_condition=%s\n' "$condition"
 done
 
