@@ -8,6 +8,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/src"
 
+# These are the current, deliberately explicit compatibility boundaries.  A
+# migration that removes an owner must update these values in the same change;
+# an accidental new accessor or legacy call then fails this audit instead of
+# silently widening the raw-AST surface.
+readonly EXPECTED_OWNER_ACCESSOR_CALL_SITES=1
+readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=4
+readonly EXPECTED_PRODUCTION_RAW_AST_CALL_SITES=0
+readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=8
+readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
+audit_failed=0
+
 printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
 printf 'root=%s\n' "$ROOT_DIR"
 
@@ -31,6 +42,11 @@ for owner in \
     printf 'owner=%s production_accessor_call_sites=%s\n' "$owner" "$count"
     if [ -n "$matches" ]; then
         printf '%s\n' "$matches"
+    fi
+    if [ "$count" -ne "$EXPECTED_OWNER_ACCESSOR_CALL_SITES" ]; then
+        printf 'owner_audit_error=%s expected_accessor_call_sites=%s actual=%s\n' \
+            "$owner" "$EXPECTED_OWNER_ACCESSOR_CALL_SITES" "$count" >&2
+        audit_failed=1
     fi
     case "$owner" in
         CodegenLegacyRemainder)
@@ -60,6 +76,11 @@ if [ -n "$body_refs" ]; then
     body_count="$(printf '%s\n' "$body_refs" | wc -l)"
 fi
 printf 'production_legacy_body_file_call_sites=%s\n' "$body_count"
+if [ "$body_count" -ne "$EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES" ]; then
+    printf 'owner_audit_error=production_legacy_body_file_call_sites expected=%s actual=%s\n' \
+        "$EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES" "$body_count" >&2
+    audit_failed=1
+fi
 
 raw_ast_refs="$(rg -n \
     --glob '*.rs' \
@@ -72,6 +93,11 @@ if [ -n "$raw_ast_refs" ]; then
     raw_ast_count="$(printf '%s\n' "$raw_ast_refs" | wc -l)"
 fi
 printf 'production_raw_ast_call_sites=%s\n' "$raw_ast_count"
+if [ "$raw_ast_count" -ne "$EXPECTED_PRODUCTION_RAW_AST_CALL_SITES" ]; then
+    printf 'owner_audit_error=production_raw_ast_call_sites expected=%s actual=%s\n' \
+        "$EXPECTED_PRODUCTION_RAW_AST_CALL_SITES" "$raw_ast_count" >&2
+    audit_failed=1
+fi
 
 legacy_refs="$(rg -n \
     --glob '*.rs' \
@@ -89,6 +115,11 @@ if [ -n "$legacy_call_sites" ]; then
     legacy_call_count="$(printf '%s\n' "$legacy_call_sites" | wc -l)"
 fi
 printf 'production_compile_func_legacy_call_sites=%s\n' "$legacy_call_count"
+if [ "$legacy_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES" ]; then
+    printf 'owner_audit_error=production_compile_func_legacy_call_sites expected=%s actual=%s\n' \
+        "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES" "$legacy_call_count" >&2
+    audit_failed=1
+fi
 printf 'owner_count=%s\n' "$owner_count"
 
 # R6-15 removed the former direct-expression-only scalar FFI admission helper.
@@ -106,6 +137,17 @@ if [ -n "$scalar_ffi_legacy_refs" ]; then
     printf '%s\n' "$scalar_ffi_legacy_refs"
 fi
 printf 'scalar_ffi_direct_expression_legacy_refs=%s\n' "$scalar_ffi_legacy_count"
+if [ "$scalar_ffi_legacy_count" -ne "$EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS" ]; then
+    printf 'owner_audit_error=scalar_ffi_direct_expression_legacy_refs expected=%s actual=%s\n' \
+        "$EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS" "$scalar_ffi_legacy_count" >&2
+    audit_failed=1
+fi
 
 printf 'dynamic_probe_command=%s\n' \
     'cargo test --features llvm18-host-dynamic legacy_body_access -- --test-threads=1'
+
+if [ "$audit_failed" -ne 0 ]; then
+    printf 'audit_status=failed\n'
+    exit 1
+fi
+printf 'audit_status=ok\n'
