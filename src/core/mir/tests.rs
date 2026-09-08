@@ -15,6 +15,25 @@ fn checked_program(source: &str) -> crate::core::CheckedProgram {
 }
 
 #[test]
+fn canonical_identity_uses_explicit_effect_and_projection_text() {
+    assert_eq!(
+        MirTransitionEffect::RecoverableBoundary.canonical_text(),
+        "recoverable_boundary"
+    );
+    assert_eq!(
+        MirProjection::Field(crate::core::NodeId("field:amount".into())).canonical_text(),
+        "field(field:amount)"
+    );
+    let expression = MirContractExpr::Project {
+        base: Box::new(MirContractExpr::Value(
+            MirValueId::new("v.amount").expect("value id"),
+        )),
+        projection: MirProjection::Tuple(1),
+    };
+    assert_eq!(expression.canonical_text(), "project(v.amount, tuple(1))");
+}
+
+#[test]
 fn materializes_terminal_session_close_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"

@@ -1757,7 +1757,7 @@ fn canonical_flow_state_match_uses_default_mir_route_and_native_output() {
         String::from_utf8_lossy(&mir_dump.stdout)
     );
     let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
-    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("recoverable_boundary"));
     assert!(mir_stdout.contains("flow_transition"));
     assert!(mir_stdout.contains("match.nested.record"));
     assert!(mir_stdout.contains("match.nested.record.project"));
@@ -1827,7 +1827,7 @@ fn canonical_flow_failure_match_returns_source_on_default_mir_route() {
         String::from_utf8_lossy(&mir_dump.stdout)
     );
     let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
-    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("recoverable_boundary"));
     assert!(mir_stdout.contains("nested=Some"));
     assert!(mir_stdout.contains("switch_move"));
     assert!(mir_stdout.contains("drop.0"));
@@ -1917,7 +1917,7 @@ fn canonical_multifield_flow_source_receipt_uses_default_mir_route() {
         String::from_utf8_lossy(&mir_dump.stdout)
     );
     let mir_stdout = String::from_utf8_lossy(&mir_dump.stdout);
-    assert!(mir_stdout.contains("RecoverableBoundary"), "{mir_stdout}");
+    assert!(mir_stdout.contains("recoverable_boundary"), "{mir_stdout}");
     assert!(mir_stdout.contains("move_project_drop"), "{mir_stdout}");
 
     for args in [vec!["run"], vec!["run", "--mir"]] {
@@ -7924,7 +7924,7 @@ fn canonical_f64_flow_cli_uses_mir_execution_and_reports_float_verifier_boundary
         String::from_utf8_lossy(&mir.stdout)
     );
     let mir_stdout = String::from_utf8_lossy(&mir.stdout);
-    assert!(mir_stdout.contains("RecoverableBoundary"));
+    assert!(mir_stdout.contains("recoverable_boundary"));
     assert!(mir_stdout.contains("Float { bits: 64 }"));
 }
 

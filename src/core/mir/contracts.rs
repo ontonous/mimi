@@ -102,7 +102,11 @@ impl MirContractExpr {
             Self::Result => "result".into(),
             Self::Old(value) => format!("old({value})"),
             Self::Project { base, projection } => {
-                format!("project({}, {projection:?})", base.canonical_text())
+                format!(
+                    "project({}, {})",
+                    base.canonical_text(),
+                    projection.canonical_text()
+                )
             }
             Self::Int(value) => value.to_string(),
             Self::Bool(value) => value.to_string(),

@@ -484,6 +484,48 @@ pub enum MirProjection {
     ReadPath(types::MirReadProjectionContract),
 }
 
+impl MirProjection {
+    /// Stable spelling for contract identity text. Projection variants carry
+    /// checker-owned IDs; consumers must not derive their meaning from a
+    /// backend aggregate or from Rust's debug formatter.
+    pub(crate) fn canonical_text(&self) -> String {
+        match self {
+            Self::Field(field) => format!("field({})", field.0),
+            Self::Tuple(index) => format!("tuple({index})"),
+            Self::Index(value) => format!("index({})", value.as_str()),
+            Self::Dereference => "deref".into(),
+            Self::ReadPath(receipt) => {
+                let mut text = format!(
+                    "read_path({}->{}, steps=[",
+                    receipt.source_ty.as_str(),
+                    receipt.result_ty.as_str()
+                );
+                for (index, step) in receipt.steps.iter().enumerate() {
+                    if index != 0 {
+                        text.push(';');
+                    }
+                    let _ = write!(
+                        text,
+                        "{}>{}:",
+                        step.base_ty.as_str(),
+                        step.result_ty.as_str()
+                    );
+                    match &step.projection {
+                        types::MirReadProjectionKind::Field(field) => {
+                            let _ = write!(text, "field({})", field.0);
+                        }
+                        types::MirReadProjectionKind::Tuple(index) => {
+                            let _ = write!(text, "tuple({index})");
+                        }
+                    }
+                }
+                text.push_str("])");
+                text
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirAggregateKind {
     Tuple,
@@ -557,6 +599,18 @@ impl MirTransitionEffect {
     pub const fn is_recoverable(self) -> bool {
         matches!(self, Self::RecoverableLocal | Self::RecoverableBoundary)
     }
+
+    /// Stable spelling used by canonical identity text. This must stay
+    /// independent of Rust's `Debug` representation so enum layout changes do
+    /// not silently rewrite route receipt digests.
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::SilentLocal => "silent_local",
+            Self::RecoverableLocal => "recoverable_local",
+            Self::RecoverableBoundary => "recoverable_boundary",
+            Self::Boundary => "boundary",
+        }
+    }
 }
 
 /// Validate the complete identity carried by a Flow Boundary effect receipt.
@@ -619,9 +673,9 @@ pub struct MirTransitionContract {
 impl MirTransitionContract {
     pub fn canonical_text(&self) -> String {
         format!(
-            "mir.transition {} {:?} [{}] -> {} targets [{}] failure {} fallback={} pinned={}\n",
+            "mir.transition {} {} [{}] -> {} targets [{}] failure {} fallback={} pinned={}\n",
             self.owner.0,
-            self.effect,
+            self.effect.canonical_text(),
             self.parameters
                 .iter()
                 .map(|ty| ty.as_str())
