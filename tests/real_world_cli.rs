@@ -1482,6 +1482,60 @@ fn canonical_mir_cli_all_receipt_rejects_without_partial_manifest() {
 }
 
 #[test]
+fn canonical_mir_rejection_diagnostics_are_stable_across_cli_entries() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_list_string_index_rejected.mimi");
+    for command in ["run", "build", "verify", "mir"] {
+        let mut invocation = Command::new(mimi_bin());
+        invocation
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&fixture);
+        if command == "mir" {
+            invocation.arg("--all").arg("--receipt");
+        } else {
+            invocation.arg("--mir");
+        }
+        let output = invocation
+            .output()
+            .unwrap_or_else(|error| panic!("rejected {command} invocation: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "rejected {command} must fail closed"
+        );
+        assert!(
+            stdout.is_empty(),
+            "rejected {command} emitted stdout: {stdout}"
+        );
+        assert!(
+            stderr.contains("Copy scalar"),
+            "rejected {command}: {stderr}"
+        );
+        assert!(
+            stderr.contains(match command {
+                "mir" => "MIR inspection input rejected",
+                "verify" => "canonical MIR verifier input rejected",
+                _ => "canonical MIR build error",
+            }),
+            "rejected {command} lost its failure phase: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Validation(["),
+            "rejected {command} leaked debug-shaped MIR error: {stderr}"
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+        assert!(!stderr.contains("flow_ast"));
+        if command == "mir" {
+            assert!(!stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER));
+        }
+    }
+}
+
+#[test]
 fn canonical_mir_run_cli_smoke() {
     let fixture = project_root()
         .join("tests")
