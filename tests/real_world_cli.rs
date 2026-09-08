@@ -8076,6 +8076,71 @@ fn canonical_mir_verifier_rejects_unsupported_abi_without_fallback() {
 }
 
 #[test]
+fn canonical_mir_cli_rejects_ffi_declaration_boundaries_without_fallback() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_boundary_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create FFI boundary CLI fixture directory");
+    let fixtures = [
+        (
+            "non_c_abi",
+            r#"extern "Rust" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(42 as i64) }
+"#,
+            "ABI 'Rust' is outside the canonical C ABI",
+        ),
+        (
+            "no_panic",
+            r#"#[no_panic]
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(42 as i64) }
+"#,
+            "unsupported no_panic FFI protection semantics",
+        ),
+        (
+            "variadic",
+            r#"extern "C" { func foreign(value: i64 ...) -> i64; }
+func main() -> i64 { foreign(42 as i64) }
+"#,
+            "unsupported variadic ABI semantics in canonical scalar FFI",
+        ),
+    ];
+
+    for (label, source_text, boundary) in fixtures {
+        let source = dir.join(format!("{label}.mimi"));
+        fs::write(&source, source_text).expect("write FFI boundary CLI fixture");
+        for command in ["run", "build", "verify"] {
+            let output = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg(command)
+                .arg(&source)
+                .arg("--mir")
+                .output()
+                .unwrap_or_else(|error| panic!("{label} {command}: {error}"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{label} {command} must reject an unmigrated declaration boundary"
+            );
+            assert!(stdout.is_empty(), "{label} {command}: {stdout}");
+            assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "{label} {command} leaked a legacy route: {stderr}"
+            );
+            assert!(!stderr.contains("flow_ast"), "{label} {command}: {stderr}");
+        }
+    }
+    fs::remove_dir_all(&dir).expect("remove FFI boundary CLI fixture directory");
+}
+
+#[test]
 fn canonical_default_generic_record_f64_projection_routes_before_legacy() {
     let fixture = project_root()
         .join("tests")
