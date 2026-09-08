@@ -516,6 +516,132 @@ fn canonical_scalar_ffi_default_and_explicit_mir_preserve_remainder_status() {
 }
 
 #[test]
+fn canonical_scalar_ffi_cli_postcondition_phase_stability() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_postcondition_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create postcondition CLI fixture directory");
+
+    for (label, contract, argument, runtime_code, runtime_message) in [
+        (
+            "violation",
+            "result == x",
+            "-7 as i64",
+            "E0808",
+            "FFI postcondition failed",
+        ),
+        (
+            "overflow",
+            "result + 1 > result",
+            "9223372036854775807 as i64",
+            "E0802",
+            "integer overflow in FFI postcondition",
+        ),
+    ] {
+        let source = dir.join(format!("{label}.mimi"));
+        fs::write(
+            &source,
+            format!(
+                "extern \"C\" {{ func labs(x: i64) -> i64 ensures: {contract}; }}\nfunc main() -> i64 {{ println(labs({argument})); 0 }}\n"
+            ),
+        )
+        .expect("write postcondition CLI source");
+        for explicit_mir in [false, true] {
+            let mut run = Command::new(mimi_bin());
+            run.current_dir(project_root()).arg("run");
+            if explicit_mir {
+                run.arg("--mir");
+            }
+            let run = run
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("{label} run {:?}: {error}", explicit_mir));
+            let run_stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(
+                !run.status.success(),
+                "{label} run {:?} must fail",
+                explicit_mir
+            );
+            assert_eq!(run.stdout, b"", "{label} run {:?}", explicit_mir);
+            assert!(run_stderr.contains(runtime_code), "{label}: {run_stderr}");
+            assert!(
+                run_stderr.contains(runtime_message),
+                "{label}: {run_stderr}"
+            );
+            assert!(!run_stderr.contains("canonical route disposition: legacy"));
+
+            let mut verify = Command::new(mimi_bin());
+            verify.current_dir(project_root()).arg("verify");
+            if explicit_mir {
+                verify.arg("--mir");
+            }
+            let verify = verify
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("{label} verify {:?}: {error}", explicit_mir));
+            let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+            let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+            assert!(
+                !verify.status.success(),
+                "{label} verify {:?} must fail",
+                explicit_mir
+            );
+            assert!(
+                verify_stdout.contains("0/1 verified") || verify_stderr.contains("0/1 verified"),
+                "{label} verify {:?}: stdout={verify_stdout} stderr={verify_stderr}",
+                explicit_mir
+            );
+            assert!(
+                verify_stderr.contains("canonical MIR extern ensures contract disproven"),
+                "{label} verify {:?}: {verify_stderr}",
+                explicit_mir
+            );
+            assert!(!verify_stderr.contains("canonical route disposition: legacy"));
+
+            let mut build = Command::new(mimi_bin());
+            build
+                .current_dir(project_root())
+                .arg("build")
+                .arg("--verify-ffi");
+            if explicit_mir {
+                build.arg("--mir");
+            }
+            let build = build
+                .arg("--emit-ir")
+                .arg(&source)
+                .output()
+                .unwrap_or_else(|error| panic!("{label} build {:?}: {error}", explicit_mir));
+            let build_stderr = String::from_utf8_lossy(&build.stderr);
+            assert!(
+                !build.status.success(),
+                "{label} build {:?} must fail",
+                explicit_mir
+            );
+            assert!(
+                build_stderr.contains("FFI contract verification failed"),
+                "{label} build {:?}: {build_stderr}",
+                explicit_mir
+            );
+            assert!(
+                build_stderr.contains("canonical MIR extern ensures contract disproven"),
+                "{label} build {:?}: {build_stderr}",
+                explicit_mir
+            );
+            assert!(!build_stderr.contains("canonical route disposition: legacy"));
+        }
+    }
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn std_mimispec_removed() {
     // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
     // `mimispec` crate are removed. This test prevents regrowth of the old
