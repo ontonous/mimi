@@ -591,6 +591,127 @@ int64_t generated_foreign(int64_t x) { return x; }
 }
 
 #[test]
+fn scalar_ffi_multi_argument_abi_shares_one_mir_across_consumers() {
+    struct MultiArgumentOracle;
+    impl MirReferenceFfiResolver for MultiArgumentOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            match (receipt.symbol.as_str(), args) {
+                ("generated_add", [MirRuntimeValue::Int(left), MirRuntimeValue::Int(right)]) => {
+                    Ok(MirRuntimeValue::Int(left + right))
+                }
+                (
+                    "generated_all",
+                    [MirRuntimeValue::Bool(first), MirRuntimeValue::Bool(second), MirRuntimeValue::Bool(third)],
+                ) => Ok(MirRuntimeValue::Bool(*first && *second && *third)),
+                _ => Err(format!(
+                    "unexpected multi-argument call: {receipt:?} {args:?}"
+                )),
+            }
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdbool.h>
+#include <stdint.h>
+int64_t generated_add(int64_t left, int64_t right) { return left + right; }
+bool generated_all(bool first, bool second, bool third) {
+    return first && second && third;
+}
+"#;
+    const SOURCE: &str = r#"
+extern "C" {
+    func generated_add(left: i64, right: i64) -> i64
+        requires: left >= 0 and right >= 0;
+    func generated_all(first: bool, second: bool, third: bool) -> bool;
+}
+func relay(value: i64) -> i64 {
+    if value > 0 as i64 {
+        generated_add(value, 0 as i64)
+    } else {
+        generated_add(0 as i64, 0 as i64)
+    }
+}
+func main() -> i64 {
+    let value = generated_add(20 as i64, 22 as i64);
+    if generated_all(true, true, true) { relay(value) } else { 0 }
+}
+"#;
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let file = super::parse_prod(SOURCE);
+    let checked = crate::core::check_program(&file).expect("multi-argument C ABI fixture");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(admission.scalar_ffi);
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("multi-argument scalar FFI materialization");
+    assert!(crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route));
+    assert_eq!(route.program.ffi_calls().len(), 4);
+    let mir = route.program;
+    let oracle = MultiArgumentOracle;
+    assert_eq!(
+        MirReferenceInterpreter::new(&mir)
+            .with_ffi_resolver(&oracle)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("multi-argument reference"),
+        MirRuntimeValue::Int(42)
+    );
+
+    let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("multi-argument bytecode"));
+    assert!(vm.program().ast.is_none());
+    assert!(matches!(
+        vm.run_value().expect("multi-argument VM"),
+        Value::Int(42)
+    ));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let verified = crate::verifier::verify_checked(&checked, "multi-argument".into())
+        .expect("multi-argument verifier");
+    assert!(verified.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let dual = crate::verifier::verify_checked_dual(&checked, "multi-argument-dual".into())
+        .expect("multi-argument dual verifier");
+    assert!(dual.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let ffi = crate::verifier::verify_ffi_checked(&checked).expect("multi-argument FFI verifier");
+    assert!(ffi.iter().all(|result| matches!(
+        result.status,
+        crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
+    )));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_argument_ffi");
+    generator
+        .compile_checked(&checked)
+        .expect("multi-argument direct native route");
+    generator.module.verify().expect("multi-argument LLVM");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let native = super::link_and_observe_module(&generator, &config, native_counter)
+        .expect("multi-argument native link");
+    assert_eq!(native.exit_code, Some(42));
+    assert_eq!(native.stdout, "");
+    assert_eq!(native.stderr, "");
+}
+
+#[test]
 fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
     const CASES: &[(&str, &str)] = &[
         (

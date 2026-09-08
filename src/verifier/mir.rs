@@ -3455,6 +3455,18 @@ fn eval_materialized_call(
         .values()
         .find(|instance| instance.function == target_owner)
     else {
+        if is_direct_scalar_call_type(catalog, &target.result) {
+            return eval_direct_scalar_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                &target_owner,
+                type_arguments,
+                arguments,
+            );
+        }
         if catalog.validate_owned_string(&target.result).is_ok() {
             return eval_direct_owned_string_call(
                 function,
@@ -3672,6 +3684,192 @@ fn eval_materialized_call(
             contract,
         ),
     }
+}
+
+fn is_direct_scalar_call_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    catalog.validate_copy_scalar(ty).is_ok()
+        || catalog.validate_copy_float_scalar(ty).is_ok()
+        || catalog.get(ty).is_some_and(|descriptor| {
+            descriptor.layout == MirLayout::Unit && descriptor.abi == MirAbiClass::Unit
+        })
+}
+
+fn direct_call_graph_reaches(
+    program: &MirProgram,
+    from: &crate::core::NodeId,
+    sought: &crate::core::NodeId,
+    visited: &mut BTreeSet<crate::core::NodeId>,
+) -> bool {
+    if from == sought || !visited.insert(from.clone()) {
+        return from == sought;
+    }
+    let Some(function) = program.functions().get(from) else {
+        return false;
+    };
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let MirInstructionKind::Call { callee, .. } = &instruction.kind else {
+                continue;
+            };
+            let Some(next) = crate::core::mir::canonical_protocol_call_target(callee) else {
+                continue;
+            };
+            if direct_call_graph_reaches(program, &next, sought, visited) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Symbolically execute a concrete direct call whose ABI is a Copy scalar or
+/// Unit. Ordinary helper functions are part of the scalar FFI graph just as
+/// much as extern instructions are: a helper may forward arguments, branch,
+/// and contain additional FFI obligations. Reusing the canonical MIR
+/// explorer here keeps those call sites visible to the same verifier without
+/// reopening a source body or inventing a second scalar-call ABI.
+fn eval_direct_scalar_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    if !type_arguments.is_empty() {
+        return Err("MIR verifier direct scalar call cannot carry generic type arguments".into());
+    }
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier direct scalar call target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    if !is_direct_scalar_call_type(catalog, &target.result) {
+        return Err("MIR verifier direct scalar call result is outside the Copy scalar ABI".into());
+    }
+    if direct_call_graph_reaches(program, target_owner, &function.owner, &mut BTreeSet::new()) {
+        return Err("MIR verifier direct scalar call graph is recursive".into());
+    }
+    if arguments.len() != target.parameters.len() {
+        return Err("MIR verifier direct scalar call arity disagrees with target".into());
+    }
+
+    let result_is_unit = catalog.get(&target.result).is_some_and(|descriptor| {
+        descriptor.layout == MirLayout::Unit && descriptor.abi == MirAbiClass::Unit
+    });
+    match (result, result_is_unit) {
+        (None, true) => {}
+        (Some(result), _) => {
+            let result_ty = function.values.get(result).ok_or_else(|| {
+                format!("MIR verifier direct scalar result '{}' is absent", result)
+            })?;
+            if result_ty.ty != target.result {
+                return Err(
+                    "MIR verifier direct scalar call result disagrees with target TypeDesc".into(),
+                );
+            }
+        }
+        (None, false) => {
+            return Err("MIR verifier direct scalar call must produce a non-unit result".into());
+        }
+    }
+
+    let caller_constraints = state.constraints.clone();
+    let mut target_state = SymbolicState {
+        values: BTreeMap::new(),
+        constraints: caller_constraints.clone(),
+        traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
+        ffi_checks: Vec::new(),
+    };
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let argument_info = function.values.get(argument).ok_or_else(|| {
+            format!(
+                "MIR verifier direct scalar call argument '{}' is absent",
+                argument
+            )
+        })?;
+        let parameter_info = target.values.get(parameter).ok_or_else(|| {
+            format!(
+                "MIR verifier direct scalar call parameter '{}' is absent",
+                parameter
+            )
+        })?;
+        if argument_info.ty != parameter_info.ty {
+            return Err(
+                "MIR verifier direct scalar call argument disagrees with target TypeDesc".into(),
+            );
+        }
+        if !is_direct_scalar_call_type(catalog, &parameter_info.ty) {
+            return Err(
+                "MIR verifier direct scalar call parameter is outside the Copy scalar ABI".into(),
+            );
+        }
+        let value = state.values.get(argument).cloned().ok_or_else(|| {
+            format!(
+                "MIR verifier direct scalar call argument '{}' is not defined",
+                argument
+            )
+        })?;
+        ensure_result_shape(function, catalog, argument, &value)?;
+        if let Some(value) = state.known_ints.get(argument).copied() {
+            target_state.known_ints.insert(parameter.clone(), value);
+        }
+        target_state.values.insert(parameter.clone(), value);
+    }
+
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    if returns.is_empty() {
+        return Err("MIR verifier direct scalar call has no return paths".into());
+    }
+
+    // The callee state inherited the caller constraints. Preserve every
+    // callee FFI/trap path so the outer verifier can discharge or report it
+    // with the complete caller/callee condition.
+    state
+        .ffi_checks
+        .extend(returns.iter().flat_map(|path| path.ffi_checks.clone()));
+    state.traps.extend(traps);
+
+    let mut normalized = Vec::with_capacity(returns.len());
+    for path in returns {
+        if !symbolic_matches_type(catalog, &target.result, &path.value) {
+            return Err(
+                "MIR verifier direct scalar call returned a value outside its TypeDesc".into(),
+            );
+        }
+        normalized.push((conjunction(&path.constraints), path.value));
+    }
+    let (_, mut merged) = normalized
+        .pop()
+        .expect("validated non-empty direct scalar return paths");
+    for (condition, value) in normalized.into_iter().rev() {
+        merged = merge_symbolic_scalars(&condition, value, merged)?;
+    }
+    state.constraints = caller_constraints;
+    if let Some(result) = result {
+        ensure_result_shape(function, catalog, result, &merged)?;
+        state.values.insert(result.clone(), merged);
+    }
+    Ok(())
 }
 
 /// Symbolically execute a materialized generic `Option<T>.unwrap()` or
