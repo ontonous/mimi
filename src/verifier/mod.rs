@@ -176,15 +176,17 @@ fn verify_ffi_checked_with_source_hash(
     // reconstructing ExternFunc AST adapters and invoking the legacy FFI
     // walker for this no-obligation profile. This is an explicit empty
     // result, not a proof verdict.
+    // This API verifies extern call-site obligations. Contracts attached to
+    // ordinary Mimi callables belong to `verify_checked` and must not make an
+    // otherwise obligation-free FFI request enter the retained AST walker.
+    // Keeping the trigger scoped to extern declarations shrinks the
+    // FfiVerifierCompatibility owner without changing any FFI proof result.
     let has_contract = program.extern_blocks().values().any(|block| {
         block
             .signatures
             .iter()
             .any(|signature| signature.requires.is_some() || signature.ensures.is_some())
-    }) || program
-        .callables()
-        .values()
-        .any(|callable| !callable.contracts.is_empty());
+    });
     for site in program.call_sites().values() {
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;

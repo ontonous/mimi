@@ -848,3 +848,26 @@ fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
         );
     }
 }
+
+#[test]
+fn ffi_checked_ignores_unrelated_callable_contract_without_legacy() {
+    let source = r#"
+        extern "C" { func foreign(value: string) -> i64; }
+        func guarded(value: i64) -> i64 {
+            requires: value > 0
+            0
+        }
+        func main() -> i64 { guarded(1 as i64) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("unrelated callable contract fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("FFI-only verifier should have no extern obligations");
+    assert!(
+        results.is_empty(),
+        "unrelated callable contract: {results:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
