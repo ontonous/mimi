@@ -752,6 +752,46 @@ fn scalar_ffi_mir_proofs_preserve_path_facts_and_fresh_external_results() {
 }
 
 #[test]
+fn scalar_ffi_proofs_include_runtime_predicate_definedness() {
+    require_z3!();
+    for (condition, argument, expected) in [
+        ("x + 1 > x", i64::MAX, VerifStatus::Disproven),
+        ("x + 1 > x", 4, VerifStatus::Proven),
+        ("x * 2 > x", i64::MAX, VerifStatus::Disproven),
+        ("x > 0 || 1 / (x - x) > 0", 4, VerifStatus::Proven),
+        ("x > 0 || 1 / (x - x) > 0", -1, VerifStatus::Disproven),
+        ("x / 3 == -2 && x % 3 == -1", -7, VerifStatus::Proven),
+        ("x < 0 && 1 / 0 > 0", 4, VerifStatus::Disproven),
+        ("x > 0 || x % -1 == 0", i64::MIN + 1, VerifStatus::Proven),
+        ("x > 0 || x / -1 > 0", i64::MIN, VerifStatus::Disproven),
+    ] {
+        // Spell MIN using supported signed literal arithmetic in the body.
+        let argument = if argument == i64::MIN {
+            "(-9223372036854775807 as i64) - (1 as i64)".to_string()
+        } else {
+            format!("{argument} as i64")
+        };
+        let source = format!(
+            "extern \"C\" {{ func foreign(x: i64) -> i64 requires: {condition}; }} func main() -> i64 {{ foreign({argument}) }}"
+        );
+        let file =
+            crate::parser::Parser::new(crate::lexer::Lexer::new(&source).tokenize().unwrap())
+                .parse_file()
+                .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let program =
+            crate::core::mir::reference::MirProgram::from_checked_program(&checked).unwrap();
+        let results = verify_mir(&program, "ffi-definedness".into()).unwrap();
+        assert_eq!(results.len(), 1, "{condition}: {results:?}");
+        assert_eq!(results[0].status, expected, "{condition}: {results:?}");
+        assert_eq!(
+            results[0].artifact.as_ref().unwrap().mir_hash,
+            program.canonical_digest()
+        );
+    }
+}
+
+#[test]
 fn verify_ffi_string_empty_violation() {
     require_z3!();
     let src = r#"

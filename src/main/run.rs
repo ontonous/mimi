@@ -174,6 +174,7 @@ fn run_once(
         let mut vm =
             mimi::interp::bytecode::BytecodeVM::new(prog).with_cli_args(extra_args.to_vec());
         vm.verify_contracts = verify_contracts;
+        vm.set_verify_ffi(verify_ffi);
         return vm
             .run()
             .map(|exit_code| exit_code as i32)

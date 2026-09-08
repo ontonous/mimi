@@ -1871,6 +1871,10 @@ pub struct CanonicalFfiDescriptor {
     pub abi: String,
     pub arguments: Vec<CanonicalFfiScalarType>,
     pub result: CanonicalFfiScalarType,
+    /// MIR identities bind predicate leaves to this call's evaluated arguments.
+    pub argument_ids: Vec<crate::core::mir::MirValueId>,
+    /// Canonical predicate only: no AST expression or source-name environment.
+    pub requires: Option<crate::core::mir::MirContractExpr>,
 }
 
 impl BytecodeProgram {

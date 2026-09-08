@@ -4294,6 +4294,7 @@ pub struct MirReferenceInterpreter<'a> {
     session_peers: RefCell<BTreeMap<i64, i64>>,
     next_session_handle: RefCell<i64>,
     ffi_resolver: Option<&'a dyn MirReferenceFfiResolver>,
+    verify_ffi: bool,
 }
 
 impl<'a> MirReferenceInterpreter<'a> {
@@ -4306,6 +4307,7 @@ impl<'a> MirReferenceInterpreter<'a> {
             session_peers: RefCell::new(BTreeMap::new()),
             next_session_handle: RefCell::new(1),
             ffi_resolver: None,
+            verify_ffi: true,
         }
     }
 
@@ -4314,6 +4316,13 @@ impl<'a> MirReferenceInterpreter<'a> {
     /// source AST declarations.
     pub fn with_ffi_resolver(mut self, resolver: &'a dyn MirReferenceFfiResolver) -> Self {
         self.ffi_resolver = Some(resolver);
+        self
+    }
+
+    /// Match the execution consumers' FFI pre-call verification switch.
+    /// Checks are enabled by default and never evaluate an external function.
+    pub fn with_ffi_verification(mut self, verify: bool) -> Self {
+        self.verify_ffi = verify;
         self
     }
 
@@ -6164,6 +6173,26 @@ impl<'a> MirReferenceInterpreter<'a> {
                         self.take_transfer_values(function, values, arguments)?;
                     for (value, actual) in arguments.iter().zip(&runtime_arguments) {
                         self.validate_ffi_runtime_value(function, Some(value), actual, "argument")?;
+                    }
+                    if let Some(condition) = receipt.requires.as_ref().filter(|_| self.verify_ffi) {
+                        super::evaluate_ffi_requires(condition, |id| {
+                            let index = arguments.iter().position(|value| value == id).ok_or_else(
+                                || "FFI precondition references a non-argument".to_string(),
+                            )?;
+                            match runtime_arguments[index] {
+                                MirRuntimeValue::Int(value) => {
+                                    Ok(super::MirContractScalar::Int(value))
+                                }
+                                MirRuntimeValue::Bool(value) => {
+                                    Ok(super::MirContractScalar::Bool(value))
+                                }
+                                _ => {
+                                    Err("FFI precondition argument is not an integer or bool"
+                                        .into())
+                                }
+                            }
+                        })
+                        .map_err(|message| self.error(&function.owner, message.to_string()))?;
                     }
                     let output = resolver
                         .call(receipt, &runtime_arguments)

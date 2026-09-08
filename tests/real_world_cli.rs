@@ -167,6 +167,91 @@ fn canonical_native_scalar_ffi_executes_checker_owned_symbol() {
 }
 
 #[test]
+fn canonical_scalar_ffi_runtime_requires_and_skip_flag_are_observable() {
+    if !can_link() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_requires_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("requires.mimi");
+    let binary = dir.join("requires");
+    for (argument, helper) in [(42, false), (-1, false), (-1, true)] {
+        let wrapper = if helper {
+            "func assume_positive(x: i64) -> i64 { requires: x > 0\n labs(x) }"
+        } else {
+            ""
+        };
+        let call = if helper { "assume_positive" } else { "labs" };
+        fs::write(&source, format!(
+            "extern \"C\" {{ func labs(x: i64) -> i64 requires: x > 0; }}\n{wrapper}\nfunc main() -> i64 {{ println({call}({argument} as i64)); 0 }}"
+        )).unwrap();
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["run", "--mir"])
+            .arg(&source)
+            .env_remove("MIMI_FFI_LIB")
+            .output()
+            .unwrap();
+        let expected_stdout = if argument > 0 { "42\n" } else { "" };
+        assert_eq!(
+            run.status.success(),
+            argument > 0,
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(run.stdout, expected_stdout.as_bytes());
+        if argument < 0 {
+            assert!(String::from_utf8_lossy(&run.stderr).contains("[E0808]"));
+            let skipped = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .args(["run", "--mir", "--skip-verify-ffi"])
+                .arg(&source)
+                .env_remove("MIMI_FFI_LIB")
+                .output()
+                .unwrap();
+            assert!(
+                skipped.status.success(),
+                "{}",
+                String::from_utf8_lossy(&skipped.stderr)
+            );
+            assert_eq!(skipped.stdout, b"1\n");
+        }
+        let build = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .args(["build", "--mir"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let native = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            native.status.success(),
+            argument > 0,
+            "{}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(native.stdout, expected_stdout.as_bytes());
+        if argument < 0 {
+            assert!(String::from_utf8_lossy(&native.stderr).contains("[E0808]"));
+        }
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn std_mimispec_removed() {
     // 0.1.8 Phase E: the in-repo std/mimispec implementation and external
     // `mimispec` crate are removed. This test prevents regrowth of the old

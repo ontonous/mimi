@@ -257,6 +257,8 @@ pub struct CodeGenerator<'ctx> {
     pub no_std: bool,
     pub shared: bool,
     pub verify_contracts: bool,
+    /// Runtime pre-call checks from canonical scalar FFI receipts.
+    pub verify_ffi: bool,
     /// Optional target triple for cross-compilation (e.g. "x86_64-pc-windows-gnu").
     /// When None, defaults to the host target.
     pub target_triple: Option<String>,
@@ -739,6 +741,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             no_std: false,
             shared: false,
             verify_contracts: true,
+            verify_ffi: true,
             target_triple: None,
             compensation_blocks: Vec::new(),
             comp_scope_stack: Vec::new(),

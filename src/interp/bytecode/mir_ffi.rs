@@ -29,12 +29,14 @@ fn default_libc_candidates() -> [&'static str; 5] {
 /// AST-free dynamic library state owned by one bytecode VM.
 pub(crate) struct CanonicalMirFfiRuntime {
     loaded_libs: Vec<(String, Library)>,
+    pub(crate) verify_requires: bool,
 }
 
 impl CanonicalMirFfiRuntime {
     pub(crate) fn new() -> Self {
         Self {
             loaded_libs: Vec::new(),
+            verify_requires: true,
         }
     }
 
@@ -45,6 +47,51 @@ impl CanonicalMirFfiRuntime {
     /// assembled `BytecodeProgram` must not turn a malformed descriptor into
     /// an unchecked libffi call.
     pub(crate) fn call(
+        &mut self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+    ) -> Result<Value, crate::interp::InterpError> {
+        if let Some(condition) = descriptor
+            .requires
+            .as_ref()
+            .filter(|_| self.verify_requires)
+        {
+            crate::core::mir::evaluate_ffi_requires(condition, |id| {
+                let index = descriptor
+                    .argument_ids
+                    .iter()
+                    .position(|argument| argument == id)
+                    .ok_or_else(|| "FFI precondition references a non-argument".to_string())?;
+                match args
+                    .get(index)
+                    .ok_or_else(|| "FFI precondition argument index is out of range".to_string())?
+                {
+                    Value::Int(value) => Ok(crate::core::mir::MirContractScalar::Int(*value)),
+                    Value::Bool(value) => Ok(crate::core::mir::MirContractScalar::Bool(*value)),
+                    _ => Err("FFI precondition argument is not an integer or bool".into()),
+                }
+            })
+            .map_err(|error| {
+                use crate::core::mir::MirFfiContractError;
+                use crate::interp::InterpError;
+                match error {
+                    MirFfiContractError::Invalid(message) => InterpError::new(message),
+                    MirFfiContractError::Violation => {
+                        InterpError::contract_violation("FFI precondition failed")
+                    }
+                    MirFfiContractError::Overflow => {
+                        InterpError::integer_overflow("integer overflow in FFI precondition")
+                    }
+                    MirFfiContractError::DivisionByZero => InterpError::div_by_zero(),
+                }
+            })?;
+        }
+
+        self.call_abi(descriptor, args)
+            .map_err(crate::interp::InterpError::new)
+    }
+
+    fn call_abi(
         &mut self,
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
@@ -70,6 +117,9 @@ impl CanonicalMirFfiRuntime {
         // them here, before library loading or CIF construction can occur.
         if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
             return Err("unit is not a canonical scalar FFI argument".into());
+        }
+        if descriptor.argument_ids.len() != args.len() {
+            return Err("canonical FFI argument identity arity mismatch".into());
         }
 
         let lib_path = match std::env::var("MIMI_FFI_LIB") {
@@ -239,6 +289,8 @@ mod tests {
             abi: "C".into(),
             arguments: vec![argument.clone()],
             result: argument,
+            argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
+            requires: None,
         }
     }
 
@@ -251,7 +303,9 @@ mod tests {
                 &[Value::Unit],
             )
             .expect_err("void arguments must never reach libffi's CIF assertion");
-        assert!(error.contains("unit is not a canonical scalar FFI argument"));
+        assert!(error
+            .to_string()
+            .contains("unit is not a canonical scalar FFI argument"));
         assert!(runtime.loaded_libs.is_empty());
     }
 
@@ -272,7 +326,7 @@ mod tests {
             let mut call = descriptor(symbol, CanonicalFfiScalarType::I64);
             call.abi = abi.into();
             let error = runtime.call(&call, &args).expect_err("invalid descriptor");
-            assert!(error.contains(expected), "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
             assert!(runtime.loaded_libs.is_empty());
         }
     }
@@ -316,7 +370,7 @@ mod tests {
             let error = runtime
                 .call(&descriptor(symbol, scalar), &[value])
                 .expect_err("invalid arguments/symbol cannot execute");
-            assert!(error.contains(expected), "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 }

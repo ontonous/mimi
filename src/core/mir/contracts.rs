@@ -440,6 +440,120 @@ fn contains_result(expression: &MirContractExpr) -> bool {
     }
 }
 
+/// Runtime values of the scalar FFI predicate language. Integer arguments are
+/// sign-extended to the canonical checked i64 slot before predicate arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MirContractScalar {
+    Int(i64),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MirFfiContractError {
+    Invalid(String),
+    Violation,
+    Overflow,
+    DivisionByZero,
+}
+
+impl From<&str> for MirFfiContractError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.to_string())
+    }
+}
+
+impl std::fmt::Display for MirFfiContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => f.write_str(message),
+            Self::Violation => f.write_str("[E0808] FFI precondition failed"),
+            Self::Overflow => f.write_str("[E0802] integer overflow in FFI precondition"),
+            Self::DivisionByZero => f.write_str("[E0801] division by zero in FFI precondition"),
+        }
+    }
+}
+
+pub(crate) fn evaluate_ffi_requires(
+    condition: &MirContractExpr,
+    mut argument: impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+) -> Result<(), MirFfiContractError> {
+    fn evaluate(
+        expression: &MirContractExpr,
+        argument: &mut impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+    ) -> Result<MirContractScalar, MirFfiContractError> {
+        use MirContractBinaryOp as Op;
+        use MirContractScalar::{Bool, Int};
+        match expression {
+            MirContractExpr::Value(id) => argument(id).map_err(MirFfiContractError::Invalid),
+            MirContractExpr::Int(value) => Ok(Int(*value)),
+            MirContractExpr::Bool(value) => Ok(Bool(*value)),
+            MirContractExpr::Unary { op, operand } => match (op, evaluate(operand, argument)?) {
+                (MirContractUnaryOp::Not, Bool(value)) => Ok(Bool(!value)),
+                (MirContractUnaryOp::Negate, Int(value)) => value
+                    .checked_neg()
+                    .map(Int)
+                    .ok_or(MirFfiContractError::Overflow),
+                _ => Err("FFI precondition unary operand type mismatch".into()),
+            },
+            MirContractExpr::Binary { op, left, right } => {
+                let left = evaluate(left, argument)?;
+                // Contract conjunction/disjunction retain source short-circuit
+                // semantics, including suppression of unreachable arithmetic traps.
+                match (op, left) {
+                    (Op::LogicalAnd, Bool(false)) => return Ok(Bool(false)),
+                    (Op::LogicalOr, Bool(true)) => return Ok(Bool(true)),
+                    _ => {}
+                }
+                let right = evaluate(right, argument)?;
+                match (op, left, right) {
+                    (Op::Add, Int(a), Int(b)) => a
+                        .checked_add(b)
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    (Op::Subtract, Int(a), Int(b)) => a
+                        .checked_sub(b)
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    (Op::Multiply, Int(a), Int(b)) => a
+                        .checked_mul(b)
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    (Op::Divide | Op::Remainder, Int(_), Int(0)) => {
+                        Err(MirFfiContractError::DivisionByZero)
+                    }
+                    (Op::Divide, Int(a), Int(b)) => a
+                        .checked_div(b)
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    (Op::Remainder, Int(a), Int(b)) => a
+                        .checked_rem(b)
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    (Op::Equal, Int(a), Int(b)) => Ok(Bool(a == b)),
+                    (Op::NotEqual, Int(a), Int(b)) => Ok(Bool(a != b)),
+                    (Op::Equal, Bool(a), Bool(b)) => Ok(Bool(a == b)),
+                    (Op::NotEqual, Bool(a), Bool(b)) => Ok(Bool(a != b)),
+                    (Op::Less, Int(a), Int(b)) => Ok(Bool(a < b)),
+                    (Op::LessEqual, Int(a), Int(b)) => Ok(Bool(a <= b)),
+                    (Op::Greater, Int(a), Int(b)) => Ok(Bool(a > b)),
+                    (Op::GreaterEqual, Int(a), Int(b)) => Ok(Bool(a >= b)),
+                    (Op::LogicalAnd, Bool(a), Bool(b)) => Ok(Bool(a && b)),
+                    (Op::LogicalOr, Bool(a), Bool(b)) => Ok(Bool(a || b)),
+                    _ => Err("FFI precondition binary operand type mismatch".into()),
+                }
+            }
+            MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
+                Err("unsupported FFI precondition expression".into())
+            }
+        }
+    }
+    match evaluate(condition, &mut argument)? {
+        MirContractScalar::Bool(true) => Ok(()),
+        MirContractScalar::Bool(false) => Err(MirFfiContractError::Violation),
+        _ => Err("FFI precondition must return bool".into()),
+    }
+}
+
 fn contains_invalid_old(function: &MirFunction, expression: &MirContractExpr) -> bool {
     match expression {
         MirContractExpr::Old(value) => !function.parameters.contains(value),

@@ -52,6 +52,7 @@ use validate::NativeMirValidator;
 mod aggregate;
 mod calls;
 mod control_flow;
+mod ffi_contract;
 mod ownership;
 mod runtime_glue;
 mod scalar;

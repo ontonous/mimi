@@ -260,6 +260,7 @@ pub(crate) fn validate_materialized_call_result_presence(
 }
 
 mod contracts;
+pub(crate) use contracts::{evaluate_ffi_requires, MirContractScalar, MirFfiContractError};
 mod copy_option_island;
 mod copy_result_island;
 mod eligibility;

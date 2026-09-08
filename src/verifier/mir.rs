@@ -3377,8 +3377,8 @@ fn eval_ffi_call(
         return Err("MIR verifier extern call arguments disagree with FFI contract".into());
     }
     if let Some(condition) = &contract.requires {
-        let term = contract_term(condition, &state.values, &state.values, None)?;
-        let condition = expect_bool(term, "extern requires contract")?;
+        let (term, defined) = ffi_contract_term(condition, &state.values)?;
+        let condition = Bool::and(&[&defined, &expect_bool(term, "extern requires contract")?]);
         state.ffi_checks.push(FfiCheck {
             instruction: instruction_id.clone(),
             constraints: state.constraints.clone(),
@@ -6280,6 +6280,85 @@ fn contract_term(
             let left = contract_term(left, values, old_values, result)?;
             let right = contract_term(right, values, old_values, result)?;
             contract_binary(*op, left, right)
+        }
+    }
+}
+
+/// Runtime FFI predicates use checked i64 arithmetic and short-circuit
+/// boolean evaluation. Prove definedness together with the predicate; the
+/// unbounded mathematical contract encoder alone cannot establish this.
+fn ffi_contract_term(
+    expression: &MirContractExpr,
+    values: &BTreeMap<MirValueId, SymbolicValue>,
+) -> Result<(SymbolicValue, Bool), String> {
+    use MirContractBinaryOp as Op;
+    match expression {
+        MirContractExpr::Value(_) | MirContractExpr::Int(_) | MirContractExpr::Bool(_) => Ok((
+            contract_term(expression, values, values, None)?,
+            Bool::from_bool(true),
+        )),
+        MirContractExpr::Unary { op, operand } => {
+            let (operand, defined) = ffi_contract_term(operand, values)?;
+            match (op, operand) {
+                (MirContractUnaryOp::Negate, SymbolicValue::Int(value)) => {
+                    let output = value.unary_minus();
+                    let defined = Bool::and(&[&defined, &int_range_constraint(&output, 64)]);
+                    Ok((SymbolicValue::Int(output), defined))
+                }
+                (MirContractUnaryOp::Not, SymbolicValue::Bool(value)) => {
+                    Ok((SymbolicValue::Bool(value.not()), defined))
+                }
+                _ => Err("FFI precondition unary type mismatch".into()),
+            }
+        }
+        MirContractExpr::Binary { op, left, right } => {
+            let (left, left_defined) = ffi_contract_term(left, values)?;
+            let (right, right_defined) = ffi_contract_term(right, values)?;
+            let mut defined = match (op, &left) {
+                (Op::LogicalAnd, SymbolicValue::Bool(left)) => {
+                    Bool::and(&[&left_defined, &left.implies(&right_defined)])
+                }
+                (Op::LogicalOr, SymbolicValue::Bool(left)) => {
+                    Bool::and(&[&left_defined, &left.not().implies(&right_defined)])
+                }
+                _ => Bool::and(&[&left_defined, &right_defined]),
+            };
+            let output = if matches!(op, Op::Divide | Op::Remainder) {
+                let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right) else {
+                    return Err("FFI precondition division requires integers".into());
+                };
+                let zero = Int::from_i64(0);
+                defined = Bool::and(&[
+                    &defined,
+                    &right.ne(&zero),
+                    &Bool::and(&[
+                        &left.eq(Int::from_i64(i64::MIN)),
+                        &right.eq(Int::from_i64(-1)),
+                    ])
+                    .not(),
+                ]);
+                let abs_left = left.ge(&zero).ite(&left, &left.unary_minus());
+                let abs_right = right.ge(&zero).ite(&right, &right.unary_minus());
+                let output = if *op == Op::Divide {
+                    let quotient = abs_left.div(&abs_right);
+                    left.ge(&zero)
+                        .eq(right.ge(&zero))
+                        .ite(&quotient, &quotient.unary_minus())
+                } else {
+                    let remainder = abs_left.modulo(&abs_right);
+                    left.ge(&zero).ite(&remainder, &remainder.unary_minus())
+                };
+                SymbolicValue::Int(output)
+            } else {
+                contract_binary(*op, left, right)?
+            };
+            if let SymbolicValue::Int(value) = &output {
+                defined = Bool::and(&[&defined, &int_range_constraint(value, 64)]);
+            }
+            Ok((output, defined))
+        }
+        MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
+            Err("unsupported FFI precondition expression".into())
         }
     }
 }

@@ -28,12 +28,12 @@ int64_t mir_ffi_read(void) { return sequence; }
 
 const SOURCE: &str = r#"
 extern "C" {
-    func mir_ffi_i32(x: i32) -> i32;
+    func mir_ffi_i32(x: i32) -> i32 requires: x != 0;
     func mir_ffi_i64(x: i64) -> i64;
-    func mir_ffi_bool(x: bool) -> bool;
+    func mir_ffi_bool(x: bool) -> bool requires: x || not x;
     func mir_ffi_f64(x: f64) -> f64;
     func mir_ffi_f64_code(x: f64) -> i64;
-    func mir_ffi_store(x: i32);
+    func mir_ffi_store(x: i32) requires: x > 0;
     func mir_ffi_read() -> i64;
 }
 func main() -> i64 {
@@ -260,18 +260,34 @@ int64_t mir_ffi_mark(int64_t x) {{
     std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
     std::env::set_var("MIMI_CANONICAL_FFI_TRACE", &trace_path);
 
-    for (body, expected_trace, error, return_value) in [
-        ("mir_ffi_mark(4 as i64); let top = mir_ffi_i64(9223372036854775807 as i64); let value = top + (1 as i64); mir_ffi_mark(9 as i64); value",
-            "4\n", Some(("E0802", "addition overflow")), 0),
-        ("let top = mir_ffi_i64(9223372036854775807 as i64); mir_ffi_mark(top + (1 as i64))",
-            "", Some(("E0802", "addition overflow")), 0),
-        ("mir_ffi_mark(4 as i64); let low = mir_ffi_i64(-9223372036854775807 as i64) - (1 as i64); let value = low - (1 as i64); mir_ffi_mark(9 as i64); value",
-            "4\n", Some(("E0802", "subtraction overflow")), 0),
-        ("mir_ffi_mark(4 as i64); let value = mir_ffi_i64(20 as i64) + (1 as i64); mir_ffi_mark(9 as i64); value",
-            "4\n9\n", None, 21),
+    for (requires, body, expected_trace, error, return_value, verify_ffi) in [
+        ("x > 0", "mir_ffi_mark(4 as i64); let top = mir_ffi_i64(9223372036854775807 as i64); let value = top + (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n", Some(("E0802", "addition overflow")), 0, true),
+        ("x > 0", "let top = mir_ffi_i64(9223372036854775807 as i64); mir_ffi_mark(top + (1 as i64))",
+            "", Some(("E0802", "addition overflow")), 0, true),
+        ("x > 0", "mir_ffi_mark(4 as i64); let low = mir_ffi_i64(-9223372036854775807 as i64) - (1 as i64); let value = low - (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n", Some(("E0802", "subtraction overflow")), 0, true),
+        ("x > 0", "mir_ffi_mark(4 as i64); let value = mir_ffi_i64(20 as i64) + (1 as i64); mir_ffi_mark(9 as i64); value",
+            "4\n9\n", None, 21, true),
+        ("x > 0", "mir_ffi_mark(4 as i64); mir_ffi_mark(-1 as i64); mir_ffi_mark(9 as i64); 21 as i64",
+            "4\n", Some(("E0808", "precondition")), 0, true),
+        ("x > 0", "mir_ffi_mark(4 as i64); mir_ffi_mark(-1 as i64); mir_ffi_mark(9 as i64); 21 as i64",
+            "4\n-1\n9\n", None, 21, false),
+        ("x > 0 || 1 / (x - x) > 0", "mir_ffi_mark(4 as i64); 21 as i64",
+            "4\n", None, 21, true),
+        ("x > 0 || 1 / (x - x) > 0", "mir_ffi_mark(4 as i64); mir_ffi_mark(-1 as i64); 21 as i64",
+            "4\n", Some(("E0801", "division by zero")), 0, true),
+        ("x <= 4 || x * 2 > 0", "mir_ffi_mark(4 as i64); mir_ffi_mark(9223372036854775807 as i64); 21 as i64",
+            "4\n", Some(("E0802", "overflow in FFI precondition")), 0, true),
+        ("x >= 0 || -x > 0", "mir_ffi_mark(4 as i64); let low = mir_ffi_i64(-9223372036854775807 as i64) - (1 as i64); mir_ffi_mark(low); 21 as i64",
+            "4\n", Some(("E0802", "overflow in FFI precondition")), 0, true),
+        ("x / 3 == -2 && x % 3 == -1", "mir_ffi_mark(-7 as i64); 21 as i64",
+            "-7\n", None, 21, true),
+        ("x < 0 && 1 / 0 > 0", "mir_ffi_mark(4 as i64); 21 as i64",
+            "", Some(("E0808", "precondition")), 0, true),
     ] {
         let source = format!(
-            "extern \"C\" {{ func mir_ffi_mark(x: i64) -> i64; func mir_ffi_i64(x: i64) -> i64; }} func main() -> i64 {{ {body} }}"
+            "extern \"C\" {{ func mir_ffi_mark(x: i64) -> i64 requires: {requires}; func mir_ffi_i64(x: i64) -> i64; }} func main() -> i64 {{ {body} }}"
         );
         let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex trap fixture");
         let file = crate::parser::Parser::new(tokens).parse_file().expect("parse trap fixture");
@@ -280,12 +296,13 @@ int64_t mir_ffi_mark(int64_t x) {{
         let digest = mir.canonical_digest();
         let oracle = TraceOracle(RefCell::new(Vec::new()));
         let reference = MirReferenceInterpreter::new(&mir).with_ffi_resolver(&oracle)
-            .execute(&crate::core::NodeId("function:main".into()), &[]);
+            .with_ffi_verification(verify_ffi).execute(&crate::core::NodeId("function:main".into()), &[]);
         let reference_trace = oracle.0.borrow().iter().map(|x| format!("{x}\n")).collect::<String>();
         assert_eq!(reference_trace, expected_trace, "{body}");
 
         std::fs::write(&trace_path, "").expect("clear VM effect trace");
         let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("trap fixture bytecode"));
+        vm.set_verify_ffi(verify_ffi);
         let vm_result = vm.run_value();
         assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), expected_trace, "{body}");
         assert_eq!(vm.stdout(), "");
@@ -293,6 +310,7 @@ int64_t mir_ffi_mark(int64_t x) {{
         std::fs::write(&trace_path, "").expect("clear native effect trace");
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "ffi_trap_prefix");
+        generator.verify_ffi = verify_ffi;
         generator.compile_mir_native(&mir).expect("trap fixture native");
         generator.module.verify().expect("valid trap fixture LLVM");
         let config = super::E2EConfig { extra_c_src: Some(c_source.clone()), ..Default::default() };

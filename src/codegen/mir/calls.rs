@@ -1208,6 +1208,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     ),
                 )
             })?;
+        if let Some(condition) = receipt
+            .requires
+            .as_ref()
+            .filter(|_| self.generator.verify_ffi)
+        {
+            self.emit_ffi_requires(condition, subject)?;
+        }
         self.emit_call_target(result, function, arguments, subject)
     }
 

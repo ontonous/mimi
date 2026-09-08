@@ -254,6 +254,7 @@ impl BytecodeVM {
     /// Enable or disable FFI contract verification at runtime.
     pub fn set_verify_ffi(&mut self, verify: bool) {
         self.ffi_runtime.verify_ffi = verify;
+        self.canonical_ffi_runtime.verify_requires = verify;
     }
 
     /// Run the program from the entry point. Returns the exit code.
@@ -1634,10 +1635,7 @@ impl BytecodeVM {
                         .collect();
                     let result = if matches!(op, Op::CallCanonicalExtern { .. }) {
                         match self.program.canonical_ffi.get(extern_idx as usize) {
-                            Some(descriptor) => self
-                                .canonical_ffi_runtime
-                                .call(descriptor, &args)
-                                .map_err(InterpError::new),
+                            Some(descriptor) => self.canonical_ffi_runtime.call(descriptor, &args),
                             None => Err(InterpError::new(format!(
                                 "canonical FFI descriptor index {extern_idx} out of range"
                             ))),
