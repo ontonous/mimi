@@ -2680,7 +2680,9 @@ fn materialize_ffi_call_contracts(
                     });
                     continue;
                 };
-                let unsupported = if signature.variadic {
+                let unsupported = if declaration.no_panic {
+                    Some("no_panic FFI protection")
+                } else if signature.variadic {
                     Some("variadic ABI")
                 } else if signature.returns_errno || declaration.returns_errno {
                     Some("errno conversion")

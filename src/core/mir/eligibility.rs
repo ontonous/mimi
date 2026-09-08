@@ -40,6 +40,7 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
             return false;
         };
         if block.abi != "C"
+            || block.no_panic
             || block.returns_errno
             || declaration.returns_errno
             || declaration.variadic
@@ -109,6 +110,12 @@ pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
             return Some(format!(
                 "extern declaration '{}' ABI '{}' is outside the canonical C ABI",
                 declaration.name, block.abi
+            ));
+        }
+        if block.no_panic {
+            return Some(format!(
+                "extern declaration '{}' enables no_panic FFI protection outside canonical scalar FFI",
+                declaration.name
             ));
         }
         if block.returns_errno {

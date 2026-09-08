@@ -2072,6 +2072,14 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
         ),
         (
             r#"
+                #[no_panic]
+                extern "C" { func foreign(value: i64) -> i64; }
+                func main() -> i64 { foreign(42 as i64) }
+            "#,
+            "no_panic FFI protection",
+        ),
+        (
+            r#"
                 extern "C" { #[errno] func foreign(value: i64) -> i64; }
                 func main() -> i64 { foreign(42 as i64) }
             "#,
@@ -2113,6 +2121,26 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
         }
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
+}
+
+#[test]
+fn scalar_ffi_materialization_rejects_unrepresented_no_panic_semantics() {
+    let source = r#"
+        #[no_panic]
+        extern "C" { func foreign(value: i64) -> i64; }
+        func main() -> i64 { foreign(42 as i64) }
+    "#;
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("no_panic declaration fixture");
+    let error = MirProgram::from_checked_program(&checked)
+        .expect_err("no_panic protection must not be silently dropped from MIR");
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported no_panic FFI protection semantics"),
+        "unexpected no_panic materialization diagnostic: {message}"
+    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
