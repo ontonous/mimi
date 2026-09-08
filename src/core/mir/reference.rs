@@ -117,7 +117,16 @@ impl std::fmt::Display for MirProgramBuildError {
                 errors.len()
             ),
             Self::Validation(errors) => {
-                write!(formatter, "MIR validation failed ({} errors)", errors.len())
+                let details = errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                write!(
+                    formatter,
+                    "MIR validation failed ({} errors): {details}",
+                    errors.len()
+                )
             }
         }
     }

@@ -2012,6 +2012,47 @@ fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
 }
 
 #[test]
+fn scalar_ffi_non_c_abi_stays_outside_canonical_route() {
+    let source = r#"
+        extern "Rust" { func foreign(value: i64) -> i64; }
+        func main() -> i64 { foreign(42 as i64) }
+    "#;
+    // Keep this admission-only fixture free of the production prelude: the
+    // unsupported ABI must be the reported boundary, rather than an unrelated
+    // compatibility helper blocking MIR construction first.
+    let checked =
+        crate::core::check_program(&super::parse(source)).expect("non-C ABI scalar fixture");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(
+        !admission.scalar_ffi,
+        "only the checker-owned C scalar ABI may cross scalar FFI admission"
+    );
+    let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("non-C ABI must remain an explicit compatibility boundary");
+    match error {
+        crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+            admission: preserved,
+            message,
+        } => {
+            assert!(!preserved.scalar_ffi);
+            assert!(
+                message.contains("ABI 'Rust' is outside the canonical C ABI"),
+                "unexpected non-C ABI boundary: {message}"
+            );
+        }
+        other => panic!("non-C ABI must not become a complete canonical admission: {other:?}"),
+    }
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("contract-free non-C ABI has no FFI proof obligations");
+    assert!(
+        results.is_empty(),
+        "non-C ABI without contracts: {results:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_seeded_composition_matrix_shares_one_mir_across_consumers() {
     struct GeneratedOracle;
     impl MirReferenceFfiResolver for GeneratedOracle {
