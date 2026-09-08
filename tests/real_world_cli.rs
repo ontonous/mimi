@@ -1274,10 +1274,27 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
 
     let source_only = run(false);
     assert!(!source_only.status.success());
+    assert!(
+        source_only.stdout.is_empty(),
+        "source-only import graph must not emit a partial receipt: {}",
+        String::from_utf8_lossy(&source_only.stdout)
+    );
     let source_only_stderr = String::from_utf8_lossy(&source_only.stderr);
     assert!(
         source_only_stderr.contains("MIR inspection input rejected"),
         "source-only import graph rejection lost its diagnostic: {source_only_stderr}"
+    );
+    assert!(
+        source_only_stderr.contains("MIR validation failed"),
+        "source-only import graph lost its stable validation phase: {source_only_stderr}"
+    );
+    assert!(
+        !source_only_stderr.contains("Validation(["),
+        "source-only import graph leaked debug-shaped MIR error: {source_only_stderr}"
+    );
+    assert!(
+        !source_only_stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+        "source-only import graph claimed a receipt manifest on failure: {source_only_stderr}"
     );
     assert!(!source_only_stderr.contains("canonical route disposition: legacy"));
 
