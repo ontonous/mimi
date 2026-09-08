@@ -871,3 +871,25 @@ fn ffi_checked_ignores_unrelated_callable_contract_without_legacy() {
     );
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
+
+#[test]
+fn ffi_checked_preserves_legacy_for_unmigrated_string_contract() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let source = r#"
+        extern "C" { func foreign(value: string) -> i64 requires: value != ""; }
+        func main() -> i64 { foreign("ok") }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("unmigrated string FFI contract fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results =
+        crate::verifier::verify_ffi_checked(&checked).expect("legacy string FFI contract verifier");
+    assert_eq!(results.len(), 1, "string FFI call-site proof: {results:?}");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::FfiVerifierCompatibility]
+    );
+}
