@@ -28,7 +28,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
-        // S12/S15/S25/S30: the S8 Flow, scalar collection, flat Copy-record,
+        // S12/S15/S25/S30/R6-15: the scalar FFI, S8 Flow, scalar collection, flat Copy-record,
         // exact non-Copy Option<string>, and exact nested Option-tuple production
         // islands have crossed the default route boundary.  This direct
         // native API is also an old production entry point, so an admitted

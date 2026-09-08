@@ -446,3 +446,196 @@ fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
+
+#[test]
+fn scalar_ffi_seeded_composition_matrix_shares_one_mir_across_consumers() {
+    struct GeneratedOracle;
+    impl MirReferenceFfiResolver for GeneratedOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "generated_foreign" {
+                return Err(format!("unexpected generated symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("generated scalar FFI expects one i64 argument".into());
+            };
+            Ok(MirRuntimeValue::Int(*value))
+        }
+    }
+
+    const C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t generated_foreign(int64_t x) { return x; }
+"#;
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+
+    // This is a deliberately small deterministic generator.  The seed and
+    // recurrence are part of the test contract, so a failure identifies the
+    // exact shape/value pair without relying on ambient randomness.
+    let mut seed = 0x5eed_cafe_u64;
+    for case_index in 0..18_u64 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let shape = (seed % 6) as usize;
+        let value = ((seed >> 11) % 63 + 1) as i64;
+        let alternate = value + 1;
+        let condition = (seed & 1) == 0;
+        let (helper, body, expected) = match shape {
+            0 => (
+                "",
+                format!("generated_foreign({value} as i64)"),
+                value,
+            ),
+            1 => (
+                "",
+                format!("let x = generated_foreign({value} as i64); x"),
+                value,
+            ),
+            2 => (
+                "",
+                format!(
+                    "if {condition} {{ generated_foreign({value} as i64) }} else {{ generated_foreign({alternate} as i64) }}"
+                ),
+                if condition { value } else { alternate },
+            ),
+            3 => (
+                "func relay(x: i64) -> i64 { generated_foreign(x) }",
+                format!("relay({value} as i64)"),
+                value,
+            ),
+            4 => (
+                "func relay(x: i64) -> i64 { generated_foreign(x) }",
+                format!(
+                    "let x = relay({value} as i64); let y = generated_foreign(x); y"
+                ),
+                value,
+            ),
+            _ => (
+                "func relay(x: i64) -> i64 { generated_foreign(x) }",
+                format!(
+                    "if {condition} {{ let x = relay({value} as i64); generated_foreign(x) }} else {{ generated_foreign({alternate} as i64) }}"
+                ),
+                if condition { value } else { alternate },
+            ),
+        };
+        let expected_ffi_calls = match shape {
+            0 | 1 | 3 => 1,
+            2 | 4 => 2,
+            _ => 3,
+        };
+        let source = format!(
+            r#"extern "C" {{ func generated_foreign(x: i64) -> i64; }}
+            {helper}
+            func main() -> i64 {{ {body} }}"#
+        );
+        let checked = crate::core::check_program(&super::parse_prod(&source))
+            .unwrap_or_else(|error| panic!("seeded case {case_index} rejected: {error:?}"));
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(admission.scalar_ffi, "seeded case {case_index}: {source}");
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .unwrap_or_else(|error| panic!("seeded case {case_index} materialization: {error}"));
+        assert!(
+            crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route),
+            "seeded case {case_index}: {route:?}"
+        );
+        let mir = route.program;
+
+        let oracle = GeneratedOracle;
+        let reference = MirReferenceInterpreter::new(&mir)
+            .with_ffi_resolver(&oracle)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .unwrap_or_else(|error| panic!("seeded case {case_index} reference: {error}"));
+        assert_eq!(reference, MirRuntimeValue::Int(expected));
+
+        let bytecode = compile_mir_program(&mir)
+            .unwrap_or_else(|error| panic!("seeded case {case_index} bytecode: {error:?}"));
+        assert!(bytecode.ast.is_none());
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value()
+                .unwrap_or_else(|error| panic!("seeded case {case_index} VM: {error}")),
+            Value::Int(value) if value == expected
+        ));
+
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(
+            &context,
+            &format!("seeded_scalar_ffi_{case_index}"),
+        );
+        generator
+            .compile_mir_native(&mir)
+            .unwrap_or_else(|error| panic!("seeded case {case_index} native: {error:?}"));
+        generator
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("seeded case {case_index} LLVM: {error}"));
+        let native = super::link_and_observe_module(&generator, &config, counter + case_index + 1)
+            .unwrap_or_else(|error| panic!("seeded case {case_index} link: {error}"));
+        assert_eq!(native.exit_code, Some(expected as i32));
+        assert_eq!(native.stdout, "");
+        assert_eq!(native.stderr, "");
+        assert_eq!(mir.ffi_calls().len(), expected_ffi_calls);
+    }
+}
+
+#[test]
+fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "float-contract",
+            r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
+            func main() -> f64 { foreign(42.5) }"#,
+        ),
+        (
+            "collection-composition",
+            r#"extern "C" { func foreign(x: i64) -> i64; }
+            func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
+        ),
+        (
+            "defer-composition",
+            r#"extern "C" { func foreign(x: i64) -> i64 requires: x > 0; }
+            func main() -> i64 { defer { foreign(1 as i64) }; 0 }"#,
+        ),
+    ];
+    let mut seed = 0xdec0_dead_u64;
+    for round in 0..12_u64 {
+        seed = seed
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493);
+        let (label, source) = CASES[(seed as usize) % CASES.len()];
+        let checked = crate::core::check_program(&super::parse_prod(source))
+            .unwrap_or_else(|error| panic!("{label} round {round} check: {error:?}"));
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+            "{label} must be recognized before hard rejection"
+        );
+        let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect_err("unsupported scalar FFI composition must fail closed");
+        assert!(
+            error.to_string().contains("scalar-ffi-v1"),
+            "{label}: {error}"
+        );
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
+        assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
+        assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
+        let context = inkwell::context::Context::create();
+        let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_seeded_ffi");
+        assert!(generator.compile_checked(&checked).is_err());
+        assert!(
+            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+            "{label} round {round} touched a compatibility owner"
+        );
+    }
+}

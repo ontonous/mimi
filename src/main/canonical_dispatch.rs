@@ -115,7 +115,7 @@ pub(crate) fn build_canonical_program_for_sources(
 /// Select a default route for a complete checked program.
 ///
 /// The current default-switch islands are deliberately narrow: a program must
-/// contain either a checker-selected scalar Set facade instance, a flat Copy
+/// contain either a checker-selected scalar C FFI call, a scalar Set facade instance, a flat Copy
 /// record value, a one-, two-, three-, four-, five-, six-, or seven-field generic Copy record projection, a concrete bounded List operation (`len`/`reverse`), a direct nested List index projection, an exact S8 Flow
 /// transition, the concrete non-Copy `Option<string>`/Copy `Option<i32>`/`Option<bool>`/`Option<i64>`/`Option<f64>`/`Result<i32, i32>` variant islands (including `unwrap_or`), or the
 /// generic `Option<T>.is_some`/`is_none` predicate island, the generic
@@ -1561,6 +1561,8 @@ mod tests {
             "let x = foreign(42 as i64); foreign(x)",
             "if true { foreign(42 as i64) } else { foreign(9 as i64) }",
             "let x = helper(42 as i64); println(x); foreign(x)",
+            "let x = helper(42 as i64); let y = foreign(x); y",
+            "if false { helper(9 as i64) } else { foreign(42 as i64) }",
         ] {
             let source = format!(
                 r#"extern "C" {{ func foreign(x: i64) -> i64; }}
