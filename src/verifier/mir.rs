@@ -3395,7 +3395,7 @@ fn eval_ffi_call(
         return Err("MIR verifier extern call arguments disagree with FFI contract".into());
     }
     if let Some(condition) = &contract.requires {
-        let (term, defined) = ffi_contract_term(condition, &state.values)?;
+        let (term, defined) = ffi_contract_term(condition, &state.values, "precondition")?;
         let condition = Bool::and(&[&defined, &expect_bool(term, "extern requires contract")?]);
         state.ffi_checks.push(FfiCheck {
             instruction: instruction_id.clone(),
@@ -3421,7 +3421,7 @@ fn eval_ffi_call(
         state.values.insert(result.clone(), value);
     }
     if let Some(condition) = &contract.ensures {
-        let (term, defined) = ffi_contract_term(condition, &state.values)?;
+        let (term, defined) = ffi_contract_term(condition, &state.values, "postcondition")?;
         let condition = Bool::and(&[&defined, &expect_bool(term, "extern ensures contract")?]);
         state.ffi_checks.push(FfiCheck {
             instruction: instruction_id.clone(),
@@ -6517,6 +6517,7 @@ fn contract_term(
 fn ffi_contract_term(
     expression: &MirContractExpr,
     values: &BTreeMap<MirValueId, SymbolicValue>,
+    phase: &str,
 ) -> Result<(SymbolicValue, Bool), String> {
     use MirContractBinaryOp as Op;
     match expression {
@@ -6525,7 +6526,7 @@ fn ffi_contract_term(
             Bool::from_bool(true),
         )),
         MirContractExpr::Unary { op, operand } => {
-            let (operand, defined) = ffi_contract_term(operand, values)?;
+            let (operand, defined) = ffi_contract_term(operand, values, phase)?;
             match (op, operand) {
                 (MirContractUnaryOp::Negate, SymbolicValue::Int(value)) => {
                     let output = value.unary_minus();
@@ -6535,12 +6536,12 @@ fn ffi_contract_term(
                 (MirContractUnaryOp::Not, SymbolicValue::Bool(value)) => {
                     Ok((SymbolicValue::Bool(value.not()), defined))
                 }
-                _ => Err("FFI precondition unary type mismatch".into()),
+                _ => Err(format!("FFI {phase} unary type mismatch")),
             }
         }
         MirContractExpr::Binary { op, left, right } => {
-            let (left, left_defined) = ffi_contract_term(left, values)?;
-            let (right, right_defined) = ffi_contract_term(right, values)?;
+            let (left, left_defined) = ffi_contract_term(left, values, phase)?;
+            let (right, right_defined) = ffi_contract_term(right, values, phase)?;
             let mut defined = match (op, &left) {
                 (Op::LogicalAnd, SymbolicValue::Bool(left)) => {
                     Bool::and(&[&left_defined, &left.implies(&right_defined)])
@@ -6552,7 +6553,7 @@ fn ffi_contract_term(
             };
             let output = if matches!(op, Op::Divide | Op::Remainder) {
                 let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right) else {
-                    return Err("FFI precondition division requires integers".into());
+                    return Err(format!("FFI {phase} division requires integers"));
                 };
                 let zero = Int::from_i64(0);
                 defined = Bool::and(&[
@@ -6585,7 +6586,7 @@ fn ffi_contract_term(
             Ok((output, defined))
         }
         MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
-            Err("unsupported FFI precondition expression".into())
+            Err(format!("unsupported FFI {phase} expression"))
         }
     }
 }

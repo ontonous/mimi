@@ -611,6 +611,234 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_ensures_short_circuit_division_matches_three_consumers() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_i64(x: i64) -> i64 ensures: x == 0 or result / x == 1;
+}
+func main() -> i64 {
+    println(mir_ffi_i64(0 as i64))
+    println(mir_ffi_i64(7 as i64))
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex short-circuit FFI ensures fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse short-circuit FFI ensures fixture");
+    let checked = crate::core::check_program(&file).expect("check short-circuit FFI ensures");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize short-circuit FFI");
+    assert_eq!(mir.ffi_calls().len(), 2);
+    assert!(mir
+        .ffi_calls()
+        .values()
+        .all(|receipt| receipt.ensures.is_some()));
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-short-circuit".into())
+        .expect("MIR short-circuit FFI ensures verifier");
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status == crate::verifier::VerifStatus::Proven)
+            .count(),
+        1,
+        "x == 0 must short-circuit before symbolic division"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status == crate::verifier::VerifStatus::Disproven)
+            .count(),
+        1,
+        "the unconstrained nonzero result remains statically disproven"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-short-circuit".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-short-circuit".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public short-circuit FFI ensures verifier");
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.status == crate::verifier::VerifStatus::Proven)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.status == crate::verifier::VerifStatus::Disproven)
+                .count(),
+            1
+        );
+        assert!(results.iter().all(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+            })
+        }));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference short-circuit FFI ensures execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "0\n7\n");
+
+    let bytecode = compile_mir_program(&mir).expect("short-circuit FFI bytecode");
+    assert!(bytecode.ast.is_none());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("bytecode short-circuit FFI ensures"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "0\n7\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_short_circuit");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native short-circuit FFI ensures");
+    generator
+        .module
+        .verify()
+        .expect("valid native short-circuit FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native short-circuit FFI ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "0\n7\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn scalar_ffi_ensures_division_by_zero_traps_after_foreign_call() {
+    struct CountingOracle(Cell<u32>);
+    impl MirReferenceFfiResolver for CountingOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_i64" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("division trap oracle expects one i64".into());
+            };
+            self.0.set(self.0.get() + 1);
+            Ok(MirRuntimeValue::Int(*value))
+        }
+    }
+
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_i64(x: i64) -> i64 ensures: result / x == 1;
+}
+func main() -> i64 {
+    mir_ffi_i64(0 as i64)
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex FFI postcondition division trap fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse FFI postcondition division trap fixture");
+    let checked = crate::core::check_program(&file).expect("check FFI postcondition division trap");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("materialize FFI postcondition division trap");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-ensures-div-zero".into())
+        .expect("MIR FFI postcondition division verifier");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
+    assert!(results[0]
+        .message
+        .contains("extern ensures contract disproven"));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = CountingOracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must trap on postcondition division by zero");
+    assert!(
+        reference
+            .message
+            .contains("division by zero in FFI postcondition"),
+        "{reference}"
+    );
+    assert_eq!(
+        oracle.0.get(),
+        1,
+        "foreign call precedes postcondition trap"
+    );
+
+    let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("division trap bytecode"));
+    let vm_error = vm
+        .run_value()
+        .expect_err("bytecode must trap on postcondition division by zero");
+    assert_eq!(vm_error.code(), "E0801");
+    assert!(vm_error
+        .to_string()
+        .contains("division by zero in FFI postcondition"));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_ensures_div_zero");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native FFI postcondition division trap");
+    generator
+        .module
+        .verify()
+        .expect("valid native FFI postcondition division module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native FFI postcondition division execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert!(native.stderr.contains("E0801"), "{}", native.stderr);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {

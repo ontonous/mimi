@@ -15,6 +15,28 @@ use libloading::Library;
 use super::instr::{CanonicalFfiDescriptor, CanonicalFfiScalarType};
 use crate::interp::value::Value;
 
+fn ffi_contract_runtime_error(
+    error: crate::core::mir::MirFfiContractError,
+    phase: &str,
+) -> crate::interp::InterpError {
+    use crate::interp::InterpError;
+
+    match error {
+        crate::core::mir::MirFfiContractError::Invalid(message) => InterpError::new(message),
+        crate::core::mir::MirFfiContractError::Violation => {
+            InterpError::contract_violation(format!("FFI {phase} failed"))
+        }
+        crate::core::mir::MirFfiContractError::Overflow => {
+            InterpError::integer_overflow(format!("integer overflow in FFI {phase}"))
+        }
+        crate::core::mir::MirFfiContractError::DivisionByZero => {
+            let mut error = InterpError::div_by_zero();
+            error.ctx_mut().msg = format!("division by zero in FFI {phase}");
+            error
+        }
+    }
+}
+
 /// Candidate system libc paths for the no-configuration scalar FFI profile.
 fn default_libc_candidates() -> [&'static str; 5] {
     [
@@ -71,20 +93,7 @@ impl CanonicalMirFfiRuntime {
                     _ => Err("FFI precondition argument is not an integer or bool".into()),
                 }
             })
-            .map_err(|error| {
-                use crate::core::mir::MirFfiContractError;
-                use crate::interp::InterpError;
-                match error {
-                    MirFfiContractError::Invalid(message) => InterpError::new(message),
-                    MirFfiContractError::Violation => {
-                        InterpError::contract_violation("FFI precondition failed")
-                    }
-                    MirFfiContractError::Overflow => {
-                        InterpError::integer_overflow("integer overflow in FFI precondition")
-                    }
-                    MirFfiContractError::DivisionByZero => InterpError::div_by_zero(),
-                }
-            })?;
+            .map_err(|error| ffi_contract_runtime_error(error, "precondition"))?;
         }
 
         let output = self
@@ -116,20 +125,7 @@ impl CanonicalMirFfiRuntime {
                 }
                 Err("FFI postcondition references an unknown value".into())
             })
-            .map_err(|error| {
-                use crate::core::mir::MirFfiContractError;
-                use crate::interp::InterpError;
-                match error {
-                    MirFfiContractError::Invalid(message) => InterpError::new(message),
-                    MirFfiContractError::Violation => {
-                        InterpError::contract_violation("FFI postcondition failed")
-                    }
-                    MirFfiContractError::Overflow => {
-                        InterpError::integer_overflow("integer overflow in FFI postcondition")
-                    }
-                    MirFfiContractError::DivisionByZero => InterpError::div_by_zero(),
-                }
-            })?;
+            .map_err(|error| ffi_contract_runtime_error(error, "postcondition"))?;
         }
         Ok(output)
     }
