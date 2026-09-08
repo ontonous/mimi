@@ -255,6 +255,8 @@ fn materialize_canonical_ffi(
             result: result_type,
             argument_ids: receipt.arguments.clone(),
             requires: receipt.requires.clone(),
+            result_id: receipt.result.clone(),
+            ensures: receipt.ensures.clone(),
         });
     }
     if errors.is_empty() {

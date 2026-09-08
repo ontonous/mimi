@@ -1875,6 +1875,12 @@ pub struct CanonicalFfiDescriptor {
     pub argument_ids: Vec<crate::core::mir::MirValueId>,
     /// Canonical predicate only: no AST expression or source-name environment.
     pub requires: Option<crate::core::mir::MirContractExpr>,
+    /// MIR identity of the returned scalar, when the call returns a value.
+    /// This binds an `ensures: result ...` predicate to the actual call output.
+    pub result_id: Option<crate::core::mir::MirValueId>,
+    /// Canonical postcondition only: no AST expression or source-name
+    /// environment crosses into the bytecode VM.
+    pub ensures: Option<crate::core::mir::MirContractExpr>,
 }
 
 impl BytecodeProgram {

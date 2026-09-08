@@ -87,8 +87,51 @@ impl CanonicalMirFfiRuntime {
             })?;
         }
 
-        self.call_abi(descriptor, args)
-            .map_err(crate::interp::InterpError::new)
+        let output = self
+            .call_abi(descriptor, args)
+            .map_err(crate::interp::InterpError::new)?;
+        if let Some(condition) = descriptor.ensures.as_ref().filter(|_| self.verify_requires) {
+            crate::core::mir::evaluate_ffi_ensures(condition, |id| {
+                if let Some(index) = descriptor
+                    .argument_ids
+                    .iter()
+                    .position(|argument| argument == id)
+                {
+                    return match args.get(index) {
+                        Some(Value::Int(value)) => {
+                            Ok(crate::core::mir::MirContractScalar::Int(*value))
+                        }
+                        Some(Value::Bool(value)) => {
+                            Ok(crate::core::mir::MirContractScalar::Bool(*value))
+                        }
+                        _ => Err("FFI postcondition argument is not an integer or bool".into()),
+                    };
+                }
+                if descriptor.result_id.as_ref() == Some(id) {
+                    return match &output {
+                        Value::Int(value) => Ok(crate::core::mir::MirContractScalar::Int(*value)),
+                        Value::Bool(value) => Ok(crate::core::mir::MirContractScalar::Bool(*value)),
+                        _ => Err("FFI postcondition result is not an integer or bool".into()),
+                    };
+                }
+                Err("FFI postcondition references an unknown value".into())
+            })
+            .map_err(|error| {
+                use crate::core::mir::MirFfiContractError;
+                use crate::interp::InterpError;
+                match error {
+                    MirFfiContractError::Invalid(message) => InterpError::new(message),
+                    MirFfiContractError::Violation => {
+                        InterpError::contract_violation("FFI postcondition failed")
+                    }
+                    MirFfiContractError::Overflow => {
+                        InterpError::integer_overflow("integer overflow in FFI postcondition")
+                    }
+                    MirFfiContractError::DivisionByZero => InterpError::div_by_zero(),
+                }
+            })?;
+        }
+        Ok(output)
     }
 
     fn call_abi(
@@ -291,6 +334,8 @@ mod tests {
             result: argument,
             argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
             requires: None,
+            result_id: None,
+            ensures: None,
         }
     }
 

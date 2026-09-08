@@ -19,8 +19,9 @@ use crate::core::{
 /// syntax is deliberately irrelevant: let bindings, branches, nested calls,
 /// and ordinary helpers all have to materialize as one complete MIR graph.
 /// Non-scalar ABI and declaration semantics not yet migrated remain explicit
-/// compatibility inputs. A recognized scalar graph failing construction or a
-/// consumer gate must never return to those compatibility consumers.
+/// compatibility inputs (variadic, errno, and parameter modes). A recognized
+/// scalar graph failing construction or a consumer gate must never return to
+/// those compatibility consumers.
 pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
     let mut found = false;
     for site in program.call_sites().values() {
@@ -42,7 +43,6 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
             || block.returns_errno
             || declaration.returns_errno
             || declaration.variadic
-            || declaration.ensures.is_some()
             || declaration
                 .typed_params
                 .iter()

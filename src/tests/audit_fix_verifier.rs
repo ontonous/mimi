@@ -292,24 +292,16 @@ func cleaner(h: i64) -> i64 {
     let error = crate::verifier::verify_ffi_source(src).expect_err("defer is outside MIR coverage");
     assert!(error.contains("MIR-MATERIALIZATION-001"), "{error}");
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    // Extern postconditions still own a compatibility boundary. Keep the
-    // original exhaustive-walker regression on that surviving owner too.
+    // Scalar extern postconditions now share the canonical admission. A
+    // structured defer body remains outside the MIR shape, so adding an
+    // `ensures` clause must stay fail-closed instead of reopening the legacy
+    // exhaustive walker.
     let compatibility = src.replace("requires: h >= 0;", "requires: h >= 0 ensures: true;");
-    let results =
-        crate::verifier::verify_ffi_source(&compatibility).expect("compatibility FFI verifier");
-    assert!(
-        results
-            .iter()
-            .any(|r| r.func_name.contains("calls release")),
-        "extern call inside a defer body must be discovered: {:?}",
-        results
-    );
-    assert!(
-        results.iter().any(|r| r.func_name.contains("calls release")
-            && r.status == crate::verifier::VerifStatus::Failed),
-        "unguarded release(h) in defer body should be Disproven: {:?}",
-        results
-    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let error = crate::verifier::verify_ffi_source(&compatibility)
+        .expect_err("defer with a scalar extern postcondition is outside MIR coverage");
+    assert!(error.contains("MIR-MATERIALIZATION-001"), "{error}");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 // ── Wave-2 VER-A: VIR engine false-Proven cluster ────────────────────────

@@ -2217,6 +2217,14 @@ fn validate_call_graph(
                             message,
                         });
                     }
+                    if let Err(message) =
+                        super::contracts::validate_ffi_ensures(function, type_catalog, contract)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
                     continue;
                 }
                 let Some(target_owner) = super::canonical_protocol_call_target(callee) else {
@@ -2612,7 +2620,7 @@ fn validate_call_graph(
     errors
 }
 
-/// Materialize the scalar FFI declaration and precondition contract. This is the
+/// Materialize the scalar FFI declaration and call contract. This is the
 /// frontend/MIR construction boundary: source contract syntax is read once
 /// here and converted to MIR value identities.  No consumer receives the
 /// source expression or re-resolves an extern name.
@@ -2663,9 +2671,7 @@ fn materialize_ffi_call_contracts(
                     });
                     continue;
                 };
-                let unsupported = if signature.ensures.is_some() {
-                    Some("ensures")
-                } else if signature.variadic {
+                let unsupported = if signature.variadic {
                     Some("variadic ABI")
                 } else if signature.returns_errno || declaration.returns_errno {
                     Some("errno conversion")
@@ -2701,8 +2707,12 @@ fn materialize_ffi_call_contracts(
                     .iter()
                     .map(|(name, _, _)| name.as_str())
                     .collect::<Vec<_>>();
+                let result = match &instruction.kind {
+                    super::MirInstructionKind::Call { result, .. } => result.clone(),
+                    _ => unreachable!("FFI receipt materializes only Call instructions"),
+                };
                 let requires = signature.requires.as_ref().map(|expression| {
-                    lower_ffi_contract_expr(expression, &parameter_names, arguments)
+                    lower_ffi_contract_expr(expression, &parameter_names, arguments, None)
                 });
                 let requires = match requires {
                     Some(Ok(condition)) => Some(condition),
@@ -2711,6 +2721,28 @@ fn materialize_ffi_call_contracts(
                             subject: instruction.id.to_string(),
                             message: format!(
                                 "extern declaration '{}' requires is outside canonical MIR: {message}",
+                                signature.name
+                            ),
+                        });
+                        None
+                    }
+                    None => None,
+                };
+                let ensures = signature.ensures.as_ref().map(|expression| {
+                    lower_ffi_contract_expr(
+                        expression,
+                        &parameter_names,
+                        arguments,
+                        result.as_ref(),
+                    )
+                });
+                let ensures = match ensures {
+                    Some(Ok(condition)) => Some(condition),
+                    Some(Err(message)) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern declaration '{}' ensures is outside canonical MIR: {message}",
                                 signature.name
                             ),
                         });
@@ -2737,11 +2769,9 @@ fn materialize_ffi_call_contracts(
                         symbol: signature.name.clone(),
                         abi: declaration.abi.clone(),
                         arguments: arguments.clone(),
-                        result: match &instruction.kind {
-                            super::MirInstructionKind::Call { result, .. } => result.clone(),
-                            _ => unreachable!("FFI receipt materializes only Call instructions"),
-                        },
+                        result,
                         requires,
+                        ensures,
                         span,
                     },
                 );
@@ -2759,6 +2789,7 @@ fn lower_ffi_contract_expr(
     expression: &crate::ast::Expr,
     parameter_names: &[&str],
     arguments: &[MirValueId],
+    result: Option<&MirValueId>,
 ) -> Result<super::MirContractExpr, String> {
     use super::{MirContractBinaryOp, MirContractExpr, MirContractUnaryOp};
     use crate::ast::{BinOp, Expr, Lit, UnOp};
@@ -2767,6 +2798,11 @@ fn lower_ffi_contract_expr(
         Expr::Literal(Lit::Int(value)) => Ok(MirContractExpr::Int(*value)),
         Expr::Literal(Lit::Bool(value)) => Ok(MirContractExpr::Bool(*value)),
         Expr::Ident(name) => {
+            if name == "result" {
+                return result.cloned().map(MirContractExpr::Value).ok_or_else(|| {
+                    "extern contract result is unavailable for a unit-returning call".into()
+                });
+            }
             let index = parameter_names
                 .iter()
                 .position(|parameter| *parameter == name)
@@ -2789,6 +2825,7 @@ fn lower_ffi_contract_expr(
                     operand,
                     parameter_names,
                     arguments,
+                    result,
                 )?),
             })
         }
@@ -2811,8 +2848,18 @@ fn lower_ffi_contract_expr(
             };
             Ok(MirContractExpr::Binary {
                 op,
-                left: Box::new(lower_ffi_contract_expr(left, parameter_names, arguments)?),
-                right: Box::new(lower_ffi_contract_expr(right, parameter_names, arguments)?),
+                left: Box::new(lower_ffi_contract_expr(
+                    left,
+                    parameter_names,
+                    arguments,
+                    result,
+                )?),
+                right: Box::new(lower_ffi_contract_expr(
+                    right,
+                    parameter_names,
+                    arguments,
+                    result,
+                )?),
             })
         }
         _ => Err("extern contract expression is outside scalar MIR".into()),
@@ -4451,9 +4498,11 @@ impl<'a> MirReferenceInterpreter<'a> {
                 && descriptor.abi == MirAbiClass::Unit
                 && descriptor.ownership == MirOwnership::Copy
             {
-                return Ok(receipt);
-            }
-            if descriptor.layout != MirLayout::Scalar
+                // Unit results are valid for a contract-free scalar FFI
+                // call; an `ensures` expression that mentions `result` is
+                // rejected by the receipt validator below because it has no
+                // scalar result identity.
+            } else if descriptor.layout != MirLayout::Scalar
                 || descriptor.ownership != MirOwnership::Copy
                 || !matches!(
                     descriptor.abi,
@@ -4473,6 +4522,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                 ));
             }
         }
+        super::contracts::validate_ffi_ensures(function, self.program.type_catalog(), receipt)
+            .map_err(|message| self.error(&function.owner, message))?;
         Ok(receipt)
     }
 
@@ -6179,12 +6230,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                             let index = arguments.iter().position(|value| value == id).ok_or_else(
                                 || "FFI precondition references a non-argument".to_string(),
                             )?;
-                            match runtime_arguments[index] {
+                            match &runtime_arguments[index] {
                                 MirRuntimeValue::Int(value) => {
-                                    Ok(super::MirContractScalar::Int(value))
+                                    Ok(super::MirContractScalar::Int(*value))
                                 }
                                 MirRuntimeValue::Bool(value) => {
-                                    Ok(super::MirContractScalar::Bool(value))
+                                    Ok(super::MirContractScalar::Bool(*value))
                                 }
                                 _ => {
                                     Err("FFI precondition argument is not an integer or bool"
@@ -6198,6 +6249,45 @@ impl<'a> MirReferenceInterpreter<'a> {
                         .call(receipt, &runtime_arguments)
                         .map_err(|message| self.error(&function.owner, message))?;
                     self.validate_ffi_runtime_value(function, result.as_ref(), &output, "result")?;
+                    if let Some(condition) = receipt.ensures.as_ref().filter(|_| self.verify_ffi) {
+                        super::evaluate_ffi_ensures(condition, |id| {
+                            if let Some(index) = arguments.iter().position(|value| value == id) {
+                                return match &runtime_arguments[index] {
+                                    MirRuntimeValue::Int(value) => {
+                                        Ok(super::MirContractScalar::Int(*value))
+                                    }
+                                    MirRuntimeValue::Bool(value) => {
+                                        Ok(super::MirContractScalar::Bool(*value))
+                                    }
+                                    _ => {
+                                        Err("FFI postcondition argument is not an integer or bool"
+                                            .into())
+                                    }
+                                };
+                            }
+                            if receipt.result.as_ref() == Some(id) {
+                                return match &output {
+                                    MirRuntimeValue::Int(value) => {
+                                        Ok(super::MirContractScalar::Int(*value))
+                                    }
+                                    MirRuntimeValue::Bool(value) => {
+                                        Ok(super::MirContractScalar::Bool(*value))
+                                    }
+                                    _ => {
+                                        Err("FFI postcondition result is not an integer or bool"
+                                            .into())
+                                    }
+                                };
+                            }
+                            Err("FFI postcondition references an unknown value".into())
+                        })
+                        .map_err(|error| {
+                            self.error(
+                                &function.owner,
+                                super::ffi_contract_error_message(&error, "postcondition"),
+                            )
+                        })?;
+                    }
                     if let Some(result) = result {
                         values.insert(result.clone(), output);
                     }
@@ -11077,6 +11167,65 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
                 receipts,
             )
             .expect_err("malformed extern requires must fail before consumer dispatch");
+            assert!(
+                errors.iter().any(|error| error.message.contains(expected)),
+                "{condition:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_ffi_gate_rejects_malformed_ensures_before_consumers() {
+        use crate::core::mir::{MirContractBinaryOp as Op, MirContractExpr as Expr};
+        let source = r#"
+extern "C" { func foreign(fd: i64) -> i64 ensures: result == fd; }
+func caller(fd: i64, unrelated: i64) -> i64 { foreign(fd) }
+func main() -> i64 { caller(0 as i64, 7 as i64) }
+"#;
+        let file = Parser::new(Lexer::new(source).tokenize().unwrap())
+            .parse_file()
+            .unwrap();
+        let checked = crate::core::check_program(&file).unwrap();
+        let canonical = MirProgram::from_checked_program(&checked).unwrap();
+        let receipt = canonical.ffi_calls().values().next().unwrap();
+        let unrelated = canonical.functions()[&receipt.caller].parameters[1].clone();
+        let equals = |left| Expr::Binary {
+            op: Op::Equal,
+            left: Box::new(left),
+            right: Box::new(Expr::Int(0)),
+        };
+        for (condition, expected) in [
+            (Expr::Int(1), "must be boolean"),
+            (
+                equals(Expr::Value(
+                    super::MirValueId::new("value:missing").unwrap(),
+                )),
+                "neither a call argument nor the call result",
+            ),
+            (equals(Expr::Value(unrelated)), "neither a call argument"),
+            (equals(Expr::Result), "marker/projection"),
+            (
+                equals(Expr::Project {
+                    base: Box::new(Expr::Value(receipt.arguments[0].clone())),
+                    projection: crate::core::mir::MirProjection::Tuple(0),
+                }),
+                "marker/projection",
+            ),
+            (
+                equals(Expr::Old(receipt.arguments[0].clone())),
+                "marker/projection",
+            ),
+        ] {
+            let mut receipts = canonical.ffi_calls().clone();
+            receipts.values_mut().next().unwrap().ensures = Some(condition.clone());
+            let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+                canonical.functions().clone(),
+                canonical.type_catalog().clone(),
+                canonical.instances().clone(),
+                canonical.transitions().clone(),
+                receipts,
+            )
+            .expect_err("malformed extern ensures must fail before consumer dispatch");
             assert!(
                 errors.iter().any(|error| error.message.contains(expected)),
                 "{condition:?}: {errors:?}"

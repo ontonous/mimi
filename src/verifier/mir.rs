@@ -94,7 +94,7 @@ struct SymbolicState {
     /// through the shape table.  Non-literal indices remain symbolic and use
     /// the ordinary bounds proof.
     known_ints: BTreeMap<MirValueId, i64>,
-    /// FFI precondition checks observed along this symbolic path. Keeping
+    /// FFI call-contract checks observed along this symbolic path. Keeping
     /// them in the path state means branch joins never lose a call-site
     /// obligation or accidentally merge facts from mutually exclusive arms.
     ffi_checks: Vec<FfiCheck>,
@@ -120,6 +120,13 @@ struct FfiCheck {
     instruction: crate::core::mir::MirInstructionId,
     constraints: Vec<Bool>,
     condition: Bool,
+    kind: FfiCheckKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FfiCheckKind {
+    Requires,
+    Ensures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,18 +266,18 @@ pub(crate) fn verify_program(
         });
     }
 
-    // Extern preconditions are call-site obligations even when the enclosing
+    // Extern call contracts are call-site obligations even when the enclosing
     // function has no ensures clause. Keep them in the public MIR result set
     // instead of letting the function-contract fast path erase them.
     results.extend(verify_ffi_program(program, source_hash)?);
     Ok(results)
 }
 
-/// Verify canonical scalar FFI preconditions. Each result is one actual MIR
+/// Verify canonical scalar FFI call contracts. Each result is one actual MIR
 /// extern call, so a caller with two calls receives two independently bound
 /// proof artifacts and counterexamples. The contract is checked against the
-/// caller's canonical `requires` facts and the symbolic path reaching the MIR
-/// call; no surface AST or legacy FFI walker is involved.
+/// caller's canonical path facts and the symbolic call result; no surface AST
+/// or legacy FFI walker is involved.
 pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
@@ -278,7 +285,7 @@ pub(crate) fn verify_ffi_program(
     if !program
         .ffi_calls()
         .values()
-        .any(|call| call.requires.is_some())
+        .any(|call| call.requires.is_some() || call.ensures.is_some())
     {
         return Ok(Vec::new());
     }
@@ -288,11 +295,9 @@ pub(crate) fn verify_ffi_program(
         BTreeMap::<crate::core::mir::MirInstructionId, (crate::core::NodeId, Vec<FfiCheck>)>::new();
 
     for function in program.functions().values() {
-        if !program
-            .ffi_calls()
-            .values()
-            .any(|call| call.caller == function.owner && call.requires.is_some())
-        {
+        if !program.ffi_calls().values().any(|call| {
+            call.caller == function.owner && (call.requires.is_some() || call.ensures.is_some())
+        }) {
             continue;
         }
         let mut initial = initial_state(function, program.type_catalog(), &mut session)?;
@@ -370,7 +375,11 @@ pub(crate) fn verify_ffi_program(
             .ok_or_else(|| format!("canonical MIR FFI check '{}' has no contract", instruction))?;
         let started = Instant::now();
         let mut status = VerifStatus::Proven;
-        let mut message = "canonical MIR extern requires contract proven".to_string();
+        let mut message = match checks.first().map(|check| check.kind) {
+            Some(FfiCheckKind::Ensures) => "canonical MIR extern ensures contract proven",
+            _ => "canonical MIR extern requires contract proven",
+        }
+        .to_string();
         let mut constraint_count = 0;
         for check in checks {
             let mut terms = check.constraints;
@@ -380,15 +389,24 @@ pub(crate) fn verify_ffi_program(
                 (SatResult::Sat, _) => {
                     status = VerifStatus::Disproven;
                     message = format!(
-                        "canonical MIR extern requires contract disproven at '{}'",
-                        instruction
+                        "canonical MIR extern {} contract disproven at '{}'",
+                        match check.kind {
+                            FfiCheckKind::Requires => "requires",
+                            FfiCheckKind::Ensures => "ensures",
+                        },
+                        instruction,
                     );
                     break;
                 }
                 (SatResult::Unknown, _) => {
                     status = session.unknown_status();
-                    message =
-                        "canonical MIR FFI verifier could not discharge extern requires".into();
+                    message = format!(
+                        "canonical MIR FFI verifier could not discharge extern {}",
+                        match check.kind {
+                            FfiCheckKind::Requires => "requires",
+                            FfiCheckKind::Ensures => "ensures",
+                        }
+                    );
                 }
                 (SatResult::Unsat, _) => {}
             }
@@ -3383,6 +3401,7 @@ fn eval_ffi_call(
             instruction: instruction_id.clone(),
             constraints: state.constraints.clone(),
             condition,
+            kind: FfiCheckKind::Requires,
         });
     }
     if let Some(result) = result {
@@ -3400,6 +3419,16 @@ fn eval_ffi_call(
         state.constraints.extend(constraints);
         ensure_result_shape(function, catalog, result, &value)?;
         state.values.insert(result.clone(), value);
+    }
+    if let Some(condition) = &contract.ensures {
+        let (term, defined) = ffi_contract_term(condition, &state.values)?;
+        let condition = Bool::and(&[&defined, &expect_bool(term, "extern ensures contract")?]);
+        state.ffi_checks.push(FfiCheck {
+            instruction: instruction_id.clone(),
+            constraints: state.constraints.clone(),
+            condition,
+            kind: FfiCheckKind::Ensures,
+        });
     }
     Ok(())
 }

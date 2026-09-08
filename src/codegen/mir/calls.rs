@@ -1215,7 +1215,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         {
             self.emit_ffi_requires(condition, subject)?;
         }
-        self.emit_call_target(result, function, arguments, subject)
+        self.emit_call_target(result, function, arguments, subject)?;
+        if let Some(condition) = receipt
+            .ensures
+            .as_ref()
+            .filter(|_| self.generator.verify_ffi)
+        {
+            self.emit_ffi_ensures(condition, subject)?;
+        }
+        Ok(())
     }
 
     pub(super) fn emit_flow_transition(

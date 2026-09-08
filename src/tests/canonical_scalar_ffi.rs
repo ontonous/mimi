@@ -201,7 +201,6 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
 #[test]
 fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
     for (declaration, expected) in [
-        ("func foreign(x: i64) -> i64 ensures: false;", "ensures"),
         ("func foreign(x: i64 ...) -> i64;", "variadic"),
         ("#[errno] func foreign(x: i64) -> i64;", "errno"),
         ("func foreign(&x: i64) -> i64;", "parameter mode"),
@@ -221,6 +220,208 @@ fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
         };
         assert!(error.contains(expected), "{declaration}: {error}");
     }
+}
+
+#[test]
+fn scalar_ffi_ensures_binds_call_result_across_three_consumers() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_i64(x: i64) -> i64 ensures: result == x;
+}
+func main() -> i64 {
+    println(mir_ffi_i64(42 as i64));
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex scalar FFI ensures fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse scalar FFI ensures fixture");
+    let checked = crate::core::check_program(&file).expect("check scalar FFI ensures fixture");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize scalar FFI ensures");
+    let receipt = mir.ffi_calls().values().next().expect("FFI receipt");
+    assert!(receipt.ensures.is_some(), "ensures must be materialized");
+    assert!(receipt
+        .ensures
+        .as_ref()
+        .expect("ensures")
+        .canonical_text()
+        .contains("eq("));
+    let digest = mir.canonical_digest();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_mir(&mir, "scalar-ffi-ensures".into())
+        .expect("MIR FFI ensures verifier");
+    assert_eq!(results.len(), 1, "one call-site postcondition obligation");
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::Disproven,
+        "an unconstrained foreign result cannot prove result == argument: {results:?}"
+    );
+    assert!(results[0]
+        .message
+        .contains("extern ensures contract disproven"));
+    assert_eq!(
+        results[0]
+            .artifact
+            .as_ref()
+            .expect("definitive ensures artifact")
+            .mir_hash,
+        digest
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    for results in [
+        crate::verifier::verify_checked(&checked, "scalar-ffi-ensures".into()),
+        crate::verifier::verify_checked_dual(&checked, "scalar-ffi-ensures".into()),
+        crate::verifier::verify_ffi_checked(&checked),
+    ] {
+        let results = results.expect("public scalar FFI ensures verifier");
+        assert_eq!(
+            results.len(),
+            1,
+            "one public call-site postcondition result"
+        );
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
+        assert!(results[0]
+            .artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR));
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+
+    let oracle = Oracle(Cell::new(0));
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&oracle)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("reference scalar FFI ensures execution");
+    assert_eq!(reference.value, MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "42\n");
+
+    let bytecode = compile_mir_program(&mir).expect("AST-free scalar FFI ensures bytecode");
+    assert!(bytecode.ast.is_none());
+    assert_eq!(bytecode.canonical_ffi.len(), 1);
+    assert!(bytecode.canonical_ffi[0].ensures.is_some());
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("bytecode scalar FFI ensures"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "42\n");
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native scalar FFI ensures");
+    generator
+        .module
+        .verify()
+        .expect("valid native FFI ensures module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native scalar FFI ensures execution");
+    assert_eq!(native.exit_code, Some(0));
+    assert_eq!(native.stdout, "42\n");
+    assert_eq!(native.stderr, "");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert_eq!(mir.canonical_digest(), digest);
+}
+
+#[test]
+fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
+    struct BadOracle;
+    impl MirReferenceFfiResolver for BadOracle {
+        fn call(
+            &self,
+            receipt: &MirFfiCallContract,
+            args: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            if receipt.symbol != "mir_ffi_bad" {
+                return Err(format!("unexpected symbol {}", receipt.symbol));
+            }
+            let [MirRuntimeValue::Int(value)] = args else {
+                return Err("bad oracle expects one i64".into());
+            };
+            Ok(MirRuntimeValue::Int(value + 1))
+        }
+    }
+
+    const BAD_C_SOURCE: &str = r#"
+#include <stdint.h>
+int64_t mir_ffi_bad(int64_t x) { return x + 1; }
+"#;
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, BAD_C_SOURCE);
+    let library = fixture.dir.join("ffi.so");
+    std::env::set_var("MIMI_FFI_LIB", &library);
+    let source = r#"
+extern "C" {
+    func mir_ffi_bad(x: i64) -> i64 ensures: result == x;
+}
+func main() -> i64 { mir_ffi_bad(41 as i64); 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex bad FFI");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse bad FFI");
+    let checked = crate::core::check_program(&file).expect("check bad FFI");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize bad FFI");
+    let reference = MirReferenceInterpreter::new(&mir)
+        .with_ffi_resolver(&BadOracle)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must enforce the FFI postcondition");
+    assert!(
+        reference.message.contains("FFI postcondition failed"),
+        "{reference}"
+    );
+
+    let mut vm = BytecodeVM::new(compile_mir_program(&mir).expect("bad FFI bytecode"));
+    let vm_error = vm
+        .run_value()
+        .expect_err("bytecode must enforce the FFI postcondition");
+    assert_eq!(vm_error.code(), "E0808");
+    assert!(vm_error.to_string().contains("FFI postcondition failed"));
+
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_bad_ensures");
+    generator
+        .compile_mir_native(&mir)
+        .expect("native bad FFI postcondition");
+    generator
+        .module
+        .verify()
+        .expect("valid native bad FFI module");
+    let config = super::E2EConfig {
+        extra_c_src: Some(BAD_C_SOURCE.into()),
+        ..Default::default()
+    };
+    let native = super::link_and_observe_module(
+        &generator,
+        &config,
+        super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+    .expect("native bad FFI execution");
+    assert_ne!(native.exit_code, Some(0));
+    assert!(native.stderr.contains("E0808"), "{}", native.stderr);
 }
 
 #[test]

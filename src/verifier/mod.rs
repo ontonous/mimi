@@ -159,10 +159,11 @@ pub fn verify_ffi_source(source: &str) -> Result<Vec<VerificationResult>, String
 /// Verify extern call sites from a checked program.
 ///
 /// Called scalar C ABIs consume the shared canonical MIR route and call-site
-/// receipts. Unmigrated declaration semantics retain the explicit compatibility
-/// adapter only for called declarations with `requires`/`ensures`; declarations
-/// and calls with no FFI obligations return an empty result. Declaration
-/// identity and arity are checked before either route.
+/// receipts, including their scalar `requires`/`ensures` predicates.
+/// Unmigrated declaration semantics retain the explicit compatibility adapter
+/// only for called declarations with FFI obligations; declarations and calls
+/// with no FFI obligations return an empty result. Declaration identity and
+/// arity are checked before either route.
 pub fn verify_ffi_checked(
     program: &crate::core::CheckedProgram,
 ) -> Result<Vec<VerificationResult>, String> {

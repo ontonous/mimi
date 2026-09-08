@@ -386,6 +386,54 @@ pub(crate) fn validate_ffi_requires(
     Ok(())
 }
 
+/// Validate an extern postcondition before any consumer sees the program.
+/// Its value leaves may refer to this call's evaluated scalar arguments and
+/// to the call's scalar result value.  The latter is represented as a normal
+/// MIR `Value` identity in the receipt, rather than the enclosing function's
+/// `Result` marker, because the foreign result is local to this call-site.
+pub(crate) fn validate_ffi_ensures(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    receipt: &super::MirFfiCallContract,
+) -> Result<(), String> {
+    fn validate_leaves(
+        expression: &MirContractExpr,
+        arguments: &[MirValueId],
+        result: Option<&MirValueId>,
+    ) -> Result<(), String> {
+        match expression {
+            MirContractExpr::Value(value)
+                if !arguments.contains(value) && result != Some(value) => Err(format!(
+                    "extern ensures value '{value}' is neither a call argument nor the call result"
+                )),
+            MirContractExpr::Value(_)
+            | MirContractExpr::Int(_)
+            | MirContractExpr::Bool(_) => Ok(()),
+            MirContractExpr::Unary { operand, .. } => {
+                validate_leaves(operand, arguments, result)
+            }
+            MirContractExpr::Binary { left, right, .. } => {
+                validate_leaves(left, arguments, result)?;
+                validate_leaves(right, arguments, result)
+            }
+            MirContractExpr::Result
+            | MirContractExpr::Old(_)
+            | MirContractExpr::Project { .. } => Err(
+                "extern ensures must use scalar call arguments/result, without old/result marker/projection"
+                    .into(),
+            ),
+        }
+    }
+    let Some(condition) = &receipt.ensures else {
+        return Ok(());
+    };
+    validate_leaves(condition, &receipt.arguments, receipt.result.as_ref())?;
+    if expr_kind(condition, function, catalog)? != ContractValueKind::Bool {
+        return Err("extern ensures condition must be boolean".into());
+    }
+    Ok(())
+}
+
 /// Validate function predicates independently of Z3 and backend ABI.
 pub(crate) fn validate_contracts(
     function: &MirFunction,
@@ -462,6 +510,12 @@ impl From<&str> for MirFfiContractError {
     }
 }
 
+impl From<String> for MirFfiContractError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
 impl std::fmt::Display for MirFfiContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -473,13 +527,46 @@ impl std::fmt::Display for MirFfiContractError {
     }
 }
 
+/// Render a checked FFI predicate error for either the pre-call or post-call
+/// phase.  `Display` remains pinned to the historical precondition wording so
+/// existing callers/tests retain their diagnostics; new consumers use this
+/// phase-aware helper for postconditions.
+pub(crate) fn ffi_contract_error_message(error: &MirFfiContractError, phase: &str) -> String {
+    match error {
+        MirFfiContractError::Invalid(message) => message.clone(),
+        MirFfiContractError::Violation => format!("[E0808] FFI {phase} failed"),
+        MirFfiContractError::Overflow => {
+            format!("[E0802] integer overflow in FFI {phase}")
+        }
+        MirFfiContractError::DivisionByZero => {
+            format!("[E0801] division by zero in FFI {phase}")
+        }
+    }
+}
+
 pub(crate) fn evaluate_ffi_requires(
     condition: &MirContractExpr,
+    argument: impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+) -> Result<(), MirFfiContractError> {
+    evaluate_ffi_contract(condition, argument, "precondition")
+}
+
+pub(crate) fn evaluate_ffi_ensures(
+    condition: &MirContractExpr,
+    argument: impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+) -> Result<(), MirFfiContractError> {
+    evaluate_ffi_contract(condition, argument, "postcondition")
+}
+
+fn evaluate_ffi_contract(
+    condition: &MirContractExpr,
     mut argument: impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+    phase: &str,
 ) -> Result<(), MirFfiContractError> {
     fn evaluate(
         expression: &MirContractExpr,
         argument: &mut impl FnMut(&MirValueId) -> Result<MirContractScalar, String>,
+        phase: &str,
     ) -> Result<MirContractScalar, MirFfiContractError> {
         use MirContractBinaryOp as Op;
         use MirContractScalar::{Bool, Int};
@@ -487,16 +574,18 @@ pub(crate) fn evaluate_ffi_requires(
             MirContractExpr::Value(id) => argument(id).map_err(MirFfiContractError::Invalid),
             MirContractExpr::Int(value) => Ok(Int(*value)),
             MirContractExpr::Bool(value) => Ok(Bool(*value)),
-            MirContractExpr::Unary { op, operand } => match (op, evaluate(operand, argument)?) {
-                (MirContractUnaryOp::Not, Bool(value)) => Ok(Bool(!value)),
-                (MirContractUnaryOp::Negate, Int(value)) => value
-                    .checked_neg()
-                    .map(Int)
-                    .ok_or(MirFfiContractError::Overflow),
-                _ => Err("FFI precondition unary operand type mismatch".into()),
-            },
+            MirContractExpr::Unary { op, operand } => {
+                match (op, evaluate(operand, argument, phase)?) {
+                    (MirContractUnaryOp::Not, Bool(value)) => Ok(Bool(!value)),
+                    (MirContractUnaryOp::Negate, Int(value)) => value
+                        .checked_neg()
+                        .map(Int)
+                        .ok_or(MirFfiContractError::Overflow),
+                    _ => Err(format!("FFI {phase} unary operand type mismatch").into()),
+                }
+            }
             MirContractExpr::Binary { op, left, right } => {
-                let left = evaluate(left, argument)?;
+                let left = evaluate(left, argument, phase)?;
                 // Contract conjunction/disjunction retain source short-circuit
                 // semantics, including suppression of unreachable arithmetic traps.
                 match (op, left) {
@@ -504,7 +593,7 @@ pub(crate) fn evaluate_ffi_requires(
                     (Op::LogicalOr, Bool(true)) => return Ok(Bool(true)),
                     _ => {}
                 }
-                let right = evaluate(right, argument)?;
+                let right = evaluate(right, argument, phase)?;
                 match (op, left, right) {
                     (Op::Add, Int(a), Int(b)) => a
                         .checked_add(b)
@@ -539,18 +628,18 @@ pub(crate) fn evaluate_ffi_requires(
                     (Op::GreaterEqual, Int(a), Int(b)) => Ok(Bool(a >= b)),
                     (Op::LogicalAnd, Bool(a), Bool(b)) => Ok(Bool(a && b)),
                     (Op::LogicalOr, Bool(a), Bool(b)) => Ok(Bool(a || b)),
-                    _ => Err("FFI precondition binary operand type mismatch".into()),
+                    _ => Err(format!("FFI {phase} binary operand type mismatch").into()),
                 }
             }
             MirContractExpr::Result | MirContractExpr::Old(_) | MirContractExpr::Project { .. } => {
-                Err("unsupported FFI precondition expression".into())
+                Err(format!("unsupported FFI {phase} expression").into())
             }
         }
     }
-    match evaluate(condition, &mut argument)? {
+    match evaluate(condition, &mut argument, phase)? {
         MirContractScalar::Bool(true) => Ok(()),
         MirContractScalar::Bool(false) => Err(MirFfiContractError::Violation),
-        _ => Err("FFI precondition must return bool".into()),
+        _ => Err(format!("FFI {phase} must return bool").into()),
     }
 }
 

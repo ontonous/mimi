@@ -1,4 +1,4 @@
-//! Runtime FFI preconditions consumed directly from canonical MIR predicates.
+//! Runtime FFI predicates consumed directly from canonical MIR predicates.
 
 use super::*;
 use crate::core::mir::{MirContractBinaryOp as Op, MirContractExpr as Expr, MirContractUnaryOp};
@@ -10,8 +10,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         condition: &Expr,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let condition = self.emit_ffi_predicate(condition, subject)?;
+        let condition = self.emit_ffi_predicate(condition, subject, "precondition")?;
         self.emit_ffi_guard(condition, "[E0808] FFI precondition failed", subject)
+    }
+
+    pub(super) fn emit_ffi_ensures(
+        &mut self,
+        condition: &Expr,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let condition = self.emit_ffi_predicate(condition, subject, "postcondition")?;
+        self.emit_ffi_guard(condition, "[E0808] FFI postcondition failed", subject)
     }
 
     fn emit_ffi_guard(
@@ -42,6 +51,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         &mut self,
         expression: &Expr,
         subject: &str,
+        phase: &str,
     ) -> Result<IntValue<'ctx>, NativeMirError> {
         let error =
             |error: inkwell::builder::BuilderError| NativeMirError::new(subject, error.to_string());
@@ -65,7 +75,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 }
             }
             Expr::Unary { op, operand } => {
-                let operand = self.emit_ffi_predicate(operand, subject)?;
+                let operand = self.emit_ffi_predicate(operand, subject, phase)?;
                 match op {
                     MirContractUnaryOp::Not => self
                         .generator
@@ -85,7 +95,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             .map_err(error)?;
                         self.emit_ffi_guard(
                             valid,
-                            "[E0802] integer overflow in FFI precondition",
+                            &format!("[E0802] integer overflow in FFI {phase}"),
                             subject,
                         )?;
                         self.generator
@@ -100,7 +110,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 left,
                 right,
             } => {
-                let left = self.emit_ffi_predicate(left, subject)?;
+                let left = self.emit_ffi_predicate(left, subject, phase)?;
                 let predecessor =
                     self.generator.builder.get_insert_block().ok_or_else(|| {
                         NativeMirError::new(subject, "FFI predicate has no block")
@@ -130,7 +140,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .build_conditional_branch(left, yes, no)
                     .map_err(error)?;
                 self.generator.builder.position_at_end(rhs);
-                let right = self.emit_ffi_predicate(right, subject)?;
+                let right = self.emit_ffi_predicate(right, subject, phase)?;
                 let rhs_end = self.generator.builder.get_insert_block().ok_or_else(|| {
                     NativeMirError::new(subject, "FFI predicate RHS has no block")
                 })?;
@@ -148,8 +158,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 Ok(phi.as_basic_value().into_int_value())
             }
             Expr::Binary { op, left, right } => {
-                let left = self.emit_ffi_predicate(left, subject)?;
-                let right = self.emit_ffi_predicate(right, subject)?;
+                let left = self.emit_ffi_predicate(left, subject, phase)?;
+                let right = self.emit_ffi_predicate(right, subject, phase)?;
                 let predicate = match op {
                     Op::Equal => Some(IntPredicate::EQ),
                     Op::NotEqual => Some(IntPredicate::NE),
@@ -179,7 +189,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         .map_err(error)?;
                     self.emit_ffi_guard(
                         nonzero,
-                        "[E0801] division by zero in FFI precondition",
+                        &format!("[E0801] division by zero in FFI {phase}"),
                         subject,
                     )?;
                     let is_min = self
@@ -214,7 +224,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         .map_err(error)?;
                     self.emit_ffi_guard(
                         valid,
-                        "[E0802] integer overflow in FFI precondition",
+                        &format!("[E0802] integer overflow in FFI {phase}"),
                         subject,
                     )?;
                     return if *op == Op::Divide {
@@ -282,7 +292,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .map_err(error)?;
                 self.emit_ffi_guard(
                     valid,
-                    "[E0802] integer overflow in FFI precondition",
+                    &format!("[E0802] integer overflow in FFI {phase}"),
                     subject,
                 )?;
                 Ok(value)

@@ -125,6 +125,15 @@ fn canonical_mir_text(program: &MirProgram) -> String {
                 .as_deref()
                 .unwrap_or("none"),
         );
+        text.push_str(" ensures=");
+        text.push_str(
+            contract
+                .ensures
+                .as_ref()
+                .map(|condition| condition.canonical_text())
+                .as_deref()
+                .unwrap_or("none"),
+        );
         text.push('\n');
     }
     for function in program.functions().values() {

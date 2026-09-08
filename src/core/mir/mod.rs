@@ -260,7 +260,10 @@ pub(crate) fn validate_materialized_call_result_presence(
 }
 
 mod contracts;
-pub(crate) use contracts::{evaluate_ffi_requires, MirContractScalar, MirFfiContractError};
+pub(crate) use contracts::{
+    evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message, MirContractScalar,
+    MirFfiContractError,
+};
 mod copy_option_island;
 mod copy_result_island;
 mod eligibility;
@@ -1011,7 +1014,7 @@ pub struct MirInstruction {
     pub kind: MirInstructionKind,
 }
 
-/// Canonical precondition attached to one checker-resolved extern call.
+/// Canonical contract facts attached to one checker-resolved extern call.
 ///
 /// The declaration expression is lowered to `MirContractExpr` while the
 /// checked program is materialized.  Consumers therefore receive the stable
@@ -1033,6 +1036,11 @@ pub struct MirFfiCallContract {
     pub arguments: Vec<MirValueId>,
     pub result: Option<MirValueId>,
     pub requires: Option<MirContractExpr>,
+    /// Canonical postcondition attached to the foreign call.  The declaration
+    /// `result` leaf is lowered to this call's MIR result value identity so
+    /// every consumer observes the same returned scalar rather than a
+    /// backend-local result placeholder.
+    pub ensures: Option<MirContractExpr>,
     pub span: crate::span::Span,
 }
 
