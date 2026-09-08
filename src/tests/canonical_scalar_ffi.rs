@@ -456,6 +456,34 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_unit_ensures_rejects_unit_result_reference() {
+    let source = r#"
+extern "C" {
+    func mir_ffi_store(x: i32) ensures: result == 0;
+}
+func main() -> i64 {
+    mir_ffi_store(4)
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex unit-result FFI result reference");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse unit-result FFI result reference");
+    let checked =
+        crate::core::check_program(&file).expect("check unit-result FFI result reference");
+    let errors = MirProgram::from_checked_program(&checked)
+        .expect_err("unit FFI result must not enter scalar postcondition arithmetic");
+    let message = format!("{errors:?}");
+    assert!(
+        message.contains("ABI Unit is outside the canonical scalar verifier contract"),
+        "{message}"
+    );
+}
+
+#[test]
 fn scalar_ffi_ensures_violation_traps_after_foreign_call_in_all_consumers() {
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
