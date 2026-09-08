@@ -108,6 +108,11 @@ fn canonical_mir_text(program: &MirProgram) -> String {
             text.push_str(argument.as_str());
             text.push(',');
         }
+        text.push_str(" parameter_types=");
+        for parameter_type in &contract.parameter_types {
+            text.push_str(parameter_type.as_str());
+            text.push(',');
+        }
         text.push_str(" result=");
         text.push_str(
             contract
@@ -116,6 +121,8 @@ fn canonical_mir_text(program: &MirProgram) -> String {
                 .map(MirValueId::as_str)
                 .unwrap_or("unit"),
         );
+        text.push_str(" result_type=");
+        text.push_str(contract.result_type.as_str());
         text.push_str(" requires=");
         text.push_str(
             contract

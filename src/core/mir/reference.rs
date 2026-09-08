@@ -2114,6 +2114,52 @@ fn validate_owned_string_identity_instance_function(
         .unwrap_or_default()
 }
 
+/// Match the checker-approved numeric widening that the current extern-call
+/// lowering records as an identity edge. The declaration TypeDesc remains the
+/// ABI fact, while the call-side literal may retain its default `i32`/`i64`
+/// identity until a later backend conversion. No other representation change
+/// is admitted at this boundary.
+fn ffi_type_compatible(
+    type_catalog: &MirTypeCatalog,
+    actual: &crate::core::ResolvedTypeId,
+    declared: &crate::core::ResolvedTypeId,
+) -> bool {
+    if actual == declared {
+        return true;
+    }
+    let Some(actual) = type_catalog.get(actual) else {
+        return false;
+    };
+    let Some(declared) = type_catalog.get(declared) else {
+        return false;
+    };
+    matches!(
+        (actual.abi, declared.abi),
+        (
+            super::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            },
+            super::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            }
+        ) | (
+            super::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            },
+            super::types::MirAbiClass::Float { bits: 64 }
+        ) | (
+            super::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            },
+            super::types::MirAbiClass::Float { bits: 64 }
+        )
+    )
+}
+
 /// Validate the canonical intra-program call ABI before a backend sees MIR.
 ///
 /// A MIR `Call` is deliberately narrower than the surface callable universe
@@ -2246,6 +2292,30 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
+                    if contract.parameter_types.len() != contract.arguments.len() {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments".into(),
+                        });
+                    }
+                    for (index, (argument, declared_type)) in contract
+                        .arguments
+                        .iter()
+                        .zip(&contract.parameter_types)
+                        .enumerate()
+                    {
+                        if let Some(argument_value) = function.values.get(argument) {
+                            if !ffi_type_compatible(type_catalog, &argument_value.ty, declared_type)
+                            {
+                                errors.push(super::MirValidationError {
+                                    subject: instruction.id.to_string(),
+                                    message: format!(
+                                        "extern call FFI declaration parameter {index} TypeDesc disagrees with MIR argument"
+                                    ),
+                                });
+                            }
+                        }
+                    }
                     if contract.result.as_ref() != result.as_ref() {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
@@ -2269,6 +2339,13 @@ fn validate_call_graph(
                                 subject: instruction.id.to_string(),
                                 message: "extern call FFI contract result value identity is absent"
                                     .into(),
+                            });
+                        } else if function.values.get(result_value).is_some_and(|value| {
+                            !ffi_type_compatible(type_catalog, &value.ty, &contract.result_type)
+                        }) {
+                            errors.push(super::MirValidationError {
+                                subject: instruction.id.to_string(),
+                                message: "extern call FFI declaration result TypeDesc disagrees with MIR result".into(),
                             });
                         }
                     }
@@ -2722,6 +2799,299 @@ fn validate_call_graph(
     errors
 }
 
+/// Resolve one checker-owned extern declaration type against the canonical
+/// resolved type table. Extern declarations are retained as declaration
+/// snapshots, so this adapter performs a structural lookup rather than
+/// re-running inference or consulting a backend layout.
+fn canonical_ffi_type_id(
+    ty: &crate::ast::Type,
+    table: &crate::core::ResolvedTypeTable,
+    program: &crate::core::CheckedProgram,
+) -> Result<crate::core::ResolvedTypeId, String> {
+    use crate::ast::Type;
+    use crate::core::ir::{FunctionTypeAbi, OwnershipTypeKind, ResolvedType, TraitTypeKind};
+
+    fn nominal_id(
+        name: &str,
+        table: &crate::core::ResolvedTypeTable,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<crate::core::NominalTypeId, String> {
+        let mut candidates = BTreeSet::new();
+        for definition in program.type_defs().values() {
+            if definition.qualified_name == name
+                || definition.qualified_name.rsplit("::").next() == Some(name)
+            {
+                candidates.insert(definition.node_id.0.clone());
+            }
+        }
+        for actor in program.actors().values() {
+            if actor.qualified_name == name
+                || actor.qualified_name.rsplit("::").next() == Some(name)
+            {
+                candidates.insert(actor.node_id.0.clone());
+            }
+        }
+        for session in program.sessions().values() {
+            if session.qualified_name == name
+                || session.qualified_name.rsplit("::").next() == Some(name)
+            {
+                candidates.insert(session.node_id.0.clone());
+            }
+        }
+        for capability in program.capabilities().values() {
+            if capability.qualified_name == name
+                || capability.qualified_name.rsplit("::").next() == Some(name)
+            {
+                candidates.insert(capability.node_id.0.clone());
+            }
+        }
+        for trait_def in program.traits().values() {
+            if trait_def.qualified_name == name
+                || trait_def.qualified_name.rsplit("::").next() == Some(name)
+            {
+                candidates.insert(trait_def.node_id.0.clone());
+            }
+        }
+        for flow in program.flows().values() {
+            for state in flow.states.values() {
+                let state_name = format!("{}::{}", flow.id.0, state.id.name);
+                let flow_state_name = format!("flow::{}::{}", flow.id.0, state.id.name);
+                if name == state_name || name == flow_state_name {
+                    candidates.insert(format!("state:{}::{}", flow.id.0, state.id.name));
+                }
+            }
+        }
+        // Builtin nominal types have stable identities even though they have
+        // no user declaration in the checker catalog. Only accept this
+        // fallback when the resolved table actually contains that identity.
+        let builtin = format!("builtin:type:{name}");
+        if table.iter().any(|(_, resolved)| {
+            matches!(
+                resolved,
+                ResolvedType::Nominal { item, .. }
+                    if item.as_str() == builtin
+            )
+        }) {
+            candidates.insert(builtin);
+        }
+        match candidates.len() {
+            1 => candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| "canonical nominal candidate disappeared".to_owned())
+                .and_then(|candidate| {
+                    crate::core::NominalTypeId::new(candidate).map_err(|error| error.to_string())
+                }),
+            0 => Err(format!("unknown canonical nominal type '{name}'")),
+            _ => Err(format!("ambiguous canonical nominal type '{name}'")),
+        }
+    }
+
+    fn find_type(
+        table: &crate::core::ResolvedTypeTable,
+        predicate: impl Fn(&ResolvedType) -> bool,
+    ) -> Option<crate::core::ResolvedTypeId> {
+        table
+            .iter()
+            .find_map(|(id, candidate)| predicate(candidate).then(|| id.clone()))
+    }
+
+    match ty.unlocated() {
+        Type::Name(name, arguments) if name == "Option" && arguments.len() == 1 => {
+            let inner = canonical_ffi_type_id(&arguments[0], table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Option(candidate) if *candidate == inner)
+            })
+            .ok_or_else(|| format!("canonical Option type for '{name}' is absent"))
+        }
+        Type::Name(name, arguments) if name == "Result" && arguments.len() == 2 => {
+            let ok = canonical_ffi_type_id(&arguments[0], table, program)?;
+            let error = canonical_ffi_type_id(&arguments[1], table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Result { ok: candidate_ok, error: candidate_error } if *candidate_ok == ok && *candidate_error == error)
+            })
+            .ok_or_else(|| format!("canonical Result type for '{name}' is absent"))
+        }
+        Type::Name(name, arguments) if name == "Tuple" => {
+            let elements = arguments
+                .iter()
+                .map(|argument| canonical_ffi_type_id(argument, table, program))
+                .collect::<Result<Vec<_>, _>>()?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Tuple(candidate) if *candidate == elements)
+            })
+            .ok_or_else(|| "canonical Tuple type is absent".into())
+        }
+        Type::Name(name, arguments) => {
+            if arguments.is_empty() {
+                let alias = program
+                    .type_defs()
+                    .values()
+                    .filter(|definition| {
+                        matches!(
+                            definition.kind,
+                            crate::core::resolved::ResolvedTypeKind::Alias
+                        ) && (definition.qualified_name == *name
+                            || definition.qualified_name.rsplit("::").next() == Some(name))
+                    })
+                    .collect::<Vec<_>>();
+                if alias.len() > 1 {
+                    return Err(format!("ambiguous transparent type alias '{name}'"));
+                }
+                if let Some(definition) = alias.into_iter().next() {
+                    if let crate::ast::TypeDefKind::Alias(target) = &definition.declaration.kind {
+                        return canonical_ffi_type_id(target, table, program);
+                    }
+                }
+            }
+            if arguments.is_empty() {
+                if let Some(primitive) = crate::core::ir::PrimitiveType::from_language_name(name) {
+                    return find_type(table, |candidate| {
+                        matches!(candidate, ResolvedType::Primitive(candidate) if *candidate == primitive)
+                    })
+                    .ok_or_else(|| format!("canonical primitive type '{name}' is absent"));
+                }
+            }
+            let item = nominal_id(name, table, program)?;
+            let arguments = arguments
+                .iter()
+                .map(|argument| canonical_ffi_type_id(argument, table, program))
+                .collect::<Result<Vec<_>, _>>()?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Nominal { item: candidate_item, arguments: candidate_arguments, .. } if *candidate_item == item && *candidate_arguments == arguments)
+            })
+            .ok_or_else(|| format!("canonical nominal type '{name}' is absent"))
+        }
+        Type::Ref(lifetime, inner) | Type::RefMut(lifetime, inner) => {
+            let target = canonical_ffi_type_id(inner, table, program)?;
+            let mutable = matches!(ty.unlocated(), Type::RefMut(_, _));
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Reference { lifetime: candidate_lifetime, mutable: candidate_mutable, target: candidate_target } if *candidate_lifetime == *lifetime && *candidate_mutable == mutable && *candidate_target == target)
+            })
+            .ok_or_else(|| "canonical reference type is absent".into())
+        }
+        Type::Option(inner) => {
+            let inner = canonical_ffi_type_id(inner, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Option(candidate) if *candidate == inner)
+            })
+            .ok_or_else(|| "canonical Option type is absent".into())
+        }
+        Type::Result(ok, error) => {
+            let ok = canonical_ffi_type_id(ok, table, program)?;
+            let error = canonical_ffi_type_id(error, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Result { ok: candidate_ok, error: candidate_error } if *candidate_ok == ok && *candidate_error == error)
+            })
+            .ok_or_else(|| "canonical Result type is absent".into())
+        }
+        Type::Tuple(elements) => {
+            let elements = elements
+                .iter()
+                .map(|element| canonical_ffi_type_id(element, table, program))
+                .collect::<Result<Vec<_>, _>>()?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Tuple(candidate) if *candidate == elements)
+            })
+            .ok_or_else(|| "canonical tuple type is absent".into())
+        }
+        Type::Func(parameters, result) | Type::ExternFunc(parameters, result) => {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| canonical_ffi_type_id(parameter, table, program))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = canonical_ffi_type_id(result, table, program)?;
+            let abi = if matches!(ty.unlocated(), Type::ExternFunc(_, _)) {
+                FunctionTypeAbi::C
+            } else {
+                FunctionTypeAbi::Mimi
+            };
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Function { abi: candidate_abi, parameters: candidate_parameters, result: candidate_result } if *candidate_abi == abi && *candidate_parameters == parameters && *candidate_result == result)
+            })
+            .ok_or_else(|| "canonical function type is absent".into())
+        }
+        Type::CBuffer(inner) => {
+            let inner = canonical_ffi_type_id(inner, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::CBuffer(candidate) if *candidate == inner)
+            })
+            .ok_or_else(|| "canonical CBuffer type is absent".into())
+        }
+        Type::Cap(name) | Type::CapAtom(name) => {
+            let item = nominal_id(name, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Capability(candidate) if *candidate == item)
+            })
+            .ok_or_else(|| "canonical capability type is absent".into())
+        }
+        Type::Shared(inner) | Type::Weak(inner) => {
+            let target = canonical_ffi_type_id(inner, table, program)?;
+            let kind = if matches!(ty.unlocated(), Type::Shared(_)) {
+                OwnershipTypeKind::Shared
+            } else {
+                OwnershipTypeKind::Weak
+            };
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Ownership { kind: candidate_kind, target: candidate_target } if *candidate_kind == kind && *candidate_target == target)
+            })
+            .ok_or_else(|| "canonical ownership type is absent".into())
+        }
+        Type::Newtype(name, inner) => {
+            let item = nominal_id(name, table, program)?;
+            let inner = canonical_ffi_type_id(inner, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Newtype { item: candidate_item, inner: candidate_inner } if *candidate_item == item && *candidate_inner == inner)
+            })
+            .ok_or_else(|| "canonical newtype is absent".into())
+        }
+        Type::Array(inner, length) => {
+            let element = canonical_ffi_type_id(inner, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Array { element: candidate_element, length: candidate_length } if *candidate_element == element && *candidate_length == *length)
+            })
+            .ok_or_else(|| "canonical array type is absent".into())
+        }
+        Type::Slice(inner) => {
+            let inner = canonical_ffi_type_id(inner, table, program)?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Slice(candidate) if *candidate == inner)
+            })
+            .ok_or_else(|| "canonical slice type is absent".into())
+        }
+        Type::ImplTrait(traits) | Type::DynTrait(traits) => {
+            let kind = if matches!(ty.unlocated(), Type::ImplTrait(_)) {
+                TraitTypeKind::Opaque
+            } else {
+                TraitTypeKind::Dynamic
+            };
+            let traits = traits
+                .iter()
+                .map(|name| nominal_id(name, table, program))
+                .collect::<Result<Vec<_>, _>>()?;
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::Trait { kind: candidate_kind, traits: candidate_traits } if *candidate_kind == kind && *candidate_traits == traits)
+            })
+            .ok_or_else(|| "canonical trait type is absent".into())
+        }
+        Type::RawPtr(inner) | Type::RawPtrMut(inner) => {
+            let target = canonical_ffi_type_id(inner, table, program)?;
+            let mutable = matches!(ty.unlocated(), Type::RawPtrMut(_));
+            find_type(table, |candidate| {
+                matches!(candidate, ResolvedType::RawPointer { mutable: candidate_mutable, target: candidate_target } if *candidate_mutable == mutable && *candidate_target == target)
+            })
+            .ok_or_else(|| "canonical raw pointer type is absent".into())
+        }
+        Type::Nothing => table
+            .unit_type_id()
+            .ok_or_else(|| "canonical unit type is absent".into()),
+        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+        Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) | Type::TyErr => {
+            Err("extern declaration type contains unresolved inference".into())
+        }
+    }
+}
+
 /// Materialize the scalar FFI declaration and call contract. This is the
 /// frontend/MIR construction boundary: source contract syntax is read once
 /// here and converted to MIR value identities.  No consumer receives the
@@ -2806,6 +3176,45 @@ fn materialize_ffi_call_contracts(
                     });
                     continue;
                 }
+                let parameter_types = signature
+                    .typed_params
+                    .iter()
+                    .map(|(_, ty, _)| canonical_ffi_type_id(ty, program.resolved_types(), program))
+                    .collect::<Result<Vec<_>, _>>();
+                let parameter_types = match parameter_types {
+                    Ok(types) => types,
+                    Err(message) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern declaration '{}' parameter type is outside canonical MIR: {message}",
+                                signature.name
+                            ),
+                        });
+                        continue;
+                    }
+                };
+                let declared_result = signature
+                    .ret_type
+                    .clone()
+                    .unwrap_or(crate::ast::Type::Nothing);
+                let result_type = match canonical_ffi_type_id(
+                    &declared_result,
+                    program.resolved_types(),
+                    program,
+                ) {
+                    Ok(result_type) => result_type,
+                    Err(message) => {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!(
+                                "extern declaration '{}' result type is outside canonical MIR: {message}",
+                                signature.name
+                            ),
+                        });
+                        continue;
+                    }
+                };
                 let parameter_names = signature
                     .typed_params
                     .iter()
@@ -2873,7 +3282,9 @@ fn materialize_ffi_call_contracts(
                         symbol: signature.name.clone(),
                         abi: declaration.abi.clone(),
                         arguments: arguments.clone(),
+                        parameter_types,
                         result,
+                        result_type,
                         requires,
                         ensures,
                         span,
@@ -11494,6 +11905,115 @@ func main() -> i64 { foreign(1 as i64); 0 }
             }),
             "{errors:?}"
         );
+
+        let (_, program) = canonical_program_with_main(source);
+        let bool_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                matches!(descriptor.abi, crate::core::mir::types::MirAbiClass::Bool)
+                    .then(|| id.clone())
+            })
+            .expect("bool TypeDesc");
+        let instruction_id = program
+            .ffi_calls()
+            .keys()
+            .next()
+            .cloned()
+            .expect("FFI instruction");
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .parameter_types = vec![bool_type.clone()];
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("FFI declaration and MIR argument TypeDescs must agree");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("FFI declaration parameter 0 TypeDesc disagrees with MIR argument")
+            }),
+            "{errors:?}"
+        );
+
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .parameter_types
+            .clear();
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("FFI declaration parameter arity must be represented in the receipt");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains(
+                    "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments",
+                )
+            }),
+            "{errors:?}"
+        );
+
+        let mut receipts = program.ffi_calls().clone();
+        receipts
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .result_type = bool_type;
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("FFI declaration result TypeDesc must agree with MIR result");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains(
+                    "extern call FFI declaration result TypeDesc disagrees with MIR result",
+                )
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_ffi_receipt_resolves_transparent_alias_type_ids() {
+        let source = r#"
+type Id = i64
+extern "C" { func foreign(value: Id) -> Id; }
+func main() -> Id { foreign(1 as Id) }
+"#;
+        let (_, program) = canonical_program_with_main(source);
+        let contract = program.ffi_calls().values().next().expect("FFI receipt");
+        let i64_type = program
+            .type_catalog()
+            .iter()
+            .find_map(|(id, descriptor)| {
+                matches!(
+                    descriptor.abi,
+                    crate::core::mir::types::MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true
+                    }
+                )
+                .then(|| id.clone())
+            })
+            .expect("i64 TypeDesc");
+        assert_eq!(contract.parameter_types, vec![i64_type.clone()]);
+        assert_eq!(contract.result_type, i64_type);
     }
 
     #[test]

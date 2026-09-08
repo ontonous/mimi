@@ -1035,7 +1035,16 @@ pub struct MirFfiCallContract {
     /// islands cannot silently infer it from a backend declaration.
     pub abi: String,
     pub arguments: Vec<MirValueId>,
+    /// Checker-canonical declaration parameter TypeDesc identities. These
+    /// are kept alongside the call value identities so a consumer cannot
+    /// accept a forged MIR call whose physical signature merely agrees with
+    /// itself while disagreeing with the extern declaration.
+    pub parameter_types: Vec<ResolvedTypeId>,
     pub result: Option<MirValueId>,
+    /// Checker-canonical declaration result TypeDesc identity. A unit-return
+    /// declaration carries the canonical unit TypeDesc even when the backend
+    /// ABI lowers it as a void result.
+    pub result_type: ResolvedTypeId,
     pub requires: Option<MirContractExpr>,
     /// Canonical postcondition attached to the foreign call.  The declaration
     /// `result` leaf is lowered to this call's MIR result value identity so
