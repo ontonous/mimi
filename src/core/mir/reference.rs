@@ -8995,7 +8995,8 @@ mod tests {
     use crate::core::mir::lower::{lower_body, lower_program};
     use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
     use crate::core::mir::{
-        MirAggregateKind, MirGenericInstanceContract, MirInstruction, MirInstructionKind,
+        MirAggregateKind, MirFfiAbiConversion, MirGenericInstanceContract, MirInstruction,
+        MirInstructionKind,
     };
     use crate::core::{NodeId, ResolvedCallee};
     use crate::lexer::Lexer;
@@ -12238,6 +12239,83 @@ func main() -> i64 { wide(1 as i64); narrow(2 as i32); 0 }
                 error
                     .message
                     .contains("FFI symbol 'wide' is used with incompatible declaration TypeDescs")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_program_gate_rejects_forged_ffi_abi_conversion_receipts() {
+        let source = r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 { foreign(1 as i32) }
+"#;
+        let (_, program) = canonical_program_with_main(source);
+        let instruction_id = program
+            .ffi_calls()
+            .keys()
+            .next()
+            .cloned()
+            .expect("FFI receipt");
+
+        let mut forged_parameter = program.ffi_calls().clone();
+        forged_parameter
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .parameter_conversions[0] = MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        };
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            forged_parameter,
+        )
+        .expect_err("forged parameter ABI conversion must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains(
+                    "extern call FFI parameter 0 ABI conversion receipt disagrees with MIR value",
+                )
+            }),
+            "{errors:?}"
+        );
+
+        let mut forged_result = program.ffi_calls().clone();
+        forged_result
+            .get_mut(&instruction_id)
+            .expect("FFI receipt")
+            .result_conversion = Some(MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        });
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            forged_result,
+        )
+        .expect_err("forged result ABI conversion must fail before consumers");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains(
+                    "extern call FFI result ABI conversion receipt disagrees with MIR result",
+                )
             }),
             "{errors:?}"
         );

@@ -1711,6 +1711,57 @@ func main() -> i64 {
         materialize(REQUIRES_PHASE).canonical_digest(),
         "precondition/postcondition phase must affect the canonical digest"
     );
+
+    const I64_DECLARATION: &str = r#"
+extern "C" { func conversion_identity(value: i64) -> i64; }
+func main() -> i64 { conversion_identity(1 as i32); 0 }
+"#;
+    const F64_DECLARATION: &str = r#"
+extern "C" { func conversion_identity(value: f64) -> f64; }
+func main() -> i64 { conversion_identity(1 as i32); 0 }
+"#;
+    let i64_program = materialize(I64_DECLARATION);
+    let f64_program = materialize(F64_DECLARATION);
+    assert_ne!(
+        i64_program.canonical_digest(),
+        f64_program.canonical_digest(),
+        "ABI conversion start/end classes must participate in the canonical digest"
+    );
+    assert!(matches!(
+        i64_program
+            .ffi_calls()
+            .values()
+            .next()
+            .expect("i64 conversion receipt")
+            .parameter_conversions
+            .as_slice(),
+        [crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true
+            }
+        }]
+    ));
+    assert!(matches!(
+        f64_program
+            .ffi_calls()
+            .values()
+            .next()
+            .expect("f64 conversion receipt")
+            .parameter_conversions
+            .as_slice(),
+        [crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            },
+            to: crate::core::mir::types::MirAbiClass::Float { bits: 64 }
+        }]
+    ));
 }
 
 #[test]
