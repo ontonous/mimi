@@ -8131,6 +8131,14 @@ func main() -> i64 { foreign(42 as i64) }
             assert!(stdout.is_empty(), "{label} {command}: {stdout}");
             assert!(stderr.contains(boundary), "{label} {command}: {stderr}");
             assert!(
+                stderr.contains("MIR validation failed"),
+                "{label} {command}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("Validation(["),
+                "{label} {command} leaked debug-shaped MIR error: {stderr}"
+            );
+            assert!(
                 !stderr.contains("canonical route disposition: legacy"),
                 "{label} {command} leaked a legacy route: {stderr}"
             );

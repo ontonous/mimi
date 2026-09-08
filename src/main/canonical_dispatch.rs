@@ -109,7 +109,10 @@ pub(crate) fn build_canonical_program_for_sources(
         .map(|record| record.id)
         .collect::<HashSet<_>>();
     MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)
-        .map_err(|error| format!("canonical MIR build error: {error:?}"))
+        // Use the stable error contract rather than Rust's debug shape.  The
+        // latter exposed enum/field syntax (`Validation([...])`) through the
+        // CLI and made construction diagnostics depend on internal layout.
+        .map_err(|error| format!("canonical MIR build error: {error}"))
 }
 
 /// Select a default route for a complete checked program.
