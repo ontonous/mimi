@@ -580,7 +580,8 @@ int64_t generated_foreign(int64_t x) { return x; }
             .module
             .verify()
             .unwrap_or_else(|error| panic!("seeded case {case_index} LLVM: {error}"));
-        let native = super::link_and_observe_module(&generator, &config, counter + case_index + 1)
+        let native_counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let native = super::link_and_observe_module(&generator, &config, native_counter)
             .unwrap_or_else(|error| panic!("seeded case {case_index} link: {error}"));
         assert_eq!(native.exit_code, Some(expected as i32));
         assert_eq!(native.stdout, "");
