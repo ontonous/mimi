@@ -261,6 +261,34 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 }
 
 #[test]
+fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
+    let source = r#"
+        func identity<T>(value: T) -> T { value }
+        func main() -> i32 { identity(42) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "legacy_generic_owner");
+    codegen
+        .compile_checked(&program)
+        .expect("legacy generic body should remain compilable");
+    assert!(
+        codegen.module.get_function("main").is_some(),
+        "generic compatibility path must still emit main"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
 fn compile_checked_routes_record_list_chain_through_canonical_mir() {
     let source = include_str!("../../tests/fixtures/mir_m1_record_list_chain.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
