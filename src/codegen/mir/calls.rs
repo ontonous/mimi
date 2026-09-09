@@ -1386,29 +1386,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )?;
             values.push(value.into());
         }
-        // Check the result-side receipt before building the foreign call.  A
-        // malformed endpoint must never be discovered only after the call
-        // has already produced an observable side effect.
+        // Check the native return shape before building the foreign call.  The
+        // shared receipt gate has already validated result conversion presence
+        // and endpoints; this branch only maps that proof to LLVM's return ABI.
         let result_conversion = if let Some(result) = result {
             let actual_type = self.value_desc(result, subject)?;
             if actual_type.abi == MirAbiClass::Unit {
-                match result_conversion {
-                    Some(conversion)
-                        if conversion.from == MirAbiClass::Unit
-                            && conversion.to == MirAbiClass::Unit => {}
-                    Some(_) => {
-                        return Err(NativeMirError::new(
-                            subject,
-                            "unit MIR result has a non-unit FFI conversion receipt",
-                        ));
-                    }
-                    None => {
-                        return Err(NativeMirError::new(
-                            subject,
-                            "unit MIR result has no FFI conversion receipt",
-                        ));
-                    }
-                }
                 if function_type.get_return_type().is_some() {
                     return Err(NativeMirError::new(
                         subject,
@@ -1438,12 +1421,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 Some((result, conversion))
             }
         } else {
-            if result_conversion.is_some() {
-                return Err(NativeMirError::new(
-                    subject,
-                    "unit MIR call has an FFI result conversion receipt",
-                ));
-            }
             if function_type.get_return_type().is_some() {
                 return Err(NativeMirError::new(
                     subject,
