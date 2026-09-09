@@ -4386,16 +4386,14 @@ impl MirTypeCatalog {
                 if argument_ty.is_some() {
                     return Err("List.len does not accept a second List argument".into());
                 }
-                if result.kind != MirTypeKind::Primitive(PrimitiveType::I32)
-                    || result.abi
-                        != (MirAbiClass::Integer {
-                            bits: 32,
-                            signed: true,
-                        })
-                    || result.layout != MirLayout::Scalar
-                    || result.ownership != MirOwnership::Copy
+                if result.abi
+                    != (MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    })
+                    || !result.is_canonical_copy_scalar(false)
                 {
-                    return Err("List.len result must be a Copy i32 scalar".into());
+                    return Err("List.len result must be a canonical Copy i32 scalar".into());
                 }
             }
             crate::core::mir::MirListOperation::Reverse => {
@@ -4851,10 +4849,9 @@ impl MirTypeCatalog {
                         bits: 32,
                         signed: true,
                     })
-                    || result_desc.layout != MirLayout::Scalar
-                    || result_desc.ownership != MirOwnership::Copy
+                    || !result_desc.is_canonical_copy_scalar(false)
                 {
-                    return Err("Set.size result must be a Copy i32 scalar".into());
+                    return Err("Set.size result must be a canonical Copy i32 scalar".into());
                 }
                 if argument_ty.is_some() {
                     return Err("Set.size does not accept an argument".into());
@@ -4862,11 +4859,10 @@ impl MirTypeCatalog {
             }
             MirSetOperation::IsEmpty | MirSetOperation::Contains => {
                 if result_desc.abi != MirAbiClass::Bool
-                    || result_desc.layout != MirLayout::Scalar
-                    || result_desc.ownership != MirOwnership::Copy
+                    || !result_desc.is_canonical_copy_scalar(false)
                 {
                     return Err(format!(
-                        "Set.{:?} result must be a Copy bool scalar",
+                        "Set.{:?} result must be a canonical Copy bool scalar",
                         operation
                     ));
                 }
@@ -6049,16 +6045,9 @@ impl MirTypeCatalog {
                     result_ty.as_str()
                 )
             })?;
-        } else if result.ownership != MirOwnership::Copy
-            || result.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-        {
+        } else if !result.is_canonical_copy_scalar(false) {
             return Err(format!(
-                "List index result type '{}' is not a Copy/no-op element or admitted nested List clone",
+                "List index result type '{}' is not a canonical Copy/no-op element or admitted nested List clone",
                 result_ty.as_str()
             ));
         }
@@ -6068,21 +6057,13 @@ impl MirTypeCatalog {
                 index_ty.as_str()
             )
         })?;
-        if index.ownership != MirOwnership::Copy
-            || index.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-            || !matches!(index.layout, MirLayout::Scalar)
-            || !matches!(
-                index.abi,
-                MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true,
-                }
-            )
+        if !matches!(
+            index.abi,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            }
+        ) || !index.is_canonical_copy_scalar(false)
         {
             return Err(format!(
                 "List index operand type '{}' is outside the signed Copy scalar contract",
@@ -10693,6 +10674,50 @@ mod tests {
             .validate_list_operation(&concat.result_ty, &concat.list_ty, MirListOperation::Concat)
             .expect_err("List.concat must carry its second input");
         assert!(missing_argument.contains("second List argument"));
+    }
+
+    #[test]
+    fn scalar_container_operation_results_reject_forged_identity() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![bool_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<bool>");
+        let set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: vec![bool_id],
+                is_linear: false,
+            })
+            .expect("Set<bool>");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut forged = catalog.get(&i32_id).expect("scalar descriptor").clone();
+        forged.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i32_id.clone(), forged);
+
+        let list_error = catalog
+            .validate_list_operation(&i32_id, &list_id, MirListOperation::Len)
+            .expect_err("List.len forged scalar result must fail closed");
+        assert!(
+            list_error.contains("canonical Copy i32 scalar"),
+            "{list_error}"
+        );
+        let set_error = catalog
+            .validate_set_operation(&i32_id, &set_id, None, MirSetOperation::Size)
+            .expect_err("Set.size forged scalar result must fail closed");
+        assert!(
+            set_error.contains("canonical Copy i32 scalar"),
+            "{set_error}"
+        );
     }
 
     #[test]
