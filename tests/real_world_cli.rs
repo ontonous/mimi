@@ -2353,6 +2353,143 @@ fn canonical_mir_multi_failure_aggregate_is_consumer_invariant() {
 }
 
 #[test]
+fn canonical_mir_source_scope_and_all_modes_are_repeatable_and_option_order_stable() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-source-all-mode-stability-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create source/all stability directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write source/all stability entry");
+
+    let source_scope = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--receipt")
+            .output()
+            .expect("spawn source-scope stability receipt")
+    };
+    let source_first = source_scope();
+    let source_second = source_scope();
+    for output in [&source_first, &source_second] {
+        assert!(
+            output.status.success(),
+            "source scope unexpectedly rejected its own main:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("root_owners=function:main") && !stdout.contains("function:bad_"),
+            "source scope included an imported helper: {stdout}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("function:bad_"),
+            "source scope emitted an imported helper diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        source_first.status.code(),
+        source_second.status.code(),
+        "source-scope receipt status changed across repetitions"
+    );
+    assert_eq!(
+        source_first.stdout, source_second.stdout,
+        "source-scope receipt changed across repetitions"
+    );
+    assert_eq!(
+        source_first.stderr, source_second.stderr,
+        "source-scope diagnostic changed across repetitions"
+    );
+
+    let all_scope = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn complete-graph stability receipt")
+    };
+    let all_first = all_scope(false);
+    let all_second = all_scope(false);
+    let receipt_first = all_scope(true);
+    let receipt_second = all_scope(true);
+    for (label, output) in [
+        ("all-first", &all_first),
+        ("all-second", &all_second),
+        ("receipt-first", &receipt_first),
+        ("receipt-second", &receipt_second),
+    ] {
+        assert!(
+            !output.status.success(),
+            "{label} silently accepted unsupported imported helpers"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label} emitted a partial manifest: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.matches("Copy scalar").count() == 2
+                && stderr.find("function:bad_a/") < stderr.find("function:bad_b/")
+                && !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "{label} changed complete-graph failure classification: {stderr}"
+        );
+    }
+    assert_eq!(
+        all_first.status.code(),
+        all_second.status.code(),
+        "repeated --all receipt status changed"
+    );
+    assert_eq!(all_first.stdout, all_second.stdout);
+    assert_eq!(all_first.stderr, all_second.stderr);
+    assert_eq!(
+        all_first.status.code(),
+        receipt_first.status.code(),
+        "receipt option order changed complete-graph status"
+    );
+    assert_eq!(all_first.stdout, receipt_first.stdout);
+    assert_eq!(
+        all_first.stderr, receipt_first.stderr,
+        "receipt option order changed complete-graph diagnostics"
+    );
+    assert_ne!(
+        source_first.status.code(),
+        all_first.status.code(),
+        "source scope and --all lost their distinct success/failure boundary"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
