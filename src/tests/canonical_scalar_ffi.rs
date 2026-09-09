@@ -2430,6 +2430,66 @@ func main() -> i64 { unsafe_symbol(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_predicate_receipt_is_validated_before_consumers() {
+    const SOURCE: &str = r#"
+extern "C" { func predicate_shape(value: i64) -> i64; }
+func main() -> i64 { predicate_shape(7 as i64) }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("predicate receipt fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("predicate receipt fixture materialization");
+    let mut receipts = canonical.ffi_calls().clone();
+    receipts
+        .values_mut()
+        .next()
+        .expect("predicate call-site receipt")
+        .requires = Some(crate::core::mir::MirContractExpr::Value(
+        crate::core::mir::MirValueId::new("value:missing-predicate").expect("MIR value id"),
+    ));
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(receipts);
+    let expected = "extern requires value 'value:missing-predicate' is not a call argument";
+    let table_errors =
+        crate::core::mir::validate_ffi_receipt_table(forged.functions(), forged.ffi_calls());
+    assert!(table_errors.is_empty(), "{table_errors:?}");
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject malformed FFI predicate");
+    assert!(
+        reference_error.to_string().contains(expected),
+        "{reference_error}"
+    );
+    let bytecode_error = compile_mir_program(&forged)
+        .expect_err("bytecode materializer must reject malformed FFI predicate");
+    assert!(
+        bytecode_error
+            .iter()
+            .any(|error| error.message.contains(expected)),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native admission must reject malformed FFI predicate");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains(expected)),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability admission must reject malformed FFI predicate");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains(expected)),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&forged, "malformed-ffi-predicate".into())
+        .expect_err("MIR verifier must reject malformed FFI predicate");
+    assert!(verifier_error.contains(expected), "{verifier_error}");
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }

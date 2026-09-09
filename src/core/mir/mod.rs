@@ -385,8 +385,8 @@ pub(crate) fn validate_materialized_call_result_presence(
 
 mod contracts;
 pub(crate) use contracts::{
-    evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message, MirContractScalar,
-    MirFfiContractError,
+    evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message, validate_ffi_ensures,
+    validate_ffi_requires, MirContractScalar, MirFfiContractError,
 };
 mod copy_option_island;
 mod copy_result_island;
@@ -1453,6 +1453,12 @@ pub(crate) fn validate_ffi_call_contract_receipt(
         errors.push(
             "extern call FFI result ABI conversion receipt is present for a unit call".into(),
         );
+    }
+    if let Err(message) = contracts::validate_ffi_requires(function, type_catalog, contract) {
+        errors.push(message);
+    }
+    if let Err(message) = contracts::validate_ffi_ensures(function, type_catalog, contract) {
+        errors.push(message);
     }
     errors
 }

@@ -5236,6 +5236,8 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "extern call FFI result ABI conversion receipt is present for a unit call",
             ));
         }
+        super::contracts::validate_ffi_requires(function, self.program.type_catalog(), receipt)
+            .map_err(|message| self.error(&function.owner, message))?;
         super::contracts::validate_ffi_ensures(function, self.program.type_catalog(), receipt)
             .map_err(|message| self.error(&function.owner, message))?;
         Ok(receipt)

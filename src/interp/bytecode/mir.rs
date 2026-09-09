@@ -305,6 +305,22 @@ fn materialize_canonical_ffi(
                 continue;
             }
         }
+        if let Err(message) =
+            crate::core::mir::validate_ffi_requires(function, program.type_catalog(), receipt)
+        {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message,
+            });
+        }
+        if let Err(message) =
+            crate::core::mir::validate_ffi_ensures(function, program.type_catalog(), receipt)
+        {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message,
+            });
+        }
         let index = match u16::try_from(descriptors.len()) {
             Ok(index) => index,
             Err(_) => {
