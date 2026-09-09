@@ -2812,10 +2812,17 @@ func main() -> i32 {
         let mut forged_descriptor = descriptor;
         forged_descriptor.kind = MirTypeKind::Nominal;
         let mut catalog = program.type_catalog().clone();
-        catalog.replace_for_test_only(scalar_id, forged_descriptor);
+        catalog.replace_for_test_only(scalar_id.clone(), forged_descriptor);
         let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
             .expect("forged native catalog remains structurally valid");
         let context = Context::create();
+        let direct_error =
+            super::native_basic_type(&context, forged_program.type_catalog(), &scalar_id)
+                .expect_err("malformed Copy scalar must fail native ABI materialization");
+        assert!(
+            format!("{direct_error:?}").contains("complete Copy scalar TypeDesc contract"),
+            "{direct_error:?}"
+        );
         let mut generator = CodeGenerator::new(&context, "mir_native_scalar_shape_rejected_test");
         let diagnostics = generator
             .compile_mir_native(&forged_program)

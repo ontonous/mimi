@@ -154,22 +154,7 @@ pub(super) fn validate_native_recursive_tuple_type(
 }
 
 pub(super) fn is_native_scalar_descriptor(desc: &MirTypeDesc) -> bool {
-    desc.layout == MirLayout::Scalar
-        && matches!(
-            desc.abi,
-            MirAbiClass::Integer {
-                bits: 32 | 64,
-                signed: true,
-            } | MirAbiClass::Float { bits: 32 | 64 }
-                | MirAbiClass::Bool
-        )
-        && desc.ownership == MirOwnership::Copy
-        && desc.glue
-            == (MirGlueContract {
-                move_out: MirGlueKind::Noop,
-                clone: MirGlueKind::Noop,
-                drop: MirGlueKind::Noop,
-            })
+    desc.is_canonical_copy_scalar(true)
 }
 
 /// Map a TypeDesc-proven canonical List element to the native runtime tag.
@@ -527,6 +512,16 @@ pub(super) fn native_basic_type<'ctx>(
     let desc = catalog
         .get(ty)
         .ok_or_else(|| NativeMirError::new(ty.as_str(), "TypeDesc is absent"))?;
+    if matches!(
+        desc.abi,
+        MirAbiClass::Integer { .. } | MirAbiClass::Float { .. } | MirAbiClass::Bool
+    ) && !desc.is_canonical_copy_scalar(true)
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "scalar TypeDesc is outside the complete Copy scalar TypeDesc contract",
+        ));
+    }
     match desc.abi {
         MirAbiClass::Integer {
             bits: 32,
