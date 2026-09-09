@@ -7312,6 +7312,10 @@ impl<'a> MirReferenceInterpreter<'a> {
             return self.read_value(function, values, id);
         };
         if descriptor.ownership == super::types::MirOwnership::Copy {
+            self.program
+                .type_catalog()
+                .validate_copy_value(&ty)
+                .map_err(|message| self.error(&function.owner, message))?;
             self.read_value(function, values, id)
         } else {
             values.remove(id).ok_or_else(|| {
@@ -7340,18 +7344,22 @@ impl<'a> MirReferenceInterpreter<'a> {
         ty: &crate::core::ResolvedTypeId,
         value: MirRuntimeValue,
     ) -> Result<(), MirExecutionError> {
-        self.program
-            .type_catalog()
-            .validate_glue(ty, MirGlueOperation::Drop)
-            .map_err(|message| self.error(&function.owner, message))?;
         let descriptor = self
             .program
             .type_catalog()
             .get(ty)
             .ok_or_else(|| self.error(&function.owner, "drop value has no TypeDesc"))?;
         if descriptor.ownership == super::types::MirOwnership::Copy {
+            self.program
+                .type_catalog()
+                .validate_copy_value(ty)
+                .map_err(|message| self.error(&function.owner, message))?;
             return Ok(());
         }
+        self.program
+            .type_catalog()
+            .validate_glue(ty, MirGlueOperation::Drop)
+            .map_err(|message| self.error(&function.owner, message))?;
         match &descriptor.layout {
             MirLayout::Tuple(elements) => {
                 let MirRuntimeValue::Tuple(mut fields) = value else {
@@ -8754,7 +8762,7 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::{
         MirProgram, MirProgramBuildError, MirReferenceFfiResolver, MirReferenceInterpreter,
@@ -8830,6 +8838,56 @@ mod tests {
             .execute(&owner, &[MirRuntimeValue::Int(41)])
             .expect("reference execution");
         assert_eq!(value, MirRuntimeValue::Int(42));
+    }
+
+    #[test]
+    fn reference_copy_runtime_consumers_require_complete_shape() {
+        let (_, program) = canonical_program_with_main(
+            "func id(value: i64) -> i64 { value }\nfunc main() -> i64 { id(41 as i64) }",
+        );
+        let id_owner = NodeId("function:id".into());
+        let id_function = program.functions().get(&id_owner).expect("id function");
+        let scalar_id = id_function
+            .parameters
+            .first()
+            .and_then(|value| id_function.values.get(value))
+            .map(|value| value.ty.clone())
+            .expect("id scalar parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("canonical scalar TypeDesc")
+            .clone();
+        let mut forged_descriptor = descriptor;
+        forged_descriptor.kind = MirTypeKind::Nominal;
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(scalar_id.clone(), forged_descriptor);
+        let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
+            .expect("forged runtime catalog remains structurally valid");
+        let interpreter = MirReferenceInterpreter::new(&forged_program);
+        let id_function = forged_program
+            .functions()
+            .get(&id_owner)
+            .expect("forged id function");
+        let parameter = id_function
+            .parameters
+            .first()
+            .expect("id parameter")
+            .clone();
+        let mut values = HashMap::from([(parameter.clone(), MirRuntimeValue::Int(41))]);
+        let transfer_error = interpreter
+            .take_transfer_value(id_function, &mut values, &parameter)
+            .expect_err("malformed Copy scalar transfer must fail closed");
+        assert!(transfer_error
+            .to_string()
+            .contains("complete Copy scalar TypeDesc contract"));
+
+        let drop_error = interpreter
+            .drop_runtime_value(id_function, &scalar_id, MirRuntimeValue::Int(41))
+            .expect_err("malformed Copy scalar drop must fail closed");
+        assert!(drop_error
+            .to_string()
+            .contains("complete Copy scalar TypeDesc contract"));
     }
 
     #[test]
