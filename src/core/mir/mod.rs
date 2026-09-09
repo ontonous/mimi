@@ -1508,6 +1508,17 @@ pub(crate) fn validate_ffi_receipt_table(
         }
     }
     errors.extend(
+        seen.keys()
+            .filter(|instruction| !ffi_calls.contains_key(*instruction))
+            .map(|instruction| {
+                format!(
+                    "extern MIR call instruction '{}' has no FFI receipt",
+                    instruction
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    errors.extend(
         ffi_calls
             .keys()
             .filter(|instruction| !seen.contains_key(*instruction))

@@ -2263,13 +2263,22 @@ func main() -> i64 { receipt_guard(1 as i64) }
 
     let mut missing = canonical.clone();
     missing.replace_ffi_calls_for_test_only(std::collections::BTreeMap::new());
+    let table_errors =
+        crate::core::mir::validate_ffi_receipt_table(missing.functions(), missing.ffi_calls());
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("has no FFI receipt")),
+        "{table_errors:?}"
+    );
     let reference_error = MirReferenceInterpreter::new(&missing)
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must reject a missing FFI receipt");
     assert!(
         reference_error
             .to_string()
-            .contains("no canonical FFI receipt"),
+            .contains("no canonical FFI receipt")
+            || reference_error.to_string().contains("has no FFI receipt"),
         "{reference_error}"
     );
     let bytecode_error =
@@ -2278,6 +2287,7 @@ func main() -> i64 { receipt_guard(1 as i64) }
         bytecode_error.iter().any(|error| {
             error.message.contains("canonical bytecode FFI descriptor")
                 || error.message.contains("canonical FFI receipt")
+                || error.message.contains("has no FFI receipt")
         }),
         "{bytecode_error:?}"
     );
@@ -2293,15 +2303,16 @@ func main() -> i64 { receipt_guard(1 as i64) }
     let capability_error = crate::verifier::validate_mir_capabilities(&missing)
         .expect_err("capability gate must reject a missing FFI receipt");
     assert!(
-        capability_error
-            .iter()
-            .any(|error| error.contains("no canonical FFI contract")),
+        capability_error.iter().any(|error| {
+            error.contains("no canonical FFI contract") || error.contains("has no FFI receipt")
+        }),
         "{capability_error:?}"
     );
     let verifier_error = crate::verifier::verify_mir(&missing, "missing-ffi-receipt".into())
         .expect_err("direct verifier must reject a missing FFI receipt");
     assert!(
-        verifier_error.contains("no canonical FFI contract"),
+        verifier_error.contains("no canonical FFI contract")
+            || verifier_error.contains("has no FFI receipt"),
         "{verifier_error}"
     );
 
