@@ -2566,7 +2566,7 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        for message in crate::core::mir::validate_ffi_call_contract_receipt(
+        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt(
             self.program.type_catalog(),
             function,
             &instruction,
@@ -2574,23 +2574,19 @@ impl<'a> NativeMirValidator<'a> {
             result,
             arguments,
             receipt,
-        ) {
+        );
+        for message in receipt_errors {
+            // Preserve the native validator's established ABI wording while
+            // taking the decision itself from the shared receipt gate.
+            let message = if let Some(rest) = message
+                .strip_prefix("extern call FFI contract ABI '")
+                .and_then(|rest| rest.strip_suffix("' is outside the canonical C ABI"))
+            {
+                format!("FFI ABI '{rest}' is outside the canonical native C ABI")
+            } else {
+                message
+            };
             self.errors.push(NativeMirError::new(subject, message));
-        }
-        if receipt.callee != *callee_owner || receipt.result.as_ref() != result {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "FFI receipt identity disagrees with native call",
-            ));
-        }
-        if receipt.abi != "C" {
-            self.errors.push(NativeMirError::new(
-                subject,
-                format!(
-                    "FFI ABI '{}' is outside the canonical native C ABI",
-                    receipt.abi
-                ),
-            ));
         }
         if !type_arguments.is_empty() {
             self.errors.push(NativeMirError::new(
@@ -2602,12 +2598,6 @@ impl<'a> NativeMirValidator<'a> {
             self.errors.push(NativeMirError::new(
                 subject,
                 "canonical native FFI call cannot carry a variant ABI receipt",
-            ));
-        }
-        if receipt.arguments != arguments {
-            self.errors.push(NativeMirError::new(
-                subject,
-                "FFI receipt arguments disagree with native call",
             ));
         }
         for argument in arguments {
