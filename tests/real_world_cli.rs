@@ -1463,6 +1463,11 @@ fn canonical_mir_cli_all_receipt_snapshot_includes_imported_instances() {
         manifest_receipt, checked,
         "imported-instance receipt round-trip changed the checked receipt"
     );
+    let checked_again = checked_route_receipt(&fixture);
+    assert_eq!(
+        checked_again, checked,
+        "rebuilding the imported-instance checked receipt changed canonical identity"
+    );
     let manifest = parse_route_receipt_manifest(&first.stdout);
     assert_eq!(
         manifest.get("schema").map(String::as_str),
