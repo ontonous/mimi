@@ -1474,35 +1474,41 @@ pub(crate) fn validate_ffi_receipt_table(
             )
         })
         .collect::<Vec<_>>();
-    let mut seen = BTreeMap::<MirInstructionId, NodeId>::new();
+    let mut seen = BTreeMap::<MirInstructionId, (NodeId, NodeId)>::new();
     for function in functions.values() {
         for block in function.blocks.values() {
             for instruction in &block.instructions {
-                if matches!(
-                    &instruction.kind,
-                    MirInstructionKind::Call {
-                        callee: ResolvedCallee::Extern(_),
-                        ..
-                    }
+                let MirInstructionKind::Call {
+                    callee: ResolvedCallee::Extern(callee),
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                if let Some(previous_owner) = seen.insert(
+                    instruction.id.clone(),
+                    (function.owner.clone(), callee.clone()),
                 ) {
-                    if let Some(previous_owner) =
-                        seen.insert(instruction.id.clone(), function.owner.clone())
-                    {
-                        errors.push(format!(
-                            "extern MIR call instruction '{}' appears in multiple functions ('{}' and '{}')",
-                            instruction.id, previous_owner.0, function.owner.0
-                        ));
-                    }
+                    errors.push(format!(
+                        "extern MIR call instruction '{}' appears in multiple functions ('{}' and '{}')",
+                        instruction.id, previous_owner.0.0, function.owner.0
+                    ));
                 }
             }
         }
     }
     for (instruction, contract) in ffi_calls {
-        if let Some(actual_caller) = seen.get(instruction) {
+        if let Some((actual_caller, actual_callee)) = seen.get(instruction) {
             if contract.caller != *actual_caller {
                 errors.push(format!(
                     "extern call FFI receipt caller '{}' disagrees with MIR instruction '{}' owner '{}'",
                     contract.caller.0, instruction, actual_caller.0
+                ));
+            }
+            if contract.callee != *actual_callee {
+                errors.push(format!(
+                    "extern call FFI receipt callee '{}' disagrees with MIR instruction '{}' callee '{}'",
+                    contract.callee.0, instruction, actual_callee.0
                 ));
             }
         }

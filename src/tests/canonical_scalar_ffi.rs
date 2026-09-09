@@ -2162,6 +2162,17 @@ func main() -> i64 {
                     .any(|error| error.contains("receipt caller") && error.contains("owner")),
                 "{label}: {table_errors:?}"
             );
+        } else {
+            let table_errors = crate::core::mir::validate_ffi_receipt_table(
+                forged.functions(),
+                forged.ffi_calls(),
+            );
+            assert!(
+                table_errors.iter().any(|error| {
+                    error.contains("receipt callee") && error.contains("MIR instruction")
+                }),
+                "{label}: {table_errors:?}"
+            );
         }
 
         let reference_error = MirReferenceInterpreter::new(&forged)
@@ -2171,7 +2182,8 @@ func main() -> i64 {
             reference_error
                 .to_string()
                 .contains("FFI receipt disagrees with the MIR call")
-                || reference_error.to_string().contains("receipt caller"),
+                || reference_error.to_string().contains("receipt caller")
+                || reference_error.to_string().contains("receipt callee"),
             "{label}: {reference_error}"
         );
 
@@ -2209,7 +2221,8 @@ func main() -> i64 {
             .expect_err("direct verifier must reject forged call-site owner identity");
         assert!(
             verifier_error.contains("contract identity disagrees")
-                || verifier_error.contains("receipt caller"),
+                || verifier_error.contains("receipt caller")
+                || verifier_error.contains("receipt callee"),
             "{label}: {verifier_error}"
         );
     }
