@@ -1994,6 +1994,78 @@ fn canonical_mir_multi_module_consumer_option_order_is_stable() {
 }
 
 #[test]
+fn canonical_mir_multi_module_consumer_failures_repeat_byte_identically() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-mir-consumer-repeat-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create consumer repeat directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write consumer repeat entry");
+
+    for command in ["run", "build", "verify"] {
+        let run = || {
+            Command::new(mimi_bin())
+                .current_dir(project_root())
+                .arg(command)
+                .arg(&main)
+                .arg("--mir")
+                .output()
+                .unwrap_or_else(|error| panic!("{command} repeated MIR failure: {error}"))
+        };
+        let first = run();
+        let second = run();
+        for output in [&first, &second] {
+            assert!(
+                !output.status.success(),
+                "{command} must reject unsupported imported helpers"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{command} emitted output before canonical rejection: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("MIR lowering failed (2 errors)")
+                    && stderr.contains("function:bad_a/")
+                    && stderr.contains("function:bad_b/")
+                    && stderr.contains("Copy scalar"),
+                "{command} repeated failure lost a canonical lowering diagnostic: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy")
+                    && !stderr.contains("flow_ast")
+                    && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+                "{command} repeated failure leaked a compatibility route or receipt: {stderr}"
+            );
+        }
+        assert_eq!(first.status.code(), second.status.code());
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(
+            first.stderr, second.stderr,
+            "{command} repeated failure changed its canonical diagnostic"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
