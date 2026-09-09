@@ -729,4 +729,38 @@ mod tests {
             Err("invalid MIR route manifest: expected header 'mimi-mir-route-manifest-v1'".into())
         );
     }
+
+    #[test]
+    fn route_receipt_manifest_enforces_field_completeness_and_empty_owner_round_trip() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+
+        let missing_owner = manifest
+            .lines()
+            .filter(|line| !line.starts_with("root_owners="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            CanonicalMirRouteReceipt::parse_manifest(&missing_owner),
+            Err("invalid MIR route manifest: missing field 'root_owners'".into())
+        );
+
+        let trailing_future = format!("{manifest}future_field=reserved\n");
+        assert_eq!(
+            CanonicalMirRouteReceipt::parse_manifest(&trailing_future),
+            Err("invalid MIR route manifest: unknown field 'future_field' at row 9".into())
+        );
+
+        let empty_owner_manifest =
+            manifest.replace("root_owners=function:main,function:z", "root_owners=");
+        let empty_owner_receipt = CanonicalMirRouteReceipt::from_manifest(&empty_owner_manifest)
+            .expect("empty owner set is a valid manifest value");
+        assert!(empty_owner_receipt.root_owners.is_empty());
+        assert_eq!(
+            empty_owner_receipt
+                .manifest_text()
+                .expect("render empty owner set"),
+            empty_owner_manifest
+        );
+    }
 }
