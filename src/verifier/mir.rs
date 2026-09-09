@@ -3437,10 +3437,7 @@ fn eval_flow_transition(
             .get(parameter)
             .map(|value| value.ty.clone())
             .ok_or_else(|| "MIR verifier transition parameter TypeDesc is absent".to_string())?;
-        if catalog
-            .get(&ty)
-            .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy)
-        {
+        if !is_copy_value(catalog, &ty)? {
             catalog.validate_glue(&ty, MirGlueOperation::MoveOut)?;
             state.values.remove(argument).ok_or_else(|| {
                 format!(
@@ -4458,9 +4455,7 @@ fn eval_direct_owned_string_call(
                     .into(),
             );
         }
-        let is_non_copy = catalog
-            .get(&argument_info.ty)
-            .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy);
+        let is_non_copy = !is_copy_value(catalog, &argument_info.ty)?;
         let value = if is_non_copy {
             state.values.remove(argument).ok_or_else(|| {
                 format!(
