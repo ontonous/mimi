@@ -2629,11 +2629,7 @@ impl<'a> NativeMirValidator<'a> {
             ));
             return;
         };
-        if allow_unit_result
-            && desc.abi == MirAbiClass::Unit
-            && desc.layout == MirLayout::Unit
-            && desc.ownership == MirOwnership::Copy
-        {
+        if allow_unit_result && desc.is_canonical_ffi_unit() {
             return;
         }
         // Keep the validator on the same physical family map as declaration,

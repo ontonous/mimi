@@ -402,7 +402,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .program
                 .type_catalog()
                 .get(&result_type)
-                .is_some_and(|desc| desc.abi == MirAbiClass::Unit && desc.layout == MirLayout::Unit)
+                .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
             {
                 self.generator
                     .context

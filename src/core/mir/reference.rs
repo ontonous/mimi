@@ -4980,10 +4980,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ),
                 ));
             };
-            if descriptor.layout == MirLayout::Unit
-                && descriptor.abi == MirAbiClass::Unit
-                && descriptor.ownership == MirOwnership::Copy
-            {
+            if descriptor.is_canonical_ffi_unit() {
                 // Unit results are valid for a contract-free scalar FFI
                 // call; an `ensures` expression that mentions `result` is
                 // rejected by the receipt validator below because it has no

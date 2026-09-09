@@ -90,6 +90,36 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
 }
 
 #[test]
+fn canonical_ffi_unit_endpoint_requires_copy_ownership() {
+    let checked = checked_program(
+        r#"
+extern "C" {
+    func noop();
+}
+func main() -> i32 {
+    noop();
+    0
+}
+"#,
+    );
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked)
+        .expect("unit-return extern must materialize a MIR type catalog");
+    let unit_id = checked
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| {
+            matches!(ty, ResolvedType::Primitive(PrimitiveType::Unit)).then_some(id.clone())
+        })
+        .expect("unit TypeDesc must be present");
+    let descriptor = catalog.get(&unit_id).expect("unit TypeDesc entry");
+    assert!(descriptor.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.ownership = MirOwnership::Move;
+    assert!(!forged.is_canonical_ffi_unit());
+}
+
+#[test]
 fn scalar_ffi_conversion_kind_is_directional_and_closed() {
     use crate::core::mir::types::MirAbiClass;
 

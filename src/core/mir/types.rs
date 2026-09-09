@@ -1236,6 +1236,16 @@ pub struct MirTypeDesc {
 }
 
 impl MirTypeDesc {
+    /// Whether this descriptor is the canonical Copy-owned Unit endpoint used
+    /// for a void scalar FFI declaration/result.  The ownership check is part
+    /// of the endpoint contract: a forged Move/Linear Unit must not be
+    /// accepted by one consumer while another rejects it before execution.
+    pub(crate) fn is_canonical_ffi_unit(&self) -> bool {
+        self.layout == MirLayout::Unit
+            && self.abi == MirAbiClass::Unit
+            && self.ownership == MirOwnership::Copy
+    }
+
     fn from_resolved(id: &ResolvedTypeId, ty: &ResolvedType, ownership: MirOwnership) -> Self {
         let (kind, abi, layout) = match ty {
             ResolvedType::Primitive(primitive) => (

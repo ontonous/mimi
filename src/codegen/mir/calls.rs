@@ -1360,7 +1360,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         // and endpoints; this branch only maps that proof to LLVM's return ABI.
         let result_conversion = if let Some(result) = result {
             let actual_type = self.value_desc(result, subject)?;
-            if actual_type.abi == MirAbiClass::Unit {
+            if actual_type.is_canonical_ffi_unit() {
                 if function_type.get_return_type().is_some() {
                     return Err(NativeMirError::new(
                         subject,

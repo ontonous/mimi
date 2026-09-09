@@ -302,10 +302,7 @@ fn scalar_ffi_type(
             ty.as_str()
         )
     })?;
-    if role == "result"
-        && descriptor.layout == MirLayout::Unit
-        && descriptor.abi == MirAbiClass::Unit
-    {
+    if role == "result" && descriptor.is_canonical_ffi_unit() {
         return Ok(CanonicalFfiScalarType::Unit);
     }
     if descriptor.layout != MirLayout::Scalar || descriptor.ownership != MirOwnership::Copy {
