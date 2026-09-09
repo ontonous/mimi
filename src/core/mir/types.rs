@@ -4302,23 +4302,7 @@ impl MirTypeCatalog {
                 element.as_str()
             )
         })?;
-        let copy_scalar = || {
-            element_desc.ownership == MirOwnership::Copy
-                && element_desc.glue
-                    == (MirGlueContract {
-                        move_out: MirGlueKind::Noop,
-                        clone: MirGlueKind::Noop,
-                        drop: MirGlueKind::Noop,
-                    })
-                && matches!(element_desc.layout, MirLayout::Scalar)
-                && matches!(
-                    element_desc.abi,
-                    MirAbiClass::Integer {
-                        bits: 32 | 64,
-                        signed: true,
-                    } | MirAbiClass::Bool
-                )
-        };
+        let copy_scalar = || element_desc.is_canonical_copy_scalar(false);
         let nested_copy_scalar = || {
             let MirLayout::List {
                 element: nested_element,
@@ -4341,21 +4325,7 @@ impl MirTypeCatalog {
             let Some(nested_desc) = self.get(nested_element) else {
                 return false;
             };
-            nested_desc.ownership == MirOwnership::Copy
-                && nested_desc.glue
-                    == (MirGlueContract {
-                        move_out: MirGlueKind::Noop,
-                        clone: MirGlueKind::Noop,
-                        drop: MirGlueKind::Noop,
-                    })
-                && matches!(nested_desc.layout, MirLayout::Scalar)
-                && matches!(
-                    nested_desc.abi,
-                    MirAbiClass::Integer {
-                        bits: 32 | 64,
-                        signed: true,
-                    } | MirAbiClass::Bool
-                )
+            nested_desc.is_canonical_copy_scalar(false)
         };
         if !copy_scalar() && !nested_copy_scalar() {
             return Err(format!(
@@ -4800,22 +4770,7 @@ impl MirTypeCatalog {
                 element.as_str()
             )
         })?;
-        if element_desc.ownership != MirOwnership::Copy
-            || element_desc.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-            || !matches!(element_desc.layout, MirLayout::Scalar)
-            || !matches!(
-                element_desc.abi,
-                MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true,
-                } | MirAbiClass::Bool
-            )
-        {
+        if !element_desc.is_canonical_copy_scalar(false) {
             return Err(format!(
                 "Set '{}' element type '{}' is outside the canonical Copy scalar contract",
                 ty.as_str(),
@@ -10742,6 +10697,41 @@ mod tests {
             .validate_set_glue(&erased_set_id, MirGlueOperation::MoveOut)
             .expect_err("erased Set has no payload contract");
         assert!(erased.contains("Set<T>") || erased.contains("canonical"));
+    }
+
+    #[test]
+    fn list_and_set_glue_reject_forged_scalar_identity() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("Set<i32>");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut forged = catalog.get(&i32_id).expect("scalar descriptor").clone();
+        forged.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i32_id.clone(), forged);
+
+        let list_error = catalog
+            .validate_list_glue(&list_id, MirGlueOperation::MoveOut)
+            .expect_err("List glue must reject forged scalar identity");
+        assert!(list_error.contains("canonical Copy scalar"), "{list_error}");
+        let set_error = catalog
+            .validate_set_glue(&set_id, MirGlueOperation::MoveOut)
+            .expect_err("Set glue must reject forged scalar identity");
+        assert!(set_error.contains("canonical Copy scalar"), "{set_error}");
     }
 
     #[test]
