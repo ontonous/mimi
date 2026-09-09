@@ -2238,6 +2238,7 @@ func main() -> i64 {
         assert!(
             bytecode_error.iter().any(|error| {
                 error.message.contains("identity/ABI validation")
+                    || error.message.contains("FFI contract identity disagrees")
                     || error.message.contains("absent from its caller")
                     || error.message.contains("absent caller")
             }),

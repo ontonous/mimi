@@ -195,25 +195,7 @@ fn materialize_canonical_ffi(
             });
             continue;
         };
-        if let Err(message) = crate::core::mir::validate_ffi_symbol_manifest_safety(&receipt.symbol)
-        {
-            errors.push(MirBytecodeError {
-                function: receipt.caller.clone(),
-                message: format!("canonical FFI receipt '{}' {message}", instruction),
-            });
-            continue;
-        }
-        if receipt.instruction != *instruction
-            || receipt.callee != *callee
-            || receipt.arguments != *arguments
-            || receipt.parameter_types.len() != arguments.len()
-            || receipt.parameter_conversions.len() != arguments.len()
-            || receipt.result.as_ref() != result.as_ref()
-            || receipt.result_conversion.is_none() != result.is_none()
-            || receipt.abi != "C"
-            || !type_arguments.is_empty()
-            || variant_call_contract.is_some()
-        {
+        if !type_arguments.is_empty() || variant_call_contract.is_some() {
             errors.push(MirBytecodeError {
                 function: receipt.caller.clone(),
                 message: format!(
@@ -223,13 +205,20 @@ fn materialize_canonical_ffi(
             });
             continue;
         }
-        if let Err(message) =
-            crate::core::mir::validate_ffi_symbol_matches_callee(callee, &receipt.symbol)
-        {
-            errors.push(MirBytecodeError {
+        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt_at_mir_boundary(
+            program.type_catalog(),
+            function,
+            instruction,
+            callee,
+            result.as_ref(),
+            arguments,
+            receipt,
+        );
+        if !receipt_errors.is_empty() {
+            errors.extend(receipt_errors.into_iter().map(|message| MirBytecodeError {
                 function: receipt.caller.clone(),
-                message,
-            });
+                message: format!("canonical FFI receipt '{}' {message}", instruction),
+            }));
             continue;
         }
         let argument_types =
@@ -254,22 +243,6 @@ fn materialize_canonical_ffi(
                     continue;
                 }
             };
-        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt(
-            program.type_catalog(),
-            function,
-            instruction,
-            callee,
-            result.as_ref(),
-            arguments,
-            receipt,
-        );
-        if !receipt_errors.is_empty() {
-            errors.extend(receipt_errors.into_iter().map(|message| MirBytecodeError {
-                function: receipt.caller.clone(),
-                message: format!("canonical FFI receipt '{}' {message}", instruction),
-            }));
-            continue;
-        }
         let index = match u16::try_from(descriptors.len()) {
             Ok(index) => index,
             Err(_) => {

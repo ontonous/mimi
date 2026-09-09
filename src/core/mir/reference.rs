@@ -11992,9 +11992,10 @@ func main() -> i64 { foreign(1 as i64); 0 }
 
         let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
             .expect_err("bytecode must reject a forged non-C ABI");
-        assert!(bytecode_error
-            .iter()
-            .any(|error| error.message.contains("identity/ABI validation")));
+        assert!(bytecode_error.iter().any(|error| {
+            error.message.contains("identity/ABI validation")
+                || error.message.contains("outside the canonical C ABI")
+        }));
 
         let native_error = crate::codegen::mir::validate_mir_native(&forged)
             .expect_err("native validator must reject a forged non-C ABI");
