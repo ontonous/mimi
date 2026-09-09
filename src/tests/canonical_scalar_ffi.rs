@@ -2430,6 +2430,60 @@ func main() -> i64 { unsafe_symbol(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_per_call_receipt_rejects_manifest_unsafe_symbol_before_match() {
+    const SOURCE: &str = r#"
+extern "C" { func unsafe_symbol(value: i64) -> i64; }
+func main() -> i64 { unsafe_symbol(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("manifest-unsafe per-call fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("manifest-unsafe per-call fixture materialization");
+    let receipt = program
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("unsafe-symbol call-site receipt");
+    let function = program
+        .functions()
+        .get(&receipt.caller)
+        .expect("unsafe-symbol caller");
+    let instruction = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find(|instruction| instruction.id == receipt.instruction)
+        .expect("unsafe-symbol MIR call");
+    let crate::core::mir::MirInstructionKind::Call {
+        callee: crate::core::ResolvedCallee::Extern(callee),
+        result,
+        arguments,
+        ..
+    } = &instruction.kind
+    else {
+        panic!("fixture must contain an extern MIR call");
+    };
+    let mut forged = receipt.clone();
+    forged.symbol = "unsafe symbol".into();
+    let errors = crate::core::mir::validate_ffi_call_contract_receipt(
+        program.type_catalog(),
+        function,
+        &instruction.id,
+        callee,
+        result.as_ref(),
+        arguments,
+        &forged,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            error.contains("FFI symbol is not manifest-safe")
+                && error.contains("whitespace or a manifest delimiter")
+        }),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_predicate_receipt_is_validated_before_consumers() {
     const SOURCE: &str = r#"
 extern "C" { func predicate_shape(value: i64) -> i64; }

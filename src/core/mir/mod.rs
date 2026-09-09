@@ -28,6 +28,24 @@ pub(crate) fn canonical_ffi_symbol_is_manifest_safe(symbol: &str) -> bool {
         })
 }
 
+/// Return the canonical diagnostic for a symbol that cannot safely cross the
+/// line-oriented FFI manifest boundary.  Keep this beside the predicate so
+/// receipt-table and per-call validation cannot drift in either classification
+/// or wording.
+pub(crate) fn validate_ffi_symbol_manifest_safety(symbol: &str) -> Result<(), String> {
+    if canonical_ffi_symbol_is_manifest_safe(symbol) {
+        return Ok(());
+    }
+    let reason = if symbol.trim().is_empty() {
+        "FFI symbol is empty"
+    } else if symbol.chars().any(char::is_control) {
+        "FFI symbol contains a control character"
+    } else {
+        "FFI symbol contains whitespace or a manifest delimiter"
+    };
+    Err(format!("FFI symbol is not manifest-safe ({reason})"))
+}
+
 /// Validate that a checker-owned C symbol still names the extern callable
 /// encoded by the canonical callee owner.  Extern owners are materialized as
 /// `.../function:<stable-name>:<signature-hash>`; consumers must not trust a
@@ -1383,7 +1401,9 @@ pub(crate) fn validate_ffi_call_contract_receipt(
             contract.abi
         ));
     }
-    if let Err(message) = validate_ffi_symbol_matches_callee(callee, &contract.symbol) {
+    if let Err(message) = validate_ffi_symbol_manifest_safety(&contract.symbol) {
+        errors.push(format!("extern call {message}"));
+    } else if let Err(message) = validate_ffi_symbol_matches_callee(callee, &contract.symbol) {
         errors.push(message);
     }
     if contract.arguments != arguments {
@@ -1536,17 +1556,8 @@ pub(crate) fn validate_ffi_receipt_table(
                     contract.abi
                 ));
             }
-            if !canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
-                let reason = if contract.symbol.trim().is_empty() {
-                    "FFI symbol is empty"
-                } else if contract.symbol.chars().any(char::is_control) {
-                    "FFI symbol contains a control character"
-                } else {
-                    "FFI symbol contains whitespace or a manifest delimiter"
-                };
-                errors.push(format!(
-                    "extern call FFI symbol is not manifest-safe ({reason})"
-                ));
+            if let Err(message) = validate_ffi_symbol_manifest_safety(&contract.symbol) {
+                errors.push(format!("extern call {message}"));
             } else {
                 if let Err(message) =
                     validate_ffi_symbol_matches_callee(actual_callee, &contract.symbol)
