@@ -1285,16 +1285,9 @@ impl MirFfiAbiConversion {
         )
     }
 
-    /// Whether this receipt describes one of the physical argument conversions
-    /// admitted by the scalar C FFI island. Keeping this independent from a
-    /// TypeDesc catalog lets the AST-free bytecode descriptor preflight reject
-    /// a hand-built conversion before it loads or calls a foreign symbol.
-    pub(crate) fn is_supported_argument(self) -> bool {
-        if self.from == self.to {
-            return Self::canonical_identity(self.from);
-        }
+    fn supported_argument_pair(from: types::MirAbiClass, to: types::MirAbiClass) -> bool {
         matches!(
-            (self.from, self.to),
+            (from, to),
             (
                 types::MirAbiClass::Integer {
                     bits: 32,
@@ -1314,16 +1307,9 @@ impl MirFfiAbiConversion {
         )
     }
 
-    /// Whether this receipt describes one of the physical result conversions
-    /// admitted by the scalar C FFI island. Result conversion is the inverse
-    /// direction of argument widening, so its non-identity set is deliberately
-    /// different from [`Self::is_supported_argument`].
-    pub(crate) fn is_supported_result(self) -> bool {
-        if self.from == self.to {
-            return Self::canonical_identity(self.from);
-        }
+    fn supported_result_pair(from: types::MirAbiClass, to: types::MirAbiClass) -> bool {
         matches!(
-            (self.from, self.to),
+            (from, to),
             (
                 types::MirAbiClass::Integer {
                     bits: 64,
@@ -1341,6 +1327,28 @@ impl MirFfiAbiConversion {
                 }
             )
         )
+    }
+
+    /// Whether this receipt describes one of the physical argument conversions
+    /// admitted by the scalar C FFI island. Keeping this independent from a
+    /// TypeDesc catalog lets the AST-free bytecode descriptor preflight reject
+    /// a hand-built conversion before it loads or calls a foreign symbol.
+    pub(crate) fn is_supported_argument(self) -> bool {
+        if self.from == self.to {
+            return Self::canonical_identity(self.from);
+        }
+        Self::supported_argument_pair(self.from, self.to)
+    }
+
+    /// Whether this receipt describes one of the physical result conversions
+    /// admitted by the scalar C FFI island. Result conversion is the inverse
+    /// direction of argument widening, so its non-identity set is deliberately
+    /// different from [`Self::is_supported_argument`].
+    pub(crate) fn is_supported_result(self) -> bool {
+        if self.from == self.to {
+            return Self::canonical_identity(self.from);
+        }
+        Self::supported_result_pair(self.from, self.to)
     }
 
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
@@ -1374,26 +1382,7 @@ impl MirFfiAbiConversion {
         if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
             return None;
         }
-        let accepted = matches!(
-            (actual_desc.abi, declared_desc.abi),
-            (
-                types::MirAbiClass::Integer {
-                    bits: 32,
-                    signed: true
-                },
-                types::MirAbiClass::Integer {
-                    bits: 64,
-                    signed: true
-                }
-            ) | (
-                types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
-                },
-                types::MirAbiClass::Float { bits: 64 }
-            )
-        );
-        accepted.then_some(Self {
+        Self::supported_argument_pair(actual_desc.abi, declared_desc.abi).then_some(Self {
             from: actual_desc.abi,
             to: declared_desc.abi,
         })
@@ -1418,26 +1407,7 @@ impl MirFfiAbiConversion {
         if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
             return None;
         }
-        let accepted = matches!(
-            (actual_desc.abi, declared_desc.abi),
-            (
-                types::MirAbiClass::Integer {
-                    bits: 32,
-                    signed: true
-                },
-                types::MirAbiClass::Integer {
-                    bits: 64,
-                    signed: true
-                }
-            ) | (
-                types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
-                },
-                types::MirAbiClass::Float { bits: 64 }
-            )
-        );
-        accepted.then_some(Self {
+        Self::supported_result_pair(declared_desc.abi, actual_desc.abi).then_some(Self {
             from: declared_desc.abi,
             to: actual_desc.abi,
         })
