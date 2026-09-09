@@ -1848,6 +1848,77 @@ fn canonical_mir_cli_all_receipt_failure_ignores_option_order() {
 }
 
 #[test]
+fn canonical_mir_multi_module_consumers_reject_unsupported_helpers_without_fallback() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-mir-multi-consumer-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-consumer failure directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write multi-consumer failure entry");
+
+    for command in ["run", "build", "verify"] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg(command)
+            .arg(&main)
+            .arg("--mir")
+            .output()
+            .unwrap_or_else(|error| panic!("{command} multi-module MIR failure: {error}"));
+        assert!(
+            !output.status.success(),
+            "{command} must reject unsupported imported helpers"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{command} emitted output before canonical rejection: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.contains("Copy scalar"),
+            "{command} lost a multi-module canonical lowering diagnostic: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains("flow_ast")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "{command} leaked a compatibility route or receipt: {stderr}"
+        );
+        if command == "verify" {
+            assert!(
+                stderr.contains("canonical MIR verifier input rejected"),
+                "verify lost its verifier-stage classification: {stderr}"
+            );
+        } else {
+            assert!(
+                stderr.contains("canonical MIR build error"),
+                "{command} lost its build-stage classification: {stderr}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
