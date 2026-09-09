@@ -4940,13 +4940,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     ),
                 ));
             };
-            if descriptor.layout != MirLayout::Scalar
-                || descriptor.ownership != MirOwnership::Copy
-                || !matches!(
-                    descriptor.abi.canonical_ffi_scalar_kind(),
-                    Some(kind) if kind != MirFfiScalarKind::Unit
-                )
-            {
+            if !descriptor.is_canonical_ffi_scalar() {
                 return Err(self.error(
                     &function.owner,
                     format!(
@@ -4977,13 +4971,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                 // call; an `ensures` expression that mentions `result` is
                 // rejected by the receipt validator below because it has no
                 // scalar result identity.
-            } else if descriptor.layout != MirLayout::Scalar
-                || descriptor.ownership != MirOwnership::Copy
-                || !matches!(
-                    descriptor.abi.canonical_ffi_scalar_kind(),
-                    Some(kind) if kind != MirFfiScalarKind::Unit
-                )
-            {
+            } else if !descriptor.is_canonical_ffi_scalar() {
                 return Err(self.error(
                     &function.owner,
                     format!(
