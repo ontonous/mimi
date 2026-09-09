@@ -1777,7 +1777,7 @@ impl<'a> CapabilityGate<'a> {
                     "{subject} call result TypeDesc disagrees with callee"
                 ));
             }
-            (None, Some(descriptor)) if descriptor.abi != MirAbiClass::Unit => {
+            (None, Some(descriptor)) if !descriptor.is_canonical_ffi_unit() => {
                 self.error(format!("{subject} non-unit call has no result value"));
             }
             _ => {}

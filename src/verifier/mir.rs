@@ -3822,9 +3822,9 @@ fn is_direct_scalar_call_type(
 ) -> bool {
     catalog.validate_copy_scalar(ty).is_ok()
         || catalog.validate_copy_float_scalar(ty).is_ok()
-        || catalog.get(ty).is_some_and(|descriptor| {
-            descriptor.layout == MirLayout::Unit && descriptor.abi == MirAbiClass::Unit
-        })
+        || catalog
+            .get(ty)
+            .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit())
 }
 
 fn direct_call_graph_reaches(
@@ -3890,9 +3890,9 @@ fn eval_direct_scalar_call(
         return Err("MIR verifier direct scalar call arity disagrees with target".into());
     }
 
-    let result_is_unit = catalog.get(&target.result).is_some_and(|descriptor| {
-        descriptor.layout == MirLayout::Unit && descriptor.abi == MirAbiClass::Unit
-    });
+    let result_is_unit = catalog
+        .get(&target.result)
+        .is_some_and(crate::core::mir::types::MirTypeDesc::is_canonical_ffi_unit);
     match (result, result_is_unit) {
         (None, true) => {}
         (Some(result), _) => {
