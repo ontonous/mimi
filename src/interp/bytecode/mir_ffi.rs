@@ -73,6 +73,8 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
     ) -> Result<Value, crate::interp::InterpError> {
+        self.validate_descriptor(descriptor, args)
+            .map_err(crate::interp::InterpError::new)?;
         if let Some(condition) = descriptor
             .requires
             .as_ref()
@@ -130,11 +132,17 @@ impl CanonicalMirFfiRuntime {
         Ok(output)
     }
 
-    fn call_abi(
-        &mut self,
+    /// Validate descriptor invariants before touching a dynamic library or
+    /// evaluating a contract predicate.
+    ///
+    /// call runs this before requires/ensures; malformed hand-built bytecode
+    /// therefore fails at the descriptor boundary even when its predicate
+    /// payload is malformed too.
+    fn validate_descriptor(
+        &self,
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
-    ) -> Result<Value, String> {
+    ) -> Result<(), String> {
         if descriptor.abi != "C" {
             return Err(format!(
                 "canonical MIR FFI ABI '{}' is outside the C scalar island",
@@ -180,8 +188,6 @@ impl CanonicalMirFfiRuntime {
                 "canonical FFI result conversion source disagrees with declaration ABI".into(),
             );
         }
-        // libffi rejects void argument types while preparing the CIF. Reject
-        // them here, before library loading or CIF construction can occur.
         if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
             return Err("unit is not a canonical scalar FFI argument".into());
         }
@@ -196,7 +202,14 @@ impl CanonicalMirFfiRuntime {
         }) {
             return Err("canonical FFI result identity overlaps an argument identity".into());
         }
+        Ok(())
+    }
 
+    fn call_abi(
+        &mut self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+    ) -> Result<Value, String> {
         let lib_path = match std::env::var("MIMI_FFI_LIB") {
             Ok(path) => path,
             Err(_) => default_libc_candidates()
@@ -526,6 +539,25 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
             assert!(runtime.loaded_libs.is_empty());
         }
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_descriptor_before_malformed_predicate() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("bad symbol", CanonicalFfiScalarType::I64);
+        call.requires = Some(crate::core::mir::MirContractExpr::Value(
+            crate::core::mir::MirValueId::new("missing-predicate").expect("MIR value id"),
+        ));
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("descriptor safety must precede predicate evaluation");
+        assert!(
+            error
+                .to_string()
+                .contains("FFI symbol is not manifest-safe"),
+            "{error}"
+        );
+        assert!(runtime.loaded_libs.is_empty());
     }
 
     #[test]
