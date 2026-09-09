@@ -3789,18 +3789,7 @@ impl MirTypeCatalog {
         if elements.len() != 2
             || descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.session_protocol.is_some()
-            || descriptor.drop_plan.is_some()
-            || descriptor.variant_drop_plan.is_some()
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(format!(
                 "session_pair result type '{}' is not the canonical Copy aggregate contract",
@@ -5252,17 +5241,8 @@ impl MirTypeCatalog {
             ));
         }
 
-        let noop = MirGlueContract {
-            move_out: MirGlueKind::Noop,
-            clone: MirGlueKind::Noop,
-            drop: MirGlueKind::Noop,
-        };
         if descriptor.ownership == MirOwnership::Copy {
-            if descriptor.glue != noop
-                || descriptor.needs_drop_glue
-                || descriptor.needs_clone_glue
-                || descriptor.drop_plan.is_some()
-            {
+            if !descriptor.has_canonical_copy_noop_metadata() {
                 return Err(format!(
                     "Copy tuple TypeDesc '{}' does not carry the canonical no-op glue contract",
                     ty.as_str()
@@ -6300,15 +6280,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Nominal
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
             || !matches!(fields.len(), 1 | 2 | 3 | 4 | 5 | 6 | 7)
         {
             return Err(
@@ -6379,15 +6351,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
             || elements.len() != 2
         {
             return Err(
@@ -6457,15 +6421,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Nominal
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
             || !matches!(fields.len(), 2 | 3)
         {
             return Err(
@@ -10376,6 +10332,43 @@ mod tests {
     }
 
     #[test]
+    fn plain_session_pair_rejects_forged_copy_metadata() {
+        let mut table = ResolvedTypeTable::new();
+        let i64_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I64))
+            .expect("i64");
+        let pair_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![i64_id.clone(), i64_id.clone()]))
+            .expect("(i64, i64)");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let original = catalog.get(&pair_id).expect("pair descriptor").clone();
+
+        let mut forged_protocol = original.clone();
+        forged_protocol.session_protocol = Some(i64_id.clone());
+        catalog.replace_for_test_only(pair_id.clone(), forged_protocol);
+        let protocol_error = catalog
+            .validate_plain_session_pair(&pair_id)
+            .expect_err("session_pair protocol metadata must fail closed");
+        assert!(protocol_error.contains("canonical Copy aggregate contract"));
+
+        let mut forged_drop_plan = original.clone();
+        forged_drop_plan.drop_plan = Some(super::MirDropGluePlan { fields: Vec::new() });
+        catalog.replace_for_test_only(pair_id.clone(), forged_drop_plan);
+        let drop_error = catalog
+            .validate_plain_session_pair(&pair_id)
+            .expect_err("session_pair drop plan metadata must fail closed");
+        assert!(drop_error.contains("canonical Copy aggregate contract"));
+
+        let mut forged_variant_plan = original;
+        forged_variant_plan.variant_drop_plan = Some(Vec::new());
+        catalog.replace_for_test_only(pair_id.clone(), forged_variant_plan);
+        let variant_error = catalog
+            .validate_plain_session_pair(&pair_id)
+            .expect_err("session_pair variant drop plan metadata must fail closed");
+        assert!(variant_error.contains("canonical Copy aggregate contract"));
+    }
+
+    #[test]
     fn session_call_rejects_forged_scalar_identity() {
         let mut table = ResolvedTypeTable::new();
         let protocol_id = table
@@ -11452,6 +11445,43 @@ mod tests {
             .expect_err("Copy parent must not hide a move-owned tuple child");
         assert!(error.contains("Copy tuple"), "{error}");
         assert!(error.contains("non-Copy"), "{error}");
+    }
+
+    #[test]
+    fn recursive_copy_tuple_rejects_forged_metadata() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let pair_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![i32_id.clone(), i32_id.clone()]))
+            .expect("(i32, i32)");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let original = catalog.get(&pair_id).expect("pair descriptor").clone();
+
+        let mut forged_protocol = original.clone();
+        forged_protocol.session_protocol = Some(i32_id.clone());
+        catalog.replace_for_test_only(pair_id.clone(), forged_protocol);
+        let protocol_error = catalog
+            .validate_recursive_tuple_abi(&pair_id)
+            .expect_err("recursive tuple protocol metadata must fail closed");
+        assert!(protocol_error.contains("canonical no-op glue"));
+
+        let mut forged_drop_plan = original.clone();
+        forged_drop_plan.drop_plan = Some(super::MirDropGluePlan { fields: Vec::new() });
+        catalog.replace_for_test_only(pair_id.clone(), forged_drop_plan);
+        let drop_error = catalog
+            .validate_recursive_tuple_abi(&pair_id)
+            .expect_err("recursive tuple drop plan metadata must fail closed");
+        assert!(drop_error.contains("canonical no-op glue"));
+
+        let mut forged_variant_plan = original;
+        forged_variant_plan.variant_drop_plan = Some(Vec::new());
+        catalog.replace_for_test_only(pair_id.clone(), forged_variant_plan);
+        let variant_error = catalog
+            .validate_recursive_tuple_abi(&pair_id)
+            .expect_err("recursive tuple variant drop plan metadata must fail closed");
+        assert!(variant_error.contains("canonical no-op glue"));
     }
 
     #[test]
