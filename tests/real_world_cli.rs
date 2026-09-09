@@ -1696,6 +1696,82 @@ fn canonical_mir_cli_all_receipt_multi_module_failure_repeats_byte_identically()
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_failure_matches_plain_mir_entry() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-cross-entry-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create cross-entry failure directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write cross-entry failure entry");
+
+    let run = |with_receipt: bool| {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all");
+        if with_receipt {
+            command.arg("--receipt");
+        }
+        command.output().expect("spawn cross-entry failure receipt")
+    };
+    let plain = run(false);
+    let receipt = run(true);
+    for output in [&plain, &receipt] {
+        assert!(
+            !output.status.success(),
+            "unsupported imported helpers must fail closed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failure emitted a partial manifest"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.contains("Copy scalar"),
+            "cross-entry failure lost one of its canonical lowering diagnostics: {stderr}"
+        );
+        assert!(
+            !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "cross-entry failure claimed a receipt manifest: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "cross-entry failure fell back to legacy: {stderr}"
+        );
+    }
+    assert_eq!(plain.status.code(), receipt.status.code());
+    assert_eq!(plain.stdout, receipt.stdout);
+    assert_eq!(
+        plain.stderr, receipt.stderr,
+        "receipt flag changed the canonical failure classification"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
