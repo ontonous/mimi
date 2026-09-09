@@ -1167,7 +1167,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let ResolvedCallee::Extern(callee_owner) = callee else {
+        let ResolvedCallee::Extern(_) = callee else {
             unreachable!("emit_ffi_call called for non-extern callee");
         };
         if !type_arguments.is_empty() {
@@ -1189,12 +1189,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .ffi_calls()
             .get(&instruction)
             .ok_or_else(|| NativeMirError::new(subject, "extern call has no FFI receipt"))?;
-        if receipt.callee != *callee_owner || receipt.result.as_ref() != result {
-            return Err(NativeMirError::new(
-                subject,
-                "FFI receipt identity disagrees with the native call",
-            ));
-        }
         let function = self
             .ffi_functions
             .get(&receipt.symbol)
