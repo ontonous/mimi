@@ -282,6 +282,33 @@ pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
+    if let Some(message) =
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+            .into_iter()
+            .next()
+    {
+        // The shared table owns ordering, while the public verifier retains
+        // its historical symbol-qualified diagnostic for an attached unsafe
+        // receipt.  Do not apply this refinement to orphan/key failures: the
+        // table error must remain the first classification there.
+        if message.contains("FFI symbol is not manifest-safe") {
+            if let Some((symbol, safety)) = program.ffi_calls().values().find_map(|contract| {
+                crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
+                    .err()
+                    .map(|safety| (contract.symbol.as_str(), safety))
+            }) {
+                return Err(format!(
+                    "canonical MIR verifier FFI symbol '{symbol}' {}",
+                    safety.strip_prefix("FFI symbol ").unwrap_or(&safety)
+                ));
+            }
+        }
+        return Err(format!("canonical MIR verifier {message}"));
+    }
+    // Receipt-table integrity is the first whole-program boundary.  Keep the
+    // standalone symbol scan after it so orphaned receipts are classified as
+    // orphaned consistently with the other consumers; attached receipts are
+    // still covered by the shared table's manifest-safety check.
     if let Some((symbol, message)) = program.ffi_calls().values().find_map(|contract| {
         crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
             .err()
@@ -291,13 +318,6 @@ pub(crate) fn verify_ffi_program(
             "canonical MIR verifier FFI symbol '{symbol}' {}",
             message.strip_prefix("FFI symbol ").unwrap_or(&message)
         ));
-    }
-    if let Some(message) =
-        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
-            .into_iter()
-            .next()
-    {
-        return Err(format!("canonical MIR verifier {message}"));
     }
     if let Some(message) =
         crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls())

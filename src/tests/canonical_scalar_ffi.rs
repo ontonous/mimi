@@ -2802,6 +2802,10 @@ func main() -> i64 { receipt_guard(1 as i64) }
         .cloned()
         .expect("receipt-guard call-site receipt");
     orphan_receipt.instruction = orphan_instruction.clone();
+    // Keep the orphan malformed in a second dimension.  The whole-program
+    // receipt boundary must classify the orphan before the verifier's
+    // standalone manifest-safety scan, matching every other consumer.
+    orphan_receipt.symbol = "orphan symbol".into();
     orphan_receipts.insert(orphan_instruction, orphan_receipt);
     let mut orphan = canonical.clone();
     orphan.replace_ffi_calls_for_test_only(orphan_receipts);
