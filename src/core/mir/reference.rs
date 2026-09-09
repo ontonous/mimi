@@ -2423,7 +2423,7 @@ fn validate_call_graph(
                                 ),
                             });
                         }
-                    } else if !contract.symbol.trim().is_empty() {
+                    } else if super::validate_ffi_symbol_manifest_safety(&contract.symbol).is_ok() {
                         ffi_symbol_shapes.insert(contract.symbol.clone(), shape);
                     }
                     if let Err(message) =

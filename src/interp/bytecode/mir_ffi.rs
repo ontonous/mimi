@@ -141,9 +141,6 @@ impl CanonicalMirFfiRuntime {
                 descriptor.abi
             ));
         }
-        if descriptor.symbol.trim().is_empty() || descriptor.symbol.contains('\0') {
-            return Err("canonical MIR FFI symbol is empty or contains NUL".into());
-        }
         if let Err(message) =
             crate::core::mir::validate_ffi_symbol_manifest_safety(&descriptor.symbol)
         {
@@ -502,7 +499,12 @@ mod tests {
                 "outside the C scalar island",
             ),
             ("", "C", vec![Value::Int(1)], "symbol is empty"),
-            ("labs\0other", "C", vec![Value::Int(1)], "contains NUL"),
+            (
+                "labs\0other",
+                "C",
+                vec![Value::Int(1)],
+                "contains a control character",
+            ),
             (
                 "labs other",
                 "C",
