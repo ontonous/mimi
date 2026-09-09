@@ -3846,7 +3846,9 @@ impl MirTypeCatalog {
             || descriptor.ownership != MirOwnership::Copy
             || descriptor.needs_drop_glue
             || descriptor.needs_clone_glue
+            || descriptor.session_protocol.is_some()
             || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
             || descriptor.glue
                 != (MirGlueContract {
                     move_out: MirGlueKind::Noop,
@@ -4275,6 +4277,17 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         }
+        if !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' List TypeDesc has incomplete canonical glue metadata",
+                ty.as_str()
+            ));
+        }
         let element_desc = self.get(element).ok_or_else(|| {
             format!(
                 "List '{}' element type '{}' is absent from MIR type catalog",
@@ -4293,6 +4306,11 @@ impl MirTypeCatalog {
             if element_desc.kind != MirTypeKind::List
                 || element_desc.abi != MirAbiClass::OpaqueHandle
                 || element_desc.ownership != MirOwnership::Move
+                || !element_desc.needs_drop_glue
+                || !element_desc.needs_clone_glue
+                || element_desc.session_protocol.is_some()
+                || element_desc.drop_plan.is_some()
+                || element_desc.variant_drop_plan.is_some()
                 || element_desc.glue
                     != (MirGlueContract {
                         move_out: MirGlueKind::List,
@@ -4735,6 +4753,9 @@ impl MirTypeCatalog {
         if descriptor.glue != expected
             || !descriptor.needs_drop_glue
             || !descriptor.needs_clone_glue
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
         {
             return Err(format!(
                 "type '{}' Set glue contract is not fully materialized",
@@ -10717,6 +10738,62 @@ mod tests {
         assert!(
             set_error.contains("canonical Copy i32 scalar"),
             "{set_error}"
+        );
+    }
+
+    #[test]
+    fn aggregate_container_glue_rejects_forged_metadata() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let list_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:List").expect("List"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("List<i32>");
+        let set_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:Set").expect("Set"),
+                arguments: vec![i32_id.clone()],
+                is_linear: false,
+            })
+            .expect("Set<i32>");
+        let pair_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![i32_id.clone(), i32_id.clone()]))
+            .expect("(i32, i32)");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        let mut forged_list = catalog.get(&list_id).expect("List descriptor").clone();
+        forged_list.needs_drop_glue = false;
+        catalog.replace_for_test_only(list_id.clone(), forged_list);
+        let list_error = catalog
+            .validate_list_glue(&list_id, MirGlueOperation::Drop)
+            .expect_err("List glue must reject incomplete drop metadata");
+        assert!(
+            list_error.contains("incomplete canonical glue metadata"),
+            "{list_error}"
+        );
+
+        let mut forged_set = catalog.get(&set_id).expect("Set descriptor").clone();
+        forged_set.session_protocol = Some(i32_id);
+        catalog.replace_for_test_only(set_id.clone(), forged_set);
+        let set_error = catalog
+            .validate_set_glue(&set_id, MirGlueOperation::Drop)
+            .expect_err("Set glue must reject forged protocol metadata");
+        assert!(set_error.contains("fully materialized"), "{set_error}");
+
+        let mut forged_pair = catalog.get(&pair_id).expect("pair descriptor").clone();
+        forged_pair.variant_drop_plan = Some(Vec::new());
+        catalog.replace_for_test_only(pair_id.clone(), forged_pair);
+        let pair_error = catalog
+            .validate_plain_session_pair(&pair_id)
+            .expect_err("session_pair must reject forged variant drop metadata");
+        assert!(
+            pair_error.contains("canonical Copy aggregate contract"),
+            "{pair_error}"
         );
     }
 
