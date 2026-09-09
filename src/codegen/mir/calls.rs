@@ -1348,9 +1348,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "FFI parameter ABI conversion receipt count disagrees with native call",
             ));
         }
-        let mut values = Vec::with_capacity(arguments.len());
-        for (index, (argument, conversion)) in
-            arguments.iter().zip(parameter_conversions).enumerate()
+        let function_type = function.get_type();
+        let parameter_types = function_type.get_param_types();
+        if parameter_types.len() != parameter_conversions.len() {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI native declaration parameter count disagrees with conversion receipt",
+            ));
+        }
+        for (index, (parameter_type, conversion)) in parameter_types
+            .iter()
+            .zip(parameter_conversions)
+            .enumerate()
         {
             if !conversion.is_supported_argument() {
                 return Err(NativeMirError::new(
@@ -1361,6 +1370,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     ),
                 ));
             }
+            if !native_ffi_metadata_type_matches(*parameter_type, conversion.to) {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!(
+                        "FFI parameter {index} conversion target ABI {:?} disagrees with native declaration",
+                        conversion.to
+                    ),
+                ));
+            }
+        }
+        let mut values = Vec::with_capacity(arguments.len());
+        for (index, (argument, conversion)) in
+            arguments.iter().zip(parameter_conversions).enumerate()
+        {
             let value = self.value(argument, subject)?;
             let actual_type = self.value_desc(argument, subject)?;
             if actual_type.abi != conversion.from {
@@ -1404,6 +1427,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         ));
                     }
                 }
+                if function_type.get_return_type().is_some() {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "unit MIR result has a non-void native declaration",
+                    ));
+                }
                 None
             } else {
                 let conversion = result_conversion.ok_or_else(|| {
@@ -1415,6 +1444,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         format!(
                             "FFI result ABI conversion from {:?} to {:?} is unsupported",
                             conversion.from, conversion.to
+                        ),
+                    ));
+                }
+                let Some(native_return_type) = function_type.get_return_type() else {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "non-unit FFI result has a void native declaration",
+                    ));
+                };
+                if !native_ffi_basic_type_matches(&native_return_type, conversion.from) {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!(
+                            "FFI result conversion source ABI {:?} disagrees with native declaration",
+                            conversion.from
                         ),
                     ));
                 }
@@ -1434,6 +1478,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 return Err(NativeMirError::new(
                     subject,
                     "unit MIR call has an FFI result conversion receipt",
+                ));
+            }
+            if function_type.get_return_type().is_some() {
+                return Err(NativeMirError::new(
+                    subject,
+                    "unit MIR call has a non-void native declaration",
                 ));
             }
             None
@@ -1680,11 +1730,65 @@ fn native_ffi_value_matches<'ctx>(value: &BasicValueEnum<'ctx>, abi: MirAbiClass
     }
 }
 
+fn native_ffi_metadata_type_matches<'ctx>(
+    value: BasicMetadataTypeEnum<'ctx>,
+    abi: MirAbiClass,
+) -> bool {
+    match (abi, value) {
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            BasicMetadataTypeEnum::IntType(value),
+        ) => value.get_bit_width() == 32,
+        (
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            BasicMetadataTypeEnum::IntType(value),
+        ) => value.get_bit_width() == 64,
+        (MirAbiClass::Bool, BasicMetadataTypeEnum::IntType(value)) => value.get_bit_width() == 1,
+        (MirAbiClass::Float { bits: 64 }, BasicMetadataTypeEnum::FloatType(value)) => {
+            value.get_bit_width() == 64
+        }
+        _ => false,
+    }
+}
+
+fn native_ffi_basic_type_matches<'ctx>(value: &BasicTypeEnum<'ctx>, abi: MirAbiClass) -> bool {
+    match (abi, value) {
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            BasicTypeEnum::IntType(value),
+        ) => value.get_bit_width() == 32,
+        (
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            BasicTypeEnum::IntType(value),
+        ) => value.get_bit_width() == 64,
+        (MirAbiClass::Bool, BasicTypeEnum::IntType(value)) => value.get_bit_width() == 1,
+        (MirAbiClass::Float { bits: 64 }, BasicTypeEnum::FloatType(value)) => {
+            value.get_bit_width() == 64
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::native_ffi_value_matches;
+    use super::{
+        native_ffi_basic_type_matches, native_ffi_metadata_type_matches, native_ffi_value_matches,
+    };
     use crate::core::mir::types::MirAbiClass;
     use inkwell::context::Context;
+    use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
     use inkwell::values::BasicValueEnum;
 
     #[test]
@@ -1722,5 +1826,53 @@ mod tests {
             MirAbiClass::Float { bits: 64 }
         ));
         assert!(!native_ffi_value_matches(&f64_value, MirAbiClass::Bool));
+    }
+
+    #[test]
+    fn native_ffi_declaration_shape_matches_receipt_endpoint() {
+        let context = Context::create();
+        let i32_type: BasicMetadataTypeEnum<'_> = context.i32_type().into();
+        let i64_type: BasicMetadataTypeEnum<'_> = context.i64_type().into();
+        let bool_type: BasicMetadataTypeEnum<'_> = context.bool_type().into();
+        let f64_type: BasicMetadataTypeEnum<'_> = context.f64_type().into();
+        assert!(native_ffi_metadata_type_matches(
+            i32_type,
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            }
+        ));
+        assert!(native_ffi_metadata_type_matches(
+            bool_type,
+            MirAbiClass::Bool
+        ));
+        assert!(native_ffi_metadata_type_matches(
+            f64_type,
+            MirAbiClass::Float { bits: 64 }
+        ));
+        assert!(!native_ffi_metadata_type_matches(
+            i32_type,
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            }
+        ));
+        assert!(!native_ffi_metadata_type_matches(
+            i64_type,
+            MirAbiClass::Bool
+        ));
+
+        let i32_basic: BasicTypeEnum<'_> = context.i32_type().into();
+        assert!(native_ffi_basic_type_matches(
+            &i32_basic,
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            }
+        ));
+        assert!(!native_ffi_basic_type_matches(
+            &i32_basic,
+            MirAbiClass::Float { bits: 64 }
+        ));
     }
 }
