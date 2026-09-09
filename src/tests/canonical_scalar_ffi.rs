@@ -2277,6 +2277,63 @@ func main() -> i64 { receipt_guard(1 as i64) }
         verifier_error.contains("conversion receipt"),
         "{verifier_error}"
     );
+
+    let mut forged_result_receipts = forged.ffi_calls().clone();
+    forged_result_receipts
+        .get_mut(&instruction_id)
+        .expect("receipt-guard call-site receipt")
+        .result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    });
+    let mut forged_result = forged;
+    forged_result.replace_ffi_calls_for_test_only(forged_result_receipts);
+    let reference_error = MirReferenceInterpreter::new(&forged_result)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged FFI result conversion receipt");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("ABI conversion receipt"),
+        "{reference_error}"
+    );
+    let bytecode_error = compile_mir_program(&forged_result)
+        .expect_err("bytecode must reject a forged FFI result conversion receipt");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error.message.contains("conversion receipt")
+                || error.message.contains("identity/ABI validation")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&forged_result)
+        .expect_err("native admission must reject a forged FFI result conversion receipt");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains("conversion receipt")),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged_result)
+        .expect_err("capability gate must reject a forged FFI result conversion receipt");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains("conversion receipt")),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&forged_result, "forged-ffi-result".into())
+        .expect_err("direct verifier must reject a forged FFI result conversion receipt");
+    assert!(
+        verifier_error.contains("conversion receipt"),
+        "{verifier_error}"
+    );
 }
 
 #[test]
