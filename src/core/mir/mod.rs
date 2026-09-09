@@ -364,11 +364,11 @@ pub(crate) fn validate_materialized_call_abi(
 
 /// Validate that a materialized call carries a destination value whenever
 /// its canonical result ABI is non-unit.  The optional result on `Call` is
-/// only a valid omission for a Unit TypeDesc; silently dropping an integer,
-/// aggregate, or owned handle would let one backend observe a value while
-/// another discards it.  This helper is deliberately catalog-driven so all
-/// consumers share the same TypeDesc/ABI proof without reopening checker or
-/// surface AST state.
+/// only a valid omission for a canonical Copy-owned Unit TypeDesc; silently
+/// dropping an integer, aggregate, or owned handle would let one backend
+/// observe a value while another discards it.  This helper is deliberately
+/// catalog-driven so all consumers share the same TypeDesc/ABI proof without
+/// reopening checker or surface AST state.
 pub(crate) fn validate_materialized_call_result_presence(
     callee: &ResolvedCallee,
     target: &MirFunction,
@@ -384,7 +384,7 @@ pub(crate) fn validate_materialized_call_result_presence(
         // here when the catalog is already malformed.
         return Vec::new();
     };
-    if descriptor.abi == types::MirAbiClass::Unit {
+    if descriptor.is_canonical_ffi_unit() {
         return Vec::new();
     }
     match callee {

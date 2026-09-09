@@ -120,6 +120,60 @@ func main() -> i32 {
 }
 
 #[test]
+fn materialized_call_result_presence_rejects_noncopy_unit() {
+    let checked = checked_program(
+        r#"
+func noop() { }
+func main() { noop() }
+"#,
+    );
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("unit-return function must lower to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let caller = program.functions().get(&owner).expect("main MIR");
+    let (callee, target_owner) = caller
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                ..
+            } if callee.0 == "function:noop" => Some((
+                crate::core::ir::ResolvedCallee::Function(callee.clone()),
+                crate::core::NodeId(callee.0.clone()),
+            )),
+            _ => None,
+        })
+        .expect("direct unit function call");
+    let target = program
+        .functions()
+        .get(&target_owner)
+        .expect("unit function target MIR");
+    let unit_id = target.result.clone();
+    let descriptor = program
+        .type_catalog()
+        .get(&unit_id)
+        .expect("unit TypeDesc entry");
+    assert!(descriptor.is_canonical_ffi_unit());
+
+    let mut catalog = program.type_catalog().clone();
+    let mut forged = descriptor.clone();
+    forged.ownership = MirOwnership::Move;
+    catalog.replace_for_test_only(unit_id.clone(), forged);
+    let missing_result = crate::core::mir::validate_materialized_call_result_presence(
+        &callee, target, None, &catalog,
+    );
+    assert_eq!(
+        missing_result,
+        vec![format!(
+            "non-unit callee '{}' has no MIR result value",
+            unit_id.as_str()
+        )]
+    );
+}
+
+#[test]
 fn scalar_ffi_conversion_kind_is_directional_and_closed() {
     use crate::core::mir::types::MirAbiClass;
 
