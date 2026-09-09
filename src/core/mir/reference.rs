@@ -2254,6 +2254,14 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
+                    if let Err(message) =
+                        super::validate_ffi_symbol_matches_callee(callee_owner, &contract.symbol)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
                     if !super::canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
                         let message = if contract.symbol.trim().is_empty() {
                             "extern call FFI contract has an empty C symbol"
@@ -12070,6 +12078,26 @@ func main() -> i64 { foreign(1 as i64); 0 }
                 "{symbol}: {errors:?}"
             );
         }
+
+        let (_, program) = canonical_program_with_main(
+            "extern \"C\" { func foreign(value: i64) -> i64; } func main() -> i64 { foreign(1 as i64) }",
+        );
+        let mut receipts = program.ffi_calls().clone();
+        receipts.values_mut().next().expect("FFI receipt").symbol = "safe_other".into();
+        let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            program.functions().clone(),
+            program.type_catalog().clone(),
+            program.instances().clone(),
+            program.transitions().clone(),
+            receipts,
+        )
+        .expect_err("safe but mismatched C symbols must fail at MIR admission");
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains("symbol disagrees with canonical extern callee")),
+            "{errors:?}"
+        );
     }
 
     #[test]
