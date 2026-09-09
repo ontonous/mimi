@@ -3119,6 +3119,204 @@ fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() 
 }
 
 #[test]
+fn canonical_scalar_ffi_transitive_import_graph_merges_mixed_width_call_sites() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-scalar-ffi-mixed-width-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive mixed-width FFI directory");
+    fs::write(
+        dir.join("leaf.mimi"),
+        "extern \"C\" {\n    func labs(x: i64) -> i64;\n}\npub func narrow(x: i32) -> i64 { labs(x) }\npub func wide(x: i64) -> i64 { labs(x) }\n",
+    )
+    .expect("write transitive mixed-width FFI leaf");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use leaf;\npub func combine(x: i32, y: i64) -> i64 { narrow(x) + wide(y) }\n",
+    )
+    .expect("write transitive mixed-width FFI middle module");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use mid;\nfunc main() -> i32 { println(combine(7, 8 as i64)); 0 }\n",
+    )
+    .expect("write transitive mixed-width FFI entry");
+
+    let source_scope = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--receipt")
+        .output()
+        .expect("spawn transitive mixed-width source-scope inspection");
+    assert!(!source_scope.status.success());
+    assert!(source_scope.stdout.is_empty());
+    let source_scope_stderr = String::from_utf8_lossy(&source_scope.stderr);
+    assert!(source_scope_stderr.contains("MIR inspection input rejected"));
+    assert!(!source_scope_stderr.contains("canonical route disposition: legacy"));
+    assert!(!source_scope_stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER));
+
+    let checked = checked_route_receipt(&main);
+    assert_eq!(
+        checked.root_owners,
+        vec![
+            mimi::core::NodeId("function:combine".into()),
+            mimi::core::NodeId("function:main".into()),
+            mimi::core::NodeId("function:narrow".into()),
+            mimi::core::NodeId("function:wide".into()),
+        ]
+    );
+    assert_eq!(checked.ffi_digest.len(), 64);
+    let inspect = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn transitive mixed-width receipt")
+    };
+    let receipt_first = inspect(false);
+    let receipt_reordered = inspect(true);
+    for (label, output) in [
+        ("all-first", &receipt_first),
+        ("receipt-first", &receipt_reordered),
+    ] {
+        assert!(
+            output.status.success(),
+            "{label} rejected mixed-width imported FFI graph:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+            &String::from_utf8_lossy(&output.stdout),
+        )
+        .unwrap_or_else(|error| panic!("{label}: mixed-width receipt round-trip failed: {error}"));
+        assert_eq!(manifest, checked);
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(receipt_first.stdout, receipt_reordered.stdout);
+    assert_eq!(receipt_first.stderr, receipt_reordered.stderr);
+
+    let run = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn transitive mixed-width run")
+    };
+    let run_default = run(false);
+    let run_mir = run(true);
+    for (label, output) in [("default", &run_default), ("mir", &run_mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{label} mixed-width imported FFI run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"15\n");
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(run_default.status.code(), run_mir.status.code());
+    assert_eq!(run_default.stdout, run_mir.stdout);
+    assert_eq!(run_default.stderr, run_mir.stderr);
+
+    let default_binary = dir.join("transitive-mixed-width-default");
+    let mir_binary = dir.join("transitive-mixed-width-mir");
+    let build_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&main)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("spawn default transitive mixed-width build");
+    let build_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&mir_binary)
+        .output()
+        .expect("spawn explicit transitive mixed-width build");
+    for (label, output) in [("default", &build_default), ("mir", &build_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} mixed-width imported FFI build failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    let native_default = Command::new(&default_binary)
+        .output()
+        .expect("execute default transitive mixed-width binary");
+    let native_mir = Command::new(&mir_binary)
+        .output()
+        .expect("execute explicit transitive mixed-width binary");
+    for (label, output) in [("default", &native_default), ("mir", &native_mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{label} mixed-width imported FFI binary failed"
+        );
+        assert_eq!(output.stdout, b"15\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    let verify_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&main)
+        .output()
+        .expect("spawn default transitive mixed-width verifier");
+    let verify_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn explicit transitive mixed-width verifier");
+    for (label, output) in [("default", &verify_default), ("mir", &verify_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} mixed-width imported FFI verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("No contracts to verify"));
+        assert!(!combined.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_file(&default_binary).ok();
+    fs::remove_file(&mir_binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_transitive_failure_preserves_side_effect_order() {
     if !can_link() {
         eprintln!("SKIP: cc not available");
