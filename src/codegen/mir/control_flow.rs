@@ -638,7 +638,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .values
             .get(value)
             .and_then(|mir_value| self.program.type_catalog().get(&mir_value.ty))
-            .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
+            .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
     }
 
     pub(super) fn add_phi_incomings(&mut self) -> Result<(), NativeMirError> {
