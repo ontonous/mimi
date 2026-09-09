@@ -1772,6 +1772,82 @@ fn canonical_mir_cli_all_receipt_failure_matches_plain_mir_entry() {
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_failure_ignores_option_order() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-option-order-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create option-order failure directory");
+    fs::write(
+        dir.join("bad_a.mimi"),
+        "pub func bad_a(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write first unsupported helper");
+    fs::write(
+        dir.join("bad_b.mimi"),
+        "pub func bad_b(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write second unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad_b;\nuse bad_a;\nfunc main() -> i32 { 0 }\n")
+        .expect("write option-order failure entry");
+
+    let run = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn option-order failure receipt")
+    };
+    let all_first = run(false);
+    let receipt_first = run(true);
+    for output in [&all_first, &receipt_first] {
+        assert!(
+            !output.status.success(),
+            "unsupported imported helpers must fail closed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "failure emitted a partial manifest"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (2 errors)")
+                && stderr.contains("function:bad_a/")
+                && stderr.contains("function:bad_b/")
+                && stderr.contains("Copy scalar"),
+            "option-order failure lost one of its canonical lowering diagnostics: {stderr}"
+        );
+        assert!(
+            !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "option-order failure claimed a receipt manifest: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "option-order failure fell back to legacy: {stderr}"
+        );
+    }
+    assert_eq!(all_first.status.code(), receipt_first.status.code());
+    assert_eq!(all_first.stdout, receipt_first.stdout);
+    assert_eq!(
+        all_first.stderr, receipt_first.stderr,
+        "CLI option order changed the canonical failure classification"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
