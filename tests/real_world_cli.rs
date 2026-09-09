@@ -2146,6 +2146,118 @@ fn canonical_mir_receipt_source_scope_and_all_classify_imported_failure_distinct
 }
 
 #[test]
+fn canonical_mir_consumers_require_complete_import_graph_after_source_scope_inspection() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-consumer-import-scope-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create consumer import-scope directory");
+    fs::write(
+        dir.join("bad.mimi"),
+        "pub func bad(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write unsupported imported helper");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use bad;\nfunc main() -> i32 { println(41); 0 }\n")
+        .expect("write source-scope entry");
+
+    let source_scope = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--receipt")
+        .output()
+        .expect("spawn source-scope inspection");
+    assert!(
+        source_scope.status.success(),
+        "source-scope inspection unexpectedly lowered imported helper:\n{}\n{}",
+        String::from_utf8_lossy(&source_scope.stdout),
+        String::from_utf8_lossy(&source_scope.stderr)
+    );
+    let source_stdout = String::from_utf8_lossy(&source_scope.stdout);
+    assert!(
+        source_stdout.contains("root_owners=function:main")
+            && !source_stdout.contains("function:bad"),
+        "source-scope receipt included an imported helper: {source_stdout}"
+    );
+    assert!(
+        source_scope.stderr.is_empty()
+            || !String::from_utf8_lossy(&source_scope.stderr).contains("function:bad"),
+        "source-scope inspection leaked an imported helper diagnostic: {}",
+        String::from_utf8_lossy(&source_scope.stderr)
+    );
+
+    let all_scope = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--receipt")
+        .arg("--all")
+        .output()
+        .expect("spawn complete-graph inspection");
+    assert!(
+        !all_scope.status.success(),
+        "complete import graph inspection silently skipped unsupported helper"
+    );
+    assert!(
+        all_scope.stdout.is_empty(),
+        "complete-graph inspection emitted a partial manifest: {}",
+        String::from_utf8_lossy(&all_scope.stdout)
+    );
+    let all_stderr = String::from_utf8_lossy(&all_scope.stderr);
+    assert!(
+        all_stderr.contains("MIR inspection input rejected")
+            && all_stderr.contains("function:bad/node:expr.index")
+            && !all_stderr.contains("canonical route disposition: legacy"),
+        "complete-graph inspection lost its fail-closed lowering diagnostic: {all_stderr}"
+    );
+
+    let binary = dir.join("consumer-output");
+    for (consumer, stage) in [
+        ("run", "canonical MIR build error"),
+        ("build", "canonical MIR build error"),
+        ("verify", "canonical MIR verifier input rejected"),
+    ] {
+        let mut command = Command::new(mimi_bin());
+        command
+            .current_dir(project_root())
+            .arg(consumer)
+            .arg(&main)
+            .arg("--mir");
+        if consumer == "build" {
+            command.arg("-o").arg(&binary);
+        }
+        let output = command
+            .output()
+            .expect("spawn explicit MIR complete-graph consumer");
+        assert!(
+            !output.status.success(),
+            "{consumer} --mir silently selected source scope"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{consumer} --mir emitted output before rejecting imported helper: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(stage)
+                && stderr.contains("MIR lowering failed")
+                && stderr.contains("function:bad/node:expr.index")
+                && !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains("bytecode runtime error"),
+            "{consumer} --mir did not preserve complete-graph fail-closed classification: {stderr}"
+        );
+    }
+    fs::remove_file(&binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
