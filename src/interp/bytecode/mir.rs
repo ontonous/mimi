@@ -3909,9 +3909,19 @@ impl<'a> FunctionEmitter<'a> {
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
         match desc.abi {
-            MirAbiClass::Integer { bits, signed } if signed && bits <= 64 => Ok(()),
-            MirAbiClass::Float { bits } if bits == 32 || bits == 64 => Ok(()),
-            MirAbiClass::Bool if desc.ownership == MirOwnership::Copy => Ok(()),
+            MirAbiClass::Integer { bits, signed }
+                if signed && bits <= 64 && desc.layout == MirLayout::Scalar =>
+            {
+                self.program.type_catalog().validate_copy_value(ty)
+            }
+            MirAbiClass::Float { bits }
+                if (bits == 32 || bits == 64) && desc.layout == MirLayout::Scalar =>
+            {
+                self.program.type_catalog().validate_copy_value(ty)
+            }
+            MirAbiClass::Bool if desc.layout == MirLayout::Scalar => {
+                self.program.type_catalog().validate_copy_value(ty)
+            }
             MirAbiClass::Unit if desc.is_canonical_ffi_unit() => Ok(()),
             MirAbiClass::StringHandle
                 if desc.ownership == MirOwnership::Move
@@ -4466,6 +4476,12 @@ impl<'a> FunctionEmitter<'a> {
             return;
         };
         if descriptor.ownership == MirOwnership::Copy {
+            if let Err(message) = self.program.type_catalog().validate_copy_value(ty) {
+                self.error(format!(
+                    "drop register type '{}' is unsupported: {message}",
+                    ty.as_str()
+                ));
+            }
             return;
         }
         match descriptor.glue.drop {
@@ -4705,7 +4721,7 @@ mod tests {
     use crate::core::mir::reference::{
         MirExecutionObservation, MirProgram, MirReferenceInterpreter, MirRuntimeValue,
     };
-    use crate::core::mir::types::{MirGlueKind, MirLayout};
+    use crate::core::mir::types::{MirGlueKind, MirLayout, MirTypeKind};
     use crate::core::mir::{MirInstructionKind, MirOwnershipEvent, MirOwnershipEventKind};
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::instr::CanonicalFfiScalarType;
@@ -4836,6 +4852,45 @@ mod tests {
         }
         assert!(forged_receipt, "owned update receipt must be present");
         forged
+    }
+
+    #[test]
+    fn bytecode_scalar_consumers_require_complete_shape() {
+        let (_, checked) = parse_and_check(
+            "func id(value: i64) -> i64 { value }\nfunc main() -> i64 { id(41 as i64) }",
+        )
+        .expect("scalar call source check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let id_owner = crate::core::NodeId("function:id".into());
+        let id_function = program.functions().get(&id_owner).expect("id function");
+        let scalar_id = id_function
+            .parameters
+            .first()
+            .and_then(|value| id_function.values.get(value))
+            .map(|value| value.ty.clone())
+            .expect("id scalar parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("canonical scalar TypeDesc")
+            .clone();
+        let mut forged_descriptor = descriptor;
+        forged_descriptor.kind = MirTypeKind::Nominal;
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(scalar_id, forged_descriptor);
+        let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
+            .expect("forged bytecode catalog remains structurally valid");
+        let errors = compile_mir_program(&forged_program)
+            .expect_err("malformed Copy scalar must fail before bytecode emission");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("complete Copy scalar TypeDesc contract")
+                    || error.message.contains("canonical bytecode slice")
+            }),
+            "{errors:?}"
+        );
     }
 
     fn normalize_value(value: Value) -> Result<MirRuntimeValue, String> {
