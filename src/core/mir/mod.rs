@@ -1389,6 +1389,9 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     if contract.arguments != arguments {
         errors.push("extern call FFI contract arguments disagree with MIR call".into());
     }
+    if result.is_some_and(|result| arguments.iter().any(|argument| argument == result)) {
+        errors.push("extern call FFI result identity overlaps an argument identity".into());
+    }
     if contract.parameter_types.len() != arguments.len() {
         errors.push(
             "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments"
@@ -1543,6 +1546,15 @@ pub(crate) fn validate_ffi_receipt_table(
             if contract.result != *actual_result {
                 errors.push(format!(
                     "extern call FFI receipt result disagrees with MIR instruction '{}' result",
+                    instruction
+                ));
+            }
+            if actual_result
+                .as_ref()
+                .is_some_and(|result| actual_arguments.iter().any(|argument| argument == result))
+            {
+                errors.push(format!(
+                    "extern MIR call instruction '{}' result identity overlaps an argument identity",
                     instruction
                 ));
             }

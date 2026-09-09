@@ -191,6 +191,14 @@ impl CanonicalMirFfiRuntime {
         if descriptor.argument_ids.len() != args.len() {
             return Err("canonical FFI argument identity arity mismatch".into());
         }
+        if descriptor.result_id.as_ref().is_some_and(|result_id| {
+            descriptor
+                .argument_ids
+                .iter()
+                .any(|argument_id| argument_id == result_id)
+        }) {
+            return Err("canonical FFI result identity overlaps an argument identity".into());
+        }
 
         let lib_path = match std::env::var("MIMI_FFI_LIB") {
             Ok(path) => path,
@@ -516,6 +524,20 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
             assert!(runtime.loaded_libs.is_empty());
         }
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_result_identity_alias_before_loading() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.result_id = Some(call.argument_ids[0].clone());
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("result identity must not alias an argument identity");
+        assert!(error
+            .to_string()
+            .contains("result identity overlaps an argument identity"));
+        assert!(runtime.loaded_libs.is_empty());
     }
 
     #[test]

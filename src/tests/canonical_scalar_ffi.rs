@@ -2298,6 +2298,63 @@ func main() -> i64 { payload_shape(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_receipt_table_rejects_result_identity_overlap() {
+    const SOURCE: &str = r#"
+extern "C" { func overlap_shape(value: i64) -> i64; }
+func main() -> i64 { overlap_shape(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("result identity overlap fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("result identity overlap fixture materialization");
+    let owner = crate::core::NodeId("function:main".into());
+    let instruction_id = program
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("overlap call-site receipt");
+    let mut functions = program.functions().clone();
+    let function = functions.get_mut(&owner).expect("main MIR");
+    let argument_id = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::Extern(_),
+                arguments,
+                ..
+            } => arguments.first().cloned(),
+            _ => None,
+        })
+        .expect("extern argument identity");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| instruction.id == instruction_id)
+        .expect("extern call");
+    let crate::core::mir::MirInstructionKind::Call { result, .. } = &mut instruction.kind else {
+        panic!("expected extern call");
+    };
+    *result = Some(argument_id.clone());
+
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("overlap call-site receipt")
+        .result = Some(argument_id);
+    let table_errors = crate::core::mir::validate_ffi_receipt_table(&functions, &receipts);
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| { error.contains("result identity overlaps an argument identity") }),
+        "{table_errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }
