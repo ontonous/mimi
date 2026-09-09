@@ -1236,6 +1236,25 @@ pub struct MirTypeDesc {
 }
 
 impl MirTypeDesc {
+    /// Whether this descriptor carries the complete metadata required by a
+    /// Copy aggregate/scalar contract.  Protocol identity and either drop
+    /// plan are ownership-bearing facts even when the top-level flags/glue
+    /// look like a no-op; consumers must reject that mixed shape uniformly.
+    pub(crate) fn has_canonical_copy_noop_metadata(&self) -> bool {
+        self.session_protocol.is_none()
+            && self.ownership == MirOwnership::Copy
+            && !self.needs_drop_glue
+            && !self.needs_clone_glue
+            && self.glue
+                == (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            && self.drop_plan.is_none()
+            && self.variant_drop_plan.is_none()
+    }
+
     /// Whether this descriptor is a complete Copy scalar shape admitted by
     /// the canonical MIR scalar contracts.  The primitive identity and ABI
     /// width/sign must agree; layout, ownership, protocol identity, glue and
@@ -1266,18 +1285,7 @@ impl MirTypeDesc {
         };
         primitive_abi_matches
             && self.layout == MirLayout::Scalar
-            && self.session_protocol.is_none()
-            && self.ownership == MirOwnership::Copy
-            && !self.needs_drop_glue
-            && !self.needs_clone_glue
-            && self.glue
-                == (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-            && self.drop_plan.is_none()
-            && self.variant_drop_plan.is_none()
+            && self.has_canonical_copy_noop_metadata()
     }
 
     /// Whether this descriptor is one of the non-Unit scalar shapes admitted
@@ -1300,19 +1308,8 @@ impl MirTypeDesc {
     pub(crate) fn is_canonical_ffi_unit(&self) -> bool {
         self.kind == MirTypeKind::Primitive(PrimitiveType::Unit)
             && self.layout == MirLayout::Unit
-            && self.session_protocol.is_none()
             && self.abi == MirAbiClass::Unit
-            && self.ownership == MirOwnership::Copy
-            && !self.needs_drop_glue
-            && !self.needs_clone_glue
-            && self.glue
-                == (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-            && self.drop_plan.is_none()
-            && self.variant_drop_plan.is_none()
+            && self.has_canonical_copy_noop_metadata()
     }
 
     fn from_resolved(id: &ResolvedTypeId, ty: &ResolvedType, ownership: MirOwnership) -> Self {
@@ -1962,17 +1959,7 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         };
-        if descriptor.session_protocol.is_some()
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-        {
+        if !descriptor.has_canonical_copy_noop_metadata() {
             return Err(format!(
                 "record type '{}' is not in the flat Copy record contract",
                 ty.as_str()
@@ -2050,16 +2037,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.session_protocol.is_some()
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
             || elements.len() != 2
         {
             return Err(format!(
@@ -2124,18 +2102,7 @@ impl MirTypeCatalog {
             ));
         }
         if descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.session_protocol.is_some()
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.drop_plan.is_some()
-            || descriptor.variant_drop_plan.is_some()
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(format!(
                 "variant TypeDesc '{}' is not Aggregate/Copy with canonical no-op glue",
@@ -2665,15 +2632,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Result
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "Result fallback source must be Aggregate/Copy with canonical no-op glue".into(),
@@ -2814,15 +2773,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Result
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "Result fallback source must be Aggregate/Copy with canonical no-op glue".into(),
@@ -3011,15 +2962,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Option
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "Option fallback source must be Aggregate/Copy with canonical no-op glue".into(),
@@ -7831,15 +7774,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != expected_kind
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "generic variant predicate source must be Aggregate/Copy with canonical no-op glue"
@@ -7933,15 +7868,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Option
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "generic Option projection source must be Aggregate/Copy with canonical no-op glue"
@@ -8025,15 +7952,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Option
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "generic Option fallback source must be Aggregate/Copy with canonical no-op glue"
@@ -8149,15 +8068,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Result
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "generic Result projection source must be Aggregate/Copy with canonical no-op glue"
@@ -8303,17 +8214,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Result
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.drop_plan.is_some()
-            || descriptor.variant_drop_plan.is_some()
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "Result projection source must be Aggregate/Copy with canonical no-op glue".into(),
@@ -8477,15 +8378,7 @@ impl MirTypeCatalog {
         };
         if descriptor.kind != MirTypeKind::Result
             || descriptor.abi != MirAbiClass::Aggregate
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.needs_drop_glue
-            || descriptor.needs_clone_glue
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(
                 "generic Result fallback source must be Aggregate/Copy with canonical no-op glue"
@@ -11796,6 +11689,71 @@ mod tests {
             .validate_flat_copy_record(&point_id)
             .expect_err("flat Copy record must reject forged protocol metadata");
         assert!(error.contains("flat Copy record contract"), "{error}");
+    }
+
+    #[test]
+    fn copy_variant_fallback_contracts_reject_forged_aggregate_metadata() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let option_id = table
+            .intern_resolved(ResolvedType::Option(i32_id.clone()))
+            .expect("Option<i32>");
+        let result_id = table
+            .intern_resolved(ResolvedType::Result {
+                ok: i32_id.clone(),
+                error: i32_id.clone(),
+            })
+            .expect("Result<i32, i32>");
+        let some = crate::core::NodeId("builtin:variant:Option::Some".into());
+        let some_payload = crate::core::NodeId("builtin:variant:Option::Some/payload:0".into());
+        let ok = crate::core::NodeId("builtin:variant:Result::Ok".into());
+        let ok_payload = crate::core::NodeId("builtin:variant:Result::Ok/payload:0".into());
+
+        for mutation in ["protocol", "drop", "variant_drop"] {
+            let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+            let mut forged = catalog.get(&option_id).expect("Option descriptor").clone();
+            match mutation {
+                "protocol" => forged.session_protocol = Some(i32_id.clone()),
+                "drop" => forged.drop_plan = Some(super::MirDropGluePlan { fields: Vec::new() }),
+                "variant_drop" => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!("known metadata mutation"),
+            }
+            catalog.replace_for_test_only(option_id.clone(), forged);
+            let error = catalog
+                .validated_copy_option_i32_projection_fallback_contract(
+                    &option_id,
+                    &some,
+                    &some_payload,
+                    &i32_id,
+                    &i32_id,
+                )
+                .expect_err("Option fallback must reject forged aggregate metadata");
+            assert!(error.contains("Option fallback source"), "{error}");
+        }
+
+        for mutation in ["protocol", "drop", "variant_drop"] {
+            let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+            let mut forged = catalog.get(&result_id).expect("Result descriptor").clone();
+            match mutation {
+                "protocol" => forged.session_protocol = Some(i32_id.clone()),
+                "drop" => forged.drop_plan = Some(super::MirDropGluePlan { fields: Vec::new() }),
+                "variant_drop" => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!("known metadata mutation"),
+            }
+            catalog.replace_for_test_only(result_id.clone(), forged);
+            let error = catalog
+                .validated_copy_result_scalar_projection_fallback_contract(
+                    &result_id,
+                    &ok,
+                    &ok_payload,
+                    &i32_id,
+                    &i32_id,
+                )
+                .expect_err("Result fallback must reject forged aggregate metadata");
+            assert!(error.contains("Result fallback source"), "{error}");
+        }
     }
 
     #[test]
