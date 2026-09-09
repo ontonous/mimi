@@ -1198,6 +1198,14 @@ fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_route
             String::from_utf8_lossy(&manifest_output.stderr)
         );
         let manifest = parse_route_receipt_manifest(&manifest_output.stdout);
+        let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+            &String::from_utf8_lossy(&manifest_output.stdout),
+        )
+        .unwrap_or_else(|error| panic!("{fixture_name}: receipt round-trip failed: {error}"));
+        assert_eq!(
+            manifest_receipt, checked,
+            "{fixture_name}: manifest round-trip changed the checked receipt"
+        );
         let expected = [
             ("schema", checked.schema.to_owned()),
             ("profile", checked.profile.clone()),

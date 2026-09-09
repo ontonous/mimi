@@ -176,12 +176,10 @@ impl CanonicalMirRouteReceipt {
 
     /// Parse the line-oriented manifest emitted by [`Self::manifest_text`].
     ///
-    /// This is intentionally a strict structural parser for evidence
-    /// consumers: the versioned header, exact field set, field order, and
-    /// duplicate/unknown rows are all checked before a map is returned. Value
-    /// semantics remain the responsibility of the receipt validator that
-    /// produced the manifest, so a parser cannot accidentally bless a
-    /// partially trusted receipt.
+    /// This is intentionally a strict parser for evidence consumers: the
+    /// versioned header, exact field set, field order, duplicate/unknown rows,
+    /// and public value semantics are all checked before a map is returned.
+    /// This keeps a parser from blessing a partially trusted receipt.
     pub fn parse_manifest(text: &str) -> Result<BTreeMap<String, String>, String> {
         validate_manifest_field_schema()
             .map_err(|error| format!("invalid MIR route manifest: {error}"))?;
