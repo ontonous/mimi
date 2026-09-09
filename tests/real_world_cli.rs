@@ -2791,6 +2791,134 @@ fn canonical_mir_transitive_imports_match_checked_receipt_and_consumers() {
 }
 
 #[test]
+fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_consumers() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-import-order-identity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create import-order identity directory");
+    fs::write(dir.join("leaf_a.mimi"), "pub func leaf_a() -> i32 { 10 }\n")
+        .expect("write first transitive leaf");
+    fs::write(dir.join("leaf_b.mimi"), "pub func leaf_b() -> i32 { 20 }\n")
+        .expect("write second transitive leaf");
+    fs::write(
+        dir.join("mid_a.mimi"),
+        "use leaf_a;\npub func mid_a() -> i32 { leaf_a() }\n",
+    )
+    .expect("write first transitive middle module");
+    fs::write(
+        dir.join("mid_b.mimi"),
+        "use leaf_b;\npub func mid_b() -> i32 { leaf_b() }\n",
+    )
+    .expect("write second transitive middle module");
+    let main = dir.join("main.mimi");
+    let write_main = |first: &str, second: &str| {
+        fs::write(
+            &main,
+            format!(
+                "use {first};\nuse {second};\nfunc main() -> i32 {{ println(mid_a() + mid_b()); 30 }}\n"
+            ),
+        )
+        .expect("write import-order identity entry");
+    };
+    let inspect = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("mir")
+            .arg(&main)
+            .arg("--all")
+            .arg("--receipt")
+            .output()
+            .expect("spawn import-order identity receipt")
+    };
+    let run = || {
+        Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg("--mir")
+            .arg(&main)
+            .output()
+            .expect("spawn import-order identity MIR run")
+    };
+
+    write_main("mid_a", "mid_b");
+    let checked_first = checked_route_receipt(&main);
+    let receipt_first = inspect();
+    let run_first = run();
+
+    write_main("mid_b", "mid_a");
+    let checked_second = checked_route_receipt(&main);
+    let receipt_second = inspect();
+    let run_second = run();
+
+    assert_eq!(
+        checked_first, checked_second,
+        "swapping import declarations changed checked graph identity"
+    );
+    for (label, output, checked) in [
+        ("first", &receipt_first, &checked_first),
+        ("second", &receipt_second, &checked_second),
+    ] {
+        assert!(
+            output.status.success(),
+            "{label} import order rejected a supported graph:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = parse_route_receipt_manifest(&output.stdout);
+        let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+            &String::from_utf8_lossy(&output.stdout),
+        )
+        .unwrap_or_else(|error| panic!("{label}: import-order receipt round-trip failed: {error}"));
+        assert_eq!(
+            &manifest_receipt, checked,
+            "{label}: CLI import-order receipt diverged from checked API"
+        );
+        assert_eq!(
+            manifest.get("root_owners").map(String::as_str),
+            Some("function:leaf_a,function:leaf_b,function:main,function:mid_a,function:mid_b"),
+            "{label}: import-order root owner order changed"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr)
+                .contains("canonical route disposition: legacy"),
+            "{label}: import-order receipt selected legacy fallback: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(receipt_first.status.code(), receipt_second.status.code());
+    assert_eq!(receipt_first.stdout, receipt_second.stdout);
+    assert_eq!(receipt_first.stderr, receipt_second.stderr);
+
+    for (label, output) in [("first", &run_first), ("second", &run_second)] {
+        assert_eq!(
+            output.status.code(),
+            Some(30),
+            "{label} import order returned the wrong result: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout, b"30\n",
+            "{label} import order changed stdout"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{label} import order emitted a legacy diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(run_first.status.code(), run_second.status.code());
+    assert_eq!(run_first.stdout, run_second.stdout);
+    assert_eq!(run_first.stderr, run_second.stderr);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_transitive_failure_is_consumer_invariant_and_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-transitive-import-failure-{}-{}",
