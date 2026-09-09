@@ -254,6 +254,22 @@ fn materialize_canonical_ffi(
                     continue;
                 }
             };
+        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt(
+            program.type_catalog(),
+            function,
+            instruction,
+            callee,
+            result.as_ref(),
+            arguments,
+            receipt,
+        );
+        if !receipt_errors.is_empty() {
+            errors.extend(receipt_errors.into_iter().map(|message| MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!("canonical FFI receipt '{}' {message}", instruction),
+            }));
+            continue;
+        }
         for (index, ((argument, declared_type), conversion)) in arguments
             .iter()
             .zip(&receipt.parameter_types)
