@@ -1474,7 +1474,7 @@ pub(crate) fn validate_ffi_receipt_table(
             )
         })
         .collect::<Vec<_>>();
-    let mut seen = BTreeSet::new();
+    let mut seen = BTreeMap::<MirInstructionId, NodeId>::new();
     for function in functions.values() {
         for block in function.blocks.values() {
             for instruction in &block.instructions {
@@ -1485,15 +1485,32 @@ pub(crate) fn validate_ffi_receipt_table(
                         ..
                     }
                 ) {
-                    seen.insert(instruction.id.clone());
+                    if let Some(previous_owner) =
+                        seen.insert(instruction.id.clone(), function.owner.clone())
+                    {
+                        errors.push(format!(
+                            "extern MIR call instruction '{}' appears in multiple functions ('{}' and '{}')",
+                            instruction.id, previous_owner.0, function.owner.0
+                        ));
+                    }
                 }
+            }
+        }
+    }
+    for (instruction, contract) in ffi_calls {
+        if let Some(actual_caller) = seen.get(instruction) {
+            if contract.caller != *actual_caller {
+                errors.push(format!(
+                    "extern call FFI receipt caller '{}' disagrees with MIR instruction '{}' owner '{}'",
+                    contract.caller.0, instruction, actual_caller.0
+                ));
             }
         }
     }
     errors.extend(
         ffi_calls
             .keys()
-            .filter(|instruction| !seen.contains(*instruction))
+            .filter(|instruction| !seen.contains_key(*instruction))
             .map(|instruction| {
                 format!(
                     "extern call FFI receipt '{}' is orphaned from a MIR extern call",

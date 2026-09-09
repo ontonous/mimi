@@ -2151,6 +2151,18 @@ func main() -> i64 {
             crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls()).is_empty(),
             "same declaration shape must classify {label} identity as a call-site failure"
         );
+        if label == "caller" {
+            let table_errors = crate::core::mir::validate_ffi_receipt_table(
+                forged.functions(),
+                forged.ffi_calls(),
+            );
+            assert!(
+                table_errors
+                    .iter()
+                    .any(|error| error.contains("receipt caller") && error.contains("owner")),
+                "{label}: {table_errors:?}"
+            );
+        }
 
         let reference_error = MirReferenceInterpreter::new(&forged)
             .execute(&crate::core::NodeId("function:main".into()), &[])
@@ -2158,7 +2170,8 @@ func main() -> i64 {
         assert!(
             reference_error
                 .to_string()
-                .contains("FFI receipt disagrees with the MIR call"),
+                .contains("FFI receipt disagrees with the MIR call")
+                || reference_error.to_string().contains("receipt caller"),
             "{label}: {reference_error}"
         );
 
@@ -2195,7 +2208,8 @@ func main() -> i64 {
         let verifier_error = crate::verifier::verify_mir(&forged, "forged-owner-identity".into())
             .expect_err("direct verifier must reject forged call-site owner identity");
         assert!(
-            verifier_error.contains("contract identity disagrees"),
+            verifier_error.contains("contract identity disagrees")
+                || verifier_error.contains("receipt caller"),
             "{label}: {verifier_error}"
         );
     }
