@@ -2258,6 +2258,46 @@ func main() -> i64 { duplicate_shape(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_receipt_table_rejects_argument_and_result_identity_drift() {
+    const SOURCE: &str = r#"
+extern "C" { func payload_shape(value: i64) -> i64; }
+func main() -> i64 { payload_shape(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("argument/result identity fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("argument/result identity fixture materialization");
+    let instruction_id = program
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("payload call-site receipt");
+
+    for label in ["arguments", "result"] {
+        let mut receipts = program.ffi_calls().clone();
+        let receipt = receipts
+            .get_mut(&instruction_id)
+            .expect("payload call-site receipt");
+        if label == "arguments" {
+            receipt.arguments.clear();
+        } else {
+            receipt.result = None;
+        }
+        let errors = crate::core::mir::validate_ffi_receipt_table(program.functions(), &receipts);
+        let expected = if label == "arguments" {
+            "receipt arguments"
+        } else {
+            "receipt result"
+        };
+        assert!(
+            errors.iter().any(|error| error.contains(expected)),
+            "{label}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }

@@ -1474,12 +1474,15 @@ pub(crate) fn validate_ffi_receipt_table(
             )
         })
         .collect::<Vec<_>>();
-    let mut seen = BTreeMap::<MirInstructionId, (NodeId, NodeId)>::new();
+    let mut seen =
+        BTreeMap::<MirInstructionId, (NodeId, NodeId, Vec<MirValueId>, Option<MirValueId>)>::new();
     for function in functions.values() {
         for block in function.blocks.values() {
             for instruction in &block.instructions {
                 let MirInstructionKind::Call {
                     callee: ResolvedCallee::Extern(callee),
+                    result,
+                    arguments,
                     ..
                 } = &instruction.kind
                 else {
@@ -1487,7 +1490,12 @@ pub(crate) fn validate_ffi_receipt_table(
                 };
                 if let Some(previous_owner) = seen.insert(
                     instruction.id.clone(),
-                    (function.owner.clone(), callee.clone()),
+                    (
+                        function.owner.clone(),
+                        callee.clone(),
+                        arguments.clone(),
+                        result.clone(),
+                    ),
                 ) {
                     errors.push(format!(
                         "extern MIR call instruction '{}' appears in multiple functions ('{}' and '{}')",
@@ -1498,7 +1506,9 @@ pub(crate) fn validate_ffi_receipt_table(
         }
     }
     for (instruction, contract) in ffi_calls {
-        if let Some((actual_caller, actual_callee)) = seen.get(instruction) {
+        if let Some((actual_caller, actual_callee, actual_arguments, actual_result)) =
+            seen.get(instruction)
+        {
             if contract.caller != *actual_caller {
                 errors.push(format!(
                     "extern call FFI receipt caller '{}' disagrees with MIR instruction '{}' owner '{}'",
@@ -1509,6 +1519,18 @@ pub(crate) fn validate_ffi_receipt_table(
                 errors.push(format!(
                     "extern call FFI receipt callee '{}' disagrees with MIR instruction '{}' callee '{}'",
                     contract.callee.0, instruction, actual_callee.0
+                ));
+            }
+            if contract.arguments != *actual_arguments {
+                errors.push(format!(
+                    "extern call FFI receipt arguments disagree with MIR instruction '{}' arguments",
+                    instruction
+                ));
+            }
+            if contract.result != *actual_result {
+                errors.push(format!(
+                    "extern call FFI receipt result disagrees with MIR instruction '{}' result",
+                    instruction
                 ));
             }
         }
