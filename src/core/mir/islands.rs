@@ -19,7 +19,7 @@ use crate::core::ir::{
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
-    MirTypeKind, MirVariantCallAbiMode,
+    MirTypeDesc, MirTypeKind, MirVariantCallAbiMode,
 };
 use crate::core::{
     CheckedProgram, NodeId, NominalTypeId, PrimitiveType, ResolvedCallKind, ResolvedTypeId,
@@ -3576,11 +3576,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         };
         let result = match descriptor.layout {
             MirLayout::Unit => {
-                if descriptor.kind == MirTypeKind::Primitive(PrimitiveType::Unit)
-                    && descriptor.abi == MirAbiClass::Unit
-                    && descriptor.ownership == MirOwnership::Copy
-                    && is_noop_glue(descriptor.glue)
-                {
+                if descriptor.is_canonical_ffi_unit() {
                     Ok(())
                 } else {
                     Err("Unit TypeDesc has an inconsistent ABI/ownership/glue contract".into())
@@ -4344,12 +4340,7 @@ impl<'a> ScalarCollectionValidator<'a> {
         self.program
             .type_catalog()
             .get(ty)
-            .is_some_and(|descriptor| {
-                descriptor.kind == MirTypeKind::Primitive(PrimitiveType::Unit)
-                    && descriptor.abi == MirAbiClass::Unit
-                    && descriptor.ownership == MirOwnership::Copy
-                    && is_noop_glue(descriptor.glue)
-            })
+            .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
     }
 
     fn is_owned_record_or_string_type(&self, ty: &crate::core::ResolvedTypeId) -> bool {
@@ -4420,14 +4411,6 @@ impl<'a> ScalarCollectionValidator<'a> {
 
     fn error(&mut self, message: String) {
         self.errors.insert(message);
-    }
-}
-
-fn is_noop_glue(glue: MirGlueContract) -> bool {
-    glue == MirGlueContract {
-        move_out: MirGlueKind::Noop,
-        clone: MirGlueKind::Noop,
-        drop: MirGlueKind::Noop,
     }
 }
 

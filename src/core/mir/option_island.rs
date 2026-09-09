@@ -567,10 +567,7 @@ impl<'a> OptionStringVariantValidator<'a> {
                 }
             }
             MirTypeKind::Primitive(PrimitiveType::Unit) => {
-                if descriptor.layout != MirLayout::Unit
-                    || descriptor.ownership != MirOwnership::Copy
-                    || !is_noop_glue(descriptor.glue)
-                {
+                if !descriptor.is_canonical_ffi_unit() {
                     self.error(format!("{subject} unit TypeDesc is inconsistent"));
                 }
             }
@@ -890,8 +887,8 @@ impl<'a> OptionStringVariantValidator<'a> {
                     || i32::try_from(*value).is_ok()
             }
             (MirAbiClass::Bool, ResolvedLiteral::Bool(_))
-            | (MirAbiClass::StringHandle, ResolvedLiteral::String(_))
-            | (MirAbiClass::Unit, ResolvedLiteral::Unit) => true,
+            | (MirAbiClass::StringHandle, ResolvedLiteral::String(_)) => true,
+            (MirAbiClass::Unit, ResolvedLiteral::Unit) => descriptor.is_canonical_ffi_unit(),
             _ => false,
         };
         if !valid {
@@ -987,10 +984,4 @@ fn is_move_owned_type(program: &MirProgram, ty: &ResolvedTypeId) -> bool {
         .type_catalog()
         .get(ty)
         .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Move)
-}
-
-fn is_noop_glue(glue: crate::core::mir::types::MirGlueContract) -> bool {
-    glue.move_out == MirGlueKind::Noop
-        && glue.clone == MirGlueKind::Noop
-        && glue.drop == MirGlueKind::Noop
 }

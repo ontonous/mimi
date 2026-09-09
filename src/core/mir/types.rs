@@ -1236,14 +1236,28 @@ pub struct MirTypeDesc {
 }
 
 impl MirTypeDesc {
-    /// Whether this descriptor is the canonical Copy-owned Unit endpoint used
-    /// for a void scalar FFI declaration/result.  The ownership check is part
-    /// of the endpoint contract: a forged Move/Linear Unit must not be
-    /// accepted by one consumer while another rejects it before execution.
+    /// Whether this descriptor is the canonical Unit endpoint used for a void
+    /// scalar FFI declaration/result.  This is the complete physical and
+    /// ownership shape emitted by `from_resolved`: a primitive Unit with no
+    /// protocol identity, no glue or drop plans, and Copy ownership.  Keeping
+    /// those facts together prevents one consumer from treating a forged
+    /// descriptor as a void value while another rejects it before execution.
     pub(crate) fn is_canonical_ffi_unit(&self) -> bool {
-        self.layout == MirLayout::Unit
+        self.kind == MirTypeKind::Primitive(PrimitiveType::Unit)
+            && self.layout == MirLayout::Unit
+            && self.session_protocol.is_none()
             && self.abi == MirAbiClass::Unit
             && self.ownership == MirOwnership::Copy
+            && !self.needs_drop_glue
+            && !self.needs_clone_glue
+            && self.glue
+                == (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            && self.drop_plan.is_none()
+            && self.variant_drop_plan.is_none()
     }
 
     fn from_resolved(id: &ResolvedTypeId, ty: &ResolvedType, ownership: MirOwnership) -> Self {
@@ -3885,11 +3899,7 @@ impl MirTypeCatalog {
         }
         match operation {
             MirSessionOperation::Close => {
-                if result.layout != MirLayout::Unit
-                    || result.abi != MirAbiClass::Unit
-                    || result.ownership != MirOwnership::Copy
-                    || result.glue != unit_glue
-                {
+                if !result.is_canonical_ffi_unit() {
                     return Err(
                         "session_close result must be the canonical Copy unit TypeDesc".into(),
                     );
@@ -3908,11 +3918,7 @@ impl MirTypeCatalog {
                 if terminal || after.as_str() == "closed" {
                     return Err("session_send must be a non-terminal residual transition".into());
                 }
-                if result.layout != MirLayout::Unit
-                    || result.abi != MirAbiClass::Unit
-                    || result.ownership != MirOwnership::Copy
-                    || result.glue != unit_glue
-                {
+                if !result.is_canonical_ffi_unit() {
                     return Err(
                         "session_send result must be the canonical Copy unit TypeDesc".into(),
                     );

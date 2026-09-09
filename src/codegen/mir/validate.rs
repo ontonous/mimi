@@ -207,15 +207,7 @@ impl<'a> NativeMirValidator<'a> {
             MirLayout::Option { .. } | MirLayout::Result { .. } | MirLayout::Enum { .. }
         );
         let is_user_enum = matches!(desc.layout, MirLayout::Enum { .. });
-        let is_unit = desc.abi == MirAbiClass::Unit
-            && desc.layout == MirLayout::Unit
-            && desc.ownership == MirOwnership::Copy
-            && desc.glue
-                == (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                });
+        let is_unit = desc.is_canonical_ffi_unit();
         let supported = if is_session {
             match self.program.type_catalog().validate_session_channel(ty) {
                 Ok(()) => true,
@@ -1196,15 +1188,7 @@ impl<'a> NativeMirValidator<'a> {
                     return;
                 };
                 let valid_result = if contract.result_must_be_unit {
-                    result_desc.layout == MirLayout::Unit
-                        && result_desc.abi == MirAbiClass::Unit
-                        && result_desc.ownership == MirOwnership::Copy
-                        && result_desc.glue
-                            == (MirGlueContract {
-                                move_out: MirGlueKind::Noop,
-                                clone: MirGlueKind::Noop,
-                                drop: MirGlueKind::Noop,
-                            })
+                    result_desc.is_canonical_ffi_unit()
                 } else {
                     contract.accepts_abi(result_desc.abi)
                         && contract.accepts_layout(&result_desc.layout)

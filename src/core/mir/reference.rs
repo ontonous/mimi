@@ -1689,17 +1689,9 @@ fn validate_builtin_calls(
             }
             if contract.result_must_be_unit {
                 let valid_unit = result_value.is_some_and(|value| {
-                    type_catalog.get(&value.ty).is_some_and(|descriptor| {
-                        descriptor.layout == super::types::MirLayout::Unit
-                            && descriptor.abi == super::types::MirAbiClass::Unit
-                            && descriptor.ownership == super::types::MirOwnership::Copy
-                            && descriptor.glue
-                                == (super::types::MirGlueContract {
-                                    move_out: super::types::MirGlueKind::Noop,
-                                    clone: super::types::MirGlueKind::Noop,
-                                    drop: super::types::MirGlueKind::Noop,
-                                })
-                    })
+                    type_catalog
+                        .get(&value.ty)
+                        .is_some_and(super::types::MirTypeDesc::is_canonical_ffi_unit)
                 });
                 if !valid_unit {
                     errors.push(super::MirValidationError {

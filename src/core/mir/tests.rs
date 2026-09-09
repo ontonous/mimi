@@ -90,7 +90,7 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
 }
 
 #[test]
-fn canonical_ffi_unit_endpoint_requires_copy_ownership() {
+fn canonical_ffi_unit_endpoint_requires_complete_shape() {
     let checked = checked_program(
         r#"
 extern "C" {
@@ -116,6 +116,26 @@ func main() -> i32 {
 
     let mut forged = descriptor.clone();
     forged.ownership = MirOwnership::Move;
+    assert!(!forged.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.kind = MirTypeKind::Nominal;
+    assert!(!forged.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.glue.move_out = MirGlueKind::Unsupported;
+    assert!(!forged.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.needs_drop_glue = true;
+    assert!(!forged.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.session_protocol = Some(unit_id.clone());
+    assert!(!forged.is_canonical_ffi_unit());
+
+    let mut forged = descriptor.clone();
+    forged.drop_plan = Some(types::MirDropGluePlan { fields: Vec::new() });
     assert!(!forged.is_canonical_ffi_unit());
 }
 

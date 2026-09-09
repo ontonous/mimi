@@ -525,11 +525,7 @@ impl<'a> CapabilityGate<'a> {
             .clone();
         match &descriptor.layout {
             MirLayout::Unit => {
-                if descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Unit)
-                    && descriptor.abi == MirAbiClass::Unit
-                    && descriptor.ownership == MirOwnership::Copy
-                    && is_noop_glue(descriptor.glue)
-                {
+                if descriptor.is_canonical_ffi_unit() {
                     Ok(())
                 } else {
                     Err("Unit TypeDesc has an inconsistent ABI/ownership/glue contract".into())

@@ -1152,17 +1152,7 @@ impl<'a> FunctionEmitter<'a> {
                 .program
                 .type_catalog()
                 .get(&result_info.ty)
-                .is_some_and(|descriptor| {
-                    descriptor.layout == MirLayout::Unit
-                        && descriptor.abi == MirAbiClass::Unit
-                        && descriptor.ownership == MirOwnership::Copy
-                        && descriptor.glue
-                            == (crate::core::mir::types::MirGlueContract {
-                                move_out: MirGlueKind::Noop,
-                                clone: MirGlueKind::Noop,
-                                drop: MirGlueKind::Noop,
-                            })
-                });
+                .is_some_and(MirTypeDesc::is_canonical_ffi_unit);
             if !valid_unit {
                 self.error(format!(
                     "builtin '{}' result must be the canonical Copy unit TypeDesc",
@@ -1804,7 +1794,8 @@ impl<'a> FunctionEmitter<'a> {
             }
             (MirAbiClass::Float { bits: 64 }, ResolvedUnaryOp::Negate) => Op::NegFloat { rd, ra },
             (MirAbiClass::Bool, ResolvedUnaryOp::Not) => Op::Not { rd, ra },
-            (MirAbiClass::StringHandle | MirAbiClass::Unit, ResolvedUnaryOp::Dereference) => {
+            (MirAbiClass::StringHandle, ResolvedUnaryOp::Dereference) => Op::Mov { rd, rs: ra },
+            (MirAbiClass::Unit, ResolvedUnaryOp::Dereference) if desc.is_canonical_ffi_unit() => {
                 Op::Mov { rd, rs: ra }
             }
             _ => {
