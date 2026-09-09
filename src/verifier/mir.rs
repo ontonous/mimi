@@ -3252,10 +3252,7 @@ fn ensure_copy_value(
             value
         ));
     }
-    if descriptor.ownership != MirOwnership::Copy
-        || descriptor.glue.move_out != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.clone != crate::core::mir::types::MirGlueKind::Noop
-        || descriptor.glue.drop != crate::core::mir::types::MirGlueKind::Noop
+    if !descriptor.has_canonical_copy_noop_metadata()
         || !matches!(
             descriptor.layout,
             MirLayout::Scalar
@@ -6766,7 +6763,7 @@ mod tests {
     use super::verify_program;
     use crate::core::ir::{PrimitiveType, ResolvedType};
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
-    use crate::core::mir::types::MirOwnership;
+    use crate::core::mir::types::{MirDropGluePlan, MirLayout, MirOwnership};
     use crate::core::mir::MirInstructionKind;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
@@ -6845,6 +6842,57 @@ mod tests {
         assert!(super::value_scalar_kind(function, &catalog, value).is_err());
         assert!(super::is_copy_value(&catalog, &i64_id).is_err());
         assert!(super::ensure_copy_value(function, &catalog, value).is_err());
+    }
+
+    #[test]
+    fn verifier_copy_aggregate_consumers_require_complete_metadata() {
+        let source = include_str!("../../tests/fixtures/mir_native_record_copy.mimi");
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let record_id = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (matches!(descriptor.layout, MirLayout::Record { .. })
+                    && descriptor.ownership == MirOwnership::Copy)
+                    .then(|| ty.clone())
+            })
+            .expect("Copy record TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&record_id)
+            .expect("Copy record descriptor")
+            .clone();
+        assert!(descriptor.has_canonical_copy_noop_metadata());
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.values.values().any(|value| value.ty == record_id))
+            .expect("function with Copy record value");
+        let value = function
+            .values
+            .iter()
+            .find_map(|(value, info)| (info.ty == record_id).then_some(value))
+            .expect("Copy record value");
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(record_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => forged.drop_plan = Some(MirDropGluePlan { fields: Vec::new() }),
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(record_id.clone(), forged);
+            assert!(
+                super::ensure_copy_value(function, &catalog, value).is_err(),
+                "forged Copy aggregate metadata must fail closed"
+            );
+        }
     }
 
     #[test]
