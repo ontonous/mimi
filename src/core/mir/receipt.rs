@@ -231,6 +231,7 @@ impl CanonicalMirRouteReceipt {
                 MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
             ));
         }
+        validate_manifest_values(&entries)?;
         Ok(entries)
     }
 
@@ -270,6 +271,77 @@ fn validate_manifest_field_schema() -> Result<(), String> {
         if !seen.insert(field) {
             return Err(format!("manifest field '{field}' is duplicated"));
         }
+    }
+    Ok(())
+}
+
+fn validate_manifest_values(entries: &BTreeMap<String, String>) -> Result<(), String> {
+    let schema = entries
+        .get("schema")
+        .ok_or_else(|| "invalid MIR route manifest: missing field 'schema'".to_string())?;
+    if schema != MIR_ROUTE_RECEIPT_SCHEMA {
+        return Err(format!(
+            "invalid MIR route manifest: field 'schema' has unexpected value '{schema}'"
+        ));
+    }
+    let profile = entries
+        .get("profile")
+        .ok_or_else(|| "invalid MIR route manifest: missing field 'profile'".to_string())?;
+    if profile.trim().is_empty()
+        || profile
+            .chars()
+            .any(|character| character.is_control() || character == '=')
+    {
+        return Err(
+            "invalid MIR route manifest: field 'profile' is empty or not manifest-safe".into(),
+        );
+    }
+    for field in [
+        "mir_digest",
+        "type_desc_digest",
+        "abi_digest",
+        "ffi_digest",
+        "ownership_digest",
+        "flow_transition_digest",
+    ] {
+        let value = entries
+            .get(field)
+            .ok_or_else(|| format!("invalid MIR route manifest: missing field '{field}'"))?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(format!(
+                "invalid MIR route manifest: field '{field}' must be a 64-character lowercase hex digest"
+            ));
+        }
+    }
+    let owners = entries
+        .get("root_owners")
+        .ok_or_else(|| "invalid MIR route manifest: missing field 'root_owners'".to_string())?;
+    let owners = if owners.is_empty() {
+        Vec::new()
+    } else {
+        owners
+            .split(',')
+            .map(|owner| {
+                if owner.is_empty()
+                    || owner
+                        .chars()
+                        .any(|character| character.is_control() || matches!(character, '=' | ','))
+                {
+                    return Err(
+                        "invalid MIR route manifest: root owner is empty or not manifest-safe"
+                            .to_string(),
+                    );
+                }
+                Ok(NodeId(owner.to_owned()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if owners.windows(2).any(|window| window[0] >= window[1]) {
+        return Err("invalid MIR route manifest: root owners must be strictly sorted".into());
     }
     Ok(())
 }
@@ -553,5 +625,45 @@ mod tests {
             duplicate,
             "invalid MIR route manifest: duplicate field 'schema' at row 1"
         );
+    }
+
+    #[test]
+    fn route_receipt_manifest_parser_rejects_value_semantic_drift() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+        for (field, value, expected) in [
+            (
+                "schema",
+                "mimi-mir-route-receipt-v2",
+                "invalid MIR route manifest: field 'schema' has unexpected value 'mimi-mir-route-receipt-v2'",
+            ),
+            (
+                "profile",
+                "bad=profile",
+                "invalid MIR route manifest: field 'profile' is empty or not manifest-safe",
+            ),
+            (
+                "mir_digest",
+                "not-a-digest",
+                "invalid MIR route manifest: field 'mir_digest' must be a 64-character lowercase hex digest",
+            ),
+            (
+                "root_owners",
+                "z-owner,a-owner",
+                "invalid MIR route manifest: root owners must be strictly sorted",
+            ),
+        ] {
+            let mutated = manifest
+                .lines()
+                .map(|line| {
+                    line.strip_prefix(&format!("{field}="))
+                        .map_or_else(|| line.to_owned(), |_| format!("{field}={value}"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = CanonicalMirRouteReceipt::parse_manifest(&mutated)
+                .expect_err("manifest value drift must fail closed");
+            assert_eq!(error, expected, "unexpected diagnostic for {field}");
+        }
     }
 }
