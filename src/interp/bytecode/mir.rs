@@ -1997,13 +1997,9 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        let Some(_receipt) = self.program.ffi_calls().get(instruction) else {
-            self.error(format!(
-                "extern call '{}' has no canonical FFI receipt",
-                instruction
-            ));
-            return;
-        };
+        // `ffi_indices` is materialized only after the MIR-boundary receipt
+        // gate succeeds.  The emitter therefore consumes the physical
+        // descriptor index and does not reopen the semantic receipt table.
         for argument in arguments {
             if let Err(message) = self.supported_type_for_value(argument) {
                 self.error(format!(
