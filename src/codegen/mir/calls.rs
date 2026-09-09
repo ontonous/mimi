@@ -1339,12 +1339,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         // Native admission has already proven the receipt conversion belongs
         // to the scalar FFI island.  The emitter keeps only physical checks
         // that depend on LLVM declarations and materialized values.
-        if arguments.len() != parameter_conversions.len() {
-            return Err(NativeMirError::new(
-                subject,
-                "FFI parameter ABI conversion receipt count disagrees with native call",
-            ));
-        }
         let function_type = function.get_type();
         let parameter_types = function_type.get_param_types();
         if parameter_types.len() != parameter_conversions.len() {
