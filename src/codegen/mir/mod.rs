@@ -2839,6 +2839,52 @@ func main() -> i32 {
     }
 
     #[test]
+    fn native_aggregate_materialization_requires_complete_copy_metadata() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_native_record_copy.mimi"
+        ));
+        let record_id = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (matches!(descriptor.layout, MirLayout::Record { .. })
+                    && descriptor.ownership == crate::core::mir::types::MirOwnership::Copy)
+                    .then(|| ty.clone())
+            })
+            .expect("Copy record TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&record_id)
+            .expect("Copy record descriptor")
+            .clone();
+        let context = Context::create();
+        super::native_basic_type(&context, program.type_catalog(), &record_id)
+            .expect("canonical Copy record should materialize as a native aggregate");
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(record_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => {
+                    forged.drop_plan =
+                        Some(crate::core::mir::types::MirDropGluePlan { fields: Vec::new() })
+                }
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(record_id.clone(), forged);
+            let error = super::native_basic_type(&context, &catalog, &record_id)
+                .expect_err("forged Copy aggregate metadata must fail native materialization");
+            assert!(
+                format!("{error:?}").contains("complete no-op metadata contract"),
+                "unexpected native aggregate error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bytecode_option_i32_unwrap_none_matches_reference_trap() {
         let program = canonical_program(
             "func main() -> i32 { let value: Option<i32> = None; value.unwrap() }",

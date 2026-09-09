@@ -522,6 +522,15 @@ pub(super) fn native_basic_type<'ctx>(
             "scalar TypeDesc is outside the complete Copy scalar TypeDesc contract",
         ));
     }
+    if desc.abi == MirAbiClass::Aggregate
+        && desc.ownership == MirOwnership::Copy
+        && !desc.has_canonical_copy_noop_metadata()
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "Copy aggregate TypeDesc is outside the complete no-op metadata contract",
+        ));
+    }
     match desc.abi {
         MirAbiClass::Integer {
             bits: 32,
