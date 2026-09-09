@@ -75,6 +75,9 @@ impl CanonicalMirFfiRuntime {
     ) -> Result<Value, crate::interp::InterpError> {
         self.validate_descriptor(descriptor, args)
             .map_err(crate::interp::InterpError::new)?;
+        let converted_args = self
+            .convert_arguments(descriptor, args)
+            .map_err(crate::interp::InterpError::new)?;
         if let Some(condition) = descriptor
             .requires
             .as_ref()
@@ -99,7 +102,7 @@ impl CanonicalMirFfiRuntime {
         }
 
         let output = self
-            .call_abi(descriptor, args)
+            .call_abi(descriptor, &converted_args)
             .map_err(crate::interp::InterpError::new)?;
         if let Some(condition) = descriptor.ensures.as_ref().filter(|_| self.verify_requires) {
             crate::core::mir::evaluate_ffi_ensures(condition, |id| {
@@ -130,6 +133,25 @@ impl CanonicalMirFfiRuntime {
             .map_err(|error| ffi_contract_runtime_error(error, "postcondition"))?;
         }
         Ok(output)
+    }
+
+    fn convert_arguments(
+        &self,
+        descriptor: &CanonicalFfiDescriptor,
+        args: &[Value],
+    ) -> Result<Vec<Value>, String> {
+        args.iter()
+            .zip(&descriptor.parameter_conversions)
+            .enumerate()
+            .map(|(index, (value, conversion))| {
+                apply_argument_conversion(value, conversion).map_err(|error| {
+                    format!(
+                        "canonical MIR FFI argument {index} for '{}' conversion failed: {error}",
+                        descriptor.symbol
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Validate descriptor invariants before touching a dynamic library or
@@ -233,21 +255,8 @@ impl CanonicalMirFfiRuntime {
     fn call_abi(
         &mut self,
         descriptor: &CanonicalFfiDescriptor,
-        args: &[Value],
+        converted_args: &[Value],
     ) -> Result<Value, String> {
-        let converted_args = args
-            .iter()
-            .zip(&descriptor.parameter_conversions)
-            .enumerate()
-            .map(|(index, (value, conversion))| {
-                apply_argument_conversion(value, conversion).map_err(|error| {
-                    format!(
-                        "canonical MIR FFI argument {index} for '{}' conversion failed: {error}",
-                        descriptor.symbol
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let lib_path = match std::env::var("MIMI_FFI_LIB") {
             Ok(path) => path,
             Err(_) => default_libc_candidates()
@@ -963,5 +972,17 @@ mod tests {
                 .expect_err("invalid arguments/symbol cannot execute");
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_validates_argument_conversion_before_predicates() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("abs", CanonicalFfiScalarType::I32);
+        call.requires = Some(crate::core::mir::MirContractExpr::Bool(false));
+        let error = runtime
+            .call(&call, &[Value::Int(i64::MAX)])
+            .expect_err("invalid argument representation must precede a contract violation");
+        assert!(error.to_string().contains("outside i32"), "{error}");
+        assert!(runtime.loaded_libs.is_empty());
     }
 }
