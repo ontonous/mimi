@@ -195,6 +195,14 @@ fn materialize_canonical_ffi(
             });
             continue;
         };
+        if let Err(message) = crate::core::mir::validate_ffi_symbol_manifest_safety(&receipt.symbol)
+        {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message: format!("canonical FFI receipt '{}' {message}", instruction),
+            });
+            continue;
+        }
         if receipt.instruction != *instruction
             || receipt.callee != *callee
             || receipt.arguments != *arguments
@@ -202,7 +210,6 @@ fn materialize_canonical_ffi(
             || receipt.parameter_conversions.len() != arguments.len()
             || receipt.result.as_ref() != result.as_ref()
             || receipt.result_conversion.is_none() != result.is_none()
-            || !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&receipt.symbol)
             || receipt.abi != "C"
             || !type_arguments.is_empty()
             || variant_call_contract.is_some()

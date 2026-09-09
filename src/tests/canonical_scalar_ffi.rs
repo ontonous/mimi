@@ -2484,6 +2484,35 @@ func main() -> i64 { unsafe_symbol(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
+    for (symbol, reason) in [
+        ("", "FFI symbol is empty"),
+        ("   ", "FFI symbol is empty"),
+        ("bad\nname", "FFI symbol contains a control character"),
+        (
+            "bad name",
+            "FFI symbol contains whitespace or a manifest delimiter",
+        ),
+        (
+            "bad=name",
+            "FFI symbol contains whitespace or a manifest delimiter",
+        ),
+        (
+            "bad,name",
+            "FFI symbol contains whitespace or a manifest delimiter",
+        ),
+    ] {
+        let error = crate::core::mir::validate_ffi_symbol_manifest_safety(symbol)
+            .expect_err("malformed symbol must be rejected");
+        assert!(error.contains(reason), "{symbol:?}: {error}");
+    }
+    for symbol in ["read", "read_2", "utf8_%HH"] {
+        crate::core::mir::validate_ffi_symbol_manifest_safety(symbol)
+            .expect("identifier-shaped symbols must be accepted");
+    }
+}
+
+#[test]
 fn scalar_ffi_predicate_receipt_is_validated_before_consumers() {
     const SOURCE: &str = r#"
 extern "C" { func predicate_shape(value: i64) -> i64; }

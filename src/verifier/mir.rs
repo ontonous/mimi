@@ -282,14 +282,14 @@ pub(crate) fn verify_ffi_program(
     program: &MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    if let Some(contract) = program
-        .ffi_calls()
-        .values()
-        .find(|contract| !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&contract.symbol))
-    {
+    if let Some((symbol, message)) = program.ffi_calls().values().find_map(|contract| {
+        crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
+            .err()
+            .map(|message| (contract.symbol.as_str(), message))
+    }) {
         return Err(format!(
-            "canonical MIR verifier FFI symbol '{}' is not manifest-safe",
-            contract.symbol
+            "canonical MIR verifier FFI symbol '{symbol}' {}",
+            message.strip_prefix("FFI symbol ").unwrap_or(&message)
         ));
     }
     if let Some(message) =

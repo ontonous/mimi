@@ -144,10 +144,10 @@ impl CanonicalMirFfiRuntime {
         if descriptor.symbol.trim().is_empty() || descriptor.symbol.contains('\0') {
             return Err("canonical MIR FFI symbol is empty or contains NUL".into());
         }
-        if !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&descriptor.symbol) {
-            return Err(
-                "canonical MIR FFI symbol contains whitespace or a manifest delimiter".into(),
-            );
+        if let Err(message) =
+            crate::core::mir::validate_ffi_symbol_manifest_safety(&descriptor.symbol)
+        {
+            return Err(format!("canonical MIR {message}"));
         }
         if descriptor.arguments.len() != args.len() {
             return Err(format!(

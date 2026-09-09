@@ -2255,24 +2255,18 @@ fn validate_call_graph(
                         });
                     }
                     if let Err(message) =
+                        super::validate_ffi_symbol_manifest_safety(&contract.symbol)
+                    {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message: format!("extern call {message}"),
+                        });
+                    } else if let Err(message) =
                         super::validate_ffi_symbol_matches_callee(callee_owner, &contract.symbol)
                     {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message,
-                        });
-                    }
-                    if !super::canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
-                        let message = if contract.symbol.trim().is_empty() {
-                            "extern call FFI contract has an empty C symbol"
-                        } else if contract.symbol.chars().any(char::is_control) {
-                            "extern call FFI contract symbol contains a control character"
-                        } else {
-                            "extern call FFI contract symbol contains whitespace or a manifest delimiter"
-                        };
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: message.into(),
                         });
                     }
                     if contract.abi != "C" {
@@ -5064,12 +5058,14 @@ impl<'a> MirReferenceInterpreter<'a> {
             .ok_or_else(|| {
                 self.error(&function.owner, "extern call has no canonical FFI receipt")
             })?;
+        if let Err(message) = super::validate_ffi_symbol_manifest_safety(&receipt.symbol) {
+            return Err(self.error(&function.owner, message));
+        }
         if receipt.caller != function.owner
             || receipt.instruction != instruction.id
             || receipt.callee != *callee
             || receipt.arguments != arguments
             || receipt.result.as_ref() != result
-            || !super::canonical_ffi_symbol_is_manifest_safe(&receipt.symbol)
             || receipt.abi != "C"
         {
             return Err(self.error(
@@ -12050,9 +12046,8 @@ func main() -> i64 { foreign(1 as i64); 0 }
         .expect_err("C symbol control characters must fail before consumers");
         assert!(
             errors.iter().any(|error| {
-                error
-                    .message
-                    .contains("FFI contract symbol contains a control character")
+                error.message.contains("FFI symbol is not manifest-safe")
+                    && error.message.contains("control character")
             }),
             "{errors:?}"
         );
@@ -12073,9 +12068,8 @@ func main() -> i64 { foreign(1 as i64); 0 }
             .expect_err("manifest-ambiguous C symbols must fail before consumers");
             assert!(
                 errors.iter().any(|error| {
-                    error
-                        .message
-                        .contains("FFI contract symbol contains whitespace or a manifest delimiter")
+                    error.message.contains("FFI symbol is not manifest-safe")
+                        && error.message.contains("whitespace or a manifest delimiter")
                 }),
                 "{symbol}: {errors:?}"
             );

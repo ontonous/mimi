@@ -2592,16 +2592,6 @@ impl<'a> NativeMirValidator<'a> {
                 ),
             ));
         }
-        if !crate::core::mir::canonical_ffi_symbol_is_manifest_safe(&receipt.symbol) {
-            let message = if receipt.symbol.trim().is_empty() {
-                "FFI symbol is empty"
-            } else if receipt.symbol.chars().any(char::is_control) {
-                "FFI symbol contains a control character"
-            } else {
-                "FFI symbol contains whitespace or a manifest delimiter"
-            };
-            self.errors.push(NativeMirError::new(subject, message));
-        }
         if !type_arguments.is_empty() {
             self.errors.push(NativeMirError::new(
                 subject,
