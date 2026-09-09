@@ -290,6 +290,11 @@ fn canonical_root_owners(program: &MirProgram) -> Vec<NodeId> {
         .cloned()
         .collect::<Vec<_>>();
     owners.sort();
+    // Flow transition bodies are executable MIR functions and are also
+    // represented by transition contracts.  The receipt exposes root owners
+    // as a set, so the shared identity must not repeat that owner merely
+    // because it has two canonical tables.
+    owners.dedup();
     owners
 }
 

@@ -1142,6 +1142,61 @@ fn canonical_mir_cli_receipt_manifest_is_deterministic_and_exposes_ffi_digest() 
 }
 
 #[test]
+fn canonical_mir_cli_receipt_manifest_deduplicates_flow_root_owners() {
+    let fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_native_flow_transition.mimi");
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&fixture)
+        .arg("--receipt")
+        .output()
+        .expect("failed to spawn Flow MIR receipt");
+    assert!(
+        output.status.success(),
+        "Flow MIR receipt failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let manifest = parse_route_receipt_manifest(&output.stdout);
+    assert_eq!(
+        manifest.get("root_owners").map(String::as_str),
+        Some("function:main,transition:Counter::inc::Zero")
+    );
+    let owners = manifest
+        .get("root_owners")
+        .expect("Flow receipt root owners")
+        .split(',')
+        .collect::<Vec<_>>();
+    assert!(owners.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        owners.len(),
+        owners
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    );
+    for field in mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS {
+        let value = manifest
+            .get(field)
+            .unwrap_or_else(|| panic!("Flow receipt missing manifest field {field}"));
+        assert!(!value.is_empty(), "Flow receipt field {field} is empty");
+        if field.ends_with("digest") {
+            assert_eq!(
+                value.len(),
+                64,
+                "Flow receipt field {field} has unstable width"
+            );
+            assert!(value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        }
+    }
+}
+
+#[test]
 fn canonical_mir_cli_receipt_manifest_matches_checked_api_matrix_and_entry_routes() {
     let fixtures = ["mir_scalar_ffi_labs.mimi", "mir_scalar_ffi_abi.mimi"];
     let mut manifests = Vec::new();
