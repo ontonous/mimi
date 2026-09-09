@@ -158,14 +158,16 @@ impl CanonicalMirRouteReceipt {
     /// the public field-order constant prevents a frontend or CLI edit from
     /// silently reordering or omitting a receipt value.
     pub fn manifest_text(&self) -> Result<String, String> {
+        validate_manifest_field_schema()
+            .map_err(|error| format!("invalid MIR route receipt: {error}"))?;
         self.validate()
             .map_err(|error| format!("invalid MIR route receipt: {error}"))?;
         let mut text = String::from(MIR_ROUTE_RECEIPT_MANIFEST_HEADER);
         text.push('\n');
         for field in MIR_ROUTE_RECEIPT_MANIFEST_FIELDS {
-            let value = self
-                .manifest_value(field)
-                .expect("every declared manifest field has a value");
+            let value = self.manifest_value(field).ok_or_else(|| {
+                format!("invalid MIR route receipt: unknown manifest field '{field}'")
+            })?;
             writeln!(text, "{field}={value}").expect("String write");
         }
         Ok(text)
@@ -190,6 +192,25 @@ impl CanonicalMirRouteReceipt {
             _ => return None,
         })
     }
+}
+
+fn validate_manifest_field_schema() -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for field in MIR_ROUTE_RECEIPT_MANIFEST_FIELDS {
+        if field.trim().is_empty()
+            || field
+                .chars()
+                .any(|character| character.is_control() || character == '=')
+        {
+            return Err(format!(
+                "manifest field '{field}' is empty or not manifest-safe"
+            ));
+        }
+        if !seen.insert(field) {
+            return Err(format!("manifest field '{field}' is duplicated"));
+        }
+    }
+    Ok(())
 }
 
 fn canonical_mir_text(program: &MirProgram) -> String {
@@ -441,5 +462,12 @@ mod tests {
             error,
             "invalid MIR route receipt: route receipt root owner is empty or not manifest-safe"
         );
+    }
+
+    #[test]
+    fn route_receipt_manifest_schema_is_unique_safe_and_unknown_lookup_is_fail_closed() {
+        assert!(validate_manifest_field_schema().is_ok());
+        let receipt = valid_receipt();
+        assert_eq!(receipt.manifest_value("future_field"), None);
     }
 }
