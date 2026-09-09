@@ -1630,6 +1630,9 @@ pub(crate) fn validate_ffi_symbol_declaration_shapes(
     let mut shapes = BTreeMap::<String, (Vec<ResolvedTypeId>, ResolvedTypeId, String)>::new();
     let mut errors = Vec::new();
     for contract in ffi_calls.values() {
+        if validate_ffi_symbol_manifest_safety(&contract.symbol).is_err() {
+            continue;
+        }
         let shape = (
             contract.parameter_types.clone(),
             contract.result_type.clone(),

@@ -2587,6 +2587,35 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_shape_validator_ignores_manifest_unsafe_symbols() {
+    const SOURCE: &str = r#"
+extern "C" {
+    func foreign_i64(value: i64) -> i64;
+    func foreign_i32(value: i32) -> i32;
+}
+func main() -> i64 {
+    let left = foreign_i64(1 as i64);
+    let right = foreign_i32(2 as i32);
+    left + (right as i64)
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("mixed declaration-shape fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("mixed declaration-shape fixture materialization");
+    let mut receipts = canonical.ffi_calls().clone();
+    for receipt in receipts.values_mut() {
+        receipt.symbol = "foreign symbol".into();
+    }
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(receipts);
+    assert!(
+        crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls()).is_empty(),
+        "manifest-unsafe symbols are rejected by the safety gate, not declaration-shape aggregation"
+    );
+}
+
+#[test]
 fn scalar_ffi_predicate_receipt_is_validated_before_consumers() {
     const SOURCE: &str = r#"
 extern "C" { func predicate_shape(value: i64) -> i64; }
