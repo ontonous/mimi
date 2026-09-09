@@ -1336,6 +1336,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result_conversion: Option<&crate::core::mir::MirFfiAbiConversion>,
         subject: &str,
     ) -> Result<(), NativeMirError> {
+        // Native admission has already proven the receipt conversion belongs
+        // to the scalar FFI island.  The emitter keeps only physical checks
+        // that depend on LLVM declarations and materialized values.
         if arguments.len() != parameter_conversions.len() {
             return Err(NativeMirError::new(
                 subject,
@@ -1355,15 +1358,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .zip(parameter_conversions)
             .enumerate()
         {
-            if !conversion.is_supported_argument() {
-                return Err(NativeMirError::new(
-                    subject,
-                    format!(
-                        "FFI parameter {index} ABI conversion from {:?} to {:?} is unsupported",
-                        conversion.from, conversion.to
-                    ),
-                ));
-            }
             if !native_ffi_metadata_type_matches(*parameter_type, conversion.to) {
                 return Err(NativeMirError::new(
                     subject,
@@ -1432,15 +1426,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let conversion = result_conversion.ok_or_else(|| {
                     NativeMirError::new(subject, "non-unit FFI result has no conversion receipt")
                 })?;
-                if !conversion.is_supported_result() {
-                    return Err(NativeMirError::new(
-                        subject,
-                        format!(
-                            "FFI result ABI conversion from {:?} to {:?} is unsupported",
-                            conversion.from, conversion.to
-                        ),
-                    ));
-                }
                 let Some(native_return_type) = function_type.get_return_type() else {
                     return Err(NativeMirError::new(
                         subject,
