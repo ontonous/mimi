@@ -1847,6 +1847,52 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_bytecode_applies_parameter_conversion_before_libffi_call() {
+    let _guard = super::FfiEnvLock::lock();
+    let counter = super::E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let fixture = library_fixture(counter, C_SOURCE);
+    std::env::set_var("MIMI_FFI_LIB", fixture.dir.join("ffi.so"));
+    let source = r#"
+extern "C" { func mir_ffi_f64(x: f64) -> f64; }
+func main() -> i64 {
+    mir_ffi_f64(7 as i32);
+    0
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex converted scalar FFI fixture");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse converted scalar FFI fixture");
+    let checked = crate::core::check_program(&file).expect("check converted scalar FFI fixture");
+    let mir = MirProgram::from_checked_program(&checked).expect("materialize converted scalar FFI");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("converted FFI receipt");
+    assert_eq!(
+        receipt.parameter_conversions,
+        vec![crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Float { bits: 64 },
+        }]
+    );
+
+    let bytecode = compile_mir_program(&mir).expect("converted scalar FFI bytecode");
+    let mut vm = BytecodeVM::new(bytecode);
+    assert!(matches!(
+        vm.run_value().expect("converted scalar FFI execution"),
+        Value::Int(0)
+    ));
+    assert_eq!(vm.stdout(), "");
+}
+
+#[test]
 fn scalar_ffi_route_receipt_digest_pins_cross_call_site_result_shape() {
     const SOURCE: &str = r#"
 extern "C" { func result_shape(value: i64) -> i64; }

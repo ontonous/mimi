@@ -223,6 +223,19 @@ impl CanonicalMirFfiRuntime {
         descriptor: &CanonicalFfiDescriptor,
         args: &[Value],
     ) -> Result<Value, String> {
+        let converted_args = args
+            .iter()
+            .zip(&descriptor.parameter_conversions)
+            .enumerate()
+            .map(|(index, (value, conversion))| {
+                apply_argument_conversion(value, conversion).map_err(|error| {
+                    format!(
+                        "canonical MIR FFI argument {index} for '{}' conversion failed: {error}",
+                        descriptor.symbol
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let lib_path = match std::env::var("MIMI_FFI_LIB") {
             Ok(path) => path,
             Err(_) => default_libc_candidates()
@@ -260,9 +273,9 @@ impl CanonicalMirFfiRuntime {
 
         // libffi::Arg stores an address into the typed value.  Keep every
         // boxed scalar alive and immovable until the synchronous call ends.
-        let mut storage: Vec<Box<dyn Any>> = Vec::with_capacity(args.len());
-        let mut ffi_args = Vec::with_capacity(args.len());
-        for (value, scalar) in args.iter().zip(&descriptor.arguments) {
+        let mut storage: Vec<Box<dyn Any>> = Vec::with_capacity(converted_args.len());
+        let mut ffi_args = Vec::with_capacity(converted_args.len());
+        for (value, scalar) in converted_args.iter().zip(&descriptor.arguments) {
             match scalar {
                 CanonicalFfiScalarType::I32 => {
                     let number = match value {
@@ -344,6 +357,81 @@ impl CanonicalMirFfiRuntime {
         // the symbol's ABI; that external contract is the program's obligation.
         let result = unsafe { call_typed(&cif, code_ptr, &ffi_args, &descriptor.result) }?;
         apply_result_conversion(result, descriptor.result_conversion.as_ref())
+    }
+}
+
+fn apply_argument_conversion(
+    value: &Value,
+    conversion: &crate::core::mir::MirFfiAbiConversion,
+) -> Result<Value, String> {
+    use crate::core::mir::types::MirAbiClass;
+
+    if conversion.from == conversion.to {
+        return match (conversion.from, value) {
+            (
+                MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+                Value::Int(value),
+            ) if i32::try_from(*value).is_err() => {
+                Err("canonical MIR FFI argument is outside i32".into())
+            }
+            (MirAbiClass::Integer { bits: 32 | 64, .. }, Value::Int(_))
+            | (MirAbiClass::Bool, Value::Bool(_))
+            | (MirAbiClass::Float { bits: 64 }, Value::Float(_)) => Ok(value.clone()),
+            (MirAbiClass::Integer { bits: 32, .. }, other) => {
+                Err(format!("expected i32 FFI argument, got {other:?}"))
+            }
+            (MirAbiClass::Integer { bits: 64, .. }, other) => {
+                Err(format!("expected i64 FFI argument, got {other:?}"))
+            }
+            (MirAbiClass::Bool, other) => Err(format!("expected bool FFI argument, got {other:?}")),
+            (MirAbiClass::Float { bits: 64 }, other) => {
+                Err(format!("expected f64 FFI argument, got {other:?}"))
+            }
+            (abi, value) => Err(format!(
+                "identity conversion for {abi:?} received {value:?}"
+            )),
+        };
+    }
+    match (conversion.from, conversion.to, value) {
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            Value::Int(value),
+        ) if i32::try_from(*value).is_ok() => Ok(Value::Int(*value)),
+        (
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            MirAbiClass::Float { bits: 64 },
+            Value::Int(value),
+        ) if i32::try_from(*value).is_ok() => Ok(Value::Float(*value as f64)),
+        (
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            MirAbiClass::Float { bits: 64 },
+            Value::Int(value),
+        ) => Ok(Value::Float(*value as f64)),
+        (MirAbiClass::Integer { bits: 32, .. }, _, other) => {
+            Err(format!("expected i32 FFI argument, got {other:?}"))
+        }
+        (MirAbiClass::Integer { bits: 64, .. }, _, other) => {
+            Err(format!("expected i64 FFI argument, got {other:?}"))
+        }
+        (from, to, value) => Err(format!(
+            "conversion from {from:?} to {to:?} received {value:?}"
+        )),
     }
 }
 
@@ -464,6 +552,41 @@ mod tests {
             apply_result_conversion(Value::Float(2_147_483_646.75), Some(&conversion)).unwrap(),
             Value::Int(2_147_483_646)
         );
+    }
+
+    #[test]
+    fn scalar_ffi_argument_receipt_applies_mir_to_declaration_conversion() {
+        use crate::core::mir::types::MirAbiClass;
+
+        let i32_to_f64 = crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        };
+        assert_eq!(
+            apply_argument_conversion(&Value::Int(7), &i32_to_f64).unwrap(),
+            Value::Float(7.0)
+        );
+        assert!(apply_argument_conversion(&Value::Int(i64::MAX), &i32_to_f64).is_err());
+        assert!(apply_argument_conversion(&Value::Float(7.0), &i32_to_f64).is_err());
+
+        let i32_to_i64 = crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        };
+        assert_eq!(
+            apply_argument_conversion(&Value::Int(-9), &i32_to_i64).unwrap(),
+            Value::Int(-9)
+        );
+        assert!(apply_argument_conversion(&Value::Int(i64::MAX), &i32_to_i64).is_err());
     }
 
     fn descriptor(symbol: &str, argument: CanonicalFfiScalarType) -> CanonicalFfiDescriptor {
