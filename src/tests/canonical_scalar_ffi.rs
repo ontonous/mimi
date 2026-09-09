@@ -1773,6 +1773,80 @@ func main() -> i64 { conversion_identity(1 as i32); 0 }
 }
 
 #[test]
+fn scalar_ffi_route_receipt_digest_pins_cross_call_site_declaration_shape() {
+    const SOURCE: &str = r#"
+extern "C" { func declaration_shape(value: i64) -> i64; }
+func main() -> i64 {
+    let narrow = declaration_shape(7 as i32);
+    let wide = declaration_shape(8 as i64);
+    narrow + wide
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cross-call-site FFI shape fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("cross-call-site FFI shape fixture materialization");
+    assert_eq!(program.ffi_calls().len(), 2);
+    let baseline = program.route_receipt("scalar-ffi-shape-v1");
+    let main = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    let (forged_id, argument) = program
+        .ffi_calls()
+        .iter()
+        .find_map(|(id, receipt)| {
+            let argument = receipt.arguments.first()?;
+            let actual = main.values.get(argument)?;
+            (actual.ty != receipt.parameter_types[0]).then(|| (id.clone(), argument.clone()))
+        })
+        .expect("mixed-width FFI receipt");
+    let actual_type = main
+        .values
+        .get(&argument)
+        .map(|value| value.ty.clone())
+        .expect("mixed-width argument TypeDesc");
+
+    let mut forged_receipts = program.ffi_calls().clone();
+    let forged_receipt = forged_receipts
+        .get_mut(&forged_id)
+        .expect("mixed-width receipt");
+    forged_receipt.parameter_types[0] = actual_type.clone();
+    forged_receipt.parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion::for_argument(
+        program.type_catalog(),
+        &actual_type,
+        &actual_type,
+    )
+    .expect("identity conversion");
+    let mut forged = program;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+    let forged_route = forged.route_receipt("scalar-ffi-shape-v1");
+
+    assert_ne!(
+        baseline.ffi_digest, forged_route.ffi_digest,
+        "route receipt FFI digest must pin declaration shape across call sites"
+    );
+    assert_ne!(
+        baseline.mir_digest, forged_route.mir_digest,
+        "whole-program identity must include the forged declaration shape"
+    );
+    assert_eq!(baseline.type_desc_digest, forged_route.type_desc_digest);
+    assert_eq!(baseline.abi_digest, forged_route.abi_digest);
+    assert_eq!(baseline.ownership_digest, forged_route.ownership_digest);
+    assert_eq!(
+        baseline.flow_transition_digest,
+        forged_route.flow_transition_digest
+    );
+    assert_eq!(baseline.root_owners, forged_route.root_owners);
+    let shape_errors = crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls());
+    assert!(shape_errors.iter().any(|error| {
+        error.contains(
+            "FFI symbol 'declaration_shape' is used with incompatible declaration TypeDescs",
+        )
+    }));
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
