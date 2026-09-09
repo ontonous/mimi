@@ -2399,6 +2399,37 @@ func main() -> i64 { missing_result(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_receipt_table_rejects_manifest_unsafe_symbol() {
+    const SOURCE: &str = r#"
+extern "C" { func unsafe_symbol(value: i64) -> i64; }
+func main() -> i64 { unsafe_symbol(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("manifest-unsafe symbol fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("manifest-unsafe symbol fixture materialization");
+    let instruction_id = program
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("unsafe-symbol call-site receipt");
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("unsafe-symbol call-site receipt")
+        .symbol = "unsafe symbol".into();
+    let table_errors = crate::core::mir::validate_ffi_receipt_table(program.functions(), &receipts);
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("FFI symbol is not manifest-safe")
+                && error.contains("whitespace or a manifest delimiter")),
+        "{table_errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }

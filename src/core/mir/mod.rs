@@ -1530,7 +1530,18 @@ pub(crate) fn validate_ffi_receipt_table(
                     contract.abi
                 ));
             }
-            if canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
+            if !canonical_ffi_symbol_is_manifest_safe(&contract.symbol) {
+                let reason = if contract.symbol.trim().is_empty() {
+                    "FFI symbol is empty"
+                } else if contract.symbol.chars().any(char::is_control) {
+                    "FFI symbol contains a control character"
+                } else {
+                    "FFI symbol contains whitespace or a manifest delimiter"
+                };
+                errors.push(format!(
+                    "extern call FFI symbol is not manifest-safe ({reason})"
+                ));
+            } else {
                 if let Err(message) =
                     validate_ffi_symbol_matches_callee(actual_callee, &contract.symbol)
                 {

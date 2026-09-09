@@ -12162,15 +12162,21 @@ func main() -> i64 { foreign(1 as i64); 0 }
         let reference_error = MirReferenceInterpreter::new(&forged)
             .execute(&NodeId("function:main".into()), &[])
             .expect_err("reference must reject a forged manifest-unsafe symbol");
-        assert!(reference_error
-            .to_string()
-            .contains("FFI receipt disagrees with the MIR call"));
+        assert!(
+            reference_error
+                .to_string()
+                .contains("FFI receipt disagrees with the MIR call")
+                || reference_error
+                    .to_string()
+                    .contains("FFI symbol is not manifest-safe")
+        );
 
         let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
             .expect_err("bytecode must reject a forged manifest-unsafe symbol");
-        assert!(bytecode_error
-            .iter()
-            .any(|error| error.message.contains("identity/ABI validation")));
+        assert!(bytecode_error.iter().any(|error| {
+            error.message.contains("identity/ABI validation")
+                || error.message.contains("FFI symbol is not manifest-safe")
+        }));
 
         let native_error = crate::codegen::mir::validate_mir_native(&forged)
             .expect_err("native validator must reject a forged manifest-unsafe symbol");
