@@ -640,9 +640,8 @@ impl<'a> CapabilityGate<'a> {
         ty: &crate::core::ResolvedTypeId,
         descriptor: &crate::core::mir::types::MirTypeDesc,
     ) -> Result<(), String> {
-        if descriptor.ownership != MirOwnership::Copy
-            || descriptor.abi != MirAbiClass::Aggregate
-            || !is_noop_glue(descriptor.glue)
+        if descriptor.abi != MirAbiClass::Aggregate
+            || !descriptor.has_canonical_copy_noop_metadata()
         {
             return Err(format!(
                 "aggregate '{}' is not Copy with canonical no-op glue",
@@ -2263,12 +2262,6 @@ impl<'a> CapabilityGate<'a> {
     }
 }
 
-fn is_noop_glue(glue: crate::core::mir::types::MirGlueContract) -> bool {
-    glue.move_out == MirGlueKind::Noop
-        && glue.clone == MirGlueKind::Noop
-        && glue.drop == MirGlueKind::Noop
-}
-
 fn value_type(function: &MirFunction, value: &MirValueId) -> Option<crate::core::ResolvedTypeId> {
     function.values.get(value).map(|value| value.ty.clone())
 }
@@ -2370,6 +2363,55 @@ mod tests {
                 .any(|error| error
                     .contains("scalar TypeDesc is outside the verifier scalar contract"))
         );
+    }
+
+    #[test]
+    fn rejects_forged_copy_aggregate_metadata_before_capability_consumption() {
+        let program = canonical(include_str!(
+            "../../tests/fixtures/mir_native_record_copy.mimi"
+        ));
+        let record_id = program
+            .type_catalog()
+            .iter()
+            .find_map(|(ty, descriptor)| {
+                (matches!(descriptor.layout, MirLayout::Record { .. })
+                    && descriptor.ownership == MirOwnership::Copy)
+                    .then(|| ty.clone())
+            })
+            .expect("Copy record TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&record_id)
+            .expect("Copy record descriptor")
+            .clone();
+        assert!(descriptor.has_canonical_copy_noop_metadata());
+
+        for mutation in 0..4 {
+            let mut catalog = program.type_catalog().clone();
+            let mut forged = descriptor.clone();
+            match mutation {
+                0 => forged.session_protocol = Some(record_id.clone()),
+                1 => forged.needs_drop_glue = true,
+                2 => {
+                    forged.drop_plan =
+                        Some(crate::core::mir::types::MirDropGluePlan { fields: Vec::new() })
+                }
+                3 => forged.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            catalog.replace_for_test_only(record_id.clone(), forged);
+            let forged_program =
+                MirProgram::with_type_catalog(program.functions().clone(), catalog)
+                    .expect("forged catalog remains structurally valid");
+            let errors = validate_mir_capabilities(&forged_program)
+                .expect_err("forged Copy aggregate metadata must fail capability admission");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("is not Copy with canonical no-op glue")),
+                "unexpected errors: {errors:?}"
+            );
+        }
     }
 
     #[test]
