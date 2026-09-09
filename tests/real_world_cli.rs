@@ -2919,6 +2919,206 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
 }
 
 #[test]
+fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-scalar-ffi-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive scalar FFI directory");
+    fs::write(
+        dir.join("leaf.mimi"),
+        "extern \"C\" {\n    func labs(x: i64) -> i64 requires: x >= 0;\n}\npub func imported_labs(x: i64) -> i64 {\n    requires: x >= 0\n    labs(x)\n}\n",
+    )
+    .expect("write transitive scalar FFI leaf");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use leaf;\npub func mid(x: i64) -> i64 {\n    requires: x >= 0\n    imported_labs(x)\n}\n",
+    )
+    .expect("write transitive scalar FFI middle module");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use mid;\nfunc main() -> i32 { println(mid(42 as i64)); 0 }\n",
+    )
+    .expect("write transitive scalar FFI entry");
+
+    let source_scope = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--receipt")
+        .output()
+        .expect("spawn transitive scalar FFI source-scope inspection");
+    assert!(
+        !source_scope.status.success(),
+        "source-scope inspection silently omitted the imported scalar FFI callee"
+    );
+    assert!(source_scope.stdout.is_empty());
+    let source_scope_stderr = String::from_utf8_lossy(&source_scope.stderr);
+    assert!(
+        source_scope_stderr.contains("callee 'function:mid' is absent")
+            || source_scope_stderr.contains("MIR inspection input rejected"),
+        "source-scope rejection lost its imported callee boundary: {source_scope_stderr}"
+    );
+    assert!(!source_scope_stderr.contains("canonical route disposition: legacy"));
+    assert!(!source_scope_stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER));
+
+    let checked = checked_route_receipt(&main);
+    let inspect = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn transitive scalar FFI receipt")
+    };
+    let receipt_first = inspect(false);
+    let receipt_reordered = inspect(true);
+    for (label, output) in [
+        ("all-first", &receipt_first),
+        ("receipt-first", &receipt_reordered),
+    ] {
+        assert!(
+            output.status.success(),
+            "{label} rejected imported scalar FFI graph:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+            &String::from_utf8_lossy(&output.stdout),
+        )
+        .unwrap_or_else(|error| panic!("{label}: scalar FFI receipt round-trip failed: {error}"));
+        assert_eq!(manifest_receipt, checked);
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(receipt_first.stdout, receipt_reordered.stdout);
+    assert_eq!(receipt_first.stderr, receipt_reordered.stderr);
+    assert_eq!(
+        checked.root_owners,
+        vec![
+            mimi::core::NodeId("function:imported_labs".into()),
+            mimi::core::NodeId("function:main".into()),
+            mimi::core::NodeId("function:mid".into()),
+        ]
+    );
+
+    let run_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&main)
+        .output()
+        .expect("spawn default transitive scalar FFI run");
+    let run_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn explicit transitive scalar FFI run");
+    for (label, output) in [("default", &run_default), ("mir", &run_mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{label} transitive scalar FFI run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"42\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    let default_binary = dir.join("transitive-scalar-default");
+    let mir_binary = dir.join("transitive-scalar-mir");
+    let build_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&main)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("spawn default transitive scalar FFI build");
+    let build_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&mir_binary)
+        .output()
+        .expect("spawn explicit transitive scalar FFI build");
+    for (label, output) in [("default", &build_default), ("mir", &build_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} transitive scalar FFI build failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    let native_default = Command::new(&default_binary)
+        .output()
+        .expect("execute default transitive scalar FFI binary");
+    let native_mir = Command::new(&mir_binary)
+        .output()
+        .expect("execute explicit transitive scalar FFI binary");
+    for (label, output) in [("default", &native_default), ("mir", &native_mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{label} transitive scalar FFI binary failed"
+        );
+        assert_eq!(output.stdout, b"42\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    let verify_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&main)
+        .output()
+        .expect("spawn default transitive scalar FFI verifier");
+    let verify_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn explicit transitive scalar FFI verifier");
+    for (label, output) in [("default", &verify_default), ("mir", &verify_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} transitive scalar FFI verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("canonical MIR extern requires contract"));
+        assert!(!combined.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_file(&default_binary).ok();
+    fs::remove_file(&mir_binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_transitive_failure_is_consumer_invariant_and_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-transitive-import-failure-{}-{}",
