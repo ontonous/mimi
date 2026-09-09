@@ -387,12 +387,9 @@ fn apply_argument_conversion(
 ) -> Result<Value, String> {
     use crate::core::mir::types::MirAbiClass;
 
-    if !conversion.is_supported_argument() {
-        return Err(format!(
-            "canonical MIR FFI argument conversion from {:?} to {:?} is unsupported",
-            conversion.from, conversion.to
-        ));
-    }
+    // `CanonicalMirFfiRuntime::validate_descriptor` owns conversion
+    // admission.  This helper only applies a descriptor already cleared by
+    // that preflight to the runtime value representation.
     if conversion.from == conversion.to {
         return match (conversion.from, value) {
             (
@@ -469,12 +466,8 @@ fn apply_result_conversion(
     let Some(conversion) = conversion else {
         return Ok(value);
     };
-    if !conversion.is_supported_result() {
-        return Err(format!(
-            "canonical MIR FFI result conversion from {:?} to {:?} is unsupported",
-            conversion.from, conversion.to
-        ));
-    }
+    // Descriptor preflight has already admitted the conversion; this helper
+    // performs only the physical result conversion and its range guard.
     if conversion.from == conversion.to {
         return Ok(value);
     }
