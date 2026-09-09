@@ -1986,6 +1986,62 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_digest_pins_call_site_instruction_identity() {
+    const SOURCE: &str = r#"
+extern "C" { func instruction_shape(value: i64) -> i64; }
+func main() -> i64 {
+    let first = instruction_shape(7 as i64);
+    let second = instruction_shape(8 as i64);
+    first + second
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("call-site instruction identity fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("call-site instruction identity fixture materialization");
+    assert_eq!(program.ffi_calls().len(), 2);
+    let mut ffi_ids = program.ffi_calls().keys().cloned();
+    let first_id = ffi_ids.next().expect("first call-site instruction");
+    let second_id = ffi_ids.next().expect("second call-site instruction");
+    let baseline = program.route_receipt("scalar-ffi-call-site-v1");
+    let mut forged_receipts = program.ffi_calls().clone();
+    forged_receipts
+        .get_mut(&first_id)
+        .expect("first call-site receipt")
+        .instruction = second_id.clone();
+    let mut forged = program;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+    let forged_route = forged.route_receipt("scalar-ffi-call-site-v1");
+
+    assert_ne!(
+        baseline.ffi_digest, forged_route.ffi_digest,
+        "route receipt FFI digest must pin call-site instruction identity"
+    );
+    assert_ne!(
+        baseline.mir_digest, forged_route.mir_digest,
+        "whole-program identity must include call-site instruction identity"
+    );
+    assert_eq!(baseline.type_desc_digest, forged_route.type_desc_digest);
+    assert_eq!(baseline.abi_digest, forged_route.abi_digest);
+    assert_eq!(baseline.ownership_digest, forged_route.ownership_digest);
+    assert_eq!(
+        baseline.flow_transition_digest,
+        forged_route.flow_transition_digest
+    );
+    assert_eq!(baseline.root_owners, forged_route.root_owners);
+    assert!(
+        crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls()).is_empty(),
+        "same declaration shape must classify this as an identity failure"
+    );
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged call-site instruction identity");
+    assert!(reference_error
+        .to_string()
+        .contains("FFI receipt disagrees with the MIR call"));
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
