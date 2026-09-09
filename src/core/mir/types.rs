@@ -3866,22 +3866,15 @@ impl MirTypeCatalog {
                     element.as_str()
                 )
             })?;
-            if child.ownership != MirOwnership::Copy
-                || child.abi
-                    != (MirAbiClass::Integer {
-                        bits: 64,
-                        signed: true,
-                    })
-                || child.layout != MirLayout::Scalar
-                || child.glue
-                    != (MirGlueContract {
-                        move_out: MirGlueKind::Noop,
-                        clone: MirGlueKind::Noop,
-                        drop: MirGlueKind::Noop,
-                    })
+            if child.abi
+                != (MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                })
+                || !child.is_canonical_copy_scalar(false)
             {
                 return Err(format!(
-                    "session_pair result field {index} type '{}' is not a Copy signed i64 scalar",
+                    "session_pair result field {index} type '{}' is not a canonical Copy signed i64 scalar",
                     element.as_str()
                 ));
             }
@@ -3925,11 +3918,6 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             )
         })?;
-        let unit_glue = MirGlueContract {
-            move_out: MirGlueKind::Noop,
-            clone: MirGlueKind::Noop,
-            drop: MirGlueKind::Noop,
-        };
         if before == after {
             return Err("SessionCall residual transition does not advance state".into());
         }
@@ -3971,11 +3959,7 @@ impl MirTypeCatalog {
                 let MirAbiClass::Integer { bits, signed: true } = payload.abi else {
                     return Err("session_send payload must use a signed integer ABI".into());
                 };
-                if !matches!(bits, 32 | 64)
-                    || payload.layout != MirLayout::Scalar
-                    || payload.ownership != MirOwnership::Copy
-                    || payload.glue != unit_glue
-                {
+                if !matches!(bits, 32 | 64) || !payload.is_canonical_copy_scalar(false) {
                     return Err(
                         "session_send payload must be a Copy scalar i32/i64 TypeDesc".into(),
                     );
@@ -4003,11 +3987,7 @@ impl MirTypeCatalog {
                 let MirAbiClass::Integer { bits, signed: true } = result.abi else {
                     return Err("session_recv result must use a signed integer ABI".into());
                 };
-                if !matches!(bits, 32 | 64)
-                    || result.layout != MirLayout::Scalar
-                    || result.ownership != MirOwnership::Copy
-                    || result.glue != unit_glue
-                {
+                if !matches!(bits, 32 | 64) || !result.is_canonical_copy_scalar(false) {
                     return Err("session_recv result must be a Copy scalar i32/i64 TypeDesc".into());
                 }
                 let prefix = if before.as_str().starts_with("?i32 .") {
@@ -10303,7 +10283,7 @@ mod tests {
         MirGlueOperation, MirLayout, MirListOperationMode, MirOwnership, MirReadProjectionKind,
         MirReadProjectionStep, MirTypeCatalog, MirTypeKind, MIR_VARIANT_PROJECTION_TRAP_CODE,
     };
-    use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+    use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable, SessionResidualId};
     use crate::core::mir::{MirAggregateKind, MirListOperation, MirProjection, MirSetOperation};
 
     #[test]
@@ -10471,6 +10451,91 @@ mod tests {
         assert!(
             error.contains("immutable Copy scalar borrow contract"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn plain_session_pair_rejects_forged_scalar_identity() {
+        let mut table = ResolvedTypeTable::new();
+        let i64_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I64))
+            .expect("i64");
+        let pair_id = table
+            .intern_resolved(ResolvedType::Tuple(vec![i64_id.clone(), i64_id.clone()]))
+            .expect("(i64, i64)");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut forged = catalog.get(&i64_id).expect("scalar descriptor").clone();
+        forged.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i64_id, forged);
+
+        let error = catalog
+            .validate_plain_session_pair(&pair_id)
+            .expect_err("session_pair fields with forged scalar identity must fail closed");
+        assert!(
+            error.contains("canonical Copy signed i64 scalar"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn session_call_rejects_forged_scalar_identity() {
+        let mut table = ResolvedTypeTable::new();
+        let protocol_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("test:type:Protocol").expect("protocol"),
+                arguments: Vec::new(),
+                is_linear: false,
+            })
+            .expect("protocol");
+        let session_id = table
+            .intern_resolved(ResolvedType::Nominal {
+                item: crate::core::NominalTypeId::new("builtin:type:SessionChan")
+                    .expect("SessionChan"),
+                arguments: vec![protocol_id],
+                is_linear: true,
+            })
+            .expect("SessionChan");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let unit_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Unit))
+            .expect("unit");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut forged = catalog.get(&i32_id).expect("scalar descriptor").clone();
+        forged.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i32_id.clone(), forged);
+
+        let send_error = catalog
+            .validated_session_call_contract(
+                super::MirSessionOperation::Send,
+                &session_id,
+                &unit_id,
+                Some(&i32_id),
+                &SessionResidualId::new("!i32 . end").expect("send residual"),
+                &SessionResidualId::new("end").expect("send after residual"),
+                false,
+            )
+            .expect_err("SessionSend forged scalar payload must fail closed");
+        assert!(
+            send_error.contains("Copy scalar i32/i64 TypeDesc"),
+            "{send_error}"
+        );
+
+        let recv_error = catalog
+            .validated_session_call_contract(
+                super::MirSessionOperation::Recv,
+                &session_id,
+                &i32_id,
+                None,
+                &SessionResidualId::new("?i32 . end").expect("recv residual"),
+                &SessionResidualId::new("end").expect("recv after residual"),
+                false,
+            )
+            .expect_err("SessionRecv forged scalar result must fail closed");
+        assert!(
+            recv_error.contains("Copy scalar i32/i64 TypeDesc"),
+            "{recv_error}"
         );
     }
 
