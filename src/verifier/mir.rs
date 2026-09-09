@@ -1848,7 +1848,10 @@ fn eval_instruction(
             ]
             .iter()
             .flatten()
-            .any(|descriptor| matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
+            .any(|descriptor| {
+                descriptor.is_canonical_copy_scalar(true)
+                    && matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+            });
             if float_shape {
                 catalog.validate_copy_float_binary(&result_ty, &left_ty, &right_ty, *op)?;
                 return Err(format!(
@@ -2030,6 +2033,12 @@ fn eval_instruction(
                     let result_desc = catalog.get(&result_ty).ok_or_else(|| {
                         "MIR verifier SessionCall result TypeDesc is absent".to_string()
                     })?;
+                    if !result_desc.is_canonical_copy_scalar(false) {
+                        return Err(
+                            "MIR verifier session_recv result is outside the Copy scalar contract"
+                                .into(),
+                        );
+                    }
                     let MirAbiClass::Integer {
                         bits: _,
                         signed: true,
