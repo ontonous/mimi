@@ -2161,6 +2161,51 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
+    const SOURCE: &str = r#"
+extern "C" { func table_order(value: i64) -> i64; }
+func main() -> i64 {
+    let first = table_order(7 as i64);
+    let second = table_order(8 as i64);
+    first + second
+}
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("FFI table-order fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("FFI table-order fixture materialization");
+    assert_eq!(program.ffi_calls().len(), 2);
+    let baseline = program.route_receipt("scalar-ffi-table-order-v1");
+    let reversed = program
+        .ffi_calls()
+        .iter()
+        .rev()
+        .map(|(instruction, receipt)| (instruction.clone(), receipt.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut rebuilt = program.clone();
+    rebuilt.replace_ffi_calls_for_test_only(reversed);
+    let reordered = rebuilt.route_receipt("scalar-ffi-table-order-v1");
+
+    assert_eq!(baseline, reordered);
+    assert_eq!(program.canonical_digest(), rebuilt.canonical_digest());
+    assert!(reordered.validate().is_ok());
+    assert_eq!(
+        crate::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS,
+        [
+            "schema",
+            "profile",
+            "mir_digest",
+            "type_desc_digest",
+            "abi_digest",
+            "ffi_digest",
+            "ownership_digest",
+            "flow_transition_digest",
+            "root_owners",
+        ]
+    );
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
