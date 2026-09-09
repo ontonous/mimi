@@ -2161,6 +2161,125 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
+    const SOURCE: &str = r#"
+extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }
+func main() -> i64 { receipt_guard(1 as i64) }
+"#;
+    let checked =
+        crate::core::check_program(&super::parse(SOURCE)).expect("receipt-guard FFI fixture check");
+    let canonical = MirProgram::from_checked_program(&checked)
+        .expect("receipt-guard FFI fixture materialization");
+    let instruction_id = canonical
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("receipt-guard call-site receipt");
+
+    let mut missing = canonical.clone();
+    missing.replace_ffi_calls_for_test_only(std::collections::BTreeMap::new());
+    let reference_error = MirReferenceInterpreter::new(&missing)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a missing FFI receipt");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("no canonical FFI receipt"),
+        "{reference_error}"
+    );
+    let bytecode_error =
+        compile_mir_program(&missing).expect_err("bytecode must reject a missing FFI receipt");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error.message.contains("canonical bytecode FFI descriptor")
+                || error.message.contains("canonical FFI receipt")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&missing)
+        .expect_err("native admission must reject a missing FFI receipt");
+    assert!(
+        native_error.iter().any(|error| {
+            error.message.contains("no canonical FFI receipt")
+                || error.message.contains("no FFI receipt")
+        }),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&missing)
+        .expect_err("capability gate must reject a missing FFI receipt");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains("no canonical FFI contract")),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&missing, "missing-ffi-receipt".into())
+        .expect_err("direct verifier must reject a missing FFI receipt");
+    assert!(
+        verifier_error.contains("no canonical FFI contract"),
+        "{verifier_error}"
+    );
+
+    let mut forged_receipts = canonical.ffi_calls().clone();
+    forged_receipts
+        .get_mut(&instruction_id)
+        .expect("receipt-guard call-site receipt")
+        .parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion {
+        from: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        },
+        to: crate::core::mir::types::MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        },
+    };
+    let mut forged = canonical;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+    let reference_error = MirReferenceInterpreter::new(&forged)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a forged FFI conversion receipt");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("ABI conversion receipt"),
+        "{reference_error}"
+    );
+    let bytecode_error = compile_mir_program(&forged)
+        .expect_err("bytecode must reject a forged FFI conversion receipt");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error.message.contains("conversion receipt")
+                || error.message.contains("identity/ABI validation")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&forged)
+        .expect_err("native admission must reject a forged FFI conversion receipt");
+    assert!(
+        native_error
+            .iter()
+            .any(|error| error.message.contains("conversion receipt")),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+        .expect_err("capability gate must reject a forged FFI conversion receipt");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains("conversion receipt")),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&forged, "forged-ffi-receipt".into())
+        .expect_err("direct verifier must reject a forged FFI conversion receipt");
+    assert!(
+        verifier_error.contains("conversion receipt"),
+        "{verifier_error}"
+    );
+}
+
+#[test]
 fn scalar_ffi_route_receipt_is_invariant_to_ffi_table_insertion_order() {
     const SOURCE: &str = r#"
 extern "C" { func table_order(value: i64) -> i64; }
