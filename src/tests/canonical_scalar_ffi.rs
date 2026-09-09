@@ -2009,7 +2009,7 @@ func main() -> i64 {
         .get_mut(&first_id)
         .expect("first call-site receipt")
         .instruction = second_id.clone();
-    let mut forged = program;
+    let mut forged = program.clone();
     forged.replace_ffi_calls_for_test_only(forged_receipts);
     let forged_route = forged.route_receipt("scalar-ffi-call-site-v1");
 
@@ -2039,6 +2039,35 @@ func main() -> i64 {
     assert!(reference_error
         .to_string()
         .contains("FFI receipt disagrees with the MIR call"));
+
+    let forged_map_key = crate::core::mir::MirInstructionId::new("inst:call:forged-map-key")
+        .expect("instruction id");
+    let mut key_forged_receipts = program.ffi_calls().clone();
+    let key_forged_receipt = key_forged_receipts
+        .remove(&first_id)
+        .expect("first call-site receipt");
+    key_forged_receipts.insert(forged_map_key, key_forged_receipt);
+    let mut key_forged = program;
+    key_forged.replace_ffi_calls_for_test_only(key_forged_receipts);
+    let key_forged_route = key_forged.route_receipt("scalar-ffi-call-site-v1");
+    assert_ne!(
+        baseline.ffi_digest, key_forged_route.ffi_digest,
+        "route receipt FFI digest must pin the receipt table key identity"
+    );
+    assert_ne!(
+        baseline.mir_digest, key_forged_route.mir_digest,
+        "whole-program identity must include the receipt table key identity"
+    );
+    let table_errors = crate::core::mir::validate_ffi_receipt_table(
+        key_forged.functions(),
+        key_forged.ffi_calls(),
+    );
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("orphaned from a MIR extern call")),
+        "{table_errors:?}"
+    );
 }
 
 #[test]

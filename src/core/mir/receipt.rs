@@ -416,8 +416,18 @@ fn canonical_mir_text(program: &MirProgram) -> String {
 
 fn canonical_ffi_text(program: &MirProgram) -> String {
     let mut text = String::new();
-    for contract in program.ffi_calls().values() {
+    for (instruction, contract) in program.ffi_calls() {
         text.push_str("mir.ffi ");
+        // Valid canonical programs keep the table key and checker-owned
+        // receipt identity equal, so this marker is absent and preserves the
+        // established digest.  A test-only forged table may change just the
+        // key while leaving the receipt body untouched; retain that mismatch
+        // in the digest instead of silently collapsing two table identities.
+        if instruction != &contract.instruction {
+            text.push_str("key_mismatch=");
+            text.push_str(instruction.as_str());
+            text.push(' ');
+        }
         text.push_str(contract.caller.0.as_str());
         text.push(' ');
         text.push_str(contract.instruction.as_str());
