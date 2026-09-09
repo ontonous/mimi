@@ -6,6 +6,7 @@
 //! CFG/instructions, and ownership event streams.  Consumers may report or
 //! compare the receipt, but they never use it to reconstruct frontend facts.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::core::mir::reference::MirProgram;
@@ -171,6 +172,66 @@ impl CanonicalMirRouteReceipt {
             writeln!(text, "{field}={value}").expect("String write");
         }
         Ok(text)
+    }
+
+    /// Parse the line-oriented manifest emitted by [`Self::manifest_text`].
+    ///
+    /// This is intentionally a strict structural parser for evidence
+    /// consumers: the versioned header, exact field set, field order, and
+    /// duplicate/unknown rows are all checked before a map is returned. Value
+    /// semantics remain the responsibility of the receipt validator that
+    /// produced the manifest, so a parser cannot accidentally bless a
+    /// partially trusted receipt.
+    pub fn parse_manifest(text: &str) -> Result<BTreeMap<String, String>, String> {
+        validate_manifest_field_schema()
+            .map_err(|error| format!("invalid MIR route manifest: {error}"))?;
+        let mut lines = text.lines();
+        if lines.next() != Some(MIR_ROUTE_RECEIPT_MANIFEST_HEADER) {
+            return Err(format!(
+                "invalid MIR route manifest: expected header '{MIR_ROUTE_RECEIPT_MANIFEST_HEADER}'"
+            ));
+        }
+
+        let mut entries = BTreeMap::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (row, expected_field) in MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.iter().enumerate() {
+            let line = lines.next().ok_or_else(|| {
+                format!("invalid MIR route manifest: missing field '{expected_field}'")
+            })?;
+            let (field, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("invalid MIR route manifest: row {row} is missing '='"))?;
+            if !MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.contains(&field) {
+                return Err(format!(
+                    "invalid MIR route manifest: unknown field '{field}' at row {row}"
+                ));
+            }
+            if !seen.insert(field) {
+                return Err(format!(
+                    "invalid MIR route manifest: duplicate field '{field}' at row {row}"
+                ));
+            }
+            if field != *expected_field {
+                return Err(format!(
+                    "invalid MIR route manifest: field '{field}' at row {row}, expected '{expected_field}'"
+                ));
+            }
+            entries.insert(field.to_owned(), value.to_owned());
+        }
+        if let Some(line) = lines.next() {
+            let field = line.split_once('=').map_or(line, |(field, _)| field);
+            if MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.contains(&field) {
+                return Err(format!(
+                    "invalid MIR route manifest: duplicate field '{field}' at row {}",
+                    MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+                ));
+            }
+            return Err(format!(
+                "invalid MIR route manifest: unknown field '{field}' at row {}",
+                MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.len()
+            ));
+        }
+        Ok(entries)
     }
 
     fn manifest_value(&self, field: &str) -> Option<String> {
@@ -469,5 +530,28 @@ mod tests {
         assert!(validate_manifest_field_schema().is_ok());
         let receipt = valid_receipt();
         assert_eq!(receipt.manifest_value("future_field"), None);
+    }
+
+    #[test]
+    fn route_receipt_manifest_parser_rejects_unknown_and_duplicate_rows() {
+        let receipt = valid_receipt();
+        let manifest = receipt.manifest_text().expect("valid receipt manifest");
+        let mut rows = manifest.lines().map(str::to_owned).collect::<Vec<_>>();
+        rows.insert(1, "future_field=unexpected".into());
+        let unknown = CanonicalMirRouteReceipt::parse_manifest(&rows.join("\n"))
+            .expect_err("unknown manifest field must fail closed");
+        assert_eq!(
+            unknown,
+            "invalid MIR route manifest: unknown field 'future_field' at row 0"
+        );
+
+        let mut rows = manifest.lines().map(str::to_owned).collect::<Vec<_>>();
+        rows.insert(1, rows[1].clone());
+        let duplicate = CanonicalMirRouteReceipt::parse_manifest(&rows.join("\n"))
+            .expect_err("duplicate manifest field must fail closed");
+        assert_eq!(
+            duplicate,
+            "invalid MIR route manifest: duplicate field 'schema' at row 1"
+        );
     }
 }

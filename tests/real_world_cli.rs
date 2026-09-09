@@ -75,29 +75,8 @@ fn normalize_run_output(s: &str) -> String {
 
 fn parse_route_receipt_manifest(stdout: &[u8]) -> BTreeMap<String, String> {
     let text = String::from_utf8_lossy(stdout);
-    let mut lines = text.lines();
-    assert_eq!(
-        lines.next(),
-        Some(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
-        "unexpected route receipt manifest header"
-    );
-    let entries = lines
-        .map(|line| {
-            line.split_once('=')
-                .unwrap_or_else(|| panic!("malformed route receipt manifest line: {line}"))
-        })
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect::<Vec<_>>();
-    let actual_fields = entries
-        .iter()
-        .map(|(key, _)| key.as_str())
-        .collect::<Vec<_>>();
-    let expected_fields = mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_FIELDS.to_vec();
-    assert_eq!(
-        actual_fields, expected_fields,
-        "route receipt manifest fields must use the canonical order"
-    );
-    entries.into_iter().collect()
+    mimi::core::mir::CanonicalMirRouteReceipt::parse_manifest(&text)
+        .unwrap_or_else(|error| panic!("invalid route receipt manifest: {error}"))
 }
 
 fn checked_route_receipt(path: &Path) -> mimi::core::mir::CanonicalMirRouteReceipt {
