@@ -28,6 +28,9 @@ use crate::core::mir::{
 /// because the verifier had no obligation to print.
 pub fn validate_mir_capabilities(program: &MirProgram) -> Result<(), Vec<String>> {
     let mut gate = CapabilityGate::new(program);
+    for message in crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls()) {
+        gate.error(message);
+    }
     gate.validate();
     if gate.errors.is_empty() {
         Ok(())

@@ -1340,6 +1340,35 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     errors
 }
 
+/// Validate that every call-site using one C symbol agrees on its declared
+/// ABI shape. A symbol has one physical declaration in native code and one
+/// libffi call interface in bytecode; accepting divergent receipt declarations
+/// would make route identity depend on the consumer that happens to run first.
+pub(crate) fn validate_ffi_symbol_declaration_shapes(
+    ffi_calls: &BTreeMap<MirInstructionId, MirFfiCallContract>,
+) -> Vec<String> {
+    let mut shapes = BTreeMap::<String, (Vec<ResolvedTypeId>, ResolvedTypeId, String)>::new();
+    let mut errors = Vec::new();
+    for contract in ffi_calls.values() {
+        let shape = (
+            contract.parameter_types.clone(),
+            contract.result_type.clone(),
+            contract.abi.clone(),
+        );
+        if let Some(previous) = shapes.get(&contract.symbol) {
+            if previous != &shape {
+                errors.push(format!(
+                    "FFI symbol '{}' is used with incompatible declaration TypeDescs",
+                    contract.symbol
+                ));
+            }
+        } else {
+            shapes.insert(contract.symbol.clone(), shape);
+        }
+    }
+    errors
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirTerminator {
     Goto {

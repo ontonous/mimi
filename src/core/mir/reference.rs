@@ -5308,6 +5308,13 @@ impl<'a> MirReferenceInterpreter<'a> {
         arguments: &[MirRuntimeValue],
         queues: &[MirSessionQueueInput],
     ) -> Result<MirExecutionObservation, MirExecutionError> {
+        if let Some(message) =
+            super::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
+                .into_iter()
+                .next()
+        {
+            return Err(self.error(owner, message));
+        }
         self.output.borrow_mut().clear();
         *self.next_session_handle.borrow_mut() = 1;
         self.session_peers.borrow_mut().clear();
@@ -12133,6 +12140,77 @@ func main() -> i64 { foreign(1 as i64); 0 }
         let verifier_error = crate::verifier::verify_mir(&forged, "forged-abi".into())
             .expect_err("direct verifier must reject a forged non-C ABI without obligations");
         assert!(verifier_error.contains("ABI 'Rust' is outside the canonical C ABI"));
+    }
+
+    #[test]
+    fn forged_ffi_symbol_declaration_shape_is_rejected_by_every_direct_consumer() {
+        let (_, program) = canonical_program_with_main(
+            r#"
+extern "C" { func foreign(value: i64) -> i64; }
+func main() -> i64 {
+    let narrow = foreign(7 as i32);
+    let wide = foreign(8 as i64);
+    narrow + wide
+}
+"#,
+        );
+        assert_eq!(program.ffi_calls().len(), 2);
+        let main = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR");
+        let (second_id, second_argument) = program
+            .ffi_calls()
+            .iter()
+            .find_map(|(id, receipt)| {
+                let argument = receipt.arguments.first()?;
+                let actual = main.values.get(argument)?;
+                (actual.ty != receipt.parameter_types[0]).then(|| (id.clone(), argument.clone()))
+            })
+            .expect("mixed-width FFI receipt");
+        let actual_type = main
+            .values
+            .get(&second_argument)
+            .map(|value| value.ty.clone())
+            .expect("second argument TypeDesc");
+
+        let mut receipts = program.ffi_calls().clone();
+        let forged_receipt = receipts.get_mut(&second_id).expect("second receipt");
+        forged_receipt.parameter_types[0] = actual_type.clone();
+        forged_receipt.parameter_conversions[0] =
+            MirFfiAbiConversion::for_argument(program.type_catalog(), &actual_type, &actual_type)
+                .expect("identity conversion");
+        let mut forged = program;
+        forged.replace_ffi_calls_for_test_only(receipts);
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect_err("reference must reject divergent FFI declaration shapes");
+        assert!(reference_error
+            .to_string()
+            .contains("incompatible declaration TypeDescs"));
+
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+            .expect_err("bytecode must reject divergent FFI declaration shapes");
+        assert!(bytecode_error
+            .iter()
+            .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native validator must reject divergent FFI declaration shapes");
+        assert!(native_error
+            .iter()
+            .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject divergent FFI declaration shapes");
+        assert!(capability_error
+            .iter()
+            .any(|error| error.contains("incompatible declaration TypeDescs")));
+
+        let verifier_error = crate::verifier::verify_mir(&forged, "forged-ffi-shape".into())
+            .expect_err("direct verifier must reject divergent FFI declaration shapes");
+        assert!(verifier_error.contains("incompatible declaration TypeDescs"));
     }
 
     #[test]
