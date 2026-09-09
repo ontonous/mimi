@@ -1400,6 +1400,65 @@ fn canonical_mir_cli_receipt_manifest_import_graph_requires_all_and_is_determini
 }
 
 #[test]
+fn canonical_mir_cli_all_receipt_multi_module_failure_is_atomic() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-receipt-multi-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create multi-module failure directory");
+    fs::write(dir.join("good.mimi"), "pub func good() -> i32 { 41 }\n")
+        .expect("write supported helper");
+    fs::write(
+        dir.join("bad.mimi"),
+        "pub func bad(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write unsupported helper");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use good;\nuse bad;\nfunc main() -> i32 { good() }\n",
+    )
+    .expect("write multi-module entry");
+
+    let output = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("mir")
+        .arg(&main)
+        .arg("--all")
+        .arg("--receipt")
+        .output()
+        .expect("spawn multi-module failure receipt");
+    assert!(
+        !output.status.success(),
+        "unsupported imported helper must fail closed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "multi-module failure emitted a partial manifest: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MIR inspection input rejected") && stderr.contains("Copy scalar"),
+        "multi-module failure lost its canonical lowering diagnostic: {stderr}"
+    );
+    assert!(
+        !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+        "multi-module failure claimed a receipt manifest: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical route disposition: legacy"),
+        "multi-module failure fell back to legacy: {stderr}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
