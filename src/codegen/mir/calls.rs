@@ -1713,6 +1713,27 @@ mod tests {
     }
 
     #[test]
+    fn native_ffi_scalar_shape_materializes_exact_llvm_type() {
+        let context = Context::create();
+        assert!(matches!(
+            NativeFfiScalarShape::SignedInteger(32).llvm_type(&context),
+            BasicTypeEnum::IntType(value) if value.get_bit_width() == 32
+        ));
+        assert!(matches!(
+            NativeFfiScalarShape::SignedInteger(64).llvm_type(&context),
+            BasicTypeEnum::IntType(value) if value.get_bit_width() == 64
+        ));
+        assert!(matches!(
+            NativeFfiScalarShape::Bool.llvm_type(&context),
+            BasicTypeEnum::IntType(value) if value.get_bit_width() == 1
+        ));
+        assert!(matches!(
+            NativeFfiScalarShape::Float(64).llvm_type(&context),
+            BasicTypeEnum::FloatType(value) if value.get_bit_width() == 64
+        ));
+    }
+
+    #[test]
     fn native_ffi_value_shape_matches_receipt_endpoint() {
         let context = Context::create();
         let i32_value: BasicValueEnum<'_> = context.i32_type().const_zero().into();

@@ -451,17 +451,16 @@ fn native_ffi_scalar_type<'ctx>(
             ),
         ));
     }
-    if native_ffi_scalar_shape(descriptor.abi).is_some() {
-        native_basic_type(context, catalog, ty)
-    } else {
-        Err(NativeMirError::new(
+    let shape = native_ffi_scalar_shape(descriptor.abi).ok_or_else(|| {
+        NativeMirError::new(
             subject,
             format!(
                 "FFI scalar ABI {:?} is outside the canonical native FFI slice",
                 descriptor.abi
             ),
-        ))
-    }
+        )
+    })?;
+    Ok(shape.llvm_type(context))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -469,6 +468,23 @@ enum NativeFfiScalarShape {
     SignedInteger(u16),
     Bool,
     Float(u16),
+}
+
+impl NativeFfiScalarShape {
+    fn llvm_type<'ctx>(self, context: &'ctx Context) -> BasicTypeEnum<'ctx> {
+        match self {
+            Self::SignedInteger(32) => context.i32_type().into(),
+            Self::SignedInteger(64) => context.i64_type().into(),
+            Self::Bool => context.bool_type().into(),
+            Self::Float(64) => context.f64_type().into(),
+            // `native_ffi_scalar_shape` is the sole constructor and admits
+            // only the widths above. Keep this total so a future shape-map
+            // edit cannot silently invent an LLVM ABI.
+            Self::SignedInteger(_) | Self::Float(_) => {
+                unreachable!("unsupported native scalar FFI width")
+            }
+        }
+    }
 }
 
 /// Return the one physical scalar shape admitted by the native FFI island.
