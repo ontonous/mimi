@@ -1726,9 +1726,7 @@ fn eval_instruction(
         MirInstructionKind::Move { result, source } => {
             let source_ty = instruction_value_type(function, source, "move source")?;
             ensure_same_instruction_types(function, result, &source_ty, "move")?;
-            let is_copy = catalog
-                .get(&source_ty)
-                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            let is_copy = is_copy_value(catalog, &source_ty)?;
             let value = if is_copy {
                 ensure_copy_value(function, catalog, source)?;
                 state
@@ -1755,9 +1753,7 @@ fn eval_instruction(
         MirInstructionKind::Clone { result, source } => {
             let source_ty = instruction_value_type(function, source, "clone source")?;
             ensure_same_instruction_types(function, result, &source_ty, "clone")?;
-            let is_copy = catalog
-                .get(&source_ty)
-                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            let is_copy = is_copy_value(catalog, &source_ty)?;
             if is_copy {
                 ensure_copy_value(function, catalog, source)?;
             } else {
@@ -1776,9 +1772,7 @@ fn eval_instruction(
         }
         MirInstructionKind::Drop { value } => {
             let ty = instruction_value_type(function, value, "drop value")?;
-            let is_copy = catalog
-                .get(&ty)
-                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            let is_copy = is_copy_value(catalog, &ty)?;
             if is_copy {
                 ensure_copy_value(function, catalog, value)?;
             } else {
@@ -3214,6 +3208,32 @@ fn eval_instruction(
     Ok(())
 }
 
+/// Classify the ownership route for a verifier value without letting a
+/// malformed scalar descriptor masquerade as an ordinary Copy aggregate.
+/// Aggregate Copy shapes still receive their broader no-op/glue validation in
+/// `ensure_copy_value`; scalar values must satisfy the complete primitive ABI,
+/// ownership, and glue contract before they can stay in the state map during
+/// Move/Clone/Drop or call argument routing.
+fn is_copy_value(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<bool, String> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if descriptor.ownership != MirOwnership::Copy {
+        return Ok(false);
+    }
+    if matches!(descriptor.layout, MirLayout::Scalar) && !descriptor.is_canonical_copy_scalar(true)
+    {
+        return Err(format!(
+            "MIR verifier scalar TypeDesc '{}' is outside the complete Copy scalar shape",
+            ty.as_str()
+        ));
+    }
+    Ok(true)
+}
+
 fn ensure_copy_value(
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
@@ -4636,10 +4656,9 @@ fn eval_direct_variant_call(
                 )
             })?
         } else {
-            let argument_is_copy = catalog
-                .get(&argument_value.ty)
-                .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy);
+            let argument_is_copy = is_copy_value(catalog, &argument_value.ty)?;
             if argument_is_copy {
+                ensure_copy_value(function, catalog, argument)?;
                 state.values.get(argument).cloned().ok_or_else(|| {
                     format!(
                         "MIR verifier direct call argument '{}' is not defined",
@@ -6830,6 +6849,7 @@ mod tests {
             .find_map(|(value, info)| (info.ty == i64_id).then_some(value))
             .expect("scalar MIR value");
         assert!(super::value_scalar_kind(function, &catalog, value).is_err());
+        assert!(super::is_copy_value(&catalog, &i64_id).is_err());
         assert!(super::ensure_copy_value(function, &catalog, value).is_err());
     }
 
