@@ -403,8 +403,8 @@ pub(crate) fn validate_materialized_call_result_presence(
 
 mod contracts;
 pub(crate) use contracts::{
-    evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message, validate_ffi_ensures,
-    validate_ffi_requires, validate_ffi_runtime_contracts, MirContractScalar, MirFfiContractError,
+    evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message,
+    validate_ffi_runtime_contracts, MirContractScalar, MirFfiContractError,
 };
 mod copy_option_island;
 mod copy_result_island;
