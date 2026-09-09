@@ -2795,7 +2795,7 @@ impl<'a> NativeMirValidator<'a> {
                     .program
                     .type_catalog()
                     .get(&function.result)
-                    .is_some_and(|desc| desc.abi != MirAbiClass::Unit) =>
+                    .is_some_and(|desc| !desc.is_canonical_ffi_unit()) =>
                 {
                     self.errors.push(NativeMirError::new(
                         subject,

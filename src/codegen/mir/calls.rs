@@ -1296,7 +1296,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         if let Some(result) = result {
             let desc = self.value_desc(result, subject)?;
-            if desc.abi != MirAbiClass::Unit {
+            if !desc.is_canonical_ffi_unit() {
                 let value = call_try_basic_value(&call).ok_or_else(|| {
                     NativeMirError::new(subject, "non-unit MIR call returned void")
                 })?;

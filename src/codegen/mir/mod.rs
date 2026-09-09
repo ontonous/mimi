@@ -313,7 +313,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .type_catalog()
                 .get(&function.result)
                 .ok_or_else(|| NativeMirError::new(owner.0.clone(), "result TypeDesc is absent"))?;
-            let function_type = if result_desc.abi == MirAbiClass::Unit {
+            let function_type = if result_desc.is_canonical_ffi_unit() {
                 self.generator
                     .context
                     .void_type()
@@ -619,7 +619,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .program
                     .type_catalog()
                     .get(&info.ty)
-                    .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
+                    .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
                 {
                     continue;
                 }
@@ -951,7 +951,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .program
                     .type_catalog()
                     .get(&self.value_type(result, subject)?)
-                    .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Unit)
+                    .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
                 {
                     self.values.insert(result.clone(), value);
                 }

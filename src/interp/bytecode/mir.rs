@@ -3912,7 +3912,8 @@ impl<'a> FunctionEmitter<'a> {
         match desc.abi {
             MirAbiClass::Integer { bits, signed } if signed && bits <= 64 => Ok(()),
             MirAbiClass::Float { bits } if bits == 32 || bits == 64 => Ok(()),
-            MirAbiClass::Bool | MirAbiClass::Unit if desc.ownership == MirOwnership::Copy => Ok(()),
+            MirAbiClass::Bool if desc.ownership == MirOwnership::Copy => Ok(()),
+            MirAbiClass::Unit if desc.is_canonical_ffi_unit() => Ok(()),
             MirAbiClass::StringHandle
                 if desc.ownership == MirOwnership::Move
                     && desc.glue.move_out == MirGlueKind::OwnedString
