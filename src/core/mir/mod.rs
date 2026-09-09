@@ -1558,6 +1558,12 @@ pub(crate) fn validate_ffi_receipt_table(
                     instruction
                 ));
             }
+            if actual_result.is_none() {
+                errors.push(format!(
+                    "extern MIR call instruction '{}' has no canonical result value identity",
+                    instruction
+                ));
+            }
         }
     }
     errors.extend(

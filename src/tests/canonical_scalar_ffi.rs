@@ -2355,6 +2355,50 @@ func main() -> i64 { overlap_shape(7 as i64) }
 }
 
 #[test]
+fn scalar_ffi_receipt_table_rejects_missing_result_identity() {
+    const SOURCE: &str = r#"
+extern "C" { func missing_result(value: i64) -> i64; }
+func main() -> i64 { missing_result(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("missing result identity fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("missing result identity fixture materialization");
+    let instruction_id = program
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("missing-result call-site receipt");
+    let mut functions = program.functions().clone();
+    let function = functions
+        .get_mut(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    let instruction = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| instruction.id == instruction_id)
+        .expect("extern call");
+    let crate::core::mir::MirInstructionKind::Call { result, .. } = &mut instruction.kind else {
+        panic!("expected extern call");
+    };
+    *result = None;
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .get_mut(&instruction_id)
+        .expect("missing-result call-site receipt")
+        .result = None;
+    let table_errors = crate::core::mir::validate_ffi_receipt_table(&functions, &receipts);
+    assert!(
+        table_errors
+            .iter()
+            .any(|error| error.contains("has no canonical result value identity")),
+        "{table_errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }
