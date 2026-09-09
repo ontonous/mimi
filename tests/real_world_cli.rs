@@ -2801,18 +2801,29 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
             .as_nanos()
     ));
     fs::create_dir_all(&dir).expect("create import-order identity directory");
-    fs::write(dir.join("leaf_a.mimi"), "pub func leaf_a() -> i32 { 10 }\n")
-        .expect("write first transitive leaf");
-    fs::write(dir.join("leaf_b.mimi"), "pub func leaf_b() -> i32 { 20 }\n")
-        .expect("write second transitive leaf");
+    fs::write(
+        dir.join("ffi_leaf.mimi"),
+        "extern \"C\" { func labs(value: i64) -> i64; }\npub func ffi_labs(value: i64) -> i64 { labs(value) }\n",
+    )
+    .expect("write shared FFI leaf");
+    fs::write(
+        dir.join("leaf_a.mimi"),
+        "use ffi_leaf;\npub func leaf_a() -> i64 { ffi_labs(10 as i64) }\n",
+    )
+    .expect("write first transitive leaf");
+    fs::write(
+        dir.join("leaf_b.mimi"),
+        "use ffi_leaf;\npub func leaf_b() -> i64 { ffi_labs(20 as i64) }\n",
+    )
+    .expect("write second transitive leaf");
     fs::write(
         dir.join("mid_a.mimi"),
-        "use leaf_a;\npub func mid_a() -> i32 { leaf_a() }\n",
+        "use leaf_a;\npub func mid_a() -> i64 { leaf_a() }\n",
     )
     .expect("write first transitive middle module");
     fs::write(
         dir.join("mid_b.mimi"),
-        "use leaf_b;\npub func mid_b() -> i32 { leaf_b() }\n",
+        "use leaf_b;\npub func mid_b() -> i64 { leaf_b() }\n",
     )
     .expect("write second transitive middle module");
     let main = dir.join("main.mimi");
@@ -2820,7 +2831,7 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
         fs::write(
             &main,
             format!(
-                "use {first};\nuse {second};\nfunc main() -> i32 {{ println(mid_a() + mid_b()); 30 }}\n"
+                "use {first};\nuse {second};\nfunc main() -> i64 {{ println(mid_a() + mid_b()); 30 }}\n"
             ),
         )
         .expect("write import-order identity entry");
@@ -2859,6 +2870,10 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
         checked_first, checked_second,
         "swapping import declarations changed checked graph identity"
     );
+    assert_eq!(
+        checked_first.ffi_digest, checked_second.ffi_digest,
+        "swapping import declarations changed the merged FFI receipt digest"
+    );
     for (label, output, checked) in [
         ("first", &receipt_first, &checked_first),
         ("second", &receipt_second, &checked_second),
@@ -2879,8 +2894,15 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
             "{label}: CLI import-order receipt diverged from checked API"
         );
         assert_eq!(
+            manifest.get("ffi_digest").map(String::as_str),
+            Some(checked.ffi_digest.as_str()),
+            "{label}: CLI import-order FFI digest diverged"
+        );
+        assert_eq!(
             manifest.get("root_owners").map(String::as_str),
-            Some("function:leaf_a,function:leaf_b,function:main,function:mid_a,function:mid_b"),
+            Some(
+                "function:ffi_labs,function:leaf_a,function:leaf_b,function:main,function:mid_a,function:mid_b",
+            ),
             "{label}: import-order root owner order changed"
         );
         assert!(
@@ -2914,6 +2936,77 @@ fn canonical_mir_import_declaration_order_preserves_checked_graph_identity_and_c
     assert_eq!(run_first.status.code(), run_second.status.code());
     assert_eq!(run_first.stdout, run_second.stdout);
     assert_eq!(run_first.stderr, run_second.stderr);
+
+    let default_binary = dir.join("import-order-ffi-default");
+    let mir_binary = dir.join("import-order-ffi-mir");
+    let build_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&main)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("spawn default import-order FFI build");
+    let build_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&mir_binary)
+        .output()
+        .expect("spawn explicit import-order FFI build");
+    for (label, output) in [("default", &build_default), ("mir", &build_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} import-order FFI build failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    let native_default = Command::new(&default_binary)
+        .output()
+        .expect("execute default import-order FFI binary");
+    let native_mir = Command::new(&mir_binary)
+        .output()
+        .expect("execute explicit import-order FFI binary");
+    for (label, output) in [("default", &native_default), ("mir", &native_mir)] {
+        assert_eq!(
+            output.status.code(),
+            Some(30),
+            "{label} import-order FFI binary returned the wrong result"
+        );
+        assert_eq!(output.stdout, b"30\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    let verify_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&main)
+        .output()
+        .expect("spawn default import-order FFI verifier");
+    let verify_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn explicit import-order FFI verifier");
+    for (label, output) in [("default", &verify_default), ("mir", &verify_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} import-order FFI verifier failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(verify_default.stdout, verify_mir.stdout);
+    assert_eq!(verify_default.stderr, verify_mir.stderr);
 
     fs::remove_dir_all(&dir).ok();
 }
