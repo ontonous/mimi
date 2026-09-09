@@ -2791,6 +2791,103 @@ fn canonical_mir_transitive_imports_match_checked_receipt_and_consumers() {
 }
 
 #[test]
+fn canonical_mir_transitive_failure_is_consumer_invariant_and_atomic() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-import-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive failure directory");
+    fs::write(
+        dir.join("bad.mimi"),
+        "pub func bad(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write transitive unsupported helper");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use bad;\npub func mid() -> i32 { 1 }\n",
+    )
+    .expect("write transitive middle module");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use mid;\nfunc main() -> i32 { 0 }\n")
+        .expect("write transitive failure entry");
+
+    let binary = dir.join("transitive-consumer-output");
+    let invoke = |consumer: &str| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg(consumer);
+        if consumer == "build" {
+            command.arg("--mir").arg(&main).arg("-o").arg(&binary);
+        } else {
+            command.arg("--mir").arg(&main);
+        }
+        command
+            .output()
+            .unwrap_or_else(|error| panic!("spawn transitive {consumer} failure: {error}"))
+    };
+
+    let mut outputs = Vec::new();
+    for consumer in ["run", "build", "verify"] {
+        let first = invoke(consumer);
+        let second = invoke(consumer);
+        let stage = match consumer {
+            "verify" => "canonical MIR verifier input rejected",
+            _ => "canonical MIR build error",
+        };
+        for (label, output) in [
+            (format!("{consumer}-first"), &first),
+            (format!("{consumer}-second"), &second),
+        ] {
+            assert!(
+                !output.status.success(),
+                "{label} silently selected source scope instead of closing the transitive graph"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{label} emitted output before transitive lowering failed: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(stage)
+                    && stderr.contains("MIR lowering failed (1 errors)")
+                    && stderr.contains("function:bad/node:expr.index")
+                    && stderr.matches("Copy scalar").count() == 1
+                    && !stderr.contains("function:mid/node:expr.index")
+                    && !stderr.contains("canonical route disposition: legacy")
+                    && !stderr.contains("flow_ast")
+                    && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+                "{label} changed transitive failure classification: {stderr}"
+            );
+        }
+        assert_eq!(first.status.code(), second.status.code());
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(first.stderr, second.stderr);
+        let stderr = String::from_utf8_lossy(&first.stderr);
+        let aggregate = stderr
+            .find("MIR lowering failed")
+            .map(|index| stderr[index..].to_owned())
+            .expect("transitive canonical lowering aggregate");
+        outputs.push((consumer, aggregate));
+    }
+    let expected = &outputs[0].1;
+    for (consumer, aggregate) in &outputs[1..] {
+        assert_eq!(
+            aggregate, expected,
+            "{consumer} changed the transitive canonical lowering aggregate"
+        );
+    }
+    assert!(
+        !binary.exists(),
+        "failed transitive build left a partial native output"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
