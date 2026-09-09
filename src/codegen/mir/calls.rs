@@ -1346,19 +1346,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             arguments.iter().zip(parameter_conversions).enumerate()
         {
             let value = self.value(argument, subject)?;
-            let actual_type = self.value_desc(argument, subject)?;
-            if actual_type.abi != conversion.from {
-                return Err(NativeMirError::new(
-                    subject,
-                    format!(
-                        "FFI parameter {index} ABI conversion receipt starts at {:?}, MIR value is {:?}",
-                        conversion.from, actual_type.abi
-                    ),
-                ));
-            }
             let value = self.coerce_ffi_value(
                 value,
-                actual_type.abi,
+                conversion.from,
                 conversion.to,
                 subject,
                 &format!("ffi_arg_{index}"),
