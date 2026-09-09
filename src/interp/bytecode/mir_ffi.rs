@@ -203,9 +203,9 @@ impl CanonicalMirFfiRuntime {
             return Err("canonical FFI result identity overlaps an argument identity".into());
         }
         let argument_abis = descriptor
-            .arguments
+            .parameter_conversions
             .iter()
-            .map(scalar_abi_class)
+            .map(|conversion| conversion.from)
             .collect::<Vec<_>>();
         crate::core::mir::validate_ffi_runtime_contracts(
             descriptor.requires.as_ref(),
@@ -213,7 +213,7 @@ impl CanonicalMirFfiRuntime {
             &descriptor.argument_ids,
             &argument_abis,
             descriptor.result_id.as_ref(),
-            scalar_abi_class(&descriptor.result),
+            result_conversion.to,
         )?;
         Ok(())
     }
@@ -603,6 +603,45 @@ mod tests {
             "extern ensures value 'missing-predicate' is neither a call argument nor the call result"
         ));
         assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_predicates_follow_conversion_endpoints() {
+        use crate::core::mir::types::MirAbiClass;
+        use crate::core::mir::{MirContractBinaryOp as Op, MirContractExpr as Expr};
+
+        let runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::F64);
+        call.parameter_conversions[0] = crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Float { bits: 64 },
+        };
+        call.result_conversion = Some(crate::core::mir::MirFfiAbiConversion {
+            from: MirAbiClass::Float { bits: 64 },
+            to: MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        });
+        let argument = call.argument_ids[0].clone();
+        let result = crate::core::mir::MirValueId::new("ffi-test-result").expect("result id");
+        call.result_id = Some(result.clone());
+        call.requires = Some(Expr::Binary {
+            op: Op::GreaterEqual,
+            left: Box::new(Expr::Value(argument)),
+            right: Box::new(Expr::Int(0)),
+        });
+        call.ensures = Some(Expr::Binary {
+            op: Op::GreaterEqual,
+            left: Box::new(Expr::Value(result)),
+            right: Box::new(Expr::Int(0)),
+        });
+        runtime
+            .validate_descriptor(&call, &[Value::Int(1)])
+            .expect("predicates must use MIR-side conversion endpoints");
     }
 
     #[test]
