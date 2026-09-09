@@ -314,6 +314,14 @@ fn scalar_ffi_type(
             descriptor.layout
         ));
     }
+    if !descriptor.is_canonical_ffi_scalar() {
+        return Err(format!(
+            "canonical FFI '{}' {} TypeDesc '{}' is outside the complete Copy scalar shape",
+            instruction,
+            role,
+            ty.as_str()
+        ));
+    }
     match descriptor.abi.canonical_ffi_scalar_kind() {
         Some(kind) if !kind.is_unit() => Ok(CanonicalFfiScalarType::from_mir_kind(kind)),
         _ => Err(format!(

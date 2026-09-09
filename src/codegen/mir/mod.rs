@@ -451,6 +451,15 @@ fn native_ffi_scalar_type<'ctx>(
             ),
         ));
     }
+    if !descriptor.is_canonical_ffi_scalar() {
+        return Err(NativeMirError::new(
+            subject,
+            format!(
+                "FFI TypeDesc '{}' is outside the complete Copy scalar shape",
+                ty.as_str()
+            ),
+        ));
+    }
     let shape = native_ffi_scalar_shape(descriptor.abi).ok_or_else(|| {
         NativeMirError::new(
             subject,

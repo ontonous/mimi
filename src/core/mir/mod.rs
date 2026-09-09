@@ -1384,12 +1384,7 @@ impl MirFfiAbiConversion {
     }
 
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
-        desc.layout == types::MirLayout::Scalar
-            && desc.ownership == types::MirOwnership::Copy
-            && desc
-                .abi
-                .canonical_ffi_scalar_kind()
-                .is_some_and(|kind| kind != types::MirFfiScalarKind::Unit)
+        desc.is_canonical_ffi_scalar()
     }
 
     /// Resolve the checker-approved argument conversion (MIR value to C

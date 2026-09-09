@@ -1236,6 +1236,61 @@ pub struct MirTypeDesc {
 }
 
 impl MirTypeDesc {
+    /// Whether this descriptor is a complete Copy scalar shape admitted by
+    /// the canonical MIR scalar contracts.  The primitive identity and ABI
+    /// width/sign must agree; layout, ownership, protocol identity, glue and
+    /// drop metadata are checked together so a forged descriptor cannot be
+    /// treated as a scalar by one consumer and rejected by another.
+    pub(crate) fn is_canonical_copy_scalar(&self, allow_float: bool) -> bool {
+        let primitive_abi_matches = match (&self.kind, self.abi) {
+            (
+                MirTypeKind::Primitive(PrimitiveType::I32),
+                MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )
+            | (
+                MirTypeKind::Primitive(PrimitiveType::I64),
+                MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            )
+            | (MirTypeKind::Primitive(PrimitiveType::Bool), MirAbiClass::Bool) => true,
+            (MirTypeKind::Primitive(PrimitiveType::F32), MirAbiClass::Float { bits: 32 })
+            | (MirTypeKind::Primitive(PrimitiveType::F64), MirAbiClass::Float { bits: 64 }) => {
+                allow_float
+            }
+            _ => false,
+        };
+        primitive_abi_matches
+            && self.layout == MirLayout::Scalar
+            && self.session_protocol.is_none()
+            && self.ownership == MirOwnership::Copy
+            && !self.needs_drop_glue
+            && !self.needs_clone_glue
+            && self.glue
+                == (MirGlueContract {
+                    move_out: MirGlueKind::Noop,
+                    clone: MirGlueKind::Noop,
+                    drop: MirGlueKind::Noop,
+                })
+            && self.drop_plan.is_none()
+            && self.variant_drop_plan.is_none()
+    }
+
+    /// Whether this descriptor is one of the non-Unit scalar shapes admitted
+    /// by the canonical C FFI island.  Unit has a separate complete endpoint
+    /// predicate because it is a void result and is never a parameter.
+    pub(crate) fn is_canonical_ffi_scalar(&self) -> bool {
+        self.is_canonical_copy_scalar(true)
+            && self
+                .abi
+                .canonical_ffi_scalar_kind()
+                .is_some_and(|kind| !kind.is_unit())
+    }
+
     /// Whether this descriptor is the canonical Unit endpoint used for a void
     /// scalar FFI declaration/result.  This is the complete physical and
     /// ownership shape emitted by `from_resolved`: a primitive Unit with no
@@ -1866,26 +1921,7 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
-        let supported_abi = matches!(
-            descriptor.abi,
-            MirAbiClass::Integer {
-                bits: 32 | 64,
-                signed: true,
-            } | MirAbiClass::Bool
-        );
-        let supported_abi = supported_abi
-            || (allow_float && matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
-        if !supported_abi
-            || descriptor.kind == MirTypeKind::GenericParameter
-            || descriptor.layout != MirLayout::Scalar
-            || descriptor.ownership != MirOwnership::Copy
-            || descriptor.glue
-                != (MirGlueContract {
-                    move_out: MirGlueKind::Noop,
-                    clone: MirGlueKind::Noop,
-                    drop: MirGlueKind::Noop,
-                })
-        {
+        if !descriptor.is_canonical_copy_scalar(allow_float) {
             let scalar_kind = if allow_float {
                 "Copy scalar/bool"
             } else {

@@ -140,6 +140,55 @@ func main() -> i32 {
 }
 
 #[test]
+fn canonical_copy_scalar_requires_complete_shape() {
+    let checked = checked_program("func main() -> i64 { 0 }");
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked)
+        .expect("scalar-returning function must materialize a MIR type catalog");
+    let i64_id = checked
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| {
+            matches!(ty, ResolvedType::Primitive(PrimitiveType::I64)).then_some(id.clone())
+        })
+        .expect("i64 TypeDesc must be present");
+    let descriptor = catalog.get(&i64_id).expect("i64 TypeDesc entry");
+    assert!(descriptor.is_canonical_copy_scalar(false));
+    assert!(descriptor.is_canonical_ffi_scalar());
+    assert!(catalog.validate_copy_scalar(&i64_id).is_ok());
+
+    let mut forged = descriptor.clone();
+    forged.kind = MirTypeKind::Nominal;
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.abi = crate::core::mir::types::MirAbiClass::Integer {
+        bits: 32,
+        signed: true,
+    };
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.glue.drop = MirGlueKind::Unsupported;
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.needs_drop_glue = true;
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.session_protocol = Some(i64_id.clone());
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.drop_plan = Some(types::MirDropGluePlan { fields: Vec::new() });
+    assert!(!forged.is_canonical_copy_scalar(false));
+
+    let mut forged = descriptor.clone();
+    forged.variant_drop_plan = Some(Vec::new());
+    assert!(!forged.is_canonical_copy_scalar(false));
+}
+
+#[test]
 fn materialized_call_result_presence_rejects_noncopy_unit() {
     let checked = checked_program(
         r#"
