@@ -3119,6 +3119,162 @@ fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() 
 }
 
 #[test]
+fn canonical_scalar_ffi_transitive_failure_preserves_side_effect_order() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-scalar-ffi-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive scalar FFI failure directory");
+    fs::write(
+        dir.join("leaf.mimi"),
+        "extern \"C\" {\n    func srand(x: i32);\n    func putchar(x: i32) -> i32;\n    func labs(x: i64) -> i64 requires: x > 0;\n}\npub func seed(x: i32) { srand(x) }\npub func emit_marker(x: i32) -> i32 { putchar(x) }\npub func checked_labs(x: i64) -> i64 {\n    requires: x > 0\n    labs(x)\n}\n",
+    )
+    .expect("write transitive scalar FFI failure leaf");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use leaf;\npub func forward_seed(x: i32) { seed(x) }\npub func forward_marker(x: i32) -> i32 { emit_marker(x) }\npub func forward_labs(x: i64) -> i64 {\n    requires: x > 0\n    checked_labs(x)\n}\n",
+    )
+    .expect("write transitive scalar FFI failure middle module");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use mid;\nfunc main() -> i32 {\n    forward_seed(4)\n    forward_marker(52)\n    forward_labs(-1 as i64)\n    forward_seed(2)\n    0\n}\n",
+    )
+    .expect("write transitive scalar FFI failure entry");
+
+    let checked = checked_route_receipt(&main);
+    assert_eq!(
+        checked.root_owners,
+        vec![
+            mimi::core::NodeId("function:checked_labs".into()),
+            mimi::core::NodeId("function:emit_marker".into()),
+            mimi::core::NodeId("function:forward_labs".into()),
+            mimi::core::NodeId("function:forward_marker".into()),
+            mimi::core::NodeId("function:forward_seed".into()),
+            mimi::core::NodeId("function:main".into()),
+            mimi::core::NodeId("function:seed".into()),
+        ]
+    );
+
+    let run = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .output()
+            .expect("spawn transitive scalar FFI failure run")
+    };
+    let run_default = run(false);
+    let run_mir = run(true);
+    for (label, output) in [("default", &run_default), ("mir", &run_mir)] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label} failure run returned the wrong status: {stderr}"
+        );
+        assert_eq!(
+            output.stdout, b"4",
+            "{label} failure run changed the side-effect prefix"
+        );
+        assert!(
+            stderr.contains("[E0808]"),
+            "{label} failure lost E0808: {stderr}"
+        );
+        assert!(!stderr.contains("canonical route disposition: legacy"));
+    }
+    assert_eq!(run_default.stdout, run_mir.stdout);
+    assert_eq!(run_default.stderr, run_mir.stderr);
+    assert_eq!(run_default.status.code(), run_mir.status.code());
+
+    let default_binary = dir.join("transitive-scalar-failure-default");
+    let mir_binary = dir.join("transitive-scalar-failure-mir");
+    let build_default = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg(&main)
+        .arg("-o")
+        .arg(&default_binary)
+        .output()
+        .expect("spawn default transitive scalar FFI failure build");
+    let build_mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&mir_binary)
+        .output()
+        .expect("spawn explicit transitive scalar FFI failure build");
+    for (label, output) in [("default", &build_default), ("mir", &build_mir)] {
+        assert!(
+            output.status.success(),
+            "{label} failure build failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr)
+            .contains("canonical route disposition: legacy"));
+    }
+    for (label, binary) in [("default", &default_binary), ("mir", &mir_binary)] {
+        let output = Command::new(binary)
+            .output()
+            .expect("execute transitive scalar FFI failure binary");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label} failure binary returned the wrong status: {stderr}"
+        );
+        assert_eq!(output.stdout, b"4");
+        assert!(
+            stderr.contains("[E0808]"),
+            "{label} binary lost E0808: {stderr}"
+        );
+    }
+
+    for explicit_mir in [false, true] {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        let output = command
+            .arg(&main)
+            .output()
+            .expect("spawn transitive scalar FFI failure verifier");
+        assert!(
+            output.status.success(),
+            "verifier unexpectedly rejected conditional helper preconditions:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains("canonical MIR extern requires contract proven"));
+        assert!(!combined.contains("canonical route disposition: legacy"));
+    }
+
+    fs::remove_file(&default_binary).ok();
+    fs::remove_file(&mir_binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_transitive_failure_is_consumer_invariant_and_atomic() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-transitive-import-failure-{}-{}",

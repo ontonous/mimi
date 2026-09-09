@@ -52,8 +52,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirTerminator::SwitchMove { scrutinee, arms } => {
                 self.emit_switch_move(scrutinee, arms, subject)?;
             }
-            MirTerminator::Return { value } => match value {
-                Some(value) => {
+            MirTerminator::Return { value } => {
+                // Unit calls still carry a semantic MIR result identity so the
+                // reference/bytecode consumers can preserve call ordering, but
+                // their native ABI has no LLVM value to insert into the return.
+                // Use the declared function ABI as the source of truth instead
+                // of looking up that phantom unit value in `self.values`.
+                if self.llvm_function.get_type().get_return_type().is_none() {
+                    self.generator.builder.build_return(None).map_err(|error| {
+                        NativeMirError::new(subject.to_string(), error.to_string())
+                    })?;
+                } else if let Some(value) = value {
                     let value = self.value(value, &subject.to_string())?;
                     self.generator
                         .builder
@@ -61,13 +70,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         .map_err(|error| {
                             NativeMirError::new(subject.to_string(), error.to_string())
                         })?;
-                }
-                None => {
+                } else {
                     self.generator.builder.build_return(None).map_err(|error| {
                         NativeMirError::new(subject.to_string(), error.to_string())
                     })?;
                 }
-            },
+            }
             MirTerminator::Trap { code } => {
                 if let Err(message) = crate::core::mir::types::validate_trap_code(code) {
                     return Err(NativeMirError::new(subject.to_string(), message));
