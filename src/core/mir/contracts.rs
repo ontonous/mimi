@@ -10,10 +10,7 @@
 use crate::core::ir::{ResolvedBinaryOp, ResolvedProjection};
 use crate::core::NodeId;
 
-use super::types::{
-    verifier_float_boundary_message, MirAbiClass, MirGlueKind, MirLayout, MirOwnership,
-    MirTypeCatalog,
-};
+use super::types::{verifier_float_boundary_message, MirAbiClass, MirLayout, MirTypeCatalog};
 use super::{MirFunction, MirProjection, MirValidationError, MirValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -192,10 +189,7 @@ fn type_kind(
         _ if matches!(
             descriptor.layout,
             MirLayout::Tuple(_) | MirLayout::Record { .. }
-        ) && descriptor.ownership == MirOwnership::Copy
-            && descriptor.glue.move_out == MirGlueKind::Noop
-            && descriptor.glue.clone == MirGlueKind::Noop
-            && descriptor.glue.drop == MirGlueKind::Noop =>
+        ) && descriptor.has_canonical_copy_noop_metadata() =>
         {
             Ok(ContractValueKind::Aggregate(ty.clone()))
         }
@@ -993,5 +987,55 @@ pub(crate) fn lower_contracts(
         Ok(contracts)
     } else {
         Err(errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{type_kind, ContractValueKind};
+    use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+    use crate::core::mir::types::{MirDropGluePlan, MirTypeCatalog};
+
+    fn copy_tuple_catalog() -> (MirTypeCatalog, crate::core::ir::ResolvedTypeId) {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let bool_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Bool))
+            .expect("bool");
+        let tuple = table
+            .intern_resolved(ResolvedType::Tuple(vec![i32_id, bool_id]))
+            .expect("tuple");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        (catalog, tuple)
+    }
+
+    #[test]
+    fn contract_copy_aggregate_requires_complete_noop_metadata() {
+        let (catalog, tuple) = copy_tuple_catalog();
+        assert_eq!(
+            type_kind(&catalog, &tuple).expect("canonical tuple"),
+            ContractValueKind::Aggregate(tuple.clone())
+        );
+
+        for mutation in 0..4 {
+            let mut forged = catalog.clone();
+            let mut descriptor = forged.get(&tuple).expect("tuple descriptor").clone();
+            match mutation {
+                0 => descriptor.session_protocol = Some(tuple.clone()),
+                1 => descriptor.needs_drop_glue = true,
+                2 => descriptor.drop_plan = Some(MirDropGluePlan { fields: Vec::new() }),
+                3 => descriptor.variant_drop_plan = Some(Vec::new()),
+                _ => unreachable!(),
+            }
+            forged.replace_for_test_only(tuple.clone(), descriptor);
+            let error = type_kind(&forged, &tuple)
+                .expect_err("forged Copy aggregate metadata must fail closed");
+            assert!(
+                error.contains("outside the canonical Copy aggregate contract"),
+                "unexpected error: {error}"
+            );
+        }
     }
 }
