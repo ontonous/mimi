@@ -1434,18 +1434,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if from == to {
             return Ok(value);
         }
-        match (from, to, value) {
-            (
-                MirAbiClass::Integer {
-                    bits: from_bits,
-                    signed: true,
-                },
-                MirAbiClass::Integer {
-                    bits: to_bits,
-                    signed: true,
-                },
-                value,
-            ) if from_bits < to_bits => self
+        let conversion = crate::core::mir::MirFfiAbiConversion { from, to };
+        match (conversion.kind(), value) {
+            (Some(MirFfiConversionKind::SignedIntegerWiden { to_bits, .. }), value) => self
                 .generator
                 .builder
                 .build_int_s_extend(
@@ -1464,17 +1455,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )
                 .map(BasicValueEnum::from)
                 .map_err(|error| NativeMirError::new(subject, error.to_string())),
-            (
-                MirAbiClass::Integer {
-                    bits: from_bits,
-                    signed: true,
-                },
-                MirAbiClass::Integer {
-                    bits: to_bits,
-                    signed: true,
-                },
-                value,
-            ) if from_bits > to_bits => {
+            (Some(MirFfiConversionKind::SignedIntegerNarrow { to_bits, .. }), value) => {
                 let value = value.into_int_value();
                 let (minimum, maximum) = match to_bits {
                     32 => (i32::MIN as i64, i32::MAX as i64),
@@ -1531,31 +1512,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .map(BasicValueEnum::from)
                     .map_err(|error| NativeMirError::new(subject, error.to_string()))
             }
-            (MirAbiClass::Integer { signed: true, .. }, MirAbiClass::Float { bits: 64 }, value) => {
-                self.generator
-                    .builder
-                    .build_signed_int_to_float(
-                        value.into_int_value(),
-                        self.generator.context.f64_type(),
-                        name,
-                    )
-                    .map(BasicValueEnum::from)
-                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
-            }
-            (
-                MirAbiClass::Float { bits: 64 },
-                MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true,
-                },
-                value,
-            ) => {
+            (Some(MirFfiConversionKind::SignedIntegerToFloat { .. }), value) => self
+                .generator
+                .builder
+                .build_signed_int_to_float(
+                    value.into_int_value(),
+                    self.generator.context.f64_type(),
+                    name,
+                )
+                .map(BasicValueEnum::from)
+                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            (Some(MirFfiConversionKind::FloatToSignedInteger { to_bits }), value) => {
                 let value = value.into_float_value();
-                let (lower, upper) = match to {
-                    MirAbiClass::Integer { bits: 32, .. } => (i32::MIN as f64, 2_147_483_648.0),
-                    MirAbiClass::Integer { bits: 64, .. } => {
-                        (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0)
-                    }
+                let (lower, upper) = match to_bits {
+                    32 => (i32::MIN as f64, 2_147_483_648.0),
+                    64 => (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0),
                     _ => unreachable!("matched integer result ABI above"),
                 };
                 let lower = self
@@ -1592,13 +1563,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .builder
                     .build_float_to_signed_int(
                         value,
-                        match to {
-                            MirAbiClass::Integer { bits: 32, .. } => {
-                                self.generator.context.i32_type()
-                            }
-                            MirAbiClass::Integer { bits: 64, .. } => {
-                                self.generator.context.i64_type()
-                            }
+                        match to_bits {
+                            32 => self.generator.context.i32_type(),
+                            64 => self.generator.context.i64_type(),
                             _ => unreachable!("matched integer result ABI above"),
                         },
                         name,

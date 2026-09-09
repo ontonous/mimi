@@ -28,9 +28,9 @@ use crate::core::mir::types::{
     MirGlueKind, MirLayout, MirOwnership, MirTypeCatalog, MirTypeDesc, MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirBlock, MirBlockId, MirFunction, MirInstructionKind, MirListOperation,
-    MirProjection, MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator, MirValueId,
-    MirVariantPredicate,
+    MirAggregateKind, MirBlock, MirBlockId, MirFfiConversionKind, MirFunction, MirInstructionKind,
+    MirListOperation, MirProjection, MirSetOperation, MirSwitchArm, MirSwitchCase, MirTerminator,
+    MirValueId, MirVariantPredicate,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;

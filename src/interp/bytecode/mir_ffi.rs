@@ -386,12 +386,19 @@ fn apply_argument_conversion(
     conversion: &crate::core::mir::MirFfiAbiConversion,
 ) -> Result<Value, String> {
     use crate::core::mir::types::MirAbiClass;
+    use crate::core::mir::MirFfiConversionKind;
 
     // `CanonicalMirFfiRuntime::validate_descriptor` owns conversion
     // admission.  This helper only applies a descriptor already cleared by
     // that preflight to the runtime value representation.
-    if conversion.from == conversion.to {
-        return match (conversion.from, value) {
+    let Some(kind) = conversion.kind() else {
+        return Err(format!(
+            "conversion from {:?} to {:?} received {value:?}",
+            conversion.from, conversion.to
+        ));
+    };
+    match kind {
+        MirFfiConversionKind::Identity { abi } => match (abi, value) {
             (
                 MirAbiClass::Integer {
                     bits: 32,
@@ -417,44 +424,24 @@ fn apply_argument_conversion(
             (abi, value) => Err(format!(
                 "identity conversion for {abi:?} received {value:?}"
             )),
-        };
-    }
-    match (conversion.from, conversion.to, value) {
-        (
-            MirAbiClass::Integer {
-                bits: 32,
-                signed: true,
-            },
-            MirAbiClass::Integer {
-                bits: 64,
-                signed: true,
-            },
-            Value::Int(value),
-        ) if i32::try_from(*value).is_ok() => Ok(Value::Int(*value)),
-        (
-            MirAbiClass::Integer {
-                bits: 32,
-                signed: true,
-            },
-            MirAbiClass::Float { bits: 64 },
-            Value::Int(value),
-        ) if i32::try_from(*value).is_ok() => Ok(Value::Float(*value as f64)),
-        (
-            MirAbiClass::Integer {
-                bits: 64,
-                signed: true,
-            },
-            MirAbiClass::Float { bits: 64 },
-            Value::Int(value),
-        ) => Ok(Value::Float(*value as f64)),
-        (MirAbiClass::Integer { bits: 32, .. }, _, other) => {
-            Err(format!("expected i32 FFI argument, got {other:?}"))
-        }
-        (MirAbiClass::Integer { bits: 64, .. }, _, other) => {
-            Err(format!("expected i64 FFI argument, got {other:?}"))
-        }
-        (from, to, value) => Err(format!(
-            "conversion from {from:?} to {to:?} received {value:?}"
+        },
+        MirFfiConversionKind::SignedIntegerWiden { from_bits, .. } => match value {
+            Value::Int(value) if from_bits == 32 && i32::try_from(*value).is_err() => {
+                Err("canonical MIR FFI argument is outside i32".into())
+            }
+            Value::Int(value) => Ok(Value::Int(*value)),
+            other => Err(format!("expected i{from_bits} FFI argument, got {other:?}")),
+        },
+        MirFfiConversionKind::SignedIntegerToFloat { from_bits } => match value {
+            Value::Int(value) if from_bits == 32 && i32::try_from(*value).is_err() => {
+                Err("canonical MIR FFI argument is outside i32".into())
+            }
+            Value::Int(value) => Ok(Value::Float(*value as f64)),
+            other => Err(format!("expected i{from_bits} FFI argument, got {other:?}")),
+        },
+        _ => Err(format!(
+            "conversion from {:?} to {:?} is not an argument conversion",
+            conversion.from, conversion.to
         )),
     }
 }
@@ -468,60 +455,42 @@ fn apply_result_conversion(
     };
     // Descriptor preflight has already admitted the conversion; this helper
     // performs only the physical result conversion and its range guard.
-    if conversion.from == conversion.to {
-        return Ok(value);
-    }
-    use crate::core::mir::types::MirAbiClass;
-    match (conversion.from, conversion.to, value) {
-        (
-            MirAbiClass::Integer {
-                bits: from,
-                signed: true,
-            },
-            MirAbiClass::Integer {
-                bits: to,
-                signed: true,
-            },
-            Value::Int(value),
-        ) if from == 64 && to == 32 => i32::try_from(value)
-            .map(|value| Value::Int(value as i64))
-            .map_err(|_| "canonical MIR FFI result is outside i32".into()),
-        (
-            MirAbiClass::Integer {
-                bits: 32,
-                signed: true,
-            },
-            MirAbiClass::Integer {
-                bits: 64,
-                signed: true,
-            },
-            Value::Int(value),
-        ) => Ok(Value::Int(value)),
-        (
-            MirAbiClass::Float { bits: 64 },
-            MirAbiClass::Integer { bits, signed: true },
-            Value::Float(value),
-        ) => {
-            let (lower, upper) = match bits {
+    use crate::core::mir::MirFfiConversionKind;
+    let Some(kind) = conversion.kind() else {
+        return Err(format!(
+            "canonical MIR FFI result conversion from {:?} to {:?} received {value:?}",
+            conversion.from, conversion.to
+        ));
+    };
+    match (kind, value) {
+        (MirFfiConversionKind::Identity { .. }, value) => Ok(value),
+        (MirFfiConversionKind::SignedIntegerNarrow { to_bits: 32, .. }, Value::Int(value)) => {
+            i32::try_from(value)
+                .map(|value| Value::Int(value as i64))
+                .map_err(|_| "canonical MIR FFI result is outside i32".into())
+        }
+        (MirFfiConversionKind::FloatToSignedInteger { to_bits }, Value::Float(value)) => {
+            let (lower, upper) = match to_bits {
                 32 => (i32::MIN as f64, (i32::MAX as f64) + 1.0),
                 64 => (i64::MIN as f64, 9_223_372_036_854_775_808.0),
                 _ => {
                     return Err(format!(
-                        "canonical MIR FFI result conversion target integer width {bits} is unsupported"
+                        "canonical MIR FFI result conversion target integer width {to_bits} is unsupported"
                     ))
                 }
             };
             if !value.is_finite() || value < lower || value >= upper {
                 return Err("canonical MIR FFI result is outside target integer range".into());
             }
-            Ok(Value::Int(if bits == 32 {
+            Ok(Value::Int(if to_bits == 32 {
                 (value as i32) as i64
             } else {
                 value as i64
             }))
         }
-        (from, to, value) => Err(format!(
-            "canonical MIR FFI result conversion from {from:?} to {to:?} received {value:?}"
+        (kind, value) => Err(format!(
+            "canonical MIR FFI result conversion {:?} received {value:?}",
+            kind
         )),
     }
 }

@@ -1271,53 +1271,100 @@ pub struct MirFfiAbiConversion {
     pub to: types::MirAbiClass,
 }
 
+/// Backend-independent classification of one admitted scalar FFI conversion.
+/// The direction and widths are part of the MIR receipt contract; adapters
+/// only lower this closed classification to LLVM or runtime operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MirFfiConversionKind {
+    Identity { abi: types::MirAbiClass },
+    SignedIntegerWiden { from_bits: u16, to_bits: u16 },
+    SignedIntegerToFloat { from_bits: u16 },
+    SignedIntegerNarrow { from_bits: u16, to_bits: u16 },
+    FloatToSignedInteger { to_bits: u16 },
+}
+
 impl MirFfiAbiConversion {
     fn canonical_identity(abi: types::MirAbiClass) -> bool {
         abi.canonical_ffi_scalar_kind().is_some()
     }
 
-    fn supported_argument_pair(from: types::MirAbiClass, to: types::MirAbiClass) -> bool {
-        matches!(
-            (from, to),
+    fn conversion_kind_for(
+        from: types::MirAbiClass,
+        to: types::MirAbiClass,
+    ) -> Option<MirFfiConversionKind> {
+        if from == to {
+            return Self::canonical_identity(from)
+                .then_some(MirFfiConversionKind::Identity { abi: from });
+        }
+        match (from, to) {
             (
                 types::MirAbiClass::Integer {
                     bits: 32,
-                    signed: true
+                    signed: true,
                 },
                 types::MirAbiClass::Integer {
                     bits: 64,
-                    signed: true
-                }
-            ) | (
-                types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
+                    signed: true,
                 },
-                types::MirAbiClass::Float { bits: 64 }
-            )
-        )
-    }
-
-    fn supported_result_pair(from: types::MirAbiClass, to: types::MirAbiClass) -> bool {
-        matches!(
-            (from, to),
+            ) => Some(MirFfiConversionKind::SignedIntegerWiden {
+                from_bits: 32,
+                to_bits: 64,
+            }),
+            (
+                types::MirAbiClass::Integer {
+                    bits: from_bits @ (32 | 64),
+                    signed: true,
+                },
+                types::MirAbiClass::Float { bits: 64 },
+            ) => Some(MirFfiConversionKind::SignedIntegerToFloat { from_bits }),
             (
                 types::MirAbiClass::Integer {
                     bits: 64,
-                    signed: true
+                    signed: true,
                 },
                 types::MirAbiClass::Integer {
                     bits: 32,
-                    signed: true
-                }
-            ) | (
+                    signed: true,
+                },
+            ) => Some(MirFfiConversionKind::SignedIntegerNarrow {
+                from_bits: 64,
+                to_bits: 32,
+            }),
+            (
                 types::MirAbiClass::Float { bits: 64 },
                 types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
-                }
-            )
+                    bits: to_bits @ (32 | 64),
+                    signed: true,
+                },
+            ) => Some(MirFfiConversionKind::FloatToSignedInteger { to_bits }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn kind(self) -> Option<MirFfiConversionKind> {
+        Self::conversion_kind_for(self.from, self.to)
+    }
+
+    fn argument_kind(self) -> Option<MirFfiConversionKind> {
+        let kind = self.kind()?;
+        matches!(
+            kind,
+            MirFfiConversionKind::Identity { .. }
+                | MirFfiConversionKind::SignedIntegerWiden { .. }
+                | MirFfiConversionKind::SignedIntegerToFloat { .. }
         )
+        .then_some(kind)
+    }
+
+    fn result_kind(self) -> Option<MirFfiConversionKind> {
+        let kind = self.kind()?;
+        matches!(
+            kind,
+            MirFfiConversionKind::Identity { .. }
+                | MirFfiConversionKind::SignedIntegerNarrow { .. }
+                | MirFfiConversionKind::FloatToSignedInteger { .. }
+        )
+        .then_some(kind)
     }
 
     /// Whether this receipt describes one of the physical argument conversions
@@ -1325,10 +1372,7 @@ impl MirFfiAbiConversion {
     /// TypeDesc catalog lets the AST-free bytecode descriptor preflight reject
     /// a hand-built conversion before it loads or calls a foreign symbol.
     pub(crate) fn is_supported_argument(self) -> bool {
-        if self.from == self.to {
-            return Self::canonical_identity(self.from);
-        }
-        Self::supported_argument_pair(self.from, self.to)
+        self.argument_kind().is_some()
     }
 
     /// Whether this receipt describes one of the physical result conversions
@@ -1336,10 +1380,7 @@ impl MirFfiAbiConversion {
     /// direction of argument widening, so its non-identity set is deliberately
     /// different from [`Self::is_supported_argument`].
     pub(crate) fn is_supported_result(self) -> bool {
-        if self.from == self.to {
-            return Self::canonical_identity(self.from);
-        }
-        Self::supported_result_pair(self.from, self.to)
+        self.result_kind().is_some()
     }
 
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
@@ -1369,10 +1410,11 @@ impl MirFfiAbiConversion {
         if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
             return None;
         }
-        Self::supported_argument_pair(actual_desc.abi, declared_desc.abi).then_some(Self {
+        let conversion = Self {
             from: actual_desc.abi,
             to: declared_desc.abi,
-        })
+        };
+        conversion.argument_kind().map(|_| conversion)
     }
 
     /// Resolve the checker-approved result conversion (C declaration to MIR
@@ -1394,10 +1436,11 @@ impl MirFfiAbiConversion {
         if !Self::scalar_copy(actual_desc) || !Self::scalar_copy(declared_desc) {
             return None;
         }
-        Self::supported_result_pair(declared_desc.abi, actual_desc.abi).then_some(Self {
+        let conversion = Self {
             from: declared_desc.abi,
             to: actual_desc.abi,
-        })
+        };
+        conversion.result_kind().map(|_| conversion)
     }
 }
 

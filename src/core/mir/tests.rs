@@ -90,6 +90,57 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
 }
 
 #[test]
+fn scalar_ffi_conversion_kind_is_directional_and_closed() {
+    use crate::core::mir::types::MirAbiClass;
+
+    let i32_abi = MirAbiClass::Integer {
+        bits: 32,
+        signed: true,
+    };
+    let i64_abi = MirAbiClass::Integer {
+        bits: 64,
+        signed: true,
+    };
+    let f64_abi = MirAbiClass::Float { bits: 64 };
+
+    let argument_pairs = [(i32_abi, i64_abi), (i32_abi, f64_abi), (i64_abi, f64_abi)];
+    for (from, to) in argument_pairs {
+        let conversion = MirFfiAbiConversion { from, to };
+        assert!(conversion.is_supported_argument());
+        assert!(!conversion.is_supported_result());
+        assert!(conversion.kind().is_some());
+    }
+
+    let result_pairs = [(i64_abi, i32_abi), (f64_abi, i32_abi), (f64_abi, i64_abi)];
+    for (from, to) in result_pairs {
+        let conversion = MirFfiAbiConversion { from, to };
+        assert!(!conversion.is_supported_argument());
+        assert!(conversion.is_supported_result());
+        assert!(conversion.kind().is_some());
+    }
+
+    let narrow_result = MirFfiAbiConversion {
+        from: i64_abi,
+        to: i32_abi,
+    };
+    assert!(narrow_result.kind().is_some());
+    assert!(MirFfiAbiConversion {
+        from: f64_abi,
+        to: f64_abi,
+    }
+    .is_supported_argument());
+    assert!(MirFfiAbiConversion {
+        from: MirAbiClass::Integer {
+            bits: 32,
+            signed: false,
+        },
+        to: i64_abi,
+    }
+    .kind()
+    .is_none());
+}
+
+#[test]
 fn materializes_terminal_session_close_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"
