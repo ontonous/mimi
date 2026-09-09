@@ -1435,15 +1435,6 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         ),
                     ));
                 }
-                if conversion.to != actual_type.abi {
-                    return Err(NativeMirError::new(
-                        subject,
-                        format!(
-                            "FFI result ABI conversion receipt ends at {:?}, MIR result is {:?}",
-                            conversion.to, actual_type.abi
-                        ),
-                    ));
-                }
                 Some((result, conversion))
             }
         } else {
