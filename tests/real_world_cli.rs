@@ -2611,6 +2611,186 @@ fn canonical_mir_all_closes_transitive_import_failures_without_partial_receipt()
 }
 
 #[test]
+fn canonical_mir_transitive_imports_match_checked_receipt_and_consumers() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-import-success-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive success directory");
+    fs::write(dir.join("leaf.mimi"), "pub func leaf() -> i32 { 41 }\n")
+        .expect("write transitive leaf");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use leaf;\npub func mid() -> i32 { leaf() + 1 }\n",
+    )
+    .expect("write transitive middle module");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use mid;\nfunc main() -> i32 { println(mid()); 42 }\n",
+    )
+    .expect("write transitive success entry");
+
+    let checked = checked_route_receipt(&main);
+    let inspect = |receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt").arg("--all");
+        } else {
+            command.arg("--all").arg("--receipt");
+        }
+        command.output().expect("spawn transitive success receipt")
+    };
+    let receipt_all_first = inspect(false);
+    let receipt_all_reordered = inspect(true);
+    for (label, output) in [
+        ("all-first", &receipt_all_first),
+        ("all-reordered", &receipt_all_reordered),
+    ] {
+        assert!(
+            output.status.success(),
+            "{label} rejected a supported transitive import graph:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = parse_route_receipt_manifest(&output.stdout);
+        let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+            &String::from_utf8_lossy(&output.stdout),
+        )
+        .unwrap_or_else(|error| panic!("{label}: transitive receipt round-trip failed: {error}"));
+        assert_eq!(
+            manifest_receipt, checked,
+            "{label}: CLI transitive receipt diverged from checked API"
+        );
+        assert_eq!(
+            manifest.get("root_owners").map(String::as_str),
+            Some("function:leaf,function:main,function:mid"),
+            "{label}: transitive root owner order changed"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr)
+                .contains("canonical route disposition: legacy"),
+            "{label}: transitive receipt selected legacy fallback: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        receipt_all_first.status.code(),
+        receipt_all_reordered.status.code()
+    );
+    assert_eq!(receipt_all_first.stdout, receipt_all_reordered.stdout);
+    assert_eq!(receipt_all_first.stderr, receipt_all_reordered.stderr);
+
+    let run_first = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn transitive explicit MIR run");
+    let run_second = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg(&main)
+        .arg("--mir")
+        .output()
+        .expect("spawn transitive reordered MIR run");
+    for (label, output) in [("run-first", &run_first), ("run-second", &run_second)] {
+        assert_eq!(
+            output.status.code(),
+            Some(42),
+            "{label} returned the wrong transitive result: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"42\n", "{label} changed transitive stdout");
+        assert!(
+            output.stderr.is_empty(),
+            "{label} emitted a transitive legacy diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(run_first.stdout, run_second.stdout);
+    assert_eq!(run_first.stderr, run_second.stderr);
+    assert_eq!(run_first.status.code(), run_second.status.code());
+
+    let binary = dir.join("transitive-native");
+    let build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&main)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("spawn transitive explicit MIR build");
+    assert!(
+        build.status.success(),
+        "transitive explicit MIR build failed:\n{}\n{}",
+        String::from_utf8_lossy(&build.stderr),
+        String::from_utf8_lossy(&build.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&build.stderr).contains("canonical route disposition: legacy"),
+        "transitive explicit MIR build selected legacy fallback: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("execute transitive explicit MIR binary");
+    assert_eq!(native.status.code(), Some(42));
+    assert_eq!(native.stdout, b"42\n");
+    assert!(native.stderr.is_empty());
+
+    let verify_first = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&main)
+        .output()
+        .expect("spawn transitive explicit MIR verifier");
+    let verify_second = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&main)
+        .arg("--mir")
+        .output()
+        .expect("spawn transitive reordered MIR verifier");
+    let expected_verify = format!("No contracts to verify in {}\n", main.display());
+    for (label, output) in [
+        ("verify-first", &verify_first),
+        ("verify-second", &verify_second),
+    ] {
+        assert!(
+            output.status.success(),
+            "{label} rejected supported transitive MIR:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            expected_verify.as_bytes(),
+            "{label} changed transitive verifier output"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{label} emitted a transitive verifier diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(verify_first.stdout, verify_second.stdout);
+    assert_eq!(verify_first.stderr, verify_second.stderr);
+    assert_eq!(verify_first.status.code(), verify_second.status.code());
+
+    fs::remove_file(&binary).ok();
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
