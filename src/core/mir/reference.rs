@@ -2244,38 +2244,18 @@ fn validate_call_graph(
                         continue;
                     };
                     seen_ffi_contracts.insert(instruction.id.clone());
-                    if contract.caller != function.owner
-                        || contract.instruction != instruction.id
-                        || contract.callee != *callee_owner
-                    {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI contract identity disagrees with MIR call"
-                                .into(),
-                        });
-                    }
-                    if let Err(message) =
-                        super::validate_ffi_symbol_manifest_safety(&contract.symbol)
-                    {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!("extern call {message}"),
-                        });
-                    } else if let Err(message) =
-                        super::validate_ffi_symbol_matches_callee(callee_owner, &contract.symbol)
-                    {
+                    for message in super::validate_ffi_call_contract_receipt_at_mir_boundary(
+                        type_catalog,
+                        function,
+                        &instruction.id,
+                        callee_owner,
+                        result.as_ref(),
+                        arguments,
+                        contract,
+                    ) {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message,
-                        });
-                    }
-                    if contract.abi != "C" {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: format!(
-                                "extern call FFI contract ABI '{}' is outside the canonical C ABI",
-                                contract.abi
-                            ),
                         });
                     }
                     if !type_arguments.is_empty() {
@@ -2291,116 +2271,10 @@ fn validate_call_graph(
                                 .into(),
                         });
                     }
-                    if contract.arguments != *arguments {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI contract arguments disagree with MIR call"
-                                .into(),
-                        });
-                    }
-                    if contract.parameter_types.len() != contract.arguments.len() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments".into(),
-                        });
-                    }
-                    if contract.parameter_conversions.len() != contract.arguments.len() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI parameter ABI conversion receipt count disagrees with MIR arguments".into(),
-                        });
-                    }
-                    for (index, (argument, declared_type)) in contract
-                        .arguments
-                        .iter()
-                        .zip(&contract.parameter_types)
-                        .enumerate()
-                    {
-                        if let Some(argument_value) = function.values.get(argument) {
-                            if !ffi_type_compatible(type_catalog, &argument_value.ty, declared_type)
-                            {
-                                errors.push(super::MirValidationError {
-                                    subject: instruction.id.to_string(),
-                                    message: format!(
-                                        "extern call FFI declaration parameter {index} TypeDesc disagrees with MIR argument"
-                                    ),
-                                });
-                            }
-                            if let Some(receipt_conversion) =
-                                contract.parameter_conversions.get(index)
-                            {
-                                let expected = super::MirFfiAbiConversion::for_argument(
-                                    type_catalog,
-                                    &argument_value.ty,
-                                    declared_type,
-                                );
-                                if expected.as_ref() != Some(receipt_conversion) {
-                                    errors.push(super::MirValidationError {
-                                        subject: instruction.id.to_string(),
-                                        message: format!(
-                                            "extern call FFI parameter {index} ABI conversion receipt disagrees with MIR value"
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    if contract.result.as_ref() != result.as_ref() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI contract result disagrees with MIR call"
-                                .into(),
-                        });
-                    }
-                    for (index, argument) in contract.arguments.iter().enumerate() {
-                        if !function.values.contains_key(argument) {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: format!(
-                                    "extern call FFI contract argument {index} value identity is absent"
-                                ),
-                            });
-                        }
-                    }
-                    if let Some(result_value) = contract.result.as_ref() {
-                        if !function.values.contains_key(result_value) {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: "extern call FFI contract result value identity is absent"
-                                    .into(),
-                            });
-                        } else if function.values.get(result_value).is_some_and(|value| {
-                            !ffi_type_compatible(type_catalog, &value.ty, &contract.result_type)
-                        }) {
-                            errors.push(super::MirValidationError {
-                                subject: instruction.id.to_string(),
-                                message: "extern call FFI declaration result TypeDesc disagrees with MIR result".into(),
-                            });
-                        }
-                        if let Some(value) = function.values.get(result_value) {
-                            let expected = super::MirFfiAbiConversion::for_result(
-                                type_catalog,
-                                &value.ty,
-                                &contract.result_type,
-                            );
-                            if contract.result_conversion.as_ref() != expected.as_ref() {
-                                errors.push(super::MirValidationError {
-                                    subject: instruction.id.to_string(),
-                                    message: "extern call FFI result ABI conversion receipt disagrees with MIR result".into(),
-                                });
-                            }
-                        }
-                    }
                     if result.is_none() {
                         errors.push(super::MirValidationError {
                             subject: instruction.id.to_string(),
                             message: "extern call has no canonical result value identity".into(),
-                        });
-                    }
-                    if result.is_none() != contract.result_conversion.is_none() {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message: "extern call FFI result ABI conversion receipt presence disagrees with MIR result".into(),
                         });
                     }
                     // A C symbol has one declaration ABI. Call-site MIR
@@ -2425,22 +2299,6 @@ fn validate_call_graph(
                         }
                     } else if super::validate_ffi_symbol_manifest_safety(&contract.symbol).is_ok() {
                         ffi_symbol_shapes.insert(contract.symbol.clone(), shape);
-                    }
-                    if let Err(message) =
-                        super::contracts::validate_ffi_requires(function, type_catalog, contract)
-                    {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message,
-                        });
-                    }
-                    if let Err(message) =
-                        super::contracts::validate_ffi_ensures(function, type_catalog, contract)
-                    {
-                        errors.push(super::MirValidationError {
-                            subject: instruction.id.to_string(),
-                            message,
-                        });
                     }
                     continue;
                 }

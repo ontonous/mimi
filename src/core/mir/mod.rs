@@ -1428,13 +1428,72 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     arguments: &[MirValueId],
     contract: &MirFfiCallContract,
 ) -> Vec<String> {
+    validate_ffi_call_contract_receipt_with_options(
+        type_catalog,
+        function,
+        instruction,
+        callee,
+        result,
+        arguments,
+        contract,
+        true,
+    )
+}
+
+/// Validate a receipt while constructing canonical MIR, before a consumer has
+/// selected an execution island.  The constructor shares all receipt identity,
+/// declaration, conversion-shape, symbol, and contract checks, but leaves the
+/// narrow scalar-island conversion whitelist to each backend's admission gate.
+/// This preserves the canonical MIR ability to carry a future non-scalar FFI
+/// declaration while keeping today's scalar consumers fail-closed.
+pub(crate) fn validate_ffi_call_contract_receipt_at_mir_boundary(
+    type_catalog: &types::MirTypeCatalog,
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    callee: &NodeId,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+    contract: &MirFfiCallContract,
+) -> Vec<String> {
+    validate_ffi_call_contract_receipt_with_options(
+        type_catalog,
+        function,
+        instruction,
+        callee,
+        result,
+        arguments,
+        contract,
+        false,
+    )
+}
+
+fn validate_ffi_call_contract_receipt_with_options(
+    type_catalog: &types::MirTypeCatalog,
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    callee: &NodeId,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+    contract: &MirFfiCallContract,
+    enforce_scalar_abi: bool,
+) -> Vec<String> {
     let mut errors = Vec::new();
     if contract.caller != function.owner
         || contract.instruction != *instruction
         || contract.callee != *callee
-        || contract.result.as_ref() != result
     {
         errors.push("extern call FFI contract identity disagrees with MIR call".into());
+    }
+    if contract.result.as_ref() != result {
+        errors.push("extern call FFI contract result disagrees with MIR call".into());
+        if let Some(result_value) = contract.result.as_ref() {
+            if !function.values.contains_key(result_value) {
+                errors.push(format!(
+                    "extern call FFI contract result value identity is absent (MIR value '{}' is absent)",
+                    result_value,
+                ));
+            }
+        }
     }
     if contract.abi != "C" {
         errors.push(format!(
@@ -1449,6 +1508,14 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     }
     if contract.arguments != arguments {
         errors.push("extern call FFI contract arguments disagree with MIR call".into());
+        for (index, argument) in contract.arguments.iter().enumerate() {
+            if !function.values.contains_key(argument) {
+                errors.push(format!(
+                    "extern call FFI contract argument {index} value identity is absent (MIR value '{}' is absent)",
+                    argument,
+                ));
+            }
+        }
     }
     if result.is_some_and(|result| arguments.iter().any(|argument| argument == result)) {
         errors.push("extern call FFI result identity overlaps an argument identity".into());
@@ -1470,8 +1537,8 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     {
         let Some(argument_value) = function.values.get(argument) else {
             errors.push(format!(
-                "extern call FFI argument {index} '{}' is absent from MIR values",
-                argument
+                "extern call FFI contract argument {index} value identity is absent (MIR value '{}' is absent)",
+                argument,
             ));
             continue;
         };
@@ -1481,7 +1548,7 @@ pub(crate) fn validate_ffi_call_contract_receipt(
             ));
         }
         if let Some(receipt_conversion) = contract.parameter_conversions.get(index) {
-            if !receipt_conversion.is_supported_argument() {
+            if enforce_scalar_abi && !receipt_conversion.is_supported_argument() {
                 errors.push(format!(
                     "extern call FFI parameter {index} ABI conversion from {:?} to {:?} is unsupported",
                     receipt_conversion.from, receipt_conversion.to
@@ -1499,8 +1566,8 @@ pub(crate) fn validate_ffi_call_contract_receipt(
     if let Some(result_value) = result {
         let Some(value) = function.values.get(result_value) else {
             errors.push(format!(
-                "extern call FFI result '{}' is absent from MIR values",
-                result_value
+                "extern call FFI contract result value identity is absent (MIR value '{}' is absent)",
+                result_value,
             ));
             return errors;
         };
@@ -1512,7 +1579,7 @@ pub(crate) fn validate_ffi_call_contract_receipt(
         let expected =
             MirFfiAbiConversion::for_result(type_catalog, &value.ty, &contract.result_type);
         if let Some(receipt_conversion) = contract.result_conversion.as_ref() {
-            if !receipt_conversion.is_supported_result() {
+            if enforce_scalar_abi && !receipt_conversion.is_supported_result() {
                 errors.push(format!(
                     "extern call FFI result ABI conversion from {:?} to {:?} is unsupported",
                     receipt_conversion.from, receipt_conversion.to
