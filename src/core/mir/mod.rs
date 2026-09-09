@@ -28,6 +28,112 @@ pub(crate) fn canonical_ffi_symbol_is_manifest_safe(symbol: &str) -> bool {
         })
 }
 
+/// Validate that a checker-owned C symbol still names the extern callable
+/// encoded by the canonical callee owner.  Extern owners are materialized as
+/// `.../function:<stable-name>:<signature-hash>`; consumers must not trust a
+/// receipt that merely contains a manifest-safe symbol because a forged safe
+/// spelling could otherwise bind the call to a different host function.
+pub(crate) fn validate_ffi_symbol_matches_callee(
+    callee: &NodeId,
+    symbol: &str,
+) -> Result<(), String> {
+    let Some((_, owner_tail)) = callee.0.rsplit_once("/function:") else {
+        return Err(format!(
+            "extern callee '{}' is not a canonical extern function identity",
+            callee.0
+        ));
+    };
+    let Some((encoded_name, signature_hash)) = owner_tail.rsplit_once(':') else {
+        return Err(format!(
+            "extern callee '{}' is not a canonical extern function identity",
+            callee.0
+        ));
+    };
+    if encoded_name.is_empty()
+        || signature_hash.len() != 16
+        || !signature_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "extern callee '{}' is not a canonical extern function identity",
+            callee.0
+        ));
+    }
+
+    let mut decoded = Vec::with_capacity(encoded_name.len());
+    let encoded = encoded_name.as_bytes();
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded[index] == b'%' {
+            if index + 2 >= encoded.len() {
+                return Err(format!(
+                    "extern callee '{}' is not a canonical extern function identity",
+                    callee.0
+                ));
+            }
+            let Some(high) = hex_value(encoded[index + 1]) else {
+                return Err(format!(
+                    "extern callee '{}' is not a canonical extern function identity",
+                    callee.0
+                ));
+            };
+            let Some(low) = hex_value(encoded[index + 2]) else {
+                return Err(format!(
+                    "extern callee '{}' is not a canonical extern function identity",
+                    callee.0
+                ));
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(encoded[index]);
+            index += 1;
+        }
+    }
+    let Ok(decoded_name) = String::from_utf8(decoded) else {
+        return Err(format!(
+            "extern callee '{}' is not a canonical extern function identity",
+            callee.0
+        ));
+    };
+    if canonical_stable_id_fragment(&decoded_name) != encoded_name {
+        return Err(format!(
+            "extern callee '{}' is not a canonical extern function identity",
+            callee.0
+        ));
+    }
+    if decoded_name != symbol {
+        return Err(format!(
+            "extern call FFI symbol disagrees with canonical extern callee: receipt '{}' vs '{}'",
+            symbol, callee.0
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_stable_id_fragment(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':') {
+            escaped.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(escaped, "%{byte:02x}");
+        }
+    }
+    escaped
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Resolve a checker-owned callable identity to the executable MIR function
 /// owner used by all consumers. Protocol/trait method calls retain their
 /// `ProtocolMethod` identity in the MIR node (so dispatch kind is not erased),
@@ -1246,9 +1352,8 @@ impl MirFfiAbiConversion {
 /// Validate the checker-owned identity and ABI receipt for one direct extern
 /// call.  This is deliberately independent of any backend representation so
 /// native, verifier, and capability consumers cannot accept a forged
-/// conversion or declaration shape that the reference/bytecode adapters
-/// would reject.  Symbol spelling is checked separately by each consumer so
-/// its manifest-facing diagnostic remains stable.
+/// conversion, declaration shape, or extern symbol identity that the
+/// reference/bytecode adapters would reject.
 pub(crate) fn validate_ffi_call_contract_receipt(
     type_catalog: &types::MirTypeCatalog,
     function: &MirFunction,
@@ -1271,6 +1376,9 @@ pub(crate) fn validate_ffi_call_contract_receipt(
             "extern call FFI contract ABI '{}' is outside the canonical C ABI",
             contract.abi
         ));
+    }
+    if let Err(message) = validate_ffi_symbol_matches_callee(callee, &contract.symbol) {
+        errors.push(message);
     }
     if contract.arguments != arguments {
         errors.push("extern call FFI contract arguments disagree with MIR call".into());

@@ -5069,6 +5069,9 @@ impl<'a> MirReferenceInterpreter<'a> {
                 "extern call FFI receipt disagrees with the MIR call",
             ));
         }
+        if let Err(message) = super::validate_ffi_symbol_matches_callee(callee, &receipt.symbol) {
+            return Err(self.error(&function.owner, message));
+        }
         if receipt.parameter_types.len() != arguments.len() {
             return Err(self.error(
                 &function.owner,

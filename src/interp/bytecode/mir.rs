@@ -208,6 +208,15 @@ fn materialize_canonical_ffi(
             });
             continue;
         }
+        if let Err(message) =
+            crate::core::mir::validate_ffi_symbol_matches_callee(callee, &receipt.symbol)
+        {
+            errors.push(MirBytecodeError {
+                function: receipt.caller.clone(),
+                message,
+            });
+            continue;
+        }
         let argument_types =
             match scalar_ffi_arguments(program, &receipt.parameter_types, instruction) {
                 Ok(arguments) => arguments,

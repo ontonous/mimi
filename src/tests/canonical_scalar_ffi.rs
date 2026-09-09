@@ -2302,6 +2302,71 @@ func main() -> i64 { receipt_guard(1 as i64) }
         "{verifier_error}"
     );
 
+    struct AcceptAnyFfiResolver;
+    impl crate::core::mir::reference::MirReferenceFfiResolver for AcceptAnyFfiResolver {
+        fn call(
+            &self,
+            _: &crate::core::mir::MirFfiCallContract,
+            _: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            Ok(MirRuntimeValue::Int(7))
+        }
+    }
+    let mut wrong_symbol_receipts = canonical.ffi_calls().clone();
+    wrong_symbol_receipts
+        .values_mut()
+        .next()
+        .expect("receipt-guard call-site receipt")
+        .symbol = "wrong_receipt_symbol".into();
+    let mut wrong_symbol = canonical.clone();
+    wrong_symbol.replace_ffi_calls_for_test_only(wrong_symbol_receipts);
+    let wrong_symbol_resolver = AcceptAnyFfiResolver;
+    let reference_error = MirReferenceInterpreter::new(&wrong_symbol)
+        .with_ffi_resolver(&wrong_symbol_resolver)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject a safe but mismatched FFI symbol");
+    assert!(
+        reference_error
+            .to_string()
+            .contains("symbol disagrees with canonical extern callee"),
+        "{reference_error}"
+    );
+    let bytecode_error = compile_mir_program(&wrong_symbol)
+        .expect_err("bytecode must reject a safe but mismatched FFI symbol");
+    assert!(
+        bytecode_error.iter().any(|error| {
+            error
+                .message
+                .contains("symbol disagrees with canonical extern callee")
+                || error.message.contains("identity/ABI validation")
+        }),
+        "{bytecode_error:?}"
+    );
+    let native_error = crate::codegen::mir::validate_mir_native(&wrong_symbol)
+        .expect_err("native admission must reject a safe but mismatched FFI symbol");
+    assert!(
+        native_error.iter().any(|error| {
+            error
+                .message
+                .contains("symbol disagrees with canonical extern callee")
+        }),
+        "{native_error:?}"
+    );
+    let capability_error = crate::verifier::validate_mir_capabilities(&wrong_symbol)
+        .expect_err("capability gate must reject a safe but mismatched FFI symbol");
+    assert!(
+        capability_error
+            .iter()
+            .any(|error| error.contains("symbol disagrees with canonical extern callee")),
+        "{capability_error:?}"
+    );
+    let verifier_error = crate::verifier::verify_mir(&wrong_symbol, "wrong-ffi-symbol".into())
+        .expect_err("direct verifier must reject a safe but mismatched FFI symbol");
+    assert!(
+        verifier_error.contains("symbol disagrees with canonical extern callee"),
+        "{verifier_error}"
+    );
+
     let mut forged_receipts = canonical.ffi_calls().clone();
     forged_receipts
         .get_mut(&instruction_id)
