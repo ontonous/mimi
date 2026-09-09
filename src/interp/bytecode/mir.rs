@@ -137,6 +137,14 @@ fn materialize_canonical_ffi(
     let mut indices = BTreeMap::new();
     let mut descriptors = Vec::with_capacity(program.ffi_calls().len());
     let mut errors = Vec::new();
+    for message in
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+    {
+        errors.push(MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message,
+        });
+    }
     for message in crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls()) {
         errors.push(MirBytecodeError {
             function: NodeId("mir-program".into()),

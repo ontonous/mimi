@@ -2033,12 +2033,24 @@ func main() -> i64 {
         crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls()).is_empty(),
         "same declaration shape must classify this as an identity failure"
     );
+    let table_errors =
+        crate::core::mir::validate_ffi_receipt_table(forged.functions(), forged.ffi_calls());
+    assert!(
+        table_errors.iter().any(|error| {
+            error.contains("receipt key") && error.contains("receipt instruction")
+        }),
+        "{table_errors:?}"
+    );
     let reference_error = MirReferenceInterpreter::new(&forged)
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must reject a forged call-site instruction identity");
-    assert!(reference_error
-        .to_string()
-        .contains("FFI receipt disagrees with the MIR call"));
+    assert!(
+        reference_error.to_string().contains("receipt key")
+            || reference_error
+                .to_string()
+                .contains("FFI receipt disagrees with the MIR call"),
+        "{reference_error}"
+    );
 
     let forged_map_key = crate::core::mir::MirInstructionId::new("inst:call:forged-map-key")
         .expect("instruction id");

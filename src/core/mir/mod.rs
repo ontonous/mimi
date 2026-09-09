@@ -1464,6 +1464,16 @@ pub(crate) fn validate_ffi_receipt_table(
     functions: &BTreeMap<NodeId, MirFunction>,
     ffi_calls: &BTreeMap<MirInstructionId, MirFfiCallContract>,
 ) -> Vec<String> {
+    let mut errors = ffi_calls
+        .iter()
+        .filter(|(instruction, contract)| *instruction != &contract.instruction)
+        .map(|(instruction, contract)| {
+            format!(
+                "extern call FFI receipt key '{}' disagrees with receipt instruction '{}'",
+                instruction, contract.instruction
+            )
+        })
+        .collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
     for function in functions.values() {
         for block in function.blocks.values() {
@@ -1480,16 +1490,19 @@ pub(crate) fn validate_ffi_receipt_table(
             }
         }
     }
-    ffi_calls
-        .keys()
-        .filter(|instruction| !seen.contains(*instruction))
-        .map(|instruction| {
-            format!(
-                "extern call FFI receipt '{}' is orphaned from a MIR extern call",
-                instruction
-            )
-        })
-        .collect()
+    errors.extend(
+        ffi_calls
+            .keys()
+            .filter(|instruction| !seen.contains(*instruction))
+            .map(|instruction| {
+                format!(
+                    "extern call FFI receipt '{}' is orphaned from a MIR extern call",
+                    instruction
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    errors
 }
 
 /// Validate that every call-site using one C symbol agrees on its declared
