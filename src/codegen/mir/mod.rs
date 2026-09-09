@@ -451,20 +451,39 @@ fn native_ffi_scalar_type<'ctx>(
             ),
         ));
     }
-    match descriptor.abi {
-        MirAbiClass::Integer {
-            bits: 32 | 64,
-            signed: true,
-        }
-        | MirAbiClass::Bool
-        | MirAbiClass::Float { bits: 64 } => native_basic_type(context, catalog, ty),
-        abi => Err(NativeMirError::new(
+    if native_ffi_scalar_shape(descriptor.abi).is_some() {
+        native_basic_type(context, catalog, ty)
+    } else {
+        Err(NativeMirError::new(
             subject,
             format!(
                 "FFI scalar ABI {:?} is outside the canonical native FFI slice",
-                abi
+                descriptor.abi
             ),
-        )),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeFfiScalarShape {
+    SignedInteger(u16),
+    Bool,
+    Float(u16),
+}
+
+/// Return the one physical scalar shape admitted by the native FFI island.
+/// All LLVM value, metadata, and declaration checks use this same shape map;
+/// the checker-owned receipt remains responsible for deciding whether a call
+/// is eligible for the island at all.
+fn native_ffi_scalar_shape(abi: MirAbiClass) -> Option<NativeFfiScalarShape> {
+    match abi {
+        MirAbiClass::Integer {
+            bits: bits @ (32 | 64),
+            signed: true,
+        } => Some(NativeFfiScalarShape::SignedInteger(bits)),
+        MirAbiClass::Bool => Some(NativeFfiScalarShape::Bool),
+        MirAbiClass::Float { bits: 64 } => Some(NativeFfiScalarShape::Float(64)),
+        _ => None,
     }
 }
 
