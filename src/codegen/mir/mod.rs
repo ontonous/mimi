@@ -492,14 +492,16 @@ impl NativeFfiScalarShape {
 /// the checker-owned receipt remains responsible for deciding whether a call
 /// is eligible for the island at all.
 fn native_ffi_scalar_shape(abi: MirAbiClass) -> Option<NativeFfiScalarShape> {
-    match abi {
-        MirAbiClass::Integer {
-            bits: bits @ (32 | 64),
-            signed: true,
-        } => Some(NativeFfiScalarShape::SignedInteger(bits)),
-        MirAbiClass::Bool => Some(NativeFfiScalarShape::Bool),
-        MirAbiClass::Float { bits: 64 } => Some(NativeFfiScalarShape::Float(64)),
-        _ => None,
+    match abi.canonical_ffi_scalar_kind()? {
+        crate::core::mir::types::MirFfiScalarKind::I32 => {
+            Some(NativeFfiScalarShape::SignedInteger(32))
+        }
+        crate::core::mir::types::MirFfiScalarKind::I64 => {
+            Some(NativeFfiScalarShape::SignedInteger(64))
+        }
+        crate::core::mir::types::MirFfiScalarKind::Bool => Some(NativeFfiScalarShape::Bool),
+        crate::core::mir::types::MirFfiScalarKind::F64 => Some(NativeFfiScalarShape::Float(64)),
+        crate::core::mir::types::MirFfiScalarKind::Unit => None,
     }
 }
 

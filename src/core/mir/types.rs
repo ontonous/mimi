@@ -121,6 +121,20 @@ pub enum MirAbiClass {
     FunctionPointer,
 }
 
+/// Backend-independent scalar kind admitted by the canonical C FFI island.
+///
+/// This is deliberately a MIR fact rather than an LLVM or bytecode type. Each
+/// execution adapter maps the kind to its own physical representation only
+/// after the shared receipt gate has accepted the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirFfiScalarKind {
+    I32,
+    I64,
+    Bool,
+    F64,
+    Unit,
+}
+
 impl MirAbiClass {
     /// Stable, backend-independent spelling used by canonical receipts and
     /// identity digests. This must not depend on Rust's `Debug` formatting.
@@ -139,6 +153,26 @@ impl MirAbiClass {
             Self::Pointer => "pointer".into(),
             Self::Aggregate => "aggregate".into(),
             Self::FunctionPointer => "function_pointer".into(),
+        }
+    }
+
+    /// Return the closed scalar kind understood by the canonical C FFI
+    /// receipt. `Unit` is retained for a void declaration/result identity;
+    /// arguments are rejected by the receipt gate and by each adapter.
+    pub(crate) fn canonical_ffi_scalar_kind(self) -> Option<MirFfiScalarKind> {
+        match self {
+            Self::Integer {
+                bits: 32,
+                signed: true,
+            } => Some(MirFfiScalarKind::I32),
+            Self::Integer {
+                bits: 64,
+                signed: true,
+            } => Some(MirFfiScalarKind::I64),
+            Self::Bool => Some(MirFfiScalarKind::Bool),
+            Self::Float { bits: 64 } => Some(MirFfiScalarKind::F64),
+            Self::Unit => Some(MirFfiScalarKind::Unit),
+            _ => None,
         }
     }
 }

@@ -34,6 +34,52 @@ fn canonical_identity_uses_explicit_effect_and_projection_text() {
 }
 
 #[test]
+fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
+    use crate::core::mir::types::{MirAbiClass, MirFfiScalarKind};
+
+    assert_eq!(
+        MirAbiClass::Integer {
+            bits: 32,
+            signed: true,
+        }
+        .canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::I32)
+    );
+    assert_eq!(
+        MirAbiClass::Integer {
+            bits: 64,
+            signed: true,
+        }
+        .canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::I64)
+    );
+    assert_eq!(
+        MirAbiClass::Bool.canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::Bool)
+    );
+    assert_eq!(
+        MirAbiClass::Float { bits: 64 }.canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::F64)
+    );
+    assert_eq!(
+        MirAbiClass::Unit.canonical_ffi_scalar_kind(),
+        Some(MirFfiScalarKind::Unit)
+    );
+    for abi in [
+        MirAbiClass::Integer {
+            bits: 32,
+            signed: false,
+        },
+        MirAbiClass::Float { bits: 32 },
+        MirAbiClass::Char,
+        MirAbiClass::StringHandle,
+        MirAbiClass::Aggregate,
+    ] {
+        assert_eq!(abi.canonical_ffi_scalar_kind(), None);
+    }
+}
+
+#[test]
 fn materializes_terminal_session_close_with_backend_neutral_receipt() {
     let checked = checked_program(include_str!(
         "../../../tests/fixtures/mir_session_close.mimi"

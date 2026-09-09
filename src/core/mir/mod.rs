@@ -1273,16 +1273,7 @@ pub struct MirFfiAbiConversion {
 
 impl MirFfiAbiConversion {
     fn canonical_identity(abi: types::MirAbiClass) -> bool {
-        matches!(
-            abi,
-            types::MirAbiClass::Unit
-                | types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
-                }
-                | types::MirAbiClass::Bool
-                | types::MirAbiClass::Float { bits: 64 }
-        )
+        abi.canonical_ffi_scalar_kind().is_some()
     }
 
     fn supported_argument_pair(from: types::MirAbiClass, to: types::MirAbiClass) -> bool {
@@ -1354,14 +1345,10 @@ impl MirFfiAbiConversion {
     fn scalar_copy(desc: &types::MirTypeDesc) -> bool {
         desc.layout == types::MirLayout::Scalar
             && desc.ownership == types::MirOwnership::Copy
-            && matches!(
-                desc.abi,
-                types::MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true
-                } | types::MirAbiClass::Bool
-                    | types::MirAbiClass::Float { bits: 64 }
-            )
+            && desc
+                .abi
+                .canonical_ffi_scalar_kind()
+                .is_some_and(|kind| kind != types::MirFfiScalarKind::Unit)
     }
 
     /// Resolve the checker-approved argument conversion (MIR value to C
