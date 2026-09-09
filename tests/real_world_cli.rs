@@ -1454,6 +1454,15 @@ fn canonical_mir_cli_all_receipt_snapshot_includes_imported_instances() {
         first.stdout, second.stdout,
         "imported-instance receipt manifest must be deterministic"
     );
+    let checked = checked_route_receipt(&fixture);
+    let manifest_receipt = mimi::core::mir::CanonicalMirRouteReceipt::from_manifest(
+        &String::from_utf8_lossy(&first.stdout),
+    )
+    .expect("imported-instance receipt must round-trip through the public API");
+    assert_eq!(
+        manifest_receipt, checked,
+        "imported-instance receipt round-trip changed the checked receipt"
+    );
     let manifest = parse_route_receipt_manifest(&first.stdout);
     assert_eq!(
         manifest.get("schema").map(String::as_str),
