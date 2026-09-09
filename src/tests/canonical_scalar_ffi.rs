@@ -2216,6 +2216,35 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_receipt_table_rejects_duplicate_instruction_ids_across_functions() {
+    const SOURCE: &str = r#"
+extern "C" { func duplicate_shape(value: i64) -> i64; }
+func main() -> i64 { duplicate_shape(7 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("duplicate instruction identity fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("duplicate instruction identity fixture materialization");
+    let main_owner = crate::core::NodeId("function:main".into());
+    let duplicate_owner = crate::core::NodeId("function:duplicate".into());
+    let mut functions = program.functions().clone();
+    let mut duplicate = functions
+        .get(&main_owner)
+        .cloned()
+        .expect("main MIR function");
+    duplicate.owner = duplicate_owner.clone();
+    functions.insert(duplicate_owner, duplicate);
+
+    let errors = crate::core::mir::validate_ffi_receipt_table(&functions, program.ffi_calls());
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("appears in multiple functions")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn scalar_ffi_direct_consumers_reject_missing_and_forged_receipts_before_execution() {
     const SOURCE: &str = r#"
 extern "C" { func receipt_guard(value: i64) -> i64 requires: value >= 0; }
