@@ -3224,13 +3224,12 @@ fn is_copy_value(
     if descriptor.ownership != MirOwnership::Copy {
         return Ok(false);
     }
-    if matches!(descriptor.layout, MirLayout::Scalar) && !descriptor.is_canonical_copy_scalar(true)
-    {
-        return Err(format!(
-            "MIR verifier scalar TypeDesc '{}' is outside the complete Copy scalar shape",
+    catalog.validate_copy_value(ty).map_err(|message| {
+        format!(
+            "MIR verifier Copy value TypeDesc '{}' is outside the complete canonical shape: {message}",
             ty.as_str()
-        ));
-    }
+        )
+    })?;
     Ok(true)
 }
 

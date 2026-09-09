@@ -1161,7 +1161,8 @@ impl MirProgram {
                             else {
                                 continue;
                             };
-                            if let Err(message) = type_catalog.validate_copy(&source_value.ty) {
+                            if let Err(message) = type_catalog.validate_copy_value(&source_value.ty)
+                            {
                                 errors.push(super::MirValidationError {
                                     subject: instruction.id.to_string(),
                                     message,

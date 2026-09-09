@@ -5644,6 +5644,35 @@ impl MirTypeCatalog {
         }
     }
 
+    /// Validate a Copy value at a consumer boundary.  `validate_copy` keeps
+    /// the historical ownership-only predicate used by aggregate glue
+    /// helpers; value consumers also need scalar and Unit descriptors to
+    /// carry their complete canonical ABI shape before they can retain a
+    /// value in-place across a Copy/Move/Clone/Drop route.
+    pub fn validate_copy_value(&self, ty: &ResolvedTypeId) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if descriptor.ownership != MirOwnership::Copy {
+            return Err(format!(
+                "copy instruction is invalid for ownership {:?} type '{}'",
+                descriptor.ownership,
+                ty.as_str()
+            ));
+        }
+        match &descriptor.layout {
+            MirLayout::Scalar if !descriptor.is_canonical_copy_scalar(true) => Err(format!(
+                "type '{}' is outside the complete Copy scalar TypeDesc contract",
+                ty.as_str()
+            )),
+            MirLayout::Unit if !descriptor.is_canonical_ffi_unit() => Err(format!(
+                "type '{}' is outside the complete Copy Unit TypeDesc contract",
+                ty.as_str()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Validate the reference representation admitted by the first canonical
     /// borrow slice.  An immutable reference to a Copy scalar is represented
     /// as the scalar value in the reference backend/bytecode register; the
@@ -10346,6 +10375,36 @@ mod tests {
             }
         );
         assert!(!descriptor.needs_drop_glue);
+    }
+
+    #[test]
+    fn copy_value_contract_rejects_forged_scalar_and_unit_shapes() {
+        let mut table = ResolvedTypeTable::new();
+        let scalar_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I64))
+            .expect("i64");
+        let unit_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::Unit))
+            .expect("unit");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        assert!(catalog.validate_copy_value(&scalar_id).is_ok());
+        assert!(catalog.validate_copy_value(&unit_id).is_ok());
+
+        let mut forged_scalar = catalog.get(&scalar_id).expect("scalar descriptor").clone();
+        forged_scalar.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(scalar_id.clone(), forged_scalar);
+        let scalar_error = catalog
+            .validate_copy_value(&scalar_id)
+            .expect_err("forged scalar must fail the complete Copy value contract");
+        assert!(scalar_error.contains("complete Copy scalar TypeDesc contract"));
+
+        let mut forged_unit = catalog.get(&unit_id).expect("unit descriptor").clone();
+        forged_unit.abi = MirAbiClass::Aggregate;
+        catalog.replace_for_test_only(unit_id.clone(), forged_unit);
+        let unit_error = catalog
+            .validate_copy_value(&unit_id)
+            .expect_err("forged Unit must fail the complete Copy value contract");
+        assert!(unit_error.contains("complete Copy Unit TypeDesc contract"));
     }
 
     #[test]

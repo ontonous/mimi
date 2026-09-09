@@ -751,7 +751,7 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::Copy { result, source } => {
                 self.require_same_type(function, result, source, subject);
                 if let Some(ty) = value_type(function, source) {
-                    if catalog.validate_copy(&ty).is_err() {
+                    if catalog.validate_copy_value(&ty).is_err() {
                         self.error(format!("{subject} Copy source '{}' is not Copy", source));
                     }
                 }
@@ -759,9 +759,7 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::Move { result, source } => {
                 self.require_same_type(function, result, source, subject);
                 if let Some(ty) = value_type(function, source) {
-                    let valid = catalog
-                        .get(&ty)
-                        .is_some_and(|descriptor| descriptor.ownership == MirOwnership::Copy)
+                    let valid = catalog.validate_copy_value(&ty).is_ok()
                         || catalog
                             .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::MoveOut)
                             .is_ok();
@@ -776,7 +774,7 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::Clone { result, source } => {
                 self.require_same_type(function, result, source, subject);
                 if let Some(ty) = value_type(function, source) {
-                    let valid = catalog.validate_copy(&ty).is_ok()
+                    let valid = catalog.validate_copy_value(&ty).is_ok()
                         || catalog
                             .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::Clone)
                             .is_ok();
@@ -790,7 +788,7 @@ impl<'a> CapabilityGate<'a> {
             }
             MirInstructionKind::Drop { value } => {
                 if let Some(ty) = value_type(function, value) {
-                    let valid = catalog.validate_copy(&ty).is_ok()
+                    let valid = catalog.validate_copy_value(&ty).is_ok()
                         || catalog
                             .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::Drop)
                             .is_ok();
