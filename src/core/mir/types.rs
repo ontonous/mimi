@@ -10217,14 +10217,7 @@ fn primitive_abi(primitive: PrimitiveType) -> MirAbiClass {
 }
 
 fn is_copy_scalar(descriptor: &MirTypeDesc) -> bool {
-    descriptor.ownership == MirOwnership::Copy
-        && descriptor.glue
-            == (MirGlueContract {
-                move_out: MirGlueKind::Noop,
-                clone: MirGlueKind::Noop,
-                drop: MirGlueKind::Noop,
-            })
-        && matches!(descriptor.layout, MirLayout::Scalar)
+    descriptor.is_canonical_copy_scalar(false)
 }
 
 fn ownership_for(
@@ -10452,6 +10445,33 @@ mod tests {
             .validate_borrow(&bool_id, &reference_id, false)
             .expect_err("reference target identity must be exact");
         assert!(mismatch_error.contains("target") || mismatch_error.contains("source"));
+    }
+
+    #[test]
+    fn reference_rejects_forged_scalar_target_identity() {
+        let mut table = ResolvedTypeTable::new();
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32");
+        let reference_id = table
+            .intern_resolved(ResolvedType::Reference {
+                lifetime: None,
+                mutable: false,
+                target: i32_id.clone(),
+            })
+            .expect("shared reference");
+        let mut catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+        let mut forged = catalog.get(&i32_id).expect("scalar descriptor").clone();
+        forged.kind = MirTypeKind::Nominal;
+        catalog.replace_for_test_only(i32_id.clone(), forged);
+
+        let error = catalog
+            .validate_reference_type(&reference_id)
+            .expect_err("borrow target with forged scalar identity must fail closed");
+        assert!(
+            error.contains("immutable Copy scalar borrow contract"),
+            "{error}"
+        );
     }
 
     #[test]
