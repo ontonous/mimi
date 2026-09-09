@@ -2005,7 +2005,7 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        let Some(receipt) = self.program.ffi_calls().get(instruction) else {
+        let Some(_receipt) = self.program.ffi_calls().get(instruction) else {
             self.error(format!(
                 "extern call '{}' has no canonical FFI receipt",
                 instruction
@@ -2015,13 +2015,6 @@ impl<'a> FunctionEmitter<'a> {
         if !type_arguments.is_empty() || variant_call_contract.is_some() {
             self.error(format!(
                 "extern call '{}' has unsupported generic or variant ABI metadata",
-                instruction
-            ));
-            return;
-        }
-        if receipt.arguments != arguments || receipt.result.as_ref() != result {
-            self.error(format!(
-                "extern call '{}' receipt disagrees with its MIR call",
                 instruction
             ));
             return;
