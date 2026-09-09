@@ -311,17 +311,24 @@ impl<'a> NativeMirValidator<'a> {
                     }
                 }
             }
+        } else if matches!(
+            desc.abi,
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } | MirAbiClass::Float { bits: 32 | 64 }
+                | MirAbiClass::Bool
+        ) && desc.layout == MirLayout::Scalar
+        {
+            match self.program.type_catalog().validate_copy_value(ty) {
+                Ok(()) => true,
+                Err(message) => {
+                    self.errors.push(NativeMirError::new(subject, message));
+                    false
+                }
+            }
         } else {
-            (matches!(
-                desc.abi,
-                MirAbiClass::Integer {
-                    bits: 32 | 64,
-                    signed: true,
-                } | MirAbiClass::Float { bits: 32 | 64 }
-                    | MirAbiClass::Bool
-            ) && desc.layout == MirLayout::Scalar)
-                || is_unit
-                || self.validate_flat_copy_record(ty, subject)
+            is_unit || self.validate_flat_copy_record(ty, subject)
         };
         if !supported {
             let contract = if is_owned_string {

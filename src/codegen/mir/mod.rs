@@ -1055,7 +1055,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 mod tests {
     use super::CodeGenerator;
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
-    use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout};
+    use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout, MirTypeKind};
     use crate::core::mir::MirInstructionKind;
     use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
     use crate::interp::Value;
@@ -2789,6 +2789,46 @@ func main() -> i32 {
             }));
             assert!(generator.module.get_function("main").is_none());
         }
+    }
+
+    #[test]
+    fn native_scalar_consumers_require_complete_shape() {
+        let program = canonical_program(
+            "func id(value: i64) -> i64 { value }\nfunc main() -> i64 { id(41 as i64) }",
+        );
+        let id_owner = crate::core::NodeId("function:id".into());
+        let id_function = program.functions().get(&id_owner).expect("id function");
+        let scalar_id = id_function
+            .parameters
+            .first()
+            .and_then(|value| id_function.values.get(value))
+            .map(|value| value.ty.clone())
+            .expect("id scalar parameter TypeDesc");
+        let descriptor = program
+            .type_catalog()
+            .get(&scalar_id)
+            .expect("canonical scalar TypeDesc")
+            .clone();
+        let mut forged_descriptor = descriptor;
+        forged_descriptor.kind = MirTypeKind::Nominal;
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(scalar_id, forged_descriptor);
+        let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
+            .expect("forged native catalog remains structurally valid");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_scalar_shape_rejected_test");
+        let diagnostics = generator
+            .compile_mir_native(&forged_program)
+            .expect_err("malformed Copy scalar must fail before LLVM emission");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("complete Copy scalar TypeDesc contract")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(generator.module.get_function("id").is_none());
     }
 
     #[test]
