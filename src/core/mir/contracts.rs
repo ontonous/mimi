@@ -438,6 +438,180 @@ pub(crate) fn validate_ffi_ensures(
     Ok(())
 }
 
+/// Validate the shape of a materialized bytecode FFI predicate without a
+/// `MirFunction` or type catalog.  The bytecode adapter still performs the
+/// richer checker-owned receipt validation, but a hand-built
+/// `CanonicalFfiDescriptor` must not be able to run a foreign call before an
+/// unknown identity or an ill-typed predicate is rejected.
+pub(crate) fn validate_ffi_runtime_contracts(
+    requires: Option<&MirContractExpr>,
+    ensures: Option<&MirContractExpr>,
+    arguments: &[MirValueId],
+    argument_abis: &[MirAbiClass],
+    result: Option<&MirValueId>,
+    result_abi: MirAbiClass,
+) -> Result<(), String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RuntimeContractKind {
+        Int,
+        Bool,
+    }
+
+    fn scalar_kind(abi: MirAbiClass, phase: &str) -> Result<RuntimeContractKind, String> {
+        match abi {
+            MirAbiClass::Integer {
+                bits: 32 | 64,
+                signed: true,
+            } => Ok(RuntimeContractKind::Int),
+            MirAbiClass::Bool => Ok(RuntimeContractKind::Bool),
+            _ => Err(format!(
+                "extern {phase} value ABI {abi:?} is outside the scalar predicate contract"
+            )),
+        }
+    }
+
+    fn expression_kind(
+        expression: &MirContractExpr,
+        phase: &str,
+        arguments: &[MirValueId],
+        argument_abis: &[MirAbiClass],
+        result: Option<&MirValueId>,
+        result_abi: MirAbiClass,
+    ) -> Result<RuntimeContractKind, String> {
+        match expression {
+            MirContractExpr::Value(value) => {
+                if let Some(index) = arguments.iter().position(|argument| argument == value) {
+                    return scalar_kind(argument_abis[index], phase);
+                }
+                if phase == "postcondition" && result == Some(value) {
+                    return scalar_kind(result_abi, phase);
+                }
+                if phase == "precondition" {
+                    Err(format!("extern requires value '{value}' is not a call argument"))
+                } else {
+                    Err(format!(
+                        "extern ensures value '{value}' is neither a call argument nor the call result"
+                    ))
+                }
+            }
+            MirContractExpr::Int(_) => Ok(RuntimeContractKind::Int),
+            MirContractExpr::Bool(_) => Ok(RuntimeContractKind::Bool),
+            MirContractExpr::Unary { op, operand } => {
+                let kind = expression_kind(
+                    operand,
+                    phase,
+                    arguments,
+                    argument_abis,
+                    result,
+                    result_abi,
+                )?;
+                match (op, kind) {
+                    (MirContractUnaryOp::Negate, RuntimeContractKind::Int)
+                    | (MirContractUnaryOp::Not, RuntimeContractKind::Bool) => Ok(kind),
+                    _ => Err(format!(
+                        "extern {phase} unary operator has an incompatible scalar operand"
+                    )),
+                }
+            }
+            MirContractExpr::Binary { op, left, right } => {
+                let left_kind = expression_kind(
+                    left,
+                    phase,
+                    arguments,
+                    argument_abis,
+                    result,
+                    result_abi,
+                )?;
+                let right_kind = expression_kind(
+                    right,
+                    phase,
+                    arguments,
+                    argument_abis,
+                    result,
+                    result_abi,
+                )?;
+                match op {
+                    MirContractBinaryOp::Add
+                    | MirContractBinaryOp::Subtract
+                    | MirContractBinaryOp::Multiply
+                    | MirContractBinaryOp::Divide
+                    | MirContractBinaryOp::Remainder
+                        if left_kind == RuntimeContractKind::Int
+                            && right_kind == RuntimeContractKind::Int =>
+                    {
+                        Ok(RuntimeContractKind::Int)
+                    }
+                    MirContractBinaryOp::LogicalAnd | MirContractBinaryOp::LogicalOr
+                        if left_kind == RuntimeContractKind::Bool
+                            && right_kind == RuntimeContractKind::Bool =>
+                    {
+                        Ok(RuntimeContractKind::Bool)
+                    }
+                    MirContractBinaryOp::Equal | MirContractBinaryOp::NotEqual
+                        if left_kind == right_kind =>
+                    {
+                        Ok(RuntimeContractKind::Bool)
+                    }
+                    MirContractBinaryOp::Less
+                    | MirContractBinaryOp::Greater
+                    | MirContractBinaryOp::LessEqual
+                    | MirContractBinaryOp::GreaterEqual
+                        if left_kind == RuntimeContractKind::Int
+                            && right_kind == RuntimeContractKind::Int =>
+                    {
+                        Ok(RuntimeContractKind::Bool)
+                    }
+                    MirContractBinaryOp::Add
+                    | MirContractBinaryOp::Subtract
+                    | MirContractBinaryOp::Multiply
+                    | MirContractBinaryOp::Divide
+                    | MirContractBinaryOp::Remainder => Err(format!(
+                        "extern {phase} arithmetic requires integer operands"
+                    )),
+                    MirContractBinaryOp::LogicalAnd | MirContractBinaryOp::LogicalOr => Err(
+                        format!("extern {phase} logical operator requires boolean operands"),
+                    ),
+                    MirContractBinaryOp::Equal | MirContractBinaryOp::NotEqual => Err(format!(
+                        "extern {phase} equality operands have incompatible scalar types"
+                    )),
+                    MirContractBinaryOp::Less
+                    | MirContractBinaryOp::Greater
+                    | MirContractBinaryOp::LessEqual
+                    | MirContractBinaryOp::GreaterEqual => Err(format!(
+                        "extern {phase} ordering requires integer operands"
+                    )),
+                }
+            }
+            MirContractExpr::Result
+            | MirContractExpr::Old(_)
+            | MirContractExpr::Project { .. } => Err(format!(
+                "extern {phase} must use scalar call arguments/result, without old/result marker/projection"
+            )),
+        }
+    }
+
+    if arguments.len() != argument_abis.len() {
+        return Err("extern FFI runtime argument ABI metadata arity mismatch".into());
+    }
+    for (phase, condition) in [("precondition", requires), ("postcondition", ensures)] {
+        let Some(condition) = condition else {
+            continue;
+        };
+        if expression_kind(
+            condition,
+            phase,
+            arguments,
+            argument_abis,
+            result,
+            result_abi,
+        )? != RuntimeContractKind::Bool
+        {
+            return Err(format!("extern {phase} condition must be boolean"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate function predicates independently of Z3 and backend ABI.
 pub(crate) fn validate_contracts(
     function: &MirFunction,

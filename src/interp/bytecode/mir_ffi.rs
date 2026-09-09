@@ -202,6 +202,19 @@ impl CanonicalMirFfiRuntime {
         }) {
             return Err("canonical FFI result identity overlaps an argument identity".into());
         }
+        let argument_abis = descriptor
+            .arguments
+            .iter()
+            .map(scalar_abi_class)
+            .collect::<Vec<_>>();
+        crate::core::mir::validate_ffi_runtime_contracts(
+            descriptor.requires.as_ref(),
+            descriptor.ensures.as_ref(),
+            &descriptor.argument_ids,
+            &argument_abis,
+            descriptor.result_id.as_ref(),
+            scalar_abi_class(&descriptor.result),
+        )?;
         Ok(())
     }
 
@@ -557,6 +570,38 @@ mod tests {
                 .contains("FFI symbol is not manifest-safe"),
             "{error}"
         );
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_malformed_requires_before_library_load() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.requires = Some(crate::core::mir::MirContractExpr::Value(
+            crate::core::mir::MirValueId::new("missing-predicate").expect("MIR value id"),
+        ));
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("unknown requires identity must fail before the foreign call");
+        assert!(error
+            .to_string()
+            .contains("extern requires value 'missing-predicate' is not a call argument"));
+        assert!(runtime.loaded_libs.is_empty());
+    }
+
+    #[test]
+    fn scalar_ffi_runtime_rejects_malformed_ensures_before_library_load() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        let mut call = descriptor("labs", CanonicalFfiScalarType::I64);
+        call.ensures = Some(crate::core::mir::MirContractExpr::Value(
+            crate::core::mir::MirValueId::new("missing-predicate").expect("MIR value id"),
+        ));
+        let error = runtime
+            .call(&call, &[Value::Int(1)])
+            .expect_err("unknown ensures identity must fail before the foreign call");
+        assert!(error.to_string().contains(
+            "extern ensures value 'missing-predicate' is neither a call argument nor the call result"
+        ));
         assert!(runtime.loaded_libs.is_empty());
     }
 
