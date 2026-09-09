@@ -1847,6 +1847,92 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_digest_pins_cross_call_site_result_shape() {
+    const SOURCE: &str = r#"
+extern "C" { func result_shape(value: i64) -> i64; }
+func f64_marker(value: f64) -> f64 { value }
+func main() -> i64 {
+    let first = result_shape(7 as i64);
+    let second = result_shape(8 as i64);
+    first + second
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("cross-call-site FFI result shape fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("cross-call-site FFI result shape fixture materialization");
+    assert_eq!(program.ffi_calls().len(), 2);
+    let f64_type = program
+        .type_catalog()
+        .iter()
+        .find_map(|(id, descriptor)| {
+            matches!(
+                descriptor.kind,
+                crate::core::mir::types::MirTypeKind::Primitive(crate::core::PrimitiveType::F64)
+            )
+            .then(|| id.clone())
+        })
+        .expect("f64 TypeDesc");
+    let main = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main MIR");
+    let (forged_id, result_value) = program
+        .ffi_calls()
+        .iter()
+        .find_map(|(id, receipt)| {
+            let result = receipt.result.as_ref()?;
+            let actual = main.values.get(result)?;
+            (actual.ty != f64_type).then(|| (id.clone(), result.clone()))
+        })
+        .expect("scalar FFI result receipt");
+    let actual_type = main
+        .values
+        .get(&result_value)
+        .map(|value| value.ty.clone())
+        .expect("result TypeDesc");
+
+    let baseline = program.route_receipt("scalar-ffi-result-shape-v1");
+    let mut forged_receipts = program.ffi_calls().clone();
+    let forged_receipt = forged_receipts
+        .get_mut(&forged_id)
+        .expect("result-shape receipt");
+    forged_receipt.result_type = f64_type.clone();
+    forged_receipt.result_conversion = Some(
+        crate::core::mir::MirFfiAbiConversion::for_result(
+            program.type_catalog(),
+            &actual_type,
+            &f64_type,
+        )
+        .expect("i64 to f64 result conversion"),
+    );
+    let mut forged = program;
+    forged.replace_ffi_calls_for_test_only(forged_receipts);
+    let forged_route = forged.route_receipt("scalar-ffi-result-shape-v1");
+
+    assert_ne!(
+        baseline.ffi_digest, forged_route.ffi_digest,
+        "route receipt FFI digest must pin result declaration shape across call sites"
+    );
+    assert_ne!(
+        baseline.mir_digest, forged_route.mir_digest,
+        "whole-program identity must include the forged result declaration shape"
+    );
+    assert_eq!(baseline.type_desc_digest, forged_route.type_desc_digest);
+    assert_eq!(baseline.abi_digest, forged_route.abi_digest);
+    assert_eq!(baseline.ownership_digest, forged_route.ownership_digest);
+    assert_eq!(
+        baseline.flow_transition_digest,
+        forged_route.flow_transition_digest
+    );
+    assert_eq!(baseline.root_owners, forged_route.root_owners);
+    let shape_errors = crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls());
+    assert!(shape_errors.iter().any(|error| {
+        error.contains("FFI symbol 'result_shape' is used with incompatible declaration TypeDescs")
+    }));
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
