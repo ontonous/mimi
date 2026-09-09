@@ -793,6 +793,13 @@ fn symbolic_value_for_type(
             vec![length.ge(Int::from_i64(0))],
         ));
     }
+    if descriptor.ownership == MirOwnership::Copy && !descriptor.has_canonical_copy_noop_metadata()
+    {
+        return Err(format!(
+            "MIR verifier TypeDesc '{}' is outside the complete Copy aggregate metadata contract",
+            ty.as_str()
+        ));
+    }
     let non_copy_record = matches!(
         descriptor.ownership,
         MirOwnership::Move | MirOwnership::Linear
@@ -6891,6 +6898,10 @@ mod tests {
             assert!(
                 super::ensure_copy_value(function, &catalog, value).is_err(),
                 "forged Copy aggregate metadata must fail closed"
+            );
+            assert!(
+                super::symbolic_value_for_type(&catalog, &record_id, "record").is_err(),
+                "forged Copy aggregate metadata must fail symbolic admission"
             );
         }
     }
