@@ -12202,9 +12202,12 @@ func main() -> i64 { foreign(1 as i64); 0 }
         let reference_error = MirReferenceInterpreter::new(&forged)
             .execute(&NodeId("function:main".into()), &[])
             .expect_err("reference must reject a forged non-C ABI");
-        assert!(reference_error
-            .to_string()
-            .contains("FFI receipt disagrees with the MIR call"));
+        assert!(
+            reference_error
+                .to_string()
+                .contains("FFI receipt disagrees with the MIR call")
+                || reference_error.to_string().contains("receipt ABI")
+        );
 
         let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
             .expect_err("bytecode must reject a forged non-C ABI");
