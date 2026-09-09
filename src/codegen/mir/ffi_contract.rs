@@ -23,7 +23,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         self.emit_ffi_guard(condition, "[E0808] FFI postcondition failed", subject)
     }
 
-    fn emit_ffi_guard(
+    pub(super) fn emit_ffi_guard(
         &mut self,
         condition: IntValue<'ctx>,
         message: &str,

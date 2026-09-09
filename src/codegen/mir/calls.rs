@@ -1461,25 +1461,63 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     signed: true,
                 },
                 value,
-            ) if from_bits > to_bits => self
-                .generator
-                .builder
-                .build_int_truncate(
-                    value.into_int_value(),
-                    match to_bits {
-                        32 => self.generator.context.i32_type(),
-                        64 => self.generator.context.i64_type(),
-                        _ => {
-                            return Err(NativeMirError::new(
-                                subject,
-                                format!("FFI integer width {to_bits} is unsupported"),
-                            ))
-                        }
-                    },
-                    name,
-                )
-                .map(BasicValueEnum::from)
-                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            ) if from_bits > to_bits => {
+                let value = value.into_int_value();
+                let (minimum, maximum) = match to_bits {
+                    32 => (i32::MIN as i64, i32::MAX as i64),
+                    64 => (i64::MIN, i64::MAX),
+                    _ => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            format!("FFI integer width {to_bits} is unsupported"),
+                        ))
+                    }
+                };
+                let i64_ty = self.generator.context.i64_type();
+                let minimum = self
+                    .generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::SGE,
+                        value,
+                        i64_ty.const_int(minimum as u64, true),
+                        "ffi_result_min",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let maximum = self
+                    .generator
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::SLE,
+                        value,
+                        i64_ty.const_int(maximum as u64, true),
+                        "ffi_result_max",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let valid = self
+                    .generator
+                    .builder
+                    .build_and(minimum, maximum, "ffi_result_in_range")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.emit_ffi_guard(
+                    valid,
+                    "[E0802] FFI integer result conversion out of range",
+                    subject,
+                )?;
+                self.generator
+                    .builder
+                    .build_int_truncate(
+                        value,
+                        match to_bits {
+                            32 => self.generator.context.i32_type(),
+                            64 => self.generator.context.i64_type(),
+                            _ => unreachable!("integer width checked above"),
+                        },
+                        name,
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
             (MirAbiClass::Integer { signed: true, .. }, MirAbiClass::Float { bits: 64 }, value) => {
                 self.generator
                     .builder
@@ -1498,20 +1536,63 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     signed: true,
                 },
                 value,
-            ) => self
-                .generator
-                .builder
-                .build_float_to_signed_int(
-                    value.into_float_value(),
-                    match to {
-                        MirAbiClass::Integer { bits: 32, .. } => self.generator.context.i32_type(),
-                        MirAbiClass::Integer { bits: 64, .. } => self.generator.context.i64_type(),
-                        _ => unreachable!("matched integer result ABI above"),
-                    },
-                    name,
-                )
-                .map(BasicValueEnum::from)
-                .map_err(|error| NativeMirError::new(subject, error.to_string())),
+            ) => {
+                let value = value.into_float_value();
+                let (lower, upper) = match to {
+                    MirAbiClass::Integer { bits: 32, .. } => (i32::MIN as f64, 2_147_483_648.0),
+                    MirAbiClass::Integer { bits: 64, .. } => {
+                        (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0)
+                    }
+                    _ => unreachable!("matched integer result ABI above"),
+                };
+                let lower = self
+                    .generator
+                    .builder
+                    .build_float_compare(
+                        FloatPredicate::OGE,
+                        value,
+                        self.generator.context.f64_type().const_float(lower),
+                        "ffi_result_lower",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let upper = self
+                    .generator
+                    .builder
+                    .build_float_compare(
+                        FloatPredicate::OLT,
+                        value,
+                        self.generator.context.f64_type().const_float(upper),
+                        "ffi_result_upper",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let valid = self
+                    .generator
+                    .builder
+                    .build_and(lower, upper, "ffi_result_in_range")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.emit_ffi_guard(
+                    valid,
+                    "[E0802] FFI integer result conversion out of range",
+                    subject,
+                )?;
+                self.generator
+                    .builder
+                    .build_float_to_signed_int(
+                        value,
+                        match to {
+                            MirAbiClass::Integer { bits: 32, .. } => {
+                                self.generator.context.i32_type()
+                            }
+                            MirAbiClass::Integer { bits: 64, .. } => {
+                                self.generator.context.i64_type()
+                            }
+                            _ => unreachable!("matched integer result ABI above"),
+                        },
+                        name,
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))
+            }
             _ => Err(NativeMirError::new(
                 subject,
                 format!("FFI ABI conversion from {from:?} to {to:?} is unsupported"),

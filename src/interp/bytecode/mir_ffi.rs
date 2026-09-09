@@ -457,7 +457,9 @@ fn apply_result_conversion(
                 signed: true,
             },
             Value::Int(value),
-        ) if from == 64 && to == 32 => Ok(Value::Int((value as i32) as i64)),
+        ) if from == 64 && to == 32 => i32::try_from(value)
+            .map(|value| Value::Int(value as i64))
+            .map_err(|_| "canonical MIR FFI result is outside i32".into()),
         (
             MirAbiClass::Integer {
                 bits: 32,
@@ -473,11 +475,25 @@ fn apply_result_conversion(
             MirAbiClass::Float { bits: 64 },
             MirAbiClass::Integer { bits, signed: true },
             Value::Float(value),
-        ) => Ok(Value::Int(if bits == 32 {
-            (value as i32) as i64
-        } else {
-            value as i64
-        })),
+        ) => {
+            let (lower, upper) = match bits {
+                32 => (i32::MIN as f64, (i32::MAX as f64) + 1.0),
+                64 => (i64::MIN as f64, 9_223_372_036_854_775_808.0),
+                _ => {
+                    return Err(format!(
+                        "canonical MIR FFI result conversion target integer width {bits} is unsupported"
+                    ))
+                }
+            };
+            if !value.is_finite() || value < lower || value >= upper {
+                return Err("canonical MIR FFI result is outside target integer range".into());
+            }
+            Ok(Value::Int(if bits == 32 {
+                (value as i32) as i64
+            } else {
+                value as i64
+            }))
+        }
         (from, to, value) => Err(format!(
             "canonical MIR FFI result conversion from {from:?} to {to:?} received {value:?}"
         )),
@@ -551,6 +567,65 @@ mod tests {
         assert_eq!(
             apply_result_conversion(Value::Float(2_147_483_646.75), Some(&conversion)).unwrap(),
             Value::Int(2_147_483_646)
+        );
+        assert_eq!(
+            apply_result_conversion(Value::Float(i32::MIN as f64), Some(&conversion)).unwrap(),
+            Value::Int(i32::MIN as i64)
+        );
+        for value in [
+            Value::Float(i32::MAX as f64 + 1.0),
+            Value::Float(i32::MIN as f64 - 1.0),
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ] {
+            assert!(
+                apply_result_conversion(value, Some(&conversion)).is_err(),
+                "out-of-range or non-finite f64 result must fail closed"
+            );
+        }
+
+        let i64_conversion = crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Float { bits: 64 },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+        };
+        assert_eq!(
+            apply_result_conversion(Value::Float(-41.75), Some(&i64_conversion)).unwrap(),
+            Value::Int(-41)
+        );
+        for value in [
+            Value::Float(9_223_372_036_854_775_808.0),
+            Value::Float(-9_223_372_036_854_777_856.0),
+            Value::Float(f64::NEG_INFINITY),
+        ] {
+            assert!(
+                apply_result_conversion(value, Some(&i64_conversion)).is_err(),
+                "out-of-range or non-finite i64 result must fail closed"
+            );
+        }
+
+        let i64_to_i32 = crate::core::mir::MirFfiAbiConversion {
+            from: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            },
+            to: crate::core::mir::types::MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        };
+        assert_eq!(
+            apply_result_conversion(Value::Int(i32::MIN as i64), Some(&i64_to_i32)).unwrap(),
+            Value::Int(i32::MIN as i64)
+        );
+        assert_eq!(
+            apply_result_conversion(Value::Int(i32::MAX as i64), Some(&i64_to_i32)).unwrap(),
+            Value::Int(i32::MAX as i64)
+        );
+        assert!(
+            apply_result_conversion(Value::Int(i32::MAX as i64 + 1), Some(&i64_to_i32)).is_err()
         );
     }
 

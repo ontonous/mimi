@@ -18,7 +18,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PhiValue,
 };
-use inkwell::IntPredicate;
+use inkwell::{FloatPredicate, IntPredicate};
 
 use crate::codegen::{call_try_basic_value, CodeGenerator};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
