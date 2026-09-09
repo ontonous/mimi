@@ -2042,6 +2042,125 @@ func main() -> i64 {
 }
 
 #[test]
+fn scalar_ffi_route_receipt_digest_pins_call_site_caller_and_callee_identity() {
+    const SOURCE: &str = r#"
+extern "C" { func owner_shape(value: i64) -> i64; }
+func main() -> i64 {
+    let first = owner_shape(7 as i64);
+    let second = owner_shape(8 as i64);
+    first + second
+}
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("call-site caller/callee identity fixture check");
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("call-site caller/callee identity fixture materialization");
+    assert_eq!(program.ffi_calls().len(), 2);
+    let forged_id = program
+        .ffi_calls()
+        .keys()
+        .next()
+        .cloned()
+        .expect("first call-site owner receipt");
+    let baseline = program.route_receipt("scalar-ffi-owner-identity-v1");
+
+    for (label, caller, callee) in [
+        (
+            "caller",
+            Some(crate::core::NodeId("function:forged_caller".into())),
+            None,
+        ),
+        (
+            "callee",
+            None,
+            Some(crate::core::NodeId("extern:forged_callee".into())),
+        ),
+    ] {
+        let mut forged_receipts = program.ffi_calls().clone();
+        let forged_receipt = forged_receipts
+            .get_mut(&forged_id)
+            .expect("call-site owner receipt");
+        if let Some(caller) = caller {
+            forged_receipt.caller = caller;
+        }
+        if let Some(callee) = callee {
+            forged_receipt.callee = callee;
+        }
+        let mut forged = program.clone();
+        forged.replace_ffi_calls_for_test_only(forged_receipts);
+        let forged_route = forged.route_receipt("scalar-ffi-owner-identity-v1");
+
+        assert_ne!(
+            baseline.ffi_digest, forged_route.ffi_digest,
+            "route receipt FFI digest must pin call-site {label} identity"
+        );
+        assert_ne!(
+            baseline.mir_digest, forged_route.mir_digest,
+            "whole-program identity must include call-site {label} identity"
+        );
+        assert_eq!(baseline.type_desc_digest, forged_route.type_desc_digest);
+        assert_eq!(baseline.abi_digest, forged_route.abi_digest);
+        assert_eq!(baseline.ownership_digest, forged_route.ownership_digest);
+        assert_eq!(
+            baseline.flow_transition_digest,
+            forged_route.flow_transition_digest
+        );
+        assert_eq!(baseline.root_owners, forged_route.root_owners);
+        assert!(
+            crate::core::mir::validate_ffi_symbol_declaration_shapes(forged.ffi_calls()).is_empty(),
+            "same declaration shape must classify {label} identity as a call-site failure"
+        );
+
+        let reference_error = MirReferenceInterpreter::new(&forged)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference must reject forged call-site owner identity");
+        assert!(
+            reference_error
+                .to_string()
+                .contains("FFI receipt disagrees with the MIR call"),
+            "{label}: {reference_error}"
+        );
+
+        let bytecode_error = crate::interp::bytecode::compile_mir_program(&forged)
+            .expect_err("bytecode must reject forged call-site owner identity");
+        assert!(
+            bytecode_error.iter().any(|error| {
+                error.message.contains("identity/ABI validation")
+                    || error.message.contains("absent from its caller")
+                    || error.message.contains("absent caller")
+            }),
+            "{label}: {bytecode_error:?}"
+        );
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native validator must reject forged call-site owner identity");
+        assert!(
+            native_error.iter().any(|error| {
+                error.message.contains("FFI contract identity disagrees")
+                    || error.message.contains("FFI receipt identity disagrees")
+            }),
+            "{label}: {native_error:?}"
+        );
+
+        let capability_error = crate::verifier::validate_mir_capabilities(&forged)
+            .expect_err("capability gate must reject forged call-site owner identity");
+        assert!(
+            capability_error
+                .iter()
+                .any(|error| error.contains("contract identity disagrees")),
+            "{label}: {capability_error:?}"
+        );
+
+        let verifier_error = crate::verifier::verify_mir(&forged, "forged-owner-identity".into())
+            .expect_err("direct verifier must reject forged call-site owner identity");
+        assert!(
+            verifier_error.contains("contract identity disagrees"),
+            "{label}: {verifier_error}"
+        );
+    }
+}
+
+#[test]
 fn scalar_ffi_same_symbol_accepts_mixed_call_site_widths_from_one_declaration() {
     struct SharedWidthOracle;
     impl MirReferenceFfiResolver for SharedWidthOracle {
