@@ -2490,6 +2490,127 @@ fn canonical_mir_source_scope_and_all_modes_are_repeatable_and_option_order_stab
 }
 
 #[test]
+fn canonical_mir_all_closes_transitive_import_failures_without_partial_receipt() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-transitive-import-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create transitive import directory");
+    fs::write(
+        dir.join("bad.mimi"),
+        "pub func bad(xs: List<string>) -> string { xs[0] }\n",
+    )
+    .expect("write transitive unsupported helper");
+    fs::write(
+        dir.join("mid.mimi"),
+        "use bad;\npub func mid() -> i32 { 1 }\n",
+    )
+    .expect("write transitive middle module");
+    let main = dir.join("main.mimi");
+    fs::write(&main, "use mid;\nfunc main() -> i32 { 0 }\n")
+        .expect("write transitive import entry");
+
+    let inspect = |include_imports: bool, receipt_first: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("mir").arg(&main);
+        if receipt_first {
+            command.arg("--receipt");
+        }
+        if include_imports {
+            command.arg("--all");
+        }
+        if !receipt_first {
+            command.arg("--receipt");
+        }
+        command
+            .output()
+            .expect("spawn transitive import inspection")
+    };
+
+    let source_first = inspect(false, false);
+    let source_second = inspect(false, false);
+    for output in [&source_first, &source_second] {
+        assert!(
+            output.status.success(),
+            "source scope rejected main before traversing the imported chain:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("root_owners=function:main")
+                && !stdout.contains("function:mid")
+                && !stdout.contains("function:bad"),
+            "source scope leaked transitive imported owners: {stdout}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("function:bad"),
+            "source scope leaked a transitive helper diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(
+        source_first.status.code(),
+        source_second.status.code(),
+        "source-scope transitive receipt status changed across repetitions"
+    );
+    assert_eq!(
+        source_first.stdout, source_second.stdout,
+        "source-scope transitive receipt changed across repetitions"
+    );
+    assert_eq!(
+        source_first.stderr, source_second.stderr,
+        "source-scope transitive diagnostic changed across repetitions"
+    );
+
+    let all_first = inspect(true, false);
+    let all_second = inspect(true, false);
+    let all_reordered = inspect(true, true);
+    for (label, output) in [
+        ("all-first", &all_first),
+        ("all-second", &all_second),
+        ("all-reordered", &all_reordered),
+    ] {
+        assert!(
+            !output.status.success(),
+            "{label} silently omitted the transitive unsupported helper"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{label} emitted a partial transitive receipt: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIR inspection input rejected")
+                && stderr.contains("MIR lowering failed (1 errors)")
+                && stderr.contains("function:bad/node:expr.index")
+                && stderr.matches("Copy scalar").count() == 1
+                && !stderr.contains("function:mid/node:expr.index")
+                && !stderr.contains("canonical route disposition: legacy")
+                && !stderr.contains(mimi::core::mir::MIR_ROUTE_RECEIPT_MANIFEST_HEADER),
+            "{label} changed transitive failure classification: {stderr}"
+        );
+    }
+    assert_eq!(all_first.status.code(), all_second.status.code());
+    assert_eq!(all_first.stdout, all_second.stdout);
+    assert_eq!(all_first.stderr, all_second.stderr);
+    assert_eq!(all_first.status.code(), all_reordered.status.code());
+    assert_eq!(all_first.stdout, all_reordered.stdout);
+    assert_eq!(all_first.stderr, all_reordered.stderr);
+    assert_ne!(
+        source_first.status.code(),
+        all_first.status.code(),
+        "source scope and transitive --all lost their success/failure boundary"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_mir_cli_all_uses_the_production_builder_for_imported_instances() {
     let fixture = project_root()
         .join("tests")
