@@ -1839,13 +1839,7 @@ impl<'a> FunctionEmitter<'a> {
         variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
     ) {
         if let ResolvedCallee::Extern(_) = callee {
-            self.emit_extern_call(
-                instruction,
-                result,
-                type_arguments,
-                arguments,
-                variant_call_contract,
-            );
+            self.emit_extern_call(instruction, result, arguments);
             return;
         }
         let Some(owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
@@ -1994,9 +1988,7 @@ impl<'a> FunctionEmitter<'a> {
         &mut self,
         instruction: &crate::core::mir::MirInstructionId,
         result: Option<&MirValueId>,
-        type_arguments: &[crate::core::ResolvedTypeId],
         arguments: &[MirValueId],
-        variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
     ) {
         let Some(&extern_idx) = self.ffi_indices.get(instruction) else {
             self.error(format!(
@@ -2012,13 +2004,6 @@ impl<'a> FunctionEmitter<'a> {
             ));
             return;
         };
-        if !type_arguments.is_empty() || variant_call_contract.is_some() {
-            self.error(format!(
-                "extern call '{}' has unsupported generic or variant ABI metadata",
-                instruction
-            ));
-            return;
-        }
         for argument in arguments {
             if let Err(message) = self.supported_type_for_value(argument) {
                 self.error(format!(
