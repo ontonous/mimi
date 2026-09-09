@@ -12,7 +12,9 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
 use crate::core::mir::reference::MirProgram;
-use crate::core::mir::types::{MirAbiClass, MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
+use crate::core::mir::types::{
+    MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeKind,
+};
 use crate::core::mir::{
     MirContractKind, MirFunction, MirGenericInstanceContract, MirInstructionKind, MirProjection,
     MirSwitchCase, MirTerminator, MirValueId,
@@ -759,10 +761,8 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::Move { result, source } => {
                 self.require_same_type(function, result, source, subject);
                 if let Some(ty) = value_type(function, source) {
-                    let valid = catalog.validate_copy_value(&ty).is_ok()
-                        || catalog
-                            .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::MoveOut)
-                            .is_ok();
+                    let valid =
+                        value_operation_is_supported(catalog, &ty, MirGlueOperation::MoveOut);
                     if !valid {
                         self.error(format!(
                             "{subject} Move source '{}' has no verifier glue",
@@ -774,10 +774,7 @@ impl<'a> CapabilityGate<'a> {
             MirInstructionKind::Clone { result, source } => {
                 self.require_same_type(function, result, source, subject);
                 if let Some(ty) = value_type(function, source) {
-                    let valid = catalog.validate_copy_value(&ty).is_ok()
-                        || catalog
-                            .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::Clone)
-                            .is_ok();
+                    let valid = value_operation_is_supported(catalog, &ty, MirGlueOperation::Clone);
                     if !valid {
                         self.error(format!(
                             "{subject} Clone source '{}' has no verifier glue",
@@ -788,10 +785,7 @@ impl<'a> CapabilityGate<'a> {
             }
             MirInstructionKind::Drop { value } => {
                 if let Some(ty) = value_type(function, value) {
-                    let valid = catalog.validate_copy_value(&ty).is_ok()
-                        || catalog
-                            .validate_glue(&ty, crate::core::mir::types::MirGlueOperation::Drop)
-                            .is_ok();
+                    let valid = value_operation_is_supported(catalog, &ty, MirGlueOperation::Drop);
                     if !valid {
                         self.error(format!(
                             "{subject} Drop value '{}' has no verifier glue",
@@ -2279,6 +2273,21 @@ fn value_type(function: &MirFunction, value: &MirValueId) -> Option<crate::core:
     function.values.get(value).map(|value| value.ty.clone())
 }
 
+fn value_operation_is_supported(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    operation: MirGlueOperation,
+) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    if descriptor.ownership == MirOwnership::Copy {
+        catalog.validate_copy_value(ty).is_ok()
+    } else {
+        catalog.validate_glue(ty, operation).is_ok()
+    }
+}
+
 fn function_has_ensures(function: &MirFunction) -> bool {
     function
         .contracts
@@ -2332,6 +2341,24 @@ mod tests {
         forged.kind = MirTypeKind::Nominal;
         let mut catalog = program.type_catalog().clone();
         catalog.replace_for_test_only(i64_id, forged);
+        let scalar_id = checked
+            .resolved_types()
+            .iter()
+            .find_map(|(id, ty)| {
+                matches!(ty, ResolvedType::Primitive(PrimitiveType::I64)).then_some(id.clone())
+            })
+            .expect("forged scalar TypeDesc identity");
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            assert!(
+                !value_operation_is_supported(&catalog, &scalar_id, operation),
+                "malformed Copy scalar must not fall back to {:?} glue",
+                operation
+            );
+        }
         let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
             .expect("forged catalog remains structurally valid");
 
