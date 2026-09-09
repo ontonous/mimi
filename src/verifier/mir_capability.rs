@@ -714,11 +714,9 @@ impl<'a> CapabilityGate<'a> {
                         catalog.validate_copy_scalar(&ty).is_ok()
                     }
                     ResolvedLiteral::String(_) => catalog.validate_owned_string(&ty).is_ok(),
-                    ResolvedLiteral::FloatBits(_) => catalog.get(&ty).is_some_and(|descriptor| {
-                        matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
-                            && descriptor.layout == MirLayout::Scalar
-                            && descriptor.ownership == MirOwnership::Copy
-                    }),
+                    ResolvedLiteral::FloatBits(_) => {
+                        catalog.validate_copy_float_scalar(&ty).is_ok()
+                    }
                     ResolvedLiteral::Unit => false,
                 };
                 if !supported {
@@ -1822,12 +1820,21 @@ impl<'a> CapabilityGate<'a> {
         let Some(descriptor) = scalar else {
             return;
         };
+        if !descriptor.is_canonical_copy_scalar(true) {
+            self.error(format!(
+                "{subject} binary operand TypeDesc is outside the complete Copy scalar contract"
+            ));
+            return;
+        }
         let result_descriptor = self.program.type_catalog().get(&result_ty);
         let right_descriptor = self.program.type_catalog().get(&right_ty);
         let float_shape = [Some(descriptor), right_descriptor, result_descriptor]
             .iter()
             .flatten()
-            .any(|descriptor| matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 }));
+            .any(|descriptor| {
+                descriptor.is_canonical_copy_scalar(true)
+                    && matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+            });
         if float_shape {
             if let Err(message) = self
                 .program
@@ -1865,11 +1872,14 @@ impl<'a> CapabilityGate<'a> {
             ),
             _ => false,
         };
-        let result_is_bool = self
-            .program
-            .type_catalog()
-            .get(&result_ty)
-            .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Bool);
+        let result_is_bool =
+            self.program
+                .type_catalog()
+                .get(&result_ty)
+                .is_some_and(|descriptor| {
+                    descriptor.is_canonical_copy_scalar(false)
+                        && descriptor.abi == MirAbiClass::Bool
+                });
         let comparison = matches!(
             op,
             ResolvedBinaryOp::Equal
@@ -1914,7 +1924,11 @@ impl<'a> CapabilityGate<'a> {
                             .type_catalog()
                             .get(&operand_ty)
                             .is_some_and(|descriptor| {
-                                matches!(descriptor.abi, MirAbiClass::Float { bits: 32 | 64 })
+                                descriptor.is_canonical_copy_scalar(true)
+                                    && matches!(
+                                        descriptor.abi,
+                                        MirAbiClass::Float { bits: 32 | 64 }
+                                    )
                             });
                     if is_float {
                         if let Err(message) = self.program.type_catalog().validate_copy_float_unary(
@@ -1930,7 +1944,10 @@ impl<'a> CapabilityGate<'a> {
                 if op == ResolvedUnaryOp::Not
                     && !value_type(function, result)
                         .and_then(|ty| self.program.type_catalog().get(&ty))
-                        .is_some_and(|descriptor| descriptor.abi == MirAbiClass::Bool)
+                        .is_some_and(|descriptor| {
+                            descriptor.is_canonical_copy_scalar(false)
+                                && descriptor.abi == MirAbiClass::Bool
+                        })
                 {
                     self.error(format!("{subject} Not result is not a canonical bool"));
                 }
@@ -2274,6 +2291,7 @@ fn function_has_ensures(function: &MirFunction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ir::{PrimitiveType, ResolvedType};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -2290,6 +2308,43 @@ mod tests {
             "../../tests/fixtures/mir_native_record_copy.mimi"
         ));
         validate_mir_capabilities(&program).expect("copy record island capability");
+    }
+
+    #[test]
+    fn rejects_forged_scalar_descriptor_before_capability_value_checks() {
+        let source = "func main() -> i64 { 0 }";
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let i64_id = checked
+            .resolved_types()
+            .iter()
+            .find_map(|(id, ty)| {
+                matches!(ty, ResolvedType::Primitive(PrimitiveType::I64)).then_some(id.clone())
+            })
+            .expect("i64 TypeDesc identity");
+        let descriptor = program
+            .type_catalog()
+            .get(&i64_id)
+            .expect("i64 TypeDesc")
+            .clone();
+        assert!(descriptor.is_canonical_copy_scalar(false));
+        let mut forged = descriptor;
+        forged.kind = MirTypeKind::Nominal;
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(i64_id, forged);
+        let forged_program = MirProgram::with_type_catalog(program.functions().clone(), catalog)
+            .expect("forged catalog remains structurally valid");
+
+        let errors = validate_mir_capabilities(&forged_program)
+            .expect_err("forged scalar TypeDesc must fail capability admission");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error
+                    .contains("scalar TypeDesc is outside the verifier scalar contract"))
+        );
     }
 
     #[test]
